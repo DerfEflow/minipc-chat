@@ -46,24 +46,45 @@ if (-not (Test-Path $Server)) { Write-Host "[FAIL] server.mjs not found in $Repo
 ) | Set-Content -Path $Wrapper -Encoding ascii
 OK "Wrote launcher $Wrapper"
 
-# 4. detached always-on task (S4U + Hidden = survives logoff / no console to Ctrl+C)
-Info "Registering the detached task '$TaskName'..."
-try {
-  if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-  }
-  $action    = New-ScheduledTaskAction -Execute $Wrapper
-  $trigger   = New-ScheduledTaskTrigger -AtLogOn
-  $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
-  $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-                 -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 `
-                 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -Hidden
-  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-  Start-ScheduledTask -TaskName $TaskName
-  Start-Sleep -Seconds 3
-  OK "Task registered + started (state: $((Get-ScheduledTask -TaskName $TaskName).State))."
-} catch { Write-Host "[FAIL] Task registration: $($_.Exception.Message)" -ForegroundColor Red; Warn "Run as Administrator." }
+# 4. make it always-on. Elevated -> a detached S4U scheduled task. Non-elevated (e.g. run over
+#    SSH, which gives admins a filtered/non-elevated token) -> the user's Startup folder + a
+#    detached launch now via WMI (survives the SSH session). The mini-PC auto-logs-in, so the
+#    Startup entry is effectively always-on.
+$startupCmd = Join-Path ([Environment]::GetFolderPath("Startup")) "minipc-chat.cmd"
+if ($isAdmin) {
+  Info "Registering the detached task '$TaskName' (admin)..."
+  try {
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+      Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+      Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    }
+    if (Test-Path $startupCmd) { Remove-Item $startupCmd -Force -ErrorAction SilentlyContinue } # no double-launch
+    $action    = New-ScheduledTaskAction -Execute $Wrapper
+    $trigger   = New-ScheduledTaskTrigger -AtLogOn
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+    $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                   -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 `
+                   -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -Hidden
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskName $TaskName
+    Start-Sleep -Seconds 3
+    OK "Task registered + started (state: $((Get-ScheduledTask -TaskName $TaskName).State))."
+  } catch { Warn "Task registration failed ($($_.Exception.Message)); using the Startup folder instead."; $isAdmin = $false }
+}
+if (-not $isAdmin) {
+  Info "Installing as a logon item (no admin needed)..."
+  try { if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false } } catch {}
+  Copy-Item $Wrapper $startupCmd -Force
+  OK "Installed $startupCmd (runs every logon; the mini-PC auto-logs-in)."
+  $running = $false
+  try { Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/" -TimeoutSec 3 | Out-Null; $running = $true } catch {}
+  if (-not $running) {
+    # WMI-create so the process is detached from this (SSH) session and keeps running after disconnect.
+    Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = 'cmd /c "' + $Wrapper + '"' } | Out-Null
+    Start-Sleep -Seconds 3
+    OK "Launched the server detached."
+  } else { OK "Server already running." }
+}
 
 # 5. local health check
 try {
