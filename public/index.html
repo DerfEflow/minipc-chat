@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>Fred's Assistant</title>
+<meta name="theme-color" content="#000023" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Assistant" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/icon-180.png" />
+<link rel="icon" href="/icon-192.png" />
+<style>
+  :root{
+    --navy:#000023; --navy2:#0a1230; --copper:#c8762f; --copper2:#e8b07c;
+    --sand:#e9dcc6; --muted:#8b93a7; --line:rgba(184,115,51,.28);
+    --user:rgba(184,115,51,.22); --ai:rgba(255,255,255,.05); --glow:rgba(57,130,255,.20);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{
+    background:
+      radial-gradient(120% 80% at 50% -10%, #0a1240 0%, var(--navy) 55%, #000018 100%) fixed;
+    color:var(--sand); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+    display:flex; flex-direction:column; height:100dvh; overflow:hidden;
+  }
+  header{
+    display:flex; align-items:center; gap:8px; padding:max(10px,env(safe-area-inset-top)) 12px 10px;
+    border-bottom:1px solid var(--line); background:rgba(0,0,30,.55); backdrop-filter:blur(8px);
+    position:sticky; top:0; z-index:5;
+  }
+  .dot{width:18px;height:18px;border-radius:50%;flex:none;
+    background:radial-gradient(circle at 35% 30%, #fff 0%, var(--copper2) 25%, var(--copper) 60%, #7a3f12 100%);
+    box-shadow:0 0 12px var(--glow), 0 0 5px rgba(200,118,47,.7);}
+  header .title{font-weight:600;letter-spacing:.3px}
+  header .spacer{flex:1}
+  select,button{font:inherit;color:var(--sand)}
+  select{
+    background:var(--navy2); border:1px solid var(--line); border-radius:9px; padding:6px 8px; max-width:42vw;
+  }
+  .ghost{background:transparent;border:1px solid var(--line);border-radius:9px;padding:6px 10px;color:var(--muted)}
+  .ghost:active{background:rgba(255,255,255,.06)}
+  main{flex:1; overflow-y:auto; padding:14px 12px 6px; -webkit-overflow-scrolling:touch}
+  .wrap{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+  .msg{display:flex}
+  .msg.me{justify-content:flex-end}
+  .bubble{max-width:88%;padding:10px 13px;border-radius:16px;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere}
+  .me .bubble{background:var(--user);border:1px solid var(--line);color:#fff1e0;border-bottom-right-radius:5px}
+  .ai .bubble{background:var(--ai);border:1px solid rgba(255,255,255,.07);border-bottom-left-radius:5px}
+  .ai .bubble.think{color:var(--muted);font-style:italic}
+  .empty{margin:18vh auto 0;text-align:center;color:var(--muted);max-width:300px}
+  .empty .dot{margin:0 auto 14px;width:46px;height:46px}
+  footer{
+    border-top:1px solid var(--line); background:rgba(0,0,30,.6); backdrop-filter:blur(8px);
+    padding:8px 10px calc(8px + env(safe-area-inset-bottom));
+  }
+  .bar{max-width:760px;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
+  textarea{
+    flex:1;resize:none;max-height:40vh;min-height:44px;padding:11px 13px;border-radius:14px;
+    background:var(--navy2);border:1px solid var(--line);color:var(--sand);outline:none;font:inherit;
+  }
+  textarea::placeholder{color:var(--muted)}
+  .send{
+    flex:none;width:44px;height:44px;border-radius:50%;border:none;cursor:pointer;
+    background:linear-gradient(145deg,var(--copper),#7a3f12);color:#fff1e0;font-size:20px;
+    box-shadow:0 6px 18px rgba(0,0,0,.45);
+  }
+  .send:disabled{opacity:.4}
+  .err{color:#ff9a7a;font-size:13px;text-align:center;padding:6px}
+  .cursor::after{content:"\258c";animation:blink 1s steps(2) infinite;color:var(--copper2)}
+  @keyframes blink{50%{opacity:0}}
+</style>
+</head>
+<body>
+  <header>
+    <span class="dot" aria-hidden="true"></span>
+    <span class="title">Assistant</span>
+    <span class="spacer"></span>
+    <select id="model" aria-label="Model"></select>
+    <button id="new" class="ghost" title="New chat">New</button>
+  </header>
+  <main id="main"><div class="wrap" id="wrap">
+    <div class="empty" id="empty">
+      <span class="dot" aria-hidden="true"></span>
+      <p>Your private AI, running on the mini&#8209;PC at home.<br/>Ask it anything.</p>
+    </div>
+  </div></main>
+  <footer>
+    <div class="bar">
+      <textarea id="input" rows="1" placeholder="Message your assistant&#8230;" autocomplete="off"></textarea>
+      <button id="send" class="send" title="Send" aria-label="Send">&#8593;</button>
+    </div>
+  </footer>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+# machine-generated on the mini-PC
+chat.log
+run-chat.cmd
+*.log
+
+# misc
+.vercel
+node_modules
+.DS_Store
