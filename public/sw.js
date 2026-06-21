@@ -1,6 +1,6 @@
 // Minimal service worker: cache the app shell so the PWA installs + opens offline.
 // Anything under /ollama/* is NEVER cached (it's the live model API).
-const CACHE = "minipc-chat-v2";
+const CACHE = "minipc-chat-v3";
 const SHELL = ["/", "/index.html", "/app.js", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (e) => {
@@ -13,12 +13,20 @@ self.addEventListener("activate", (e) => {
   );
 });
 
+// NETWORK-FIRST: always load fresh when online (so updates take immediately), fall back to the
+// cached shell only when offline. /ollama (the live model API) is never touched by the worker.
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
-  if (url.pathname.startsWith("/ollama")) return; // live API: always hit the network
-  if (e.request.mode === "navigate") {
-    e.respondWith(fetch(e.request).catch(() => caches.match("/index.html")));
-    return;
-  }
-  e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request)));
+  if (url.pathname.startsWith("/ollama")) return;
+  e.respondWith(
+    fetch(e.request)
+      .then((res) => {
+        if (res && res.ok && e.request.method === "GET") {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(e.request).then((hit) => hit || caches.match("/index.html")))
+  );
 });
