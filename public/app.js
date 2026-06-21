@@ -16,7 +16,6 @@ function load() {
 }
 
 // ---------- helpers ----------
-// qwen3 and friends emit <think>...</think>; never show that to the user.
 const stripThink = (t) => t.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
 const scroll = () => { main.scrollTop = main.scrollHeight; };
 
@@ -30,42 +29,54 @@ function bubble(role, text) {
   wrap.appendChild(row);
   return b;
 }
-
 function renderAll() {
   wrap.querySelectorAll(".msg").forEach((n) => n.remove());
   empty.style.display = messages.length ? "none" : "";
   for (const m of messages) bubble(m.role, m.content);
   scroll();
 }
-
 function autosize() {
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px";
 }
+function showErr(t) {
+  document.querySelector(".err")?.remove();
+  const e = document.createElement("div"); e.className = "err"; e.textContent = t; wrap.appendChild(e); scroll();
+}
 
 // ---------- models ----------
-// Retries on a cold server (the mini-PC / Tailscale may still be coming up), and defaults to the
-// faster small model so the first reply is snappy.
-async function loadModels(attempt = 0) {
-  try {
-    const r = await fetch("/ollama/v1/models", { cache: "no-store" });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const j = await r.json();
-    const ids = (j.data || j.models || []).map((m) => m.id || m.name).filter(Boolean);
-    if (!ids.length) throw new Error("no models");
-    modelSel.innerHTML = "";
-    for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = id; modelSel.appendChild(o); }
-    const saved = localStorage.getItem(LS_MODEL);
-    if (saved && ids.includes(saved)) modelSel.value = saved;
-    else modelSel.value = ids.find((x) => /:(8b|7b|4b|3b|1\.5b)\b/i.test(x) || /mini/i.test(x)) || ids[0];
-  } catch {
-    if (attempt < 5) {
-      if (!modelSel.value) modelSel.innerHTML = "<option>connecting…</option>";
-      setTimeout(() => loadModels(attempt + 1), 2500);
-    } else if (!modelSel.value || modelSel.value === "connecting…") {
-      modelSel.innerHTML = "<option>offline — reload</option>";
+// A real, selectable model id (not a placeholder). Empty string means "not ready yet".
+function currentModel() {
+  const v = modelSel.value;
+  return v && !/connecting|offline|no models|^$/i.test(v) ? v : "";
+}
+// Awaitable: retries a cold server; resolves true once the picker holds a real model.
+let loading = null;
+async function loadModels() {
+  if (loading) return loading;
+  loading = (async () => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        const r = await fetch("/ollama/v1/models", { cache: "no-store" });
+        if (!r.ok) throw 0;
+        const j = await r.json();
+        const ids = (j.data || j.models || []).map((m) => m.id || m.name).filter(Boolean);
+        if (!ids.length) throw 0;
+        modelSel.innerHTML = "";
+        for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = id; modelSel.appendChild(o); }
+        const saved = localStorage.getItem(LS_MODEL);
+        modelSel.value = (saved && ids.includes(saved)) ? saved
+          : (ids.find((x) => /:(8b|7b|4b|3b|1\.5b)\b/i.test(x) || /mini/i.test(x)) || ids[0]);
+        return true;
+      } catch {
+        if (!currentModel()) modelSel.innerHTML = "<option value=''>connecting…</option>";
+        await new Promise((res) => setTimeout(res, 2000));
+      }
     }
-  }
+    if (!currentModel()) modelSel.innerHTML = "<option value=''>offline — tap to retry</option>";
+    return false;
+  })();
+  try { return await loading; } finally { loading = null; }
 }
 
 // ---------- send ----------
@@ -73,9 +84,18 @@ async function send() {
   const text = input.value.trim();
   if (!text || busy) return;
   busy = true; sendBtn.disabled = true;
-  input.value = ""; autosize();
   document.querySelector(".err")?.remove();
 
+  // GUARD: never POST without a real model (that returns an instant 400). Wait for the list first.
+  let model = currentModel();
+  if (!model) { await loadModels(); model = currentModel(); }
+  if (!model) {
+    showErr("Still connecting to your AI — give it a few seconds, then tap send again.");
+    busy = false; sendBtn.disabled = false;
+    return;
+  }
+
+  input.value = ""; autosize();
   messages.push({ role: "user", content: text });
   empty.style.display = "none";
   bubble("user", text); save(); scroll();
@@ -87,16 +107,15 @@ async function send() {
   live.textContent = "thinking…";
   liveRow.appendChild(live); wrap.appendChild(liveRow); scroll();
 
-  // The first reply has to load the model into memory (can take ~20s); reassure instead of failing.
+  // First reply loads the model into memory (~15-25s); reassure rather than look frozen.
   const warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "waking the model… first reply can take ~20s"; scroll(); } }, 6000);
 
-  // One streamed attempt. Throws on transport/HTTP error so the caller can retry once.
   async function attempt() {
     let raw = "";
     const res = await fetch("/ollama/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: modelSel.value, messages, stream: true }),
+      body: JSON.stringify({ model, messages, stream: true }),
     });
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
     const reader = res.body.getReader();
@@ -131,8 +150,7 @@ async function send() {
     let final;
     try {
       final = await attempt();
-    } catch (e1) {
-      // cold-start transient (server/model just waking) — wait and retry once
+    } catch {
       live.textContent = "waking the model… retrying";
       await new Promise((r) => setTimeout(r, 3000));
       final = await attempt();
@@ -143,13 +161,10 @@ async function send() {
     live.textContent = final;
     messages.push({ role: "assistant", content: final });
     save();
-  } catch (e) {
+  } catch {
     clearTimeout(warm);
     liveRow.remove();
-    const err = document.createElement("div");
-    err.className = "err";
-    err.textContent = "Couldn't reach your assistant — it may still be waking up. Give it a few seconds and tap send again.";
-    wrap.appendChild(err);
+    showErr("Couldn't reach your assistant — give it a few seconds and tap send again.");
   } finally {
     busy = false; sendBtn.disabled = false; scroll();
   }
@@ -162,12 +177,10 @@ function newChat() {
 
 // ---------- wire up ----------
 input.addEventListener("input", autosize);
-input.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-});
+input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
 sendBtn.addEventListener("click", send);
 newBtn.addEventListener("click", newChat);
-modelSel.addEventListener("change", () => localStorage.setItem(LS_MODEL, modelSel.value));
+modelSel.addEventListener("change", () => { if (currentModel()) localStorage.setItem(LS_MODEL, modelSel.value); else loadModels(); });
 
 load();
 renderAll();
