@@ -117,7 +117,8 @@ async function send() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model, messages, stream: true }),
     });
-    if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+    if (!res.ok) { const t = await res.text().catch(() => ""); throw new Error("HTTP " + res.status + (t ? ": " + t.replace(/\s+/g, " ").slice(0, 90) : "")); }
+    if (!res.body) throw new Error("no response stream");
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
@@ -161,10 +162,10 @@ async function send() {
     live.textContent = final;
     messages.push({ role: "assistant", content: final });
     save();
-  } catch {
+  } catch (e) {
     clearTimeout(warm);
     liveRow.remove();
-    showErr("Couldn't reach your assistant — give it a few seconds and tap send again.");
+    showErr("Chat failed: " + ((e && e.message) || "network error") + " — tap send to retry.");
   } finally {
     busy = false; sendBtn.disabled = false; scroll();
   }
