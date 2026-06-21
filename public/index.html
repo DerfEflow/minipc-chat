@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
-<title>Fred's Assistant</title>
+<title>Dominion AI</title>
 <meta name="theme-color" content="#000023" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="Assistant" />
+<meta name="apple-mobile-web-app-title" content="Dominion AI" />
 <link rel="manifest" href="/manifest.webmanifest" />
 <link rel="apple-touch-icon" href="/icon-180.png" />
 <link rel="icon" href="/icon-192.png" />
@@ -50,7 +50,9 @@
   .ai .bubble{background:var(--ai);border:1px solid rgba(255,255,255,.07);border-bottom-left-radius:5px}
   .ai .bubble.think{color:var(--muted);font-style:italic}
   .empty{margin:18vh auto 0;text-align:center;color:var(--muted);max-width:300px}
-  .empty .dot{margin:0 auto 14px;width:46px;height:46px}
+  .empty .dot{margin:0 auto 14px;width:52px;height:52px}
+  .empty .brand{margin:0;font-size:32px;font-weight:800;letter-spacing:.5px;color:var(--copper2);text-shadow:0 0 18px var(--glow)}
+  .empty .byline{margin:8px 0 0;font-size:15px;letter-spacing:.4px;color:var(--sand);opacity:.85}
   footer{
     border-top:1px solid var(--line); background:rgba(0,0,30,.6); backdrop-filter:blur(8px);
     padding:8px 10px calc(8px + env(safe-area-inset-bottom));
@@ -75,7 +77,7 @@
 <body>
   <header>
     <span class="dot" aria-hidden="true"></span>
-    <span class="title">Assistant</span>
+    <span class="title">Dominion AI</span>
     <span class="spacer"></span>
     <select id="model" aria-label="Model"></select>
     <button id="new" class="ghost" title="New chat">New</button>
@@ -83,7 +85,8 @@
   <main id="main"><div class="wrap" id="wrap">
     <div class="empty" id="empty">
       <span class="dot" aria-hidden="true"></span>
-      <p>Your private AI, running on the mini&#8209;PC at home.<br/>Ask it anything.</p>
+      <p class="brand">Dominion AI</p>
+      <p class="byline">by Frederick Wolfe</p>
     </div>
   </div></main>
   <footer>

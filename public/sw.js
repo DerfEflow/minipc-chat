@@ -1,6 +1,6 @@
 // Minimal service worker: cache the app shell so the PWA installs + opens offline.
 // Anything under /ollama/* is NEVER cached (it's the live model API).
-const CACHE = "minipc-chat-v1";
+const CACHE = "minipc-chat-v2";
 const SHELL = ["/", "/index.html", "/app.js", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (e) => {

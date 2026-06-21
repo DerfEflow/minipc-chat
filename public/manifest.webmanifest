@@ -1,7 +1,7 @@
 {
-  "name": "Fred's Assistant",
-  "short_name": "Assistant",
-  "description": "Private chat with your local AI on the mini-PC.",
+  "name": "Dominion AI",
+  "short_name": "Dominion AI",
+  "description": "Dominion AI by Frederick Wolfe.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
