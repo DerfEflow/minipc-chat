@@ -33,6 +33,10 @@ const TYPES = {
 function proxy(req, res, upstreamPath) {
   const headers = { ...req.headers, host: ou.host };
   delete headers["accept-encoding"]; // keep SSE/stream un-gzipped so it flows token-by-token
+  // Ollama 403s any request carrying a browser Origin/Referer (its cross-origin guard).
+  // The phone is a real browser and sends them; strip so Ollama sees a clean local request.
+  delete headers.origin;
+  delete headers.referer;
   const opts = {
     protocol: ou.protocol,
     hostname: ou.hostname,
