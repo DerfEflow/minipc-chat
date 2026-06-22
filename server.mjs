@@ -76,8 +76,8 @@ const MAX_ROUNDS = 6;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const stripThink = (t) => String(t || "").replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
 
-function systemPrompt() {
-  return [
+function systemPrompt(persona) {
+  const base = [
     "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is 2026-06-22.",
     "You run on his always-on mini-PC and you have real tools (hands). Use them when they help —",
     "don't just describe what could be done; do it. Prefer reading current state (e.g. deck_list_projects,",
@@ -87,11 +87,14 @@ function systemPrompt() {
     "say so plainly rather than pretending. The sandbox is your private scratch space for drafts/notes.",
     "When you finish a tool action, briefly confirm what you actually did.",
   ].join(" ");
+  return persona ? base + "\n\nFor this conversation, adopt this style/role: " + persona : base;
 }
 
-async function ollamaChat(model, messages) {
+async function ollamaChat(model, messages, temperature) {
   return await new Promise((resolve) => {
-    const body = JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: false });
+    const payload = { model, messages, tools: TOOL_DEFS, stream: false };
+    if (typeof temperature === "number") payload.options = { temperature };
+    const body = JSON.stringify(payload);
     const r = http.request(
       { protocol: ou.protocol, hostname: ou.hostname, port: ou.port || 80, path: "/api/chat", method: "POST",
         headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) }, timeout: 180000 },
@@ -117,11 +120,13 @@ async function handleChat(req, res) {
   let aborted = false;
   res.on("close", () => (aborted = true));
 
-  const messages = [{ role: "system", content: systemPrompt() }, ...(Array.isArray(input.messages) ? input.messages : [])];
+  const persona = typeof input.persona === "string" ? input.persona.slice(0, 2000) : "";
+  const temperature = (typeof input.temperature === "number" && input.temperature >= 0 && input.temperature <= 2) ? input.temperature : undefined;
+  const messages = [{ role: "system", content: systemPrompt(persona) }, ...(Array.isArray(input.messages) ? input.messages : [])];
 
   try {
     for (let round = 0; round < MAX_ROUNDS && !aborted; round++) {
-      const d = await ollamaChat(model, messages);
+      const d = await ollamaChat(model, messages, temperature);
       if (aborted) break;
       const msg = d && d.message;
       if (!msg) { sse({ type: "error", error: "The model didn't respond (it may still be warming up — try again)." }); return res.end(); }

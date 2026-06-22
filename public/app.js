@@ -1,86 +1,82 @@
-// Dominion AI — chat client. Talks to the server-side agent loop at /chat (which runs tools),
-// with multi-conversation history in a sidebar. Model list still comes from /ollama/v1/models.
+// Dominion AI — chat client. Server-side agent loop at /chat (runs tools), multi-conversation
+// history, per-message actions (copy/edit/regenerate), persona presets + temperature.
 const $ = (id) => document.getElementById(id);
 const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"),
       modelSel = $("model"), empty = $("empty"),
-      sidebar = $("sidebar"), overlay = $("overlay"), menuBtn = $("menu"), newBtn = $("newchat"), chatlist = $("chatlist");
+      sidebar = $("sidebar"), overlay = $("overlay"), menuBtn = $("menu"), newBtn = $("newchat"), chatlist = $("chatlist"),
+      settingsBtn = $("settings"), smodal = $("smodal"), sclose = $("sclose"), ssave = $("ssave"),
+      personaSel = $("persona-sel"), personaCustom = $("persona-custom"), tempInput = $("temp"), tempVal = $("temp-val");
 
-const LS_CHATS = "dominion.chats.v1";
-const LS_CUR = "dominion.cur.v1";
-const LS_MODEL = "minipc-chat.model.v1";
-const OLD_MSGS = "minipc-chat.messages.v1";
+const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
+      LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
 
-let chats = [];        // [{id, title, messages:[{role,content}], updatedAt}]
-let curId = null;
-let busy = false;
-let aborter = null;
+const PRESETS = {
+  default: "",
+  concise: "Be maximally concise — short, direct answers, minimal preamble.",
+  brainstorm: "Act as a sharp brainstorming partner: offer ideas, angles, and honest pushback; think briefly out loud.",
+  code: "You are a precise coding assistant: give exact, runnable specifics; for real file changes use forge_send with complete instructions.",
+};
+
+let chats = [], curId = null, busy = false, aborter = null;
+let settings = { persona: "default", personaCustom: "", temperature: 0.7 };
 
 // ---------- persistence ----------
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "c" + Date.now() + Math.random().toString(36).slice(2));
 const save = () => { try { localStorage.setItem(LS_CHATS, JSON.stringify(chats.slice(0, 100))); localStorage.setItem(LS_CUR, curId || ""); } catch {} };
+const saveSettings = () => { try { localStorage.setItem(LS_SET, JSON.stringify(settings)); } catch {} };
 function load() {
   try { const r = localStorage.getItem(LS_CHATS); const a = r && JSON.parse(r); if (Array.isArray(a)) chats = a; } catch {}
-  // migrate a pre-sidebar single conversation
-  if (!chats.length) {
-    try { const old = JSON.parse(localStorage.getItem(OLD_MSGS) || "null"); if (Array.isArray(old) && old.length) chats = [{ id: uid(), title: titleFrom(old), messages: old, updatedAt: Date.now() }]; } catch {}
-  }
+  if (!chats.length) { try { const old = JSON.parse(localStorage.getItem(OLD_MSGS) || "null"); if (Array.isArray(old) && old.length) chats = [{ id: uid(), title: titleFrom(old), messages: old, updatedAt: Date.now() }]; } catch {} }
   curId = localStorage.getItem(LS_CUR) || (chats[0] && chats[0].id) || null;
   if (!curId) newChat();
+  try { const s = JSON.parse(localStorage.getItem(LS_SET) || "null"); if (s && typeof s === "object") settings = { ...settings, ...s }; } catch {}
 }
 const cur = () => chats.find((c) => c.id === curId);
 const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); return (u ? u.content : "New chat").replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
+const resolvePersona = () => settings.persona === "custom" ? (settings.personaCustom || "") : (PRESETS[settings.persona] || "");
 
-function newChat() {
-  if (busy) return;
-  const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() };
-  chats.unshift(c); curId = c.id; save();
-  renderAll(); closeSidebar(); input.focus();
-}
+// ---------- chats ----------
+function newChat() { if (busy) return; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); closeSidebar(); input.focus(); }
 function switchChat(id) { if (busy) return; curId = id; save(); renderAll(); closeSidebar(); }
-function deleteChat(id) {
-  chats = chats.filter((c) => c.id !== id);
-  if (curId === id) curId = (chats[0] && chats[0].id) || null;
-  if (!curId) { newChat(); return; }
-  save(); renderAll();
-}
-function renameChat(id) {
-  const c = chats.find((x) => x.id === id); if (!c) return;
-  const t = prompt("Rename chat", c.title); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); }
-}
+function deleteChat(id) { chats = chats.filter((c) => c.id !== id); if (curId === id) curId = (chats[0] && chats[0].id) || null; if (!curId) { newChat(); return; } save(); renderAll(); }
+function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = prompt("Rename chat", c.title); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); } }
 
 // ---------- sidebar ----------
 const openSidebar = () => { sidebar.classList.add("open"); overlay.classList.add("show"); };
 const closeSidebar = () => { sidebar.classList.remove("open"); overlay.classList.remove("show"); };
 function renderSidebar() {
   chatlist.innerHTML = "";
-  const sorted = [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  for (const c of sorted) {
-    const row = document.createElement("div");
-    row.className = "ci" + (c.id === curId ? " active" : "");
-    const ttl = document.createElement("div"); ttl.className = "ttl"; ttl.textContent = c.title || "New chat";
-    ttl.onclick = () => switchChat(c.id);
-    const ren = document.createElement("span"); ren.className = "x"; ren.textContent = "✎"; ren.title = "Rename";
-    ren.onclick = (e) => { e.stopPropagation(); renameChat(c.id); };
-    const del = document.createElement("span"); del.className = "x"; del.textContent = "×"; del.title = "Delete";
-    del.onclick = (e) => { e.stopPropagation(); if (confirm("Delete this chat?")) deleteChat(c.id); };
-    row.appendChild(ttl); row.appendChild(ren); row.appendChild(del);
-    chatlist.appendChild(row);
+  for (const c of [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) {
+    const row = document.createElement("div"); row.className = "ci" + (c.id === curId ? " active" : "");
+    const ttl = document.createElement("div"); ttl.className = "ttl"; ttl.textContent = c.title || "New chat"; ttl.onclick = () => switchChat(c.id);
+    const ren = document.createElement("span"); ren.className = "x"; ren.textContent = "✎"; ren.title = "Rename"; ren.onclick = (e) => { e.stopPropagation(); renameChat(c.id); };
+    const del = document.createElement("span"); del.className = "x"; del.textContent = "×"; del.title = "Delete"; del.onclick = (e) => { e.stopPropagation(); if (confirm("Delete this chat?")) deleteChat(c.id); };
+    row.append(ttl, ren, del); chatlist.appendChild(row);
   }
 }
 
 // ---------- rendering ----------
 const stripThink = (t) => t.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
 const scroll = () => { main.scrollTop = main.scrollHeight; };
-function bubble(role, text) {
-  const row = document.createElement("div"); row.className = "msg " + (role === "user" ? "me" : "ai");
-  const b = document.createElement("div"); b.className = "bubble"; b.textContent = text;
-  row.appendChild(b); wrap.appendChild(row); return b;
+function mkAct(label, fn) { const b = document.createElement("button"); b.className = "act"; b.textContent = label; b.onclick = fn; return b; }
+async function copyText(t) { try { await navigator.clipboard.writeText(t); } catch { const a = document.createElement("textarea"); a.value = t; document.body.appendChild(a); a.select(); try { document.execCommand("copy"); } catch {} a.remove(); } }
+function renderMsg(m, i, isLastAi) {
+  const turn = document.createElement("div"); turn.className = "turn";
+  const row = document.createElement("div"); row.className = "msg " + (m.role === "user" ? "me" : "ai");
+  const b = document.createElement("div"); b.className = "bubble"; b.textContent = m.content; row.appendChild(b); turn.appendChild(row);
+  const acts = document.createElement("div"); acts.className = "acts" + (m.role === "user" ? " me" : "");
+  if (m.role === "user") { acts.append(mkAct("Edit", () => editUser(i)), mkAct("Copy", () => copyText(m.content))); }
+  else { acts.appendChild(mkAct("Copy", () => copyText(m.content))); if (isLastAi && !busy) acts.appendChild(mkAct("Regenerate", () => regenerate())); }
+  turn.appendChild(acts); wrap.appendChild(turn);
 }
 function renderAll() {
-  wrap.querySelectorAll(".msg, .err").forEach((n) => n.remove());
+  wrap.querySelectorAll(".turn, .err").forEach((n) => n.remove());
   const c = cur();
   empty.style.display = (c && c.messages.length) ? "none" : "";
-  if (c) for (const m of c.messages) bubble(m.role, m.content);
+  if (c) {
+    let lastAi = -1; for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { lastAi = i; break; }
+    c.messages.forEach((m, i) => renderMsg(m, i, i === lastAi));
+  }
   renderSidebar(); scroll();
 }
 function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px"; }
@@ -95,10 +91,8 @@ async function loadModels() {
     for (let attempt = 0; attempt < 6; attempt++) {
       try {
         const r = await fetch("/ollama/v1/models", { cache: "no-store" }); if (!r.ok) throw 0;
-        const ids = ((await r.json()).data || []).map((m) => m.id || m.name).filter(Boolean);
-        if (!ids.length) throw 0;
-        modelSel.innerHTML = "";
-        for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = id; modelSel.appendChild(o); }
+        const ids = ((await r.json()).data || []).map((m) => m.id || m.name).filter(Boolean); if (!ids.length) throw 0;
+        modelSel.innerHTML = ""; for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = id; modelSel.appendChild(o); }
         const saved = localStorage.getItem(LS_MODEL);
         modelSel.value = (saved && ids.includes(saved)) ? saved : (ids.find((x) => /:(8b|7b|4b|3b|1\.5b)\b/i.test(x)) || ids[0]);
         return true;
@@ -110,45 +104,27 @@ async function loadModels() {
   try { return await loading; } finally { loading = null; }
 }
 
-// ---------- send (agent loop over SSE) ----------
-function setBusy(on) {
-  busy = on;
-  sendBtn.classList.toggle("stop", on);
-  sendBtn.innerHTML = on ? "&#9632;" : "&#8593;";
-  sendBtn.title = on ? "Stop" : "Send";
-}
+// ---------- agent loop over SSE ----------
+function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send"; }
 
-async function send() {
-  if (busy) { if (aborter) aborter.abort(); return; }
-  const text = input.value.trim(); if (!text) return;
+async function streamReply(c) {
   document.querySelector(".err")?.remove();
-  let model = currentModel();
-  if (!model) { await loadModels(); model = currentModel(); }
-  if (!model) { showErr("Still connecting to your AI — give it a few seconds, then send again."); return; }
-
-  const c = cur(); if (!c) return;
-  input.value = ""; autosize();
-  c.messages.push({ role: "user", content: text });
-  if (c.title === "New chat") c.title = titleFrom(c.messages);
-  c.updatedAt = Date.now(); save();
-  empty.style.display = "none"; bubble("user", text); renderSidebar(); scroll();
-
-  // live assistant row: a tools strip + the answer bubble
-  const row = document.createElement("div"); row.className = "msg ai";
+  let model = currentModel(); if (!model) { await loadModels(); model = currentModel(); }
+  if (!model) { showErr("Still connecting to your AI — give it a few seconds, then try again."); return; }
+  empty.style.display = "none";
+  const row = document.createElement("div"); row.className = "turn";
+  const inner = document.createElement("div"); inner.className = "msg ai";
   const tools = document.createElement("div"); tools.className = "tools";
   const live = document.createElement("div"); live.className = "bubble think cursor"; live.textContent = "thinking…";
-  row.appendChild(tools); row.appendChild(live); wrap.appendChild(row); scroll();
-
+  inner.append(tools, live); row.appendChild(inner); wrap.appendChild(row); scroll();
   const warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "waking the model… first reply can take ~20s"; scroll(); } }, 6000);
 
-  setBusy(true);
-  aborter = new AbortController();
-  let raw = "";
-  const chips = [];
+  setBusy(true); aborter = new AbortController();
+  let raw = ""; let errMsg = ""; const chips = [];
   try {
     const res = await fetch("/chat", {
       method: "POST", headers: { "content-type": "application/json" }, signal: aborter.signal,
-      body: JSON.stringify({ model, messages: c.messages.map((m) => ({ role: m.role, content: m.content })) }),
+      body: JSON.stringify({ model, messages: c.messages.map((m) => ({ role: m.role, content: m.content })), persona: resolvePersona(), temperature: settings.temperature }),
     });
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
@@ -162,39 +138,56 @@ async function send() {
         if (ev.type === "tool") {
           if (ev.status === "run") {
             const chip = document.createElement("div"); chip.className = "tool" + (ev.gated ? " gated" : "");
-            chip.innerHTML = '<span class="sp"></span>';
-            const lab = document.createElement("span"); lab.textContent = (ev.gated ? "🔒 " : "🔧 ") + ev.name + "…"; chip.appendChild(lab);
+            chip.innerHTML = '<span class="sp"></span>'; const lab = document.createElement("span"); lab.textContent = (ev.gated ? "🔒 " : "🔧 ") + ev.name + "…"; chip.appendChild(lab);
             chip._name = ev.name; chip._lab = lab; tools.appendChild(chip); chips.push(chip); scroll();
-          } else if (ev.status === "done") {
-            const chip = [...chips].reverse().find((x) => x._name === ev.name && !x._done);
-            if (chip) { chip._done = true; chip.classList.add("done"); chip._lab.textContent = "✓ " + ev.name; }
-          }
-        } else if (ev.type === "token") {
-          raw += ev.delta || ""; const shown = stripThink(raw);
-          live.classList.toggle("think", !shown); live.textContent = shown || "thinking…"; scroll();
-        } else if (ev.type === "error") {
-          throw new Error(ev.error || "server error");
-        } else if (ev.type === "done") {
-          /* finished */
-        }
+          } else if (ev.status === "done") { const chip = [...chips].reverse().find((x) => x._name === ev.name && !x._done); if (chip) { chip._done = true; chip.classList.add("done"); chip._lab.textContent = "✓ " + ev.name; } }
+        } else if (ev.type === "token") { raw += ev.delta || ""; const shown = stripThink(raw); live.classList.toggle("think", !shown); live.textContent = shown || "thinking…"; scroll(); }
+        else if (ev.type === "error") { throw new Error(ev.error || "server error"); }
       }
     }
     clearTimeout(warm);
     const final = stripThink(raw) || "(no response)";
-    live.classList.remove("think", "cursor"); live.textContent = final;
-    c.messages.push({ role: "assistant", content: final }); c.updatedAt = Date.now(); save(); renderSidebar();
+    c.messages.push({ role: "assistant", content: final }); c.updatedAt = Date.now(); save();
   } catch (e) {
     clearTimeout(warm);
-    if (e.name === "AbortError") {
-      const partial = stripThink(raw);
-      live.classList.remove("think", "cursor"); live.textContent = partial || "(stopped)";
-      if (partial) { c.messages.push({ role: "assistant", content: partial }); save(); }
-    } else {
-      row.remove(); showErr("Chat failed: " + (e.message || "network error") + " — tap send to retry.");
-    }
+    if (e.name === "AbortError") { const partial = stripThink(raw); if (partial) { c.messages.push({ role: "assistant", content: partial }); save(); } }
+    else { errMsg = "Chat failed: " + (e.message || "network error") + " — tap send to retry."; }
   } finally {
-    setBusy(false); aborter = null; scroll();
+    setBusy(false); aborter = null; renderAll(); if (errMsg) showErr(errMsg);
   }
+}
+
+function send() {
+  if (busy) { if (aborter) aborter.abort(); return; }
+  const text = input.value.trim(); if (!text) return;
+  const c = cur(); if (!c) return;
+  input.value = ""; autosize();
+  c.messages.push({ role: "user", content: text });
+  if (c.title === "New chat") c.title = titleFrom(c.messages);
+  c.updatedAt = Date.now(); save(); renderAll();
+  streamReply(c);
+}
+function regenerate() {
+  if (busy) return; const c = cur(); if (!c) return;
+  for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { c.messages.splice(i, 1); break; }
+  save(); renderAll(); streamReply(c);
+}
+function editUser(i) {
+  if (busy) return; const c = cur(); if (!c) return;
+  input.value = c.messages[i].content; c.messages = c.messages.slice(0, i); c.updatedAt = Date.now(); save(); renderAll(); autosize(); input.focus();
+}
+
+// ---------- settings ----------
+function openSettings() {
+  personaSel.value = settings.persona; personaCustom.value = settings.personaCustom || "";
+  personaCustom.hidden = settings.persona !== "custom";
+  tempInput.value = String(settings.temperature); tempVal.textContent = String(settings.temperature);
+  smodal.hidden = false;
+}
+const closeSettings = () => { smodal.hidden = true; };
+function saveSettingsUI() {
+  settings.persona = personaSel.value; settings.personaCustom = personaCustom.value.trim();
+  settings.temperature = parseFloat(tempInput.value); saveSettings(); closeSettings();
 }
 
 // ---------- wire up ----------
@@ -205,12 +198,12 @@ menuBtn.addEventListener("click", () => (sidebar.classList.contains("open") ? cl
 overlay.addEventListener("click", closeSidebar);
 newBtn.addEventListener("click", newChat);
 modelSel.addEventListener("change", () => { if (currentModel()) localStorage.setItem(LS_MODEL, modelSel.value); else loadModels(); });
+settingsBtn.addEventListener("click", openSettings);
+sclose.addEventListener("click", closeSettings);
+ssave.addEventListener("click", saveSettingsUI);
+smodal.addEventListener("click", (e) => { if (e.target === smodal) closeSettings(); });
+personaSel.addEventListener("change", () => { personaCustom.hidden = personaSel.value !== "custom"; });
+tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.value; });
 
-load();
-renderAll();
-loadModels();
-autosize();
-
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
-}
+load(); renderAll(); loadModels(); autosize();
+if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
