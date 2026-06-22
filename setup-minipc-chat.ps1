@@ -46,45 +46,65 @@ if (-not (Test-Path $Server)) { Write-Host "[FAIL] server.mjs not found in $Repo
 ) | Set-Content -Path $Wrapper -Encoding ascii
 OK "Wrote launcher $Wrapper"
 
-# 4. make it always-on. Elevated -> a detached S4U scheduled task. Non-elevated (e.g. run over
-#    SSH, which gives admins a filtered/non-elevated token) -> the user's Startup folder + a
-#    detached launch now via WMI (survives the SSH session). The mini-PC auto-logs-in, so the
-#    Startup entry is effectively always-on.
+# 4. make it always-on as a scheduled task WITH restart-on-failure.
+#    Admin     -> S4U + Hidden (fully detached: survives logoff, runs before interactive logon).
+#    Non-admin -> Interactive at-logon (the mini-PC auto-logs-in, so the user session is always
+#                 present); still restart-on-failure. This replaces the old fragile Startup-folder
+#                 launcher. If even a non-elevated task registration is denied, it falls back to the
+#                 Startup folder so the result is never worse than before.
 $startupCmd = Join-Path ([Environment]::GetFolderPath("Startup")) "minipc-chat.cmd"
-if ($isAdmin) {
-  Info "Registering the detached task '$TaskName' (admin)..."
+
+# Kill ONLY the process listening on $Port before we (re)start, so a server left from a previous
+# run can't double-bind. NEVER 'taskkill /IM node.exe' - the Command Deck bridge poller is also
+# node and must keep running.
+function Stop-ChatPort($p) {
   try {
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-      Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-      Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-    }
-    if (Test-Path $startupCmd) { Remove-Item $startupCmd -Force -ErrorAction SilentlyContinue } # no double-launch
-    $action    = New-ScheduledTaskAction -Execute $Wrapper
-    $trigger   = New-ScheduledTaskTrigger -AtLogOn
-    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
-    $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-                   -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 `
-                   -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -Hidden
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-    Start-ScheduledTask -TaskName $TaskName
-    Start-Sleep -Seconds 3
-    OK "Task registered + started (state: $((Get-ScheduledTask -TaskName $TaskName).State))."
-  } catch { Warn "Task registration failed ($($_.Exception.Message)); using the Startup folder instead."; $isAdmin = $false }
+    $owners = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
+    foreach ($procId in $owners) { try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {} }
+  } catch {}
 }
-if (-not $isAdmin) {
-  Info "Installing as a logon item (no admin needed)..."
-  try { if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false } } catch {}
-  Copy-Item $Wrapper $startupCmd -Force
-  OK "Installed $startupCmd (runs every logon; the mini-PC auto-logs-in)."
-  $running = $false
-  try { Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/" -TimeoutSec 3 | Out-Null; $running = $true } catch {}
-  if (-not $running) {
-    # WMI-create so the process is detached from this (SSH) session and keeps running after disconnect.
-    Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = 'cmd /c "' + $Wrapper + '"' } | Out-Null
-    Start-Sleep -Seconds 3
-    OK "Launched the server detached."
-  } else { OK "Server already running." }
+function Port-Up($p) { [bool](Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue) }
+
+Info "Registering the always-on task '$TaskName'..."
+try { if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false } } catch {}
+
+$action   = New-ScheduledTaskAction -Execute $Wrapper
+$trigger  = New-ScheduledTaskTrigger -AtLogOn
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+              -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 `
+              -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -Hidden
+$userId   = "$env:USERDOMAIN\$env:USERNAME"
+$registered = $false; $mode = ""
+try {
+  if ($isAdmin) { $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType S4U -RunLevel Limited; $mode = "S4U detached" }
+  else          { $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive;            $mode = "Interactive at-logon" }
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+  $registered = $true
+  OK "Registered '$TaskName' ($mode, restart-on-fail 999 x 1min, no time limit)."
+} catch {
+  Warn "Scheduled-task registration was denied ($($_.Exception.Message)). Falling back to the Startup folder."
 }
+
+# (Re)start cleanly: retire the old launcher, free the port, then bring the server up. Prefer the
+# task; if it doesn't bind within ~12s (e.g. an Interactive task triggered from a non-interactive
+# context), launch the wrapper detached as a guaranteed safety net so the server is never left down.
+if ($registered -and (Test-Path $startupCmd)) { Remove-Item $startupCmd -Force -ErrorAction SilentlyContinue }
+Stop-ChatPort $Port
+Start-Sleep -Milliseconds 800
+$broughtUpBy = "none"
+if ($registered) {
+  try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch { Warn "On-demand task start: $($_.Exception.Message)" }
+  for ($t = 0; $t -lt 12 -and -not (Port-Up $Port); $t++) { Start-Sleep -Seconds 1 }
+  if (Port-Up $Port) { $broughtUpBy = "task" }
+}
+if (-not (Port-Up $Port)) {
+  if (-not $registered) { Copy-Item $Wrapper $startupCmd -Force; OK "Installed $startupCmd (runs every logon)." }
+  Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = 'cmd /c "' + $Wrapper + '"' } | Out-Null
+  for ($t = 0; $t -lt 10 -and -not (Port-Up $Port); $t++) { Start-Sleep -Seconds 1 }
+  if (Port-Up $Port) { if ($registered) { $broughtUpBy = "safety-net (task registered; takes over at next logon)" } else { $broughtUpBy = "startup-folder launcher" } }
+}
+if ($registered) { try { OK "Task state: $((Get-ScheduledTask -TaskName $TaskName).State); server up via: $broughtUpBy." } catch {} }
+else             { OK "Server up via: $broughtUpBy." }
 
 # 5. local health check
 try {
@@ -92,22 +112,23 @@ try {
   if ($resp.StatusCode -eq 200) { OK "Server responding on http://127.0.0.1:$Port" }
 } catch { Warn "Server didn't answer yet on port $Port - check $LogFile (Get-Content '$LogFile' -Tail 20)." }
 
-# 6. Tailscale HTTPS
-Info "Exposing it over Tailscale HTTPS..."
+# 6. Tailscale HTTPS (idempotent: only (re)assert the serve mapping if it isn't already there, so
+#    re-runs are fast and we don't re-trigger cert provisioning).
+Info "Ensuring the Tailscale HTTPS mapping..."
 $ts = (Get-Command tailscale -ErrorAction SilentlyContinue).Source
 if (-not $ts -and (Test-Path "C:\Program Files\Tailscale\tailscale.exe")) { $ts = "C:\Program Files\Tailscale\tailscale.exe" }
 if (-not $ts) { Warn "tailscale CLI not found - install Tailscale, then run:  tailscale serve --bg $Port" }
 else {
   try {
-    & $ts serve --bg $Port 2>&1 | Out-Host
+    $already = $false
+    try { $already = (((& $ts serve status) 2>&1 | Out-String) -match (":" + $Port)) } catch {}
+    if ($already) { OK "Tailscale already serving port $Port." } else { & $ts serve --bg $Port 2>&1 | Out-Host }
     $name = ""
     try { $name = ((& $ts status --json | ConvertFrom-Json).Self.DNSName).TrimEnd(".") } catch {}
     Write-Host ""
     if ($name) { OK "PHONE URL:  https://$name/" } else { OK "Served. Run 'tailscale serve status' to see the https URL." }
-    Say "Open that URL on your phone (it's on your tailnet), then use the browser menu ->"
-    Say "  'Add to Home Screen' / 'Install app'."
     Say "If it errors about HTTPS/certs: in the Tailscale admin console enable MagicDNS + HTTPS Certificates, then re-run 'tailscale serve --bg $Port'."
-  } catch { Warn "tailscale serve failed: $($_.Exception.Message). Try manually: tailscale serve --bg $Port" }
+  } catch { Warn "tailscale step failed: $($_.Exception.Message). Try manually: tailscale serve --bg $Port" }
 }
 
 Write-Host ""
