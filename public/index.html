@@ -75,6 +75,7 @@
   .acts.me{justify-content:flex-end}
   .act{background:none;border:none;color:var(--muted);font-size:12px;cursor:pointer;padding:1px 2px;opacity:.65}
   .act:hover{opacity:1;color:var(--copper2)}
+  .route{font-size:11px;color:var(--muted);opacity:.75;padding:1px 4px 3px}
   .tools{display:flex;flex-direction:column;gap:4px;margin:0 0 6px}
   .tool{font-size:12.5px;color:var(--copper2);opacity:.92;display:flex;align-items:center;gap:6px}
   .tool .sp{width:8px;height:8px;border-radius:50%;background:var(--copper2);box-shadow:0 0 8px var(--glow);animation:pulse 1s infinite}
@@ -134,7 +135,14 @@
     <span class="dot" aria-hidden="true"></span>
     <span class="title">Dominion AI</span>
     <span class="spacer"></span>
-    <select id="model" aria-label="Model"></select>
+    <select id="mode" aria-label="Mode" title="Mode">
+      <option value="auto">Auto</option>
+      <option value="fast">Fast</option>
+      <option value="normal">Normal</option>
+      <option value="deep_think">Deep Think</option>
+      <option value="long_context">Long Context</option>
+      <option value="draft">Draft</option>
+    </select>
     <button id="settings" class="icon" title="Settings" aria-label="Settings">&#9881;</button>
   </header>
 
@@ -157,6 +165,9 @@
   <div id="smodal" class="modal" hidden>
     <div class="sheet">
       <div class="sheet-h">Settings <button id="sclose" class="icon" aria-label="Close">&times;</button></div>
+      <label class="frow">Model (Auto = the router picks 8B vs 30B per request)
+        <select id="model"><option value="auto">Auto (router picks)</option></select>
+      </label>
       <label class="frow">Persona / style
         <select id="persona-sel">
           <option value="default">Default assistant</option>
@@ -174,6 +185,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=6"></script>
+  <script src="/app.js?v=7"></script>
 </body>
 </html>

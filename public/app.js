@@ -1,14 +1,15 @@
-// Dominion AI — chat client. Server-side agent loop at /chat (runs tools), multi-conversation
-// history, per-message actions (copy/edit/regenerate), persona presets + temperature.
+// Dominion AI — chat client. Server-side agent loop at /chat (routes models + runs tools).
+// Multi-conversation history, per-message actions, persona/temperature, and a Mode selector that
+// drives the Phase-1 router (Auto = the server's light model classifies + picks 8B vs 30B).
 const $ = (id) => document.getElementById(id);
 const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"),
-      modelSel = $("model"), empty = $("empty"),
+      modelSel = $("model"), modeSel = $("mode"), empty = $("empty"),
       sidebar = $("sidebar"), overlay = $("overlay"), menuBtn = $("menu"), newBtn = $("newchat"), chatlist = $("chatlist"),
       settingsBtn = $("settings"), smodal = $("smodal"), sclose = $("sclose"), ssave = $("ssave"),
       personaSel = $("persona-sel"), personaCustom = $("persona-custom"), tempInput = $("temp"), tempVal = $("temp-val");
 
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
-      LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
+      LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
 
 const PRESETS = {
   default: "",
@@ -30,10 +31,12 @@ function load() {
   curId = localStorage.getItem(LS_CUR) || (chats[0] && chats[0].id) || null;
   if (!curId) newChat();
   try { const s = JSON.parse(localStorage.getItem(LS_SET) || "null"); if (s && typeof s === "object") settings = { ...settings, ...s }; } catch {}
+  try { const m = localStorage.getItem(LS_MODE); if (m && modeSel) modeSel.value = m; } catch {}
 }
 const cur = () => chats.find((c) => c.id === curId);
 const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); return (u ? u.content : "New chat").replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
 const resolvePersona = () => settings.persona === "custom" ? (settings.personaCustom || "") : (PRESETS[settings.persona] || "");
+const forcedModel = () => { const v = modelSel ? modelSel.value : "auto"; return v && v !== "auto" ? v : ""; };
 
 // ---------- chats ----------
 function newChat() { if (busy) return; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); closeSidebar(); input.focus(); }
@@ -82,26 +85,17 @@ function renderAll() {
 function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px"; }
 function showErr(t) { document.querySelector(".err")?.remove(); const e = document.createElement("div"); e.className = "err"; e.textContent = t; wrap.appendChild(e); scroll(); }
 
-// ---------- models ----------
-function currentModel() { const v = modelSel.value; return v && !/connecting|offline|no models|^$/i.test(v) ? v : ""; }
-let loading = null;
+// ---------- models (advanced override; the router picks by default) ----------
 async function loadModels() {
-  if (loading) return loading;
-  loading = (async () => {
-    for (let attempt = 0; attempt < 6; attempt++) {
-      try {
-        const r = await fetch("/ollama/v1/models", { cache: "no-store" }); if (!r.ok) throw 0;
-        const ids = ((await r.json()).data || []).map((m) => m.id || m.name).filter(Boolean); if (!ids.length) throw 0;
-        modelSel.innerHTML = ""; for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = id; modelSel.appendChild(o); }
-        const saved = localStorage.getItem(LS_MODEL);
-        modelSel.value = (saved && ids.includes(saved)) ? saved : (ids.find((x) => /:(8b|7b|4b|3b|1\.5b)\b/i.test(x)) || ids[0]);
-        return true;
-      } catch { if (!currentModel()) modelSel.innerHTML = "<option value=''>connecting…</option>"; await new Promise((r) => setTimeout(r, 2000)); }
-    }
-    if (!currentModel()) modelSel.innerHTML = "<option value=''>offline — tap to retry</option>";
-    return false;
-  })();
-  try { return await loading; } finally { loading = null; }
+  if (!modelSel) return;
+  try {
+    const r = await fetch("/ollama/v1/models", { cache: "no-store" }); if (!r.ok) return;
+    const ids = ((await r.json()).data || []).map((m) => m.id || m.name).filter(Boolean);
+    modelSel.innerHTML = "<option value='auto'>Auto (router picks)</option>";
+    for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = id; modelSel.appendChild(o); }
+    const saved = localStorage.getItem(LS_MODEL);
+    modelSel.value = (saved && (saved === "auto" || ids.includes(saved))) ? saved : "auto";
+  } catch {}
 }
 
 // ---------- agent loop over SSE ----------
@@ -109,8 +103,6 @@ function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.
 
 async function streamReply(c) {
   document.querySelector(".err")?.remove();
-  let model = currentModel(); if (!model) { await loadModels(); model = currentModel(); }
-  if (!model) { showErr("Still connecting to your AI — give it a few seconds, then try again."); return; }
   empty.style.display = "none";
   const row = document.createElement("div"); row.className = "turn";
   const inner = document.createElement("div"); inner.className = "msg ai";
@@ -120,11 +112,17 @@ async function streamReply(c) {
   const warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "waking the model… first reply can take ~20s"; scroll(); } }, 6000);
 
   setBusy(true); aborter = new AbortController();
-  let raw = ""; let errMsg = ""; const chips = [];
+  let raw = ""; let errMsg = ""; let routeEl = null; const chips = [];
   try {
     const res = await fetch("/chat", {
       method: "POST", headers: { "content-type": "application/json" }, signal: aborter.signal,
-      body: JSON.stringify({ model, messages: c.messages.map((m) => ({ role: m.role, content: m.content })), persona: resolvePersona(), temperature: settings.temperature }),
+      body: JSON.stringify({
+        messages: c.messages.map((m) => ({ role: m.role, content: m.content })),
+        mode: modeSel ? modeSel.value : "auto",
+        model: forcedModel() || "auto",
+        persona: resolvePersona(),
+        temperature: settings.temperature,
+      }),
     });
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
@@ -135,7 +133,11 @@ async function streamReply(c) {
       for (const line of lines) {
         const s = line.trim(); if (!s.startsWith("data:")) continue;
         let ev; try { ev = JSON.parse(s.slice(5).trim()); } catch { continue; }
-        if (ev.type === "tool") {
+        if (ev.type === "route") {
+          if (!routeEl) { routeEl = document.createElement("div"); routeEl.className = "route"; inner.insertBefore(routeEl, tools); }
+          routeEl.textContent = ev.model + " · " + String(ev.mode || "").replace("_", " ") + (ev.reason ? " — " + ev.reason : "");
+          scroll();
+        } else if (ev.type === "tool") {
           if (ev.status === "run") {
             const chip = document.createElement("div"); chip.className = "tool" + (ev.gated ? " gated" : "");
             chip.innerHTML = '<span class="sp"></span>'; const lab = document.createElement("span"); lab.textContent = (ev.gated ? "🔒 " : "🔧 ") + ev.name + "…"; chip.appendChild(lab);
@@ -187,7 +189,9 @@ function openSettings() {
 const closeSettings = () => { smodal.hidden = true; };
 function saveSettingsUI() {
   settings.persona = personaSel.value; settings.personaCustom = personaCustom.value.trim();
-  settings.temperature = parseFloat(tempInput.value); saveSettings(); closeSettings();
+  settings.temperature = parseFloat(tempInput.value);
+  if (modelSel) try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {}
+  saveSettings(); closeSettings();
 }
 
 // ---------- wire up ----------
@@ -197,7 +201,7 @@ sendBtn.addEventListener("click", send);
 menuBtn.addEventListener("click", () => (sidebar.classList.contains("open") ? closeSidebar() : openSidebar()));
 overlay.addEventListener("click", closeSidebar);
 newBtn.addEventListener("click", newChat);
-modelSel.addEventListener("change", () => { if (currentModel()) localStorage.setItem(LS_MODEL, modelSel.value); else loadModels(); });
+if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODE, modeSel.value); } catch {} });
 settingsBtn.addEventListener("click", openSettings);
 sclose.addEventListener("click", closeSettings);
 ssave.addEventListener("click", saveSettingsUI);
