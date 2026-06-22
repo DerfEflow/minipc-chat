@@ -1,7 +1,7 @@
 // Minimal service worker: cache the app shell so the PWA installs + opens offline.
-// Anything under /ollama/* is NEVER cached (it's the live model API).
-const CACHE = "minipc-chat-v4";
-const SHELL = ["/", "/index.html", "/app.js?v=4", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
+// The live model/agent APIs (/ollama/*, /chat) are NEVER cached.
+const CACHE = "dominion-ai-v5";
+const SHELL = ["/", "/index.html", "/app.js?v=5", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -14,10 +14,10 @@ self.addEventListener("activate", (e) => {
 });
 
 // NETWORK-FIRST: always load fresh when online (so updates take immediately), fall back to the
-// cached shell only when offline. /ollama (the live model API) is never touched by the worker.
+// cached shell only when offline. The live APIs are never touched by the worker.
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
-  if (url.pathname.startsWith("/ollama")) return;
+  if (url.pathname.startsWith("/ollama") || url.pathname === "/chat") return;
   e.respondWith(
     fetch(e.request)
       .then((res) => {

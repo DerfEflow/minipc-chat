@@ -16,12 +16,12 @@
     --navy:#000023; --navy2:#0a1230; --copper:#c8762f; --copper2:#e8b07c;
     --sand:#e9dcc6; --muted:#8b93a7; --line:rgba(184,115,51,.28);
     --user:rgba(184,115,51,.22); --ai:rgba(255,255,255,.05); --glow:rgba(57,130,255,.20);
+    --panel:#070d24;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%}
   body{
-    background:
-      radial-gradient(120% 80% at 50% -10%, #0a1240 0%, var(--navy) 55%, #000018 100%) fixed;
+    background:radial-gradient(120% 80% at 50% -10%, #0a1240 0%, var(--navy) 55%, #000018 100%) fixed;
     color:var(--sand); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
     display:flex; flex-direction:column; height:100dvh; overflow:hidden;
   }
@@ -36,11 +36,33 @@
   header .title{font-weight:600;letter-spacing:.3px}
   header .spacer{flex:1}
   select,button{font:inherit;color:var(--sand)}
-  select{
-    background:var(--navy2); border:1px solid var(--line); border-radius:9px; padding:6px 8px; max-width:42vw;
-  }
-  .ghost{background:transparent;border:1px solid var(--line);border-radius:9px;padding:6px 10px;color:var(--muted)}
+  select{background:var(--navy2); border:1px solid var(--line); border-radius:9px; padding:6px 8px; max-width:40vw;}
+  .ghost{background:transparent;border:1px solid var(--line);border-radius:9px;padding:6px 10px;color:var(--muted);cursor:pointer}
   .ghost:active{background:rgba(255,255,255,.06)}
+  .icon{background:transparent;border:none;color:var(--sand);font-size:22px;line-height:1;padding:4px 8px;cursor:pointer;border-radius:8px}
+  .icon:active{background:rgba(255,255,255,.08)}
+
+  /* ---- sidebar ---- */
+  #overlay{position:fixed;inset:0;background:rgba(0,0,12,.55);backdrop-filter:blur(2px);z-index:8;opacity:0;pointer-events:none;transition:opacity .18s}
+  #overlay.show{opacity:1;pointer-events:auto}
+  #sidebar{
+    position:fixed;top:0;left:0;height:100dvh;width:min(82vw,300px);z-index:9;display:flex;flex-direction:column;
+    background:var(--panel);border-right:1px solid var(--line);box-shadow:6px 0 26px rgba(0,0,0,.5);
+    transform:translateX(-102%);transition:transform .2s ease;padding-top:env(safe-area-inset-top);
+  }
+  #sidebar.open{transform:none}
+  .sb-head{display:flex;align-items:center;gap:8px;padding:14px 12px 10px;border-bottom:1px solid var(--line)}
+  .sb-head .h{font-weight:700;letter-spacing:.4px;color:var(--copper2);flex:1}
+  .sb-new{background:linear-gradient(145deg,var(--copper),#7a3f12);border:none;border-radius:9px;padding:7px 11px;color:#fff1e0;cursor:pointer;font-size:14px}
+  #chatlist{flex:1;overflow-y:auto;padding:8px}
+  .ci{display:flex;align-items:center;gap:6px;padding:9px 10px;border-radius:10px;cursor:pointer;border:1px solid transparent}
+  .ci:hover{background:rgba(255,255,255,.04)}
+  .ci.active{background:rgba(184,115,51,.16);border-color:var(--line)}
+  .ci .ttl{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14.5px}
+  .ci .x{opacity:.45;font-size:15px;padding:0 4px}
+  .ci .x:hover{opacity:1;color:#ff9a7a}
+  .sb-foot{padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+
   main{flex:1; overflow-y:auto; padding:14px 12px 6px; -webkit-overflow-scrolling:touch}
   .wrap{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
   .msg{display:flex}
@@ -49,10 +71,17 @@
   .me .bubble{background:var(--user);border:1px solid var(--line);color:#fff1e0;border-bottom-right-radius:5px}
   .ai .bubble{background:var(--ai);border:1px solid rgba(255,255,255,.07);border-bottom-left-radius:5px}
   .ai .bubble.think{color:var(--muted);font-style:italic}
-  .empty{margin:18vh auto 0;text-align:center;color:var(--muted);max-width:300px}
+  .tools{display:flex;flex-direction:column;gap:4px;margin:0 0 6px}
+  .tool{font-size:12.5px;color:var(--copper2);opacity:.92;display:flex;align-items:center;gap:6px}
+  .tool .sp{width:8px;height:8px;border-radius:50%;background:var(--copper2);box-shadow:0 0 8px var(--glow);animation:pulse 1s infinite}
+  .tool.done .sp{background:#5fae6b;animation:none;box-shadow:none}
+  .tool.gated{color:#e8b07c}
+  @keyframes pulse{50%{opacity:.3}}
+  .empty{margin:16vh auto 0;text-align:center;color:var(--muted);max-width:320px}
   .empty .dot{margin:0 auto 14px;width:52px;height:52px}
   .empty .brand{margin:0;font-size:32px;font-weight:800;letter-spacing:.5px;color:var(--copper2);text-shadow:0 0 18px var(--glow)}
   .empty .byline{margin:8px 0 0;font-size:15px;letter-spacing:.4px;color:var(--sand);opacity:.85}
+  .empty .hint{margin:14px 0 0;font-size:13px;opacity:.7}
   footer{
     border-top:1px solid var(--line); background:rgba(0,0,30,.6); backdrop-filter:blur(8px);
     padding:8px 10px calc(8px + env(safe-area-inset-bottom));
@@ -63,11 +92,9 @@
     background:var(--navy2);border:1px solid var(--line);color:var(--sand);outline:none;font:inherit;
   }
   textarea::placeholder{color:var(--muted)}
-  .send{
-    flex:none;width:44px;height:44px;border-radius:50%;border:none;cursor:pointer;
-    background:linear-gradient(145deg,var(--copper),#7a3f12);color:#fff1e0;font-size:20px;
-    box-shadow:0 6px 18px rgba(0,0,0,.45);
-  }
+  .send{flex:none;width:44px;height:44px;border-radius:50%;border:none;cursor:pointer;
+    background:linear-gradient(145deg,var(--copper),#7a3f12);color:#fff1e0;font-size:20px;box-shadow:0 6px 18px rgba(0,0,0,.45);}
+  .send.stop{background:linear-gradient(145deg,#b23b2a,#5e1d13)}
   .send:disabled{opacity:.4}
   .err{color:#ff9a7a;font-size:13px;text-align:center;padding:6px}
   .cursor::after{content:"\258c";animation:blink 1s steps(2) infinite;color:var(--copper2)}
@@ -75,26 +102,39 @@
 </style>
 </head>
 <body>
+  <div id="overlay"></div>
+  <aside id="sidebar">
+    <div class="sb-head">
+      <span class="h">Chats</span>
+      <button id="newchat" class="sb-new">+ New</button>
+    </div>
+    <div id="chatlist"></div>
+    <div class="sb-foot">Dominion AI &middot; by Frederick Wolfe</div>
+  </aside>
+
   <header>
+    <button id="menu" class="icon" title="Chats" aria-label="Chats">&#9776;</button>
     <span class="dot" aria-hidden="true"></span>
     <span class="title">Dominion AI</span>
     <span class="spacer"></span>
     <select id="model" aria-label="Model"></select>
-    <button id="new" class="ghost" title="New chat">New</button>
   </header>
+
   <main id="main"><div class="wrap" id="wrap">
     <div class="empty" id="empty">
       <span class="dot" aria-hidden="true"></span>
       <p class="brand">Dominion AI</p>
       <p class="byline">by Frederick Wolfe</p>
+      <p class="hint">Ask me anything &mdash; I can also read your Command Deck, capture notes, read your files, and queue work.</p>
     </div>
   </div></main>
+
   <footer>
     <div class="bar">
       <textarea id="input" rows="1" placeholder="Message your assistant&#8230;" autocomplete="off"></textarea>
       <button id="send" class="send" title="Send" aria-label="Send">&#8593;</button>
     </div>
   </footer>
-  <script src="/app.js?v=4"></script>
+  <script src="/app.js?v=5"></script>
 </body>
 </html>
