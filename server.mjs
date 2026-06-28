@@ -18,7 +18,8 @@ import { readFile, appendFile, mkdir } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import { join, normalize, extname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TOOL_DEFS, WRITE_TOOLS, runTool } from "./tools.mjs";
+import { randomUUID } from "node:crypto";
+import { TOOL_DEFS, WRITE_TOOLS, runTool, toolMeta, assertNotProtected } from "./tools.mjs";
 import { createMemoryStore } from "./memory.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -117,6 +118,29 @@ async function logUsage(entry) {
   } catch {}
 }
 const estTokens = (chars) => Math.ceil((chars || 0) / 4);
+
+// Tool-run lifecycle log (Phase 3) -> logs/toolruns.jsonl, plus an in-memory tail for the UI.
+const toolRunTail = [];
+async function logToolRun(entry) {
+  try {
+    toolRunTail.push(entry); if (toolRunTail.length > 200) toolRunTail.shift();
+    if (!logDirReady) { await mkdir(LOG_DIR, { recursive: true }); logDirReady = true; }
+    await appendFile(join(LOG_DIR, "toolruns.jsonl"), JSON.stringify(entry) + "\n");
+  } catch {}
+}
+const newRunId = () => "tr_" + randomUUID().slice(0, 8);
+const needsConfirm = (cls) => cls === "dangerous" || cls === "requires_confirmation";
+
+// Pending tool confirmations (Phase 3 confirmation flow). runId -> resolver. Default OFF under LAX;
+// turned on per-request via {confirmTools:true} or server-wide via CONFIRM_TOOLS=1.
+const pendingConfirms = new Map();
+function awaitConfirm(runId, timeoutMs) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { pendingConfirms.delete(runId); resolve("timeout"); }, timeoutMs);
+    pendingConfirms.set(runId, (decision) => { clearTimeout(t); pendingConfirms.delete(runId); resolve(decision); });
+  });
+}
+const CONFIRM_TOOLS_ENV = String(cfgGet("CONFIRM_TOOLS", "0")) === "1";
 
 function systemPrompt(persona, modeFrag) {
   let s = [
@@ -260,6 +284,21 @@ async function handleMemory(req, res, u) {
   return json(404, { error: "not found" });
 }
 
+// Tool-run log (Phase 3 tool log UI): GET /toolruns -> recent tool runs (newest first).
+function handleToolRuns(req, res) {
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  res.end(JSON.stringify({ runs: [...toolRunTail].reverse().slice(0, 100) }));
+}
+
+// Tool confirmation callback (Phase 3): the client POSTs {runId, approved} to approve/deny a gated tool.
+async function handleToolConfirm(req, res) {
+  const body = await readJsonBody(req);
+  const ok = body && pendingConfirms.has(body.runId);
+  if (ok) pendingConfirms.get(body.runId)(body.approved ? "approved" : "denied");
+  res.writeHead(ok ? 200 : 404, { "content-type": "application/json", "cache-control": "no-store" });
+  res.end(JSON.stringify({ ok }));
+}
+
 async function handleChat(req, res) {
   let body = "";
   req.on("data", (d) => (body += d));
@@ -278,6 +317,7 @@ async function handleChat(req, res) {
   const userTemp = (typeof input.temperature === "number" && input.temperature >= 0 && input.temperature <= 2) ? input.temperature : undefined;
   const reqMode = typeof input.mode === "string" ? input.mode : "auto";
   const forced = (typeof input.model === "string" && input.model && input.model !== "auto") ? input.model : "";
+  const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
 
@@ -332,10 +372,40 @@ async function handleChat(req, res) {
           const name = fn.name || "unknown";
           let args = fn.arguments;
           if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = {}; } }
-          sse({ type: "tool", name, gated: WRITE_TOOLS.has(name), status: "run" });
-          const result = await runTool(name, args, CTX);
+          const meta = toolMeta(name);
+          const runId = newRunId();
+          const cls = meta.permissionClass;
+          const startedAt = new Date().toISOString();
+          const inPrev = meta.logsInputs ? JSON.stringify(args).slice(0, 200) : undefined;
           toolCount++;
-          sse({ type: "tool", name, status: "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
+
+          // 1) Ironclad carve-out: hard-deny protected resources (customer DBs / backups), even under LAX.
+          const guard = assertNotProtected(name, args);
+          if (!guard.ok) {
+            sse({ type: "tool", name, runId, cls, status: "blocked", preview: guard.reason });
+            await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "blocked", reason: guard.reason, input: inPrev });
+            messages.push({ role: "tool", tool_name: name, content: `BLOCKED: this ${guard.reason}. I cannot do that.` });
+            continue;
+          }
+
+          // 2) Confirmation gate (Phase 3) — default OFF (LAX). When on, risky tools need user approval.
+          if (confirmTools && needsConfirm(cls)) {
+            sse({ type: "tool_confirm", name, runId, cls, preview: inPrev || "" });
+            const decision = await awaitConfirm(runId, 120000);
+            if (decision !== "approved") {
+              sse({ type: "tool", name, runId, cls, status: "cancelled", preview: decision });
+              await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "cancelled", decision, input: inPrev });
+              messages.push({ role: "tool", tool_name: name, content: `The user did not approve this ${cls} action (${decision}); it was not run.` });
+              continue;
+            }
+          }
+
+          // 3) Run + report honestly.
+          sse({ type: "tool", name, runId, cls, gated: WRITE_TOOLS.has(name), status: "run" });
+          const result = await runTool(name, args, CTX);
+          const failed = /^(Tool .+ failed|Unknown tool|Couldn't|I can read and plan|Memory isn't available|BLOCKED)/i.test(String(result));
+          sse({ type: "tool", name, runId, cls, status: failed ? "failed" : "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
+          await logToolRun({ ts: startedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200) });
           messages.push({ role: "tool", tool_name: name, content: String(result).slice(0, 8000) });
         }
         continue;
@@ -370,6 +440,8 @@ const server = http.createServer(async (req, res) => {
 
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
     if (path === "/memory" || path.startsWith("/memory/")) return handleMemory(req, res, u);
+    if (path === "/toolruns" && req.method === "GET") return handleToolRuns(req, res);
+    if (path === "/tool-confirm" && req.method === "POST") return handleToolConfirm(req, res);
 
     if (path === "/ollama" || path.startsWith("/ollama/")) {
       const rest = path.slice("/ollama".length) || "/";
@@ -398,5 +470,6 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  usage log=${LOG_DIR}`);
   const ms = memory.stats();
   console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  auto-approve=${ms.autoApprove}  ·  dir=${MEMORY_DIR}  ·  endpoints: GET/POST /memory, /memory/update, /memory/delete`);
+  console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON" : "off (LAX)"}  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl`);
   console.log("[dominion-ai] front this with: tailscale serve --bg " + PORT);
 });

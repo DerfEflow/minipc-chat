@@ -8,7 +8,9 @@ const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"
       settingsBtn = $("settings"), smodal = $("smodal"), sclose = $("sclose"), ssave = $("ssave"),
       personaSel = $("persona-sel"), personaCustom = $("persona-custom"), tempInput = $("temp"), tempVal = $("temp-val"),
       memBtn = $("memory"), mmodal = $("mmodal"), mclose = $("mclose"), madd = $("madd"), msave = $("msave"),
-      mlist = $("mlist"), mstats = $("mstats"), mfilterStatus = $("mfilter-status");
+      mlist = $("mlist"), mstats = $("mstats"), mfilterStatus = $("mfilter-status"),
+      toolsBtn = $("tools"), tmodal = $("tmodal"), tclose = $("tclose"), tlist = $("tlist"), tstats = $("tstats"),
+      confirmToolsBox = $("confirm-tools");
 
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
       LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
@@ -21,7 +23,7 @@ const PRESETS = {
 };
 
 let chats = [], curId = null, busy = false, aborter = null;
-let settings = { persona: "default", personaCustom: "", temperature: 0.7 };
+let settings = { persona: "default", personaCustom: "", temperature: 0.7, confirmTools: false };
 
 // ---------- persistence ----------
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "c" + Date.now() + Math.random().toString(36).slice(2));
@@ -124,6 +126,7 @@ async function streamReply(c) {
         model: forcedModel() || "auto",
         persona: resolvePersona(),
         temperature: settings.temperature,
+        confirmTools: !!settings.confirmTools,
       }),
     });
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
@@ -147,8 +150,27 @@ async function streamReply(c) {
           if (ev.status === "run") {
             const chip = document.createElement("div"); chip.className = "tool" + (ev.gated ? " gated" : "");
             chip.innerHTML = '<span class="sp"></span>'; const lab = document.createElement("span"); lab.textContent = (ev.gated ? "🔒 " : "🔧 ") + ev.name + "…"; chip.appendChild(lab);
-            chip._name = ev.name; chip._lab = lab; tools.appendChild(chip); chips.push(chip); scroll();
-          } else if (ev.status === "done") { const chip = [...chips].reverse().find((x) => x._name === ev.name && !x._done); if (chip) { chip._done = true; chip.classList.add("done"); chip._lab.textContent = "✓ " + ev.name; } }
+            if (ev.cls) { const cb = document.createElement("span"); cb.className = "cls"; cb.textContent = ev.cls.replace(/_/g, " "); chip.appendChild(cb); }
+            chip._runId = ev.runId; chip._name = ev.name; chip._lab = lab; tools.appendChild(chip); chips.push(chip); scroll();
+          } else {
+            const chip = [...chips].reverse().find((x) => (ev.runId ? x._runId === ev.runId : x._name === ev.name) && !x._done);
+            if (chip) {
+              chip._done = true; const sp = chip.querySelector(".sp"); if (sp) sp.remove();
+              if (ev.status === "done") { chip.classList.add("done"); chip._lab.textContent = "✓ " + ev.name; }
+              else if (ev.status === "failed") { chip.classList.add("failed"); chip._lab.textContent = "✗ " + ev.name; }
+              else if (ev.status === "blocked") { chip.classList.add("blocked"); chip._lab.textContent = "⛔ " + ev.name + " — blocked"; }
+              else if (ev.status === "cancelled") { chip.classList.add("cancelled"); chip._lab.textContent = "⃠ " + ev.name + " — skipped"; }
+            }
+          }
+        } else if (ev.type === "tool_confirm") {
+          const box = document.createElement("div"); box.className = "confirm";
+          const q = document.createElement("div"); q.className = "cq"; q.textContent = "Run " + ev.name + " (" + String(ev.cls || "").replace(/_/g, " ") + ")?" + (ev.preview ? "  " + ev.preview : "");
+          const btns = document.createElement("div"); btns.className = "cbtns";
+          const yes = document.createElement("button"); yes.className = "yes"; yes.textContent = "Approve";
+          const no = document.createElement("button"); no.textContent = "Deny";
+          const decide = (approved) => { yes.disabled = no.disabled = true; box.remove(); fetch("/tool-confirm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runId: ev.runId, approved }) }).catch(() => {}); };
+          yes.onclick = () => decide(true); no.onclick = () => decide(false);
+          btns.append(yes, no); box.append(q, btns); tools.appendChild(box); scroll();
         } else if (ev.type === "token") { raw += ev.delta || ""; const shown = stripThink(raw); live.classList.toggle("think", !shown); live.textContent = shown || "thinking…"; scroll(); }
         else if (ev.type === "error") { throw new Error(ev.error || "server error"); }
       }
@@ -190,12 +212,14 @@ function openSettings() {
   personaSel.value = settings.persona; personaCustom.value = settings.personaCustom || "";
   personaCustom.hidden = settings.persona !== "custom";
   tempInput.value = String(settings.temperature); tempVal.textContent = String(settings.temperature);
+  if (confirmToolsBox) confirmToolsBox.checked = !!settings.confirmTools;
   smodal.hidden = false;
 }
 const closeSettings = () => { smodal.hidden = true; };
 function saveSettingsUI() {
   settings.persona = personaSel.value; settings.personaCustom = personaCustom.value.trim();
   settings.temperature = parseFloat(tempInput.value);
+  if (confirmToolsBox) settings.confirmTools = confirmToolsBox.checked;
   if (modelSel) try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {}
   saveSettings(); closeSettings();
 }
@@ -240,6 +264,32 @@ async function addMemory() { const v = (madd.value || "").trim(); if (!v) return
 function openMemory() { mmodal.hidden = false; loadMemory(); }
 const closeMemory = () => { mmodal.hidden = true; };
 
+// ---------- tool activity panel (Phase 3) ----------
+const tfmt = (ts) => { try { return new Date(ts).toLocaleString(); } catch { return ts || ""; } };
+async function loadTools() {
+  tlist.textContent = "Loading…";
+  let runs = [];
+  try { runs = ((await (await fetch("/toolruns", { cache: "no-store" })).json()).runs) || []; } catch {}
+  if (tstats) tstats.textContent = runs.length ? runs.length + " recent" : "";
+  tlist.innerHTML = "";
+  if (!runs.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "No tool activity yet."; tlist.appendChild(n); return; }
+  for (const r of runs) {
+    const it = document.createElement("div"); it.className = "tritem";
+    const top = document.createElement("div"); top.className = "trtop";
+    const nm = document.createElement("span"); nm.className = "trname"; nm.textContent = r.name;
+    const cb = document.createElement("span"); cb.className = "tbadge " + (r.cls || ""); cb.textContent = String(r.cls || "").replace(/_/g, " ");
+    const sb = document.createElement("span"); sb.className = "tbadge " + (r.status || ""); sb.textContent = r.status || "";
+    const tm = document.createElement("span"); tm.textContent = tfmt(r.ts);
+    top.append(nm, cb, sb, tm);
+    it.appendChild(top);
+    const prevText = r.output || r.reason || r.input || "";
+    if (prevText) { const p = document.createElement("div"); p.className = "trprev"; p.textContent = prevText; it.appendChild(p); }
+    tlist.appendChild(it);
+  }
+}
+function openTools() { tmodal.hidden = false; loadTools(); }
+const closeTools = () => { tmodal.hidden = true; };
+
 // ---------- wire up ----------
 input.addEventListener("input", autosize);
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
@@ -257,6 +307,9 @@ mclose.addEventListener("click", closeMemory);
 msave.addEventListener("click", addMemory);
 mmodal.addEventListener("click", (e) => { if (e.target === mmodal) closeMemory(); });
 if (mfilterStatus) mfilterStatus.addEventListener("change", loadMemory);
+toolsBtn.addEventListener("click", openTools);
+tclose.addEventListener("click", closeTools);
+tmodal.addEventListener("click", (e) => { if (e.target === tmodal) closeTools(); });
 personaSel.addEventListener("change", () => { personaCustom.hidden = personaSel.value !== "custom"; });
 tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.value; });
 

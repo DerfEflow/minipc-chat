@@ -73,25 +73,51 @@ function jail(ctx, filename) {
   return target;
 }
 
-// ===================== tool schemas (handed to the model) =====================
-export const TOOL_DEFS = [
-  { type: "function", function: { name: "deck_list_projects", description: "List Fred's Command Deck projects (id, name, status, priority, next proof, open next-steps). Use this before acting on a project so you have its id and current state.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "deck_capture", description: "Drop an idea, reminder, or link into Fred's capture inbox to triage later.", parameters: { type: "object", properties: { text: { type: "string", description: "What to capture." }, url: { type: "string", description: "Optional URL." } }, required: ["text"] } } },
-  { type: "function", function: { name: "deck_add_note", description: "Append a note/log entry to a project (get the project id from deck_list_projects first).", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } },
-  { type: "function", function: { name: "deck_add_next_step", description: "Add an actionable next-step to a project.", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } },
-  { type: "function", function: { name: "deck_set_next_proof", description: "Set a project's Next Proof — the single riskiest thing it must prove next.", parameters: { type: "object", properties: { project_id: { type: "string" }, proof: { type: "string" } }, required: ["project_id", "proof"] } } },
-  { type: "function", function: { name: "deck_create_project", description: "Create a new Command Deck project. discipline: Apps|Writing|Business|Product Development|Saints Dominion. status: Idea|Building|Live|Paused|Done.", parameters: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, discipline: { type: "string" }, status: { type: "string" }, priority: { type: "string" } }, required: ["name"] } } },
-  { type: "function", function: { name: "forge_read", description: "Read source/files on Fred's machine (READ-ONLY). op: 'read' a file or folder, 'list' a folder (omit path to see allowed roots), 'tree' a folder tree, 'grep' (needs query). Paths must be under the bridge's allowed roots.", parameters: { type: "object", properties: { op: { type: "string", enum: ["read", "list", "tree", "grep"] }, path: { type: "string" }, query: { type: "string" } }, required: ["op"] } } },
-  { type: "function", function: { name: "forge_send", description: "Queue a REAL code/file work order for Claude Code on Fred's machine (the Forge). Use only for actual source/file changes or builds. repo is a named shortcut ('command-deck','cad-sandbox') or an absolute path under the allowed roots. Needs the run-password (configured on the server). The change snapshots first and is always rollback-able.", parameters: { type: "object", properties: { repo: { type: "string" }, title: { type: "string" }, instructions: { type: "string", description: "Clear, complete plain-English steps." } }, required: ["repo", "title", "instructions"] } } },
-  { type: "function", function: { name: "sandbox_write", description: "Write (overwrite) a text file in your private sandbox folder on the mini-PC.", parameters: { type: "object", properties: { filename: { type: "string" }, content: { type: "string" } }, required: ["filename", "content"] } } },
-  { type: "function", function: { name: "sandbox_read", description: "Read a text file from your private sandbox folder.", parameters: { type: "object", properties: { filename: { type: "string" } }, required: ["filename"] } } },
-  { type: "function", function: { name: "sandbox_list", description: "List the files in your private sandbox folder.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "remember", description: "Save a durable fact or preference to long-term memory when Fred asks you to remember something, or clearly states a lasting preference (e.g. units, formats, how he likes answers). Keep it ONE concise fact — don't save one-off chatter, secrets, or hidden reasoning.", parameters: { type: "object", properties: { content: { type: "string", description: "The single fact/preference to remember." }, type: { type: "string", description: "profile (a preference about Fred, default) | workspace | episodic | failure" }, tags: { type: "array", items: { type: "string" } } }, required: ["content"] } } },
-  { type: "function", function: { name: "recall_memory", description: "Search Fred's saved long-term memory for facts/preferences relevant to a query. Relevant memory is usually already provided automatically; use this to look up something specific.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } },
+// ===================== typed tool registry (Phase 3) =====================
+// Each tool carries a category + permission class alongside its model-facing function schema.
+// Permission classes (spec): read_only | draft_only | safe_local_write | requires_confirmation | dangerous.
+// The server enforces these (carve-out hard-deny + optional confirmation) and logs every run.
+export const TOOLS = [
+  { category: "system", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "deck_list_projects", description: "List Fred's Command Deck projects (id, name, status, priority, next proof, open next-steps). Use this before acting on a project so you have its id and current state.", parameters: { type: "object", properties: {} } } } },
+  { category: "system", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "deck_capture", description: "Drop an idea, reminder, or link into Fred's capture inbox to triage later.", parameters: { type: "object", properties: { text: { type: "string", description: "What to capture." }, url: { type: "string", description: "Optional URL." } }, required: ["text"] } } } },
+  { category: "system", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "deck_add_note", description: "Append a note/log entry to a project (get the project id from deck_list_projects first).", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } } },
+  { category: "system", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "deck_add_next_step", description: "Add an actionable next-step to a project.", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } } },
+  { category: "system", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "deck_set_next_proof", description: "Set a project's Next Proof — the single riskiest thing it must prove next.", parameters: { type: "object", properties: { project_id: { type: "string" }, proof: { type: "string" } }, required: ["project_id", "proof"] } } } },
+  { category: "system", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "deck_create_project", description: "Create a new Command Deck project. discipline: Apps|Writing|Business|Product Development|Saints Dominion. status: Idea|Building|Live|Paused|Done.", parameters: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, discipline: { type: "string" }, status: { type: "string" }, priority: { type: "string" } }, required: ["name"] } } } },
+  { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "forge_read", description: "Read source/files on Fred's machine (READ-ONLY). op: 'read' a file or folder, 'list' a folder (omit path to see allowed roots), 'tree' a folder tree, 'grep' (needs query). Paths must be under the bridge's allowed roots.", parameters: { type: "object", properties: { op: { type: "string", enum: ["read", "list", "tree", "grep"] }, path: { type: "string" }, query: { type: "string" } }, required: ["op"] } } } },
+  { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_send", description: "Queue a REAL code/file work order for Claude Code on Fred's machine (the Forge). Use only for actual source/file changes or builds. repo is a named shortcut ('command-deck','cad-sandbox') or an absolute path under the allowed roots. Needs the run-password (configured on the server). The change snapshots first and is always rollback-able.", parameters: { type: "object", properties: { repo: { type: "string" }, title: { type: "string" }, instructions: { type: "string", description: "Clear, complete plain-English steps." } }, required: ["repo", "title", "instructions"] } } } },
+  { category: "file", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "sandbox_write", description: "Write (overwrite) a text file in your private sandbox folder on the mini-PC.", parameters: { type: "object", properties: { filename: { type: "string" }, content: { type: "string" } }, required: ["filename", "content"] } } } },
+  { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "sandbox_read", description: "Read a text file from your private sandbox folder.", parameters: { type: "object", properties: { filename: { type: "string" } }, required: ["filename"] } } } },
+  { category: "file", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "sandbox_list", description: "List the files in your private sandbox folder.", parameters: { type: "object", properties: {} } } } },
+  { category: "memory", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "remember", description: "Save a durable fact or preference to long-term memory when Fred asks you to remember something, or clearly states a lasting preference (e.g. units, formats, how he likes answers). Keep it ONE concise fact — don't save one-off chatter, secrets, or hidden reasoning.", parameters: { type: "object", properties: { content: { type: "string", description: "The single fact/preference to remember." }, type: { type: "string", description: "profile (a preference about Fred, default) | workspace | episodic | failure" }, tags: { type: "array", items: { type: "string" } } }, required: ["content"] } } } },
+  { category: "memory", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "recall_memory", description: "Search Fred's saved long-term memory for facts/preferences relevant to a query. Relevant memory is usually already provided automatically; use this to look up something specific.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } } },
 ];
 
-// Tools that change real code/files (need the run-password) — surfaced so the UI can label them.
-export const WRITE_TOOLS = new Set(["forge_send"]);
+export const TOOL_DEFS = TOOLS.map((t) => t.def);
+const META = new Map(TOOLS.map((t) => [t.def.function.name, t]));
+export const toolMeta = (name) => { const t = META.get(name); return t ? { category: t.category, permissionClass: t.permissionClass, logsInputs: t.logsInputs } : { category: "system", permissionClass: "read_only", logsInputs: false }; };
+// Back-compat: dangerous tools (real code/file changes) get the UI lock.
+export const WRITE_TOOLS = new Set(TOOLS.filter((t) => t.permissionClass === "dangerous").map((t) => t.def.function.name));
+
+// ---- ironclad carve-out guard (ALWAYS on, even under LAX) ----
+// Two resources the assistant must NEVER touch: (1) customer/production databases,
+// (2) app backups (mini-PC D: + the backup system). Enforced at the tool bus as defense-in-depth
+// on top of the bridge's root-scoping. Conservative patterns to avoid false-denials on dev work.
+const PROTECTED_RE = [
+  /(^|[^a-z0-9])d:[\\/]/i,        // mini-PC D: = the backup SSD
+  /app[-_ ]?backups?/i,          // the app-backup system
+  /\bdb[-_ ]?backups?\b/i,
+  /pg_dump|pg_restore/i,         // dumping/restoring a (prod) DB
+];
+const REACHES_OUT = new Set(["forge_read", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list"]);
+export function assertNotProtected(name, args) {
+  if (!REACHES_OUT.has(name)) return { ok: true };
+  const blob = JSON.stringify(args || {});
+  for (const re of PROTECTED_RE) {
+    if (re.test(blob)) return { ok: false, reason: "references a protected resource (app backups / customer DB) — hard carve-out, never touched" };
+  }
+  return { ok: true };
+}
 
 // ===================== dispatcher =====================
 export async function runTool(name, args, ctx) {
