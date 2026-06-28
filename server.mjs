@@ -14,7 +14,7 @@
  *   COMMAND_DECK_URL the live Command Deck (default the prod alias).
  */
 import http from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, appendFile, mkdir } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import { join, normalize, extname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,18 +76,41 @@ const MAX_ROUNDS = 6;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const stripThink = (t) => String(t || "").replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
 
-// Provider tiers (local). qwen3:8b = fast/light worker; qwen3:30b-a3b = heavier reasoning.
+// Provider abstraction (local) — spec Phase 1 "model provider abstraction". Each tier is a provider
+// with the capability fields the router cares about. qwen3:8b = fast light worker; qwen3:30b-a3b = heavy reasoning.
 const LIGHT_MODEL = cfgGet("LIGHT_MODEL", "qwen3:8b");
 const MAIN_MODEL = cfgGet("MAIN_MODEL", "qwen3:30b-a3b");
+const PROVIDERS = {
+  light: { id: "local_light", modelName: LIGHT_MODEL, providerType: "local", maxContextTokens: 40960,
+           supportsThinking: true, supportsTools: true, latencyTier: "fast",   privacyLevel: "local_private", costTier: "free_local" },
+  main:  { id: "local_main",  modelName: MAIN_MODEL,  providerType: "local", maxContextTokens: 262144,
+           supportsThinking: true, supportsTools: true, latencyTier: "medium", privacyLevel: "local_private", costTier: "free_local" },
+};
+const MODEL_FOR = (tier) => (PROVIDERS[tier] || PROVIDERS.light).modelName;
+
 // Mode discipline: each mode picks a model tier, sampling, optional long context, + a prompt fragment.
 const MODES = {
   fast:         { tier: "light", temp: 0.4, frag: "FAST MODE: minimize reasoning; give a concise, direct answer; use tools only if necessary." },
   normal:       { tier: "light", temp: 0.7, frag: "" },
+  draft:        { tier: "main",  temp: 0.8, frag: "DRAFT MODE: produce a clean, reusable, well-structured document; use headings and lists; keep it editable." },
   deep_think:   { tier: "main",  temp: 0.5, frag: "DEEP THINK MODE: reason carefully through the steps and tradeoffs; give a structured, thorough answer; summarize your reasoning rather than dumping raw chain-of-thought." },
   long_context: { tier: "main",  temp: 0.5, num_ctx: 32768, frag: "LONG CONTEXT MODE: the input may be large; be systematic and note which parts you used." },
-  draft:        { tier: "main",  temp: 0.8, frag: "DRAFT MODE: produce a clean, reusable, well-structured document; use headings and lists; keep it editable." },
 };
-const MODEL_FOR = (tier) => (tier === "main" ? MAIN_MODEL : LIGHT_MODEL);
+// Mode "heaviness" ranking — the router takes the STRONGER of (heuristic, light-model classifier)
+// so it can never under-escalate a hard prompt down to the 8B (the old under-escalation bug).
+const RANK_MODE = ["fast", "normal", "draft", "deep_think", "long_context"];
+const MODE_RANK = { fast: 0, normal: 1, draft: 2, deep_think: 3, long_context: 4 };
+
+// Basic model-usage logging (Phase 1 deliverable) — one JSONL line per run, including interrupted ones.
+const LOG_DIR = cfgGet("LOG_DIR", join(HERE, "logs"));
+let logDirReady = false;
+async function logUsage(entry) {
+  try {
+    if (!logDirReady) { await mkdir(LOG_DIR, { recursive: true }); logDirReady = true; }
+    await appendFile(join(LOG_DIR, "usage.jsonl"), JSON.stringify(entry) + "\n");
+  } catch {}
+}
+const estTokens = (chars) => Math.ceil((chars || 0) / 4);
 
 function systemPrompt(persona, modeFrag) {
   let s = [
@@ -125,7 +148,36 @@ async function ollamaChat(model, messages, opts = {}) {
   });
 }
 
-// Auto-router: a quick light-model classification of the latest request -> {tier, mode}.
+// Deterministic length/keyword heuristic — the PRIMARY routing signal, immune to the 8B emitting
+// bad JSON. Returns a mode "rank" + whether the main (30B) model is warranted.
+function heuristicRoute(lastUser, totalInputChars) {
+  const t = String(lastUser || "");
+  const low = t.toLowerCase();
+  const inTok = estTokens(totalInputChars);
+
+  // size gate -> long context, only when the input is genuinely large
+  if (inTok > 6000 || t.length > 8000) return { rank: MODE_RANK.long_context, wantMain: true, confident: true, reason: `large input (~${inTok} tok)` };
+
+  if (/^(hi|hey+|hello|yo|sup|thanks|thank you|thx|ok(ay)?|yes|no|cool|nice|got it|good (morning|night|evening)|gm|gn)[!. ]*$/.test(low.trim()))
+    return { rank: MODE_RANK.fast, wantMain: false, confident: true, reason: "trivial greeting/ack" };
+
+  const codeRe   = /(\bcode\b|function|refactor|stack ?trace|regex|\bsql\b|typescript|javascript|python|\bnode\b|compile|exception|traceback|algorithm|\bschema\b|migration|debug|\bapi\b|async|class |def |npm |git )/;
+  const reasonRe = /(architect|design (a|an|the|my|our)|trade[- ]?off|compare|evaluat|strategy|\bplan\b|root cause|why (does|is|are|do)|step[- ]by[- ]step|pros and cons|optimi|prove|analyz|reason through|figure out|how (should|would|do) (i|we|you))/;
+  const docRe    = /(draft|write (a|an|the|me) |compose|proposal|\breport\b|\bessay\b|outline|readme|\bspec\b|\bletter\b|\bblog\b|article|\bmemo\b|\bguide\b|document )/;
+
+  let rank = MODE_RANK.normal, wantMain = false, reason = "general";
+  if (docRe.test(low))    { rank = Math.max(rank, MODE_RANK.draft);      wantMain = true; reason = "document drafting"; }
+  if (reasonRe.test(low)) { rank = Math.max(rank, MODE_RANK.deep_think); wantMain = true; reason = "reasoning/analysis"; }
+  if (codeRe.test(low))   { rank = Math.max(rank, MODE_RANK.deep_think); wantMain = true; reason = "code/technical"; }
+  // long, detailed single prompts deserve the main model even below the long-context gate
+  if (t.length > 1500 && rank < MODE_RANK.deep_think) { rank = MODE_RANK.deep_think; wantMain = true; reason = "long detailed prompt"; }
+
+  // confident enough to skip the slower 8B classifier when we already see a clear signal
+  const confident = wantMain || t.length < 60;
+  return { rank, wantMain, confident, reason };
+}
+
+// Secondary signal: a quick light-model classification. Only consulted for ambiguous middle cases.
 async function classifyRoute(lastUser) {
   const prompt =
     "You are a routing classifier for a local AI assistant. Read the request and reply with ONLY compact JSON, no prose:\n" +
@@ -137,9 +189,25 @@ async function classifyRoute(lastUser) {
   const txt = stripThink((d && d.message && d.message.content) || "");
   const m = txt.match(/\{[\s\S]*\}/);
   let r = {}; if (m) { try { r = JSON.parse(m[0]); } catch {} }
-  const mode = MODES[r.mode] ? r.mode : "normal";
-  const tier = (r.tier === "main" || r.tier === "light") ? r.tier : MODES[mode].tier;
-  return { mode, tier, reason: String(r.reason || "auto").slice(0, 80) };
+  const rank = MODE_RANK[r.mode] != null ? MODE_RANK[r.mode] : MODE_RANK.normal;
+  return { rank, wantMain: r.tier === "main", reason: String(r.reason || "").slice(0, 60), ok: !!m };
+}
+
+// Combined auto-router: take the STRONGER of heuristic vs classifier -> {mode, tier, reason}.
+// This is the fix for the under-escalation bug: a hard prompt can never be dragged below 30B.
+async function routeDecision(lastUser, totalInputChars) {
+  const h = heuristicRoute(lastUser, totalInputChars);
+  let rank = h.rank, wantMain = h.wantMain, reason = h.reason, src = "heuristic";
+  if (!h.confident) {
+    const c = await classifyRoute(lastUser);
+    if (c.ok && (c.rank > rank || (c.wantMain && !wantMain))) {
+      rank = Math.max(rank, c.rank); wantMain = wantMain || c.wantMain; reason = c.reason || reason; src = "classifier";
+    }
+  }
+  let mode = RANK_MODE[rank] || "normal";
+  let tier = MODES[mode].tier;
+  if (wantMain && tier !== "main") { mode = "deep_think"; tier = "main"; }   // honor main even on a light-tier mode
+  return { mode, tier, reason: `${src}: ${reason}`.slice(0, 80) };
 }
 
 async function handleChat(req, res) {
@@ -161,34 +229,45 @@ async function handleChat(req, res) {
   const reqMode = typeof input.mode === "string" ? input.mode : "auto";
   const forced = (typeof input.model === "string" && input.model && input.model !== "auto") ? input.model : "";
   const lastUser = [...history].reverse().find((m) => m.role === "user");
+  const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
 
-  // Route: an explicit mode wins; otherwise the light model classifies the request.
+  // Route: an explicit mode wins; otherwise the combined heuristic+light-model router picks.
   let mode, tier, reason;
   if (reqMode !== "auto" && MODES[reqMode]) { mode = reqMode; tier = MODES[mode].tier; reason = "you chose " + mode.replace("_", " "); }
-  else { const c = await classifyRoute(lastUser ? lastUser.content : ""); mode = c.mode; tier = c.tier; reason = c.reason; }
+  else { const c = await routeDecision(lastUser ? lastUser.content : "", totalInputChars); mode = c.mode; tier = c.tier; reason = c.reason; }
   if (aborted) return res.end();
   const md = MODES[mode];
   const model = forced || MODEL_FOR(tier);
   const opts = { temperature: typeof userTemp === "number" ? userTemp : md.temp };
-  if (md.num_ctx) opts.num_ctx = md.num_ctx;
+  // Long-context gating: only scale num_ctx up for long_context mode, sized to the input, capped at the provider limit.
+  if (mode === "long_context") {
+    const cap = (PROVIDERS[tier] || PROVIDERS.main).maxContextTokens;
+    const want = Math.min(estTokens(totalInputChars) * 2 + 8192, cap);
+    opts.num_ctx = Math.max(md.num_ctx || 32768, Math.ceil(want / 4096) * 4096);
+  } else if (md.num_ctx) opts.num_ctx = md.num_ctx;
   sse({ type: "route", model, mode, reason });
   console.log(`[dominion-ai] /chat route -> ${model} · ${mode} (${reason})`);
 
   const messages = [{ role: "system", content: systemPrompt(persona, md.frag) }, ...history];
+  const startedAt = new Date().toISOString();
+  let toolCount = 0, roundsUsed = 0;
 
   try {
     let last = null;
     for (let round = 0; round < MAX_ROUNDS && !aborted; round++) {
-      const d = await ollamaChat(model, messages, opts);
+      roundsUsed = round + 1;
+      let d = await ollamaChat(model, messages, opts);
+      // the heavier 30B can return null on a cold load / transient blip — retry once on the first round
+      if (!d && round === 0 && !aborted) { await sleep(1500); d = await ollamaChat(model, messages, opts); }
       last = d;
       if (aborted) break;
       const msg = d && d.message;
-      if (!msg) { sse({ type: "error", error: "The model didn't respond (it may still be warming up — try again)." }); return res.end(); }
+      if (!msg) { sse({ type: "error", error: "The model didn't respond (it may still be warming up — try again)." }); await logUsage({ ts: startedAt, model, mode, reason, status: "no_response", rounds: roundsUsed }); return res.end(); }
 
       const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
       if (calls.length && round < MAX_ROUNDS - 1) {
-        // record the assistant's tool-call turn, then run each tool and feed results back
-        messages.push({ role: "assistant", content: msg.content || "", tool_calls: calls });
+        // record the assistant's tool-call turn (thinking stripped — hygiene), then run each tool and feed results back
+        messages.push({ role: "assistant", content: stripThink(msg.content), tool_calls: calls });
         for (const c of calls) {
           if (aborted) break;
           const fn = (c.function || {});
@@ -197,6 +276,7 @@ async function handleChat(req, res) {
           if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = {}; } }
           sse({ type: "tool", name, gated: WRITE_TOOLS.has(name), status: "run" });
           const result = await runTool(name, args, CTX);
+          toolCount++;
           sse({ type: "tool", name, status: "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
           messages.push({ role: "tool", tool_name: name, content: String(result).slice(0, 8000) });
         }
@@ -210,13 +290,17 @@ async function handleChat(req, res) {
         sse({ type: "token", delta: answer.slice(i, i + size) });
         if (i + size < answer.length) await sleep(8);
       }
-      if (last) console.log(`[dominion-ai] usage ${model}/${mode} prompt=${last.prompt_eval_count || "?"} out=${last.eval_count || "?"}`);
+      if (aborted) break;   // stopped mid-stream -> fall through to the interrupted log, NOT "done"
+      console.log(`[dominion-ai] usage ${model}/${mode} prompt=${(last && last.prompt_eval_count) || "?"} out=${(last && last.eval_count) || "?"} tools=${toolCount}`);
+      await logUsage({ ts: startedAt, model, mode, reason, status: "completed", rounds: roundsUsed, tools: toolCount, promptTokens: (last && last.prompt_eval_count) || null, outputTokens: (last && last.eval_count) || null });
       sse({ type: "done" });
       return res.end();
     }
-    if (!aborted) { sse({ type: "error", error: "I used too many tool steps without finishing — try rephrasing." }); }
+    if (aborted) { await logUsage({ ts: startedAt, model, mode, reason, status: "interrupted", rounds: roundsUsed, tools: toolCount }); }
+    else { sse({ type: "error", error: "I used too many tool steps without finishing — try rephrasing." }); await logUsage({ ts: startedAt, model, mode, reason, status: "max_rounds", rounds: roundsUsed, tools: toolCount }); }
   } catch (e) {
     sse({ type: "error", error: "Server error: " + e.message });
+    await logUsage({ ts: startedAt, model, mode, reason, status: "error", error: String(e.message).slice(0, 200) });
   }
   res.end();
 }
@@ -252,6 +336,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`[dominion-ai] http://127.0.0.1:${PORT}  ->  Ollama ${OLLAMA}`);
   console.log(`[dominion-ai] tools: deck/forge/sandbox  ·  sync=${CTX.syncKey ? "set" : "MISSING"}  ·  run-password=${CTX.runPassword ? "set" : "unset"}  ·  sandbox=${CTX.sandboxDir}`);
-  console.log(`[dominion-ai] router: light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/deep_think/long_context/draft`);
+  console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  usage log=${LOG_DIR}`);
   console.log("[dominion-ai] front this with: tailscale serve --bg " + PORT);
 });

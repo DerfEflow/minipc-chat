@@ -4,6 +4,7 @@ run-chat.cmd
 *.log
 .env
 sandbox/
+logs/
 
 # misc
 .vercel
