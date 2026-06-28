@@ -86,6 +86,8 @@ export const TOOL_DEFS = [
   { type: "function", function: { name: "sandbox_write", description: "Write (overwrite) a text file in your private sandbox folder on the mini-PC.", parameters: { type: "object", properties: { filename: { type: "string" }, content: { type: "string" } }, required: ["filename", "content"] } } },
   { type: "function", function: { name: "sandbox_read", description: "Read a text file from your private sandbox folder.", parameters: { type: "object", properties: { filename: { type: "string" } }, required: ["filename"] } } },
   { type: "function", function: { name: "sandbox_list", description: "List the files in your private sandbox folder.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "remember", description: "Save a durable fact or preference to long-term memory when Fred asks you to remember something, or clearly states a lasting preference (e.g. units, formats, how he likes answers). Keep it ONE concise fact — don't save one-off chatter, secrets, or hidden reasoning.", parameters: { type: "object", properties: { content: { type: "string", description: "The single fact/preference to remember." }, type: { type: "string", description: "profile (a preference about Fred, default) | workspace | episodic | failure" }, tags: { type: "array", items: { type: "string" } } }, required: ["content"] } } },
+  { type: "function", function: { name: "recall_memory", description: "Search Fred's saved long-term memory for facts/preferences relevant to a query. Relevant memory is usually already provided automatically; use this to look up something specific.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } },
 ];
 
 // Tools that change real code/files (need the run-password) — surfaced so the UI can label them.
@@ -133,6 +135,18 @@ export async function runTool(name, args, ctx) {
         });
         const items = walk(root);
         return items.length ? items.join("\n") : "(sandbox is empty)";
+      }
+      case "remember": {
+        if (!ctx.memory) return "Memory isn't available right now.";
+        const r = ctx.memory.propose({ content: args.content, type: args.type, tags: args.tags, source: { kind: "user_explicit" } });
+        if (r.error) return "Couldn't save that to memory: " + r.error;
+        return r.deduped ? "I already had that in memory." : `Saved to long-term memory (${r.item.type}).`;
+      }
+      case "recall_memory": {
+        if (!ctx.memory) return "Memory isn't available right now.";
+        const hits = ctx.memory.retrieve(args.query || "", { limit: 6, minScore: 0.1 });
+        if (!hits.length) return "No saved memory matches that.";
+        return hits.map((h) => `- (${h.title}) ${h.content}`).join("\n");
       }
       default: return `Unknown tool: ${name}`;
     }

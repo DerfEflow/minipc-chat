@@ -19,6 +19,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, normalize, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TOOL_DEFS, WRITE_TOOLS, runTool } from "./tools.mjs";
+import { createMemoryStore } from "./memory.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -46,6 +47,11 @@ const CTX = {
   runPassword: cfgGet("RUN_PASSWORD", ""),
   sandboxDir: cfgGet("SANDBOX_DIR", "C:\\minipc-chat\\sandbox"),
 };
+
+// Phase 2: governed memory store. LAX -> candidates auto-approve unless MEMORY_AUTO_APPROVE=0.
+const MEMORY_DIR = cfgGet("MEMORY_DIR", "C:\\minipc-chat\\memory");
+const memory = createMemoryStore({ dir: MEMORY_DIR, autoApprove: String(cfgGet("MEMORY_AUTO_APPROVE", "1")) !== "0" });
+CTX.memory = memory;
 
 const TYPES = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -210,6 +216,50 @@ async function routeDecision(lastUser, totalInputChars) {
   return { mode, tier, reason: `${src}: ${reason}`.slice(0, 80) };
 }
 
+// Context builder (Phase 2): assemble the memory block for a request. Loads always-on durable
+// memory (pinned + profile) plus query-relevant approved memory; pending/rejected/archived are
+// never included. Returns the injected items (for logging) + a compact system block.
+function buildMemoryContext(lastUserText) {
+  const pinned = memory.alwaysLoaded({ limit: 6 });
+  const retrieved = memory.retrieve(lastUserText || "", { limit: 4 });
+  const seen = new Set(), used = [];
+  for (const c of [...pinned, ...retrieved]) { if (seen.has(c.id)) continue; seen.add(c.id); used.push(c); }
+  if (!used.length) return { used: [], block: "" };
+  const block = "Relevant saved memory about Fred (use it when helpful; don't recite it verbatim unless asked):\n" +
+    used.map((c) => `- (${c.title}) ${c.content}`).join("\n");
+  return { used, block };
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve) => {
+    let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => { try { resolve(JSON.parse(b || "{}")); } catch { resolve(null); } });
+  });
+}
+
+// Memory API (Phase 2 inbox/approval): GET list, POST create, POST /update, POST /delete.
+async function handleMemory(req, res, u) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const path = u.pathname;
+  if (req.method === "GET" && path === "/memory") {
+    const items = memory.list({ status: u.searchParams.get("status") || "", type: u.searchParams.get("type") || "", q: u.searchParams.get("q") || "" });
+    return json(200, { items, stats: memory.stats() });
+  }
+  if (req.method === "POST" && path === "/memory") {
+    const body = await readJsonBody(req); if (!body) return json(400, { error: "bad json" });
+    const r = memory.propose({ content: body.content, type: body.type, tags: body.tags, scope: body.scope, pinned: body.pinned, source: { kind: body.source || "user_explicit" } });
+    return json(r.error ? 400 : 200, r);
+  }
+  if (req.method === "POST" && path === "/memory/update") {
+    const body = await readJsonBody(req); if (!body || !body.id) return json(400, { error: "id required" });
+    return json(200, memory.update(body.id, body));
+  }
+  if (req.method === "POST" && path === "/memory/delete") {
+    const body = await readJsonBody(req); if (!body || !body.id) return json(400, { error: "id required" });
+    return json(200, memory.remove(body.id));
+  }
+  return json(404, { error: "not found" });
+}
+
 async function handleChat(req, res) {
   let body = "";
   req.on("data", (d) => (body += d));
@@ -248,7 +298,15 @@ async function handleChat(req, res) {
   sse({ type: "route", model, mode, reason });
   console.log(`[dominion-ai] /chat route -> ${model} · ${mode} (${reason})`);
 
-  const messages = [{ role: "system", content: systemPrompt(persona, md.frag) }, ...history];
+  // Context builder (Phase 2): system -> relevant approved memory -> recent chat turns.
+  const ctxInfo = buildMemoryContext(lastUser ? lastUser.content : "");
+  const messages = [{ role: "system", content: systemPrompt(persona, md.frag) }];
+  if (ctxInfo.block) messages.push({ role: "system", content: ctxInfo.block });
+  messages.push(...history);
+  if (ctxInfo.used.length) {
+    sse({ type: "context", memory: ctxInfo.used.length, items: ctxInfo.used.map((c) => ({ title: c.title, label: c.citationLabel, score: c.score })) });
+    console.log(`[dominion-ai] context: ${ctxInfo.used.length} memory item(s) -> ${ctxInfo.used.map((c) => c.citationLabel).join(", ")}`);
+  }
   const startedAt = new Date().toISOString();
   let toolCount = 0, roundsUsed = 0;
 
@@ -292,7 +350,7 @@ async function handleChat(req, res) {
       }
       if (aborted) break;   // stopped mid-stream -> fall through to the interrupted log, NOT "done"
       console.log(`[dominion-ai] usage ${model}/${mode} prompt=${(last && last.prompt_eval_count) || "?"} out=${(last && last.eval_count) || "?"} tools=${toolCount}`);
-      await logUsage({ ts: startedAt, model, mode, reason, status: "completed", rounds: roundsUsed, tools: toolCount, promptTokens: (last && last.prompt_eval_count) || null, outputTokens: (last && last.eval_count) || null });
+      await logUsage({ ts: startedAt, model, mode, reason, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, promptTokens: (last && last.prompt_eval_count) || null, outputTokens: (last && last.eval_count) || null });
       sse({ type: "done" });
       return res.end();
     }
@@ -311,6 +369,7 @@ const server = http.createServer(async (req, res) => {
     const path = decodeURIComponent(u.pathname);
 
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
+    if (path === "/memory" || path.startsWith("/memory/")) return handleMemory(req, res, u);
 
     if (path === "/ollama" || path.startsWith("/ollama/")) {
       const rest = path.slice("/ollama".length) || "/";
@@ -337,5 +396,7 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[dominion-ai] http://127.0.0.1:${PORT}  ->  Ollama ${OLLAMA}`);
   console.log(`[dominion-ai] tools: deck/forge/sandbox  ·  sync=${CTX.syncKey ? "set" : "MISSING"}  ·  run-password=${CTX.runPassword ? "set" : "unset"}  ·  sandbox=${CTX.sandboxDir}`);
   console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  usage log=${LOG_DIR}`);
+  const ms = memory.stats();
+  console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  auto-approve=${ms.autoApprove}  ·  dir=${MEMORY_DIR}  ·  endpoints: GET/POST /memory, /memory/update, /memory/delete`);
   console.log("[dominion-ai] front this with: tailscale serve --bg " + PORT);
 });

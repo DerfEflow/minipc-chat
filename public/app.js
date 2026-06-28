@@ -6,7 +6,9 @@ const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"
       modelSel = $("model"), modeSel = $("mode"), empty = $("empty"),
       sidebar = $("sidebar"), overlay = $("overlay"), menuBtn = $("menu"), newBtn = $("newchat"), chatlist = $("chatlist"),
       settingsBtn = $("settings"), smodal = $("smodal"), sclose = $("sclose"), ssave = $("ssave"),
-      personaSel = $("persona-sel"), personaCustom = $("persona-custom"), tempInput = $("temp"), tempVal = $("temp-val");
+      personaSel = $("persona-sel"), personaCustom = $("persona-custom"), tempInput = $("temp"), tempVal = $("temp-val"),
+      memBtn = $("memory"), mmodal = $("mmodal"), mclose = $("mclose"), madd = $("madd"), msave = $("msave"),
+      mlist = $("mlist"), mstats = $("mstats"), mfilterStatus = $("mfilter-status");
 
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
       LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
@@ -112,7 +114,7 @@ async function streamReply(c) {
   const warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "waking the model… first reply can take ~20s"; scroll(); } }, 6000);
 
   setBusy(true); aborter = new AbortController();
-  let raw = ""; let errMsg = ""; let routeEl = null; const chips = [];
+  let raw = ""; let errMsg = ""; let routeEl = null; let ctxEl = null; const chips = [];
   try {
     const res = await fetch("/chat", {
       method: "POST", headers: { "content-type": "application/json" }, signal: aborter.signal,
@@ -136,6 +138,10 @@ async function streamReply(c) {
         if (ev.type === "route") {
           if (!routeEl) { routeEl = document.createElement("div"); routeEl.className = "route"; inner.insertBefore(routeEl, tools); }
           routeEl.textContent = ev.model + " · " + String(ev.mode || "").replace("_", " ") + (ev.reason ? " — " + ev.reason : "");
+          scroll();
+        } else if (ev.type === "context") {
+          if (!ctxEl) { ctxEl = document.createElement("div"); ctxEl.className = "ctx"; inner.insertBefore(ctxEl, tools); }
+          ctxEl.textContent = "🧠 used " + ev.memory + " memor" + (ev.memory === 1 ? "y" : "ies");
           scroll();
         } else if (ev.type === "tool") {
           if (ev.status === "run") {
@@ -194,6 +200,46 @@ function saveSettingsUI() {
   saveSettings(); closeSettings();
 }
 
+// ---------- memory panel (Phase 2) ----------
+function badge(text, cls) { const b = document.createElement("span"); b.className = "mbadge" + (cls ? " " + cls : ""); b.textContent = text; return b; }
+async function memApi(path, body) {
+  const r = await fetch(path, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : { cache: "no-store" });
+  return r.json().catch(() => ({}));
+}
+async function loadMemory() {
+  mlist.textContent = "Loading…";
+  const status = mfilterStatus ? mfilterStatus.value : "";
+  const d = await memApi("/memory" + (status ? "?status=" + encodeURIComponent(status) : ""));
+  const items = (d && d.items) || [];
+  if (mstats && d.stats) { const p = d.stats.byStatus && d.stats.byStatus.pending; mstats.textContent = (d.stats.total || 0) + " saved" + (p ? " · " + p + " pending" : ""); }
+  renderMemory(items);
+}
+function renderMemory(items) {
+  mlist.innerHTML = "";
+  if (!items.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "No memories yet. Add one above, or tell me “remember that…”"; mlist.appendChild(n); return; }
+  for (const m of items) {
+    const it = document.createElement("div"); it.className = "mitem";
+    const top = document.createElement("div"); top.className = "mtop";
+    top.append(badge(m.type), badge(m.status, m.status));
+    if (m.pinned) { const p = document.createElement("span"); p.className = "pinned"; p.textContent = "📌"; top.appendChild(p); }
+    const c = document.createElement("div"); c.className = "mc"; c.textContent = m.content;
+    const acts = document.createElement("div"); acts.className = "macts";
+    if (m.status === "pending") acts.append(mkAct("Approve", () => memUpdate(m.id, { action: "approve" })), mkAct("Reject", () => memUpdate(m.id, { action: "reject" })));
+    acts.append(
+      mkAct(m.pinned ? "Unpin" : "Pin", () => memUpdate(m.id, { action: m.pinned ? "unpin" : "pin" })),
+      mkAct("Edit", () => { const t = prompt("Edit memory", m.content); if (t != null && t.trim()) memUpdate(m.id, { content: t.trim() }); }),
+      mkAct(m.status === "archived" ? "Unarchive" : "Archive", () => memUpdate(m.id, { action: m.status === "archived" ? "approve" : "archive" })),
+      mkAct("Delete", () => { if (confirm("Delete this memory?")) memDelete(m.id); }),
+    );
+    it.append(top, c, acts); mlist.appendChild(it);
+  }
+}
+async function memUpdate(id, patch) { await memApi("/memory/update", { id, ...patch }); loadMemory(); }
+async function memDelete(id) { await memApi("/memory/delete", { id }); loadMemory(); }
+async function addMemory() { const v = (madd.value || "").trim(); if (!v) return; await memApi("/memory", { content: v, source: "user_explicit" }); madd.value = ""; loadMemory(); }
+function openMemory() { mmodal.hidden = false; loadMemory(); }
+const closeMemory = () => { mmodal.hidden = true; };
+
 // ---------- wire up ----------
 input.addEventListener("input", autosize);
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
@@ -206,6 +252,11 @@ settingsBtn.addEventListener("click", openSettings);
 sclose.addEventListener("click", closeSettings);
 ssave.addEventListener("click", saveSettingsUI);
 smodal.addEventListener("click", (e) => { if (e.target === smodal) closeSettings(); });
+memBtn.addEventListener("click", openMemory);
+mclose.addEventListener("click", closeMemory);
+msave.addEventListener("click", addMemory);
+mmodal.addEventListener("click", (e) => { if (e.target === mmodal) closeMemory(); });
+if (mfilterStatus) mfilterStatus.addEventListener("change", loadMemory);
 personaSel.addEventListener("change", () => { personaCustom.hidden = personaSel.value !== "custom"; });
 tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.value; });
 
