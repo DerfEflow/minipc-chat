@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { TOOL_DEFS, WRITE_TOOLS, runTool, toolMeta, assertNotProtected } from "./tools.mjs";
 import { createMemoryStore } from "./memory.mjs";
+import { createArtifactStore } from "./artifacts.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -53,6 +54,11 @@ const CTX = {
 const MEMORY_DIR = cfgGet("MEMORY_DIR", "C:\\minipc-chat\\memory");
 const memory = createMemoryStore({ dir: MEMORY_DIR, autoApprove: String(cfgGet("MEMORY_AUTO_APPROVE", "1")) !== "0" });
 CTX.memory = memory;
+
+// Phase 4: artifact studio. Generated documents become versioned, editable artifacts.
+const ARTIFACT_DIR = cfgGet("ARTIFACT_DIR", "C:\\minipc-chat\\artifacts");
+const artifacts = createArtifactStore({ dir: ARTIFACT_DIR });
+CTX.artifacts = artifacts;
 
 const TYPES = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -118,6 +124,15 @@ async function logUsage(entry) {
   } catch {}
 }
 const estTokens = (chars) => Math.ceil((chars || 0) / 4);
+
+// Derive an artifact title from a generated document (first heading / first line).
+function deriveTitle(text, lastUser) {
+  const lines = String(text || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const h = lines.find((l) => /^#{1,6}\s+/.test(l));
+  let t = (h ? h.replace(/^#{1,6}\s+/, "") : (lines[0] || "")).replace(/[*_`#>]/g, "").trim();
+  if (!t && lastUser) t = String(lastUser.content || "").slice(0, 60);
+  return (t || "Draft").slice(0, 80);
+}
 
 // Tool-run lifecycle log (Phase 3) -> logs/toolruns.jsonl, plus an in-memory tail for the UI.
 const toolRunTail = [];
@@ -299,6 +314,42 @@ async function handleToolConfirm(req, res) {
   res.end(JSON.stringify({ ok }));
 }
 
+// Local document review (Phase 4 mentor-hook stand-in) — the main model critiques an artifact.
+// Phase 5 swaps in external mentors + the full structured critique/ledger.
+async function localReview(a) {
+  const prompt =
+    "You are a careful reviewer of a document. Review it and return a SHORT plain-text critique with these labeled sections:\n" +
+    "SCORE (0-10):\nREADY FOR USE (yes/no):\nMAJOR ISSUES:\nMINOR ISSUES:\nUNSUPPORTED CLAIMS:\nSUGGESTIONS:\n" +
+    "Do not rewrite the document. Be concise and specific.\n\nTITLE: " + a.title + "\nTYPE: " + a.type + "\n\nDOCUMENT:\n" + String(a.content || "").slice(0, 12000);
+  const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: prompt }], { temperature: 0.3, num_predict: 700, noTools: true });
+  return stripThink((d && d.message && d.message.content) || "") || "(no review produced)";
+}
+
+// Artifact studio API (Phase 4): list/get/create/version/update/delete/diff/export/review.
+async function handleArtifacts(req, res, u) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const p = u.pathname;
+  if (req.method === "GET" && p === "/artifacts") return json(200, { items: artifacts.list({ status: u.searchParams.get("status") || "", type: u.searchParams.get("type") || "", q: u.searchParams.get("q") || "" }), stats: artifacts.stats() });
+  if (req.method === "GET" && p === "/artifacts/get") { const a = artifacts.get(u.searchParams.get("id")); return json(a ? 200 : 404, a || { error: "not found" }); }
+  if (req.method === "GET" && p === "/artifacts/content") { const c = artifacts.getContent(u.searchParams.get("id"), Number(u.searchParams.get("v")) || 0); return json(c == null ? 404 : 200, { content: c || "" }); }
+  if (req.method === "GET" && p === "/artifacts/diff") return json(200, artifacts.diff(u.searchParams.get("id"), Number(u.searchParams.get("a")) || 0, Number(u.searchParams.get("b")) || 0));
+  if (req.method === "POST") {
+    const body = await readJsonBody(req); if (!body) return json(400, { error: "bad json" });
+    if (p === "/artifacts") return json(200, artifacts.create(body));
+    if (p === "/artifacts/version") return json(200, artifacts.addVersion(body.id, body));
+    if (p === "/artifacts/setversion") return json(200, artifacts.setVersion(body.id, Number(body.version)));
+    if (p === "/artifacts/update") return json(200, artifacts.update(body.id, body));
+    if (p === "/artifacts/delete") return json(200, artifacts.remove(body.id));
+    if (p === "/artifacts/export") return json(200, artifacts.exportArtifact(body.id, body.format));
+    if (p === "/artifacts/review") {
+      const a = artifacts.get(body.id); if (!a) return json(404, { error: "not found" });
+      const notes = "LOCAL REVIEW (" + MAIN_MODEL + " — Phase 4; external mentors arrive in Phase 5):\n\n" + await localReview(a);
+      return json(200, artifacts.attachReview(body.id, notes));
+    }
+  }
+  return json(404, { error: "not found" });
+}
+
 async function handleChat(req, res) {
   let body = "";
   req.on("data", (d) => (body += d));
@@ -318,6 +369,7 @@ async function handleChat(req, res) {
   const reqMode = typeof input.mode === "string" ? input.mode : "auto";
   const forced = (typeof input.model === "string" && input.model && input.model !== "auto") ? input.model : "";
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
+  const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
 
@@ -348,7 +400,7 @@ async function handleChat(req, res) {
     console.log(`[dominion-ai] context: ${ctxInfo.used.length} memory item(s) -> ${ctxInfo.used.map((c) => c.citationLabel).join(", ")}`);
   }
   const startedAt = new Date().toISOString();
-  let toolCount = 0, roundsUsed = 0;
+  let toolCount = 0, roundsUsed = 0, artifactCreatedThisTurn = false;
 
   try {
     let last = null;
@@ -404,6 +456,7 @@ async function handleChat(req, res) {
           sse({ type: "tool", name, runId, cls, gated: WRITE_TOOLS.has(name), status: "run" });
           const result = await runTool(name, args, CTX);
           const failed = /^(Tool .+ failed|Unknown tool|Couldn't|I can read and plan|Memory isn't available|BLOCKED)/i.test(String(result));
+          if ((name === "create_artifact" || name === "revise_artifact") && !failed) artifactCreatedThisTurn = true;
           sse({ type: "tool", name, runId, cls, status: failed ? "failed" : "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
           await logToolRun({ ts: startedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200) });
           messages.push({ role: "tool", tool_name: name, content: String(result).slice(0, 8000) });
@@ -419,6 +472,14 @@ async function handleChat(req, res) {
         if (i + size < answer.length) await sleep(8);
       }
       if (aborted) break;   // stopped mid-stream -> fall through to the interrupted log, NOT "done"
+      // Phase 4: in Draft mode, a generated document is auto-saved as a versioned artifact
+      // (unless the model already saved one via a tool this turn).
+      if (mode === "draft" && !artifactCreatedThisTurn && answer.trim().length > 400) {
+        try {
+          const art = artifacts.create({ title: deriveTitle(answer, lastUser), type: "markdown", content: answer, model, sourceChatId: chatId, promptSummary: lastUser ? String(lastUser.content).slice(0, 200) : "" });
+          if (art.item) { sse({ type: "artifact", id: art.item.id, title: art.item.title, action: "saved" }); console.log(`[dominion-ai] artifact auto-saved: ${art.item.title} (${art.item.id.slice(0, 8)})`); }
+        } catch {}
+      }
       console.log(`[dominion-ai] usage ${model}/${mode} prompt=${(last && last.prompt_eval_count) || "?"} out=${(last && last.eval_count) || "?"} tools=${toolCount}`);
       await logUsage({ ts: startedAt, model, mode, reason, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, promptTokens: (last && last.prompt_eval_count) || null, outputTokens: (last && last.eval_count) || null });
       sse({ type: "done" });
@@ -442,6 +503,7 @@ const server = http.createServer(async (req, res) => {
     if (path === "/memory" || path.startsWith("/memory/")) return handleMemory(req, res, u);
     if (path === "/toolruns" && req.method === "GET") return handleToolRuns(req, res);
     if (path === "/tool-confirm" && req.method === "POST") return handleToolConfirm(req, res);
+    if (path === "/artifacts" || path.startsWith("/artifacts/")) return handleArtifacts(req, res, u);
 
     if (path === "/ollama" || path.startsWith("/ollama/")) {
       const rest = path.slice("/ollama".length) || "/";
@@ -471,5 +533,7 @@ server.listen(PORT, "127.0.0.1", () => {
   const ms = memory.stats();
   console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  auto-approve=${ms.autoApprove}  ·  dir=${MEMORY_DIR}  ·  endpoints: GET/POST /memory, /memory/update, /memory/delete`);
   console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON" : "off (LAX)"}  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl`);
+  const as = artifacts.stats();
+  console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review]  ·  draft-mode auto-saves`);
   console.log("[dominion-ai] front this with: tailscale serve --bg " + PORT);
 });

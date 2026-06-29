@@ -91,6 +91,11 @@ export const TOOLS = [
   { category: "file", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "sandbox_list", description: "List the files in your private sandbox folder.", parameters: { type: "object", properties: {} } } } },
   { category: "memory", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "remember", description: "Save a durable fact or preference to long-term memory when Fred asks you to remember something, or clearly states a lasting preference (e.g. units, formats, how he likes answers). Keep it ONE concise fact — don't save one-off chatter, secrets, or hidden reasoning.", parameters: { type: "object", properties: { content: { type: "string", description: "The single fact/preference to remember." }, type: { type: "string", description: "profile (a preference about Fred, default) | workspace | episodic | failure" }, tags: { type: "array", items: { type: "string" } } }, required: ["content"] } } } },
   { category: "memory", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "recall_memory", description: "Search Fred's saved long-term memory for facts/preferences relevant to a query. Relevant memory is usually already provided automatically; use this to look up something specific.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } } },
+  { category: "document", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "create_artifact", description: "Save a generated document as a versioned artifact (not disposable chat text). Use when you produce a document, report, checklist, spec, or other reusable output Fred may revise or export. Returns the artifact id.", parameters: { type: "object", properties: { title: { type: "string" }, content: { type: "string", description: "The full document text (markdown preferred)." }, type: { type: "string", description: "markdown|report|checklist|code|json|other (default markdown)" }, tags: { type: "array", items: { type: "string" } } }, required: ["title", "content"] } } } },
+  { category: "document", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "revise_artifact", description: "Save a revision of an existing artifact as a NEW version (prior versions are kept). Get the id from list_artifacts.", parameters: { type: "object", properties: { id: { type: "string" }, content: { type: "string", description: "The full revised document text." }, note: { type: "string", description: "Short summary of what changed." } }, required: ["id", "content"] } } } },
+  { category: "document", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "list_artifacts", description: "List Fred's saved artifacts (id, title, type, status, version count).", parameters: { type: "object", properties: { q: { type: "string", description: "Optional keyword filter." } } } } } },
+  { category: "document", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "read_artifact", description: "Read the current content of an artifact by id.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } } },
+  { category: "document", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "export_artifact", description: "Export an artifact to a text file (md/txt/json/html) in the exports folder. docx/pdf must go through forge_send. Source versions are preserved.", parameters: { type: "object", properties: { id: { type: "string" }, format: { type: "string", description: "md|txt|json|html" } }, required: ["id"] } } } },
 ];
 
 export const TOOL_DEFS = TOOLS.map((t) => t.def);
@@ -173,6 +178,34 @@ export async function runTool(name, args, ctx) {
         const hits = ctx.memory.retrieve(args.query || "", { limit: 6, minScore: 0.1 });
         if (!hits.length) return "No saved memory matches that.";
         return hits.map((h) => `- (${h.title}) ${h.content}`).join("\n");
+      }
+      case "create_artifact": {
+        if (!ctx.artifacts) return "The artifact studio isn't available right now.";
+        const r = ctx.artifacts.create({ title: args.title, type: args.type, content: args.content, tags: args.tags, model: "qwen-local" });
+        if (r.error) return "Couldn't save the artifact: " + r.error;
+        return `Saved artifact "${r.item.title}" (id ${r.item.id.slice(0, 8)}, v1, ${r.item.wordCount} words). Fred can view, revise, diff, and export it from the Artifacts panel.`;
+      }
+      case "revise_artifact": {
+        if (!ctx.artifacts) return "The artifact studio isn't available right now.";
+        const r = ctx.artifacts.addVersion(args.id, { content: args.content, promptSummary: args.note, model: "qwen-local" });
+        if (r.error) return "Couldn't revise that artifact: " + r.error;
+        return `Saved revision v${r.item.version} of "${r.item.title}" (prior versions kept).`;
+      }
+      case "list_artifacts": {
+        if (!ctx.artifacts) return "The artifact studio isn't available right now.";
+        const list = ctx.artifacts.list({ q: args.q || "" });
+        if (!list.length) return "No artifacts yet.";
+        return list.slice(0, 20).map((a) => `- [${a.id.slice(0, 8)}] ${a.title} (${a.type}/${a.status}, v${a.version})`).join("\n");
+      }
+      case "read_artifact": {
+        if (!ctx.artifacts) return "The artifact studio isn't available right now.";
+        const c = ctx.artifacts.getContent(args.id);
+        return c == null ? "No artifact with that id." : c.slice(0, 8000);
+      }
+      case "export_artifact": {
+        if (!ctx.artifacts) return "The artifact studio isn't available right now.";
+        const r = ctx.artifacts.exportArtifact(args.id, args.format);
+        return r.error ? "Couldn't export: " + r.error : `Exported to ${r.path} (${r.bytes} bytes).`;
       }
       default: return `Unknown tool: ${name}`;
     }

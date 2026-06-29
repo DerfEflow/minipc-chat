@@ -10,7 +10,8 @@ const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"
       memBtn = $("memory"), mmodal = $("mmodal"), mclose = $("mclose"), madd = $("madd"), msave = $("msave"),
       mlist = $("mlist"), mstats = $("mstats"), mfilterStatus = $("mfilter-status"),
       toolsBtn = $("tools"), tmodal = $("tmodal"), tclose = $("tclose"), tlist = $("tlist"), tstats = $("tstats"),
-      confirmToolsBox = $("confirm-tools");
+      confirmToolsBox = $("confirm-tools"),
+      artifactsBtn = $("artifacts"), amodal = $("amodal"), aclose = $("aclose"), alist = $("alist"), adetail = $("adetail"), astats = $("astats"), ahead = $("ahead");
 
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
       LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
@@ -73,7 +74,7 @@ function renderMsg(m, i, isLastAi) {
   const b = document.createElement("div"); b.className = "bubble"; b.textContent = m.content; row.appendChild(b); turn.appendChild(row);
   const acts = document.createElement("div"); acts.className = "acts" + (m.role === "user" ? " me" : "");
   if (m.role === "user") { acts.append(mkAct("Edit", () => editUser(i)), mkAct("Copy", () => copyText(m.content))); }
-  else { acts.appendChild(mkAct("Copy", () => copyText(m.content))); if (isLastAi && !busy) acts.appendChild(mkAct("Regenerate", () => regenerate())); }
+  else { acts.appendChild(mkAct("Copy", () => copyText(m.content))); acts.appendChild(mkAct("Save", () => saveAsArtifact(m.content))); if (isLastAi && !busy) acts.appendChild(mkAct("Regenerate", () => regenerate())); }
   turn.appendChild(acts); wrap.appendChild(turn);
 }
 function renderAll() {
@@ -127,6 +128,7 @@ async function streamReply(c) {
         persona: resolvePersona(),
         temperature: settings.temperature,
         confirmTools: !!settings.confirmTools,
+        chatId: c.id,
       }),
     });
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
@@ -146,6 +148,11 @@ async function streamReply(c) {
           if (!ctxEl) { ctxEl = document.createElement("div"); ctxEl.className = "ctx"; inner.insertBefore(ctxEl, tools); }
           ctxEl.textContent = "🧠 used " + ev.memory + " memor" + (ev.memory === 1 ? "y" : "ies");
           scroll();
+        } else if (ev.type === "artifact") {
+          const note = document.createElement("div"); note.className = "ctx"; note.style.cursor = "pointer";
+          note.textContent = "📄 saved artifact: " + ev.title + " (tap to open)";
+          note.onclick = () => { openArtifacts(); openArtifact(ev.id); };
+          inner.insertBefore(note, tools); scroll();
         } else if (ev.type === "tool") {
           if (ev.status === "run") {
             const chip = document.createElement("div"); chip.className = "tool" + (ev.gated ? " gated" : "");
@@ -290,6 +297,75 @@ async function loadTools() {
 function openTools() { tmodal.hidden = false; loadTools(); }
 const closeTools = () => { tmodal.hidden = true; };
 
+// ---------- artifact studio (Phase 4) ----------
+const aApi = async (path, body) => { const r = await fetch(path, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : { cache: "no-store" }); return r.json().catch(() => ({})); };
+function openArtifacts() { amodal.hidden = false; showArtifactList(); }
+const closeArtifacts = () => { amodal.hidden = true; };
+async function showArtifactList() {
+  adetail.hidden = true; alist.hidden = false; alist.textContent = "Loading…";
+  const d = await aApi("/artifacts"); const items = (d && d.items) || [];
+  if (astats) astats.textContent = d.stats ? (d.stats.total || 0) + " saved" : "";
+  alist.innerHTML = "";
+  if (!items.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "No artifacts yet. Generate a document in Draft mode, or use “Save” on a reply."; alist.appendChild(n); return; }
+  for (const a of items) {
+    const it = document.createElement("div"); it.className = "aitem";
+    const ttl = document.createElement("div"); ttl.className = "atitle"; ttl.textContent = a.title;
+    const top = document.createElement("div"); top.className = "atop";
+    const ty = document.createElement("span"); ty.className = "abadge"; ty.textContent = a.type;
+    const st = document.createElement("span"); st.className = "abadge " + a.status; st.textContent = a.status;
+    const vc = document.createElement("span"); vc.textContent = "v" + a.version + (a.versionCount > 1 ? " of " + a.versionCount : "");
+    const wc = document.createElement("span"); wc.textContent = a.wordCount + " words";
+    top.append(ty, st, vc, wc); it.append(ttl, top); it.onclick = () => openArtifact(a.id); alist.appendChild(it);
+  }
+}
+async function openArtifact(id) {
+  const a = await aApi("/artifacts/get?id=" + encodeURIComponent(id));
+  if (!a || a.error) return;
+  alist.hidden = true; adetail.hidden = false; adetail.innerHTML = "";
+  const back = document.createElement("button"); back.className = "back"; back.textContent = "← All artifacts"; back.onclick = showArtifactList; adetail.appendChild(back);
+  const h = document.createElement("div"); h.className = "sheet-h"; h.textContent = a.title; adetail.appendChild(h);
+  const meta = document.createElement("div"); meta.className = "arow";
+  meta.innerHTML = `<span class="abadge ${a.status}">${a.status}</span><span>${a.type}</span><span>v${a.version} of ${a.versionCount}</span><span>${a.wordCount} words</span>`;
+  adetail.appendChild(meta);
+  const vrow = document.createElement("div"); vrow.className = "arow";
+  const sel = document.createElement("select");
+  for (let v = 1; v <= a.versionCount; v++) { const o = document.createElement("option"); o.value = v; o.textContent = "v" + v; if (v === a.version) o.selected = true; sel.appendChild(o); }
+  sel.onchange = async () => { await aApi("/artifacts/setversion", { id: a.id, version: Number(sel.value) }); openArtifact(a.id); };
+  vrow.append(Object.assign(document.createElement("span"), { textContent: "Version" }), sel);
+  if (a.versionCount > 1) vrow.appendChild(mkAct("Diff vs prev", () => showDiff(a.id, a.version - 1 || 1, a.version)));
+  adetail.appendChild(vrow);
+  const c = document.createElement("div"); c.className = "acontent"; c.textContent = a.content; adetail.appendChild(c);
+  const acts = document.createElement("div"); acts.className = "arow"; acts.style.marginTop = "8px";
+  acts.append(
+    mkAct("Revise", () => reviseArtifact(a)),
+    mkAct("Export", () => exportArtifact(a)),
+    mkAct(a.status === "final" ? "Unfinalize" : "Mark final", () => setArtStatus(a.id, a.status === "final" ? "draft" : "final")),
+    mkAct("Review", () => reviewArtifact(a.id)),
+    mkAct("Rename", () => renameArt(a)),
+    mkAct("Delete", () => { if (confirm("Delete this artifact and all versions?")) delArt(a.id); }),
+  );
+  adetail.appendChild(acts);
+  if (a.reviewNotes) { const rv = document.createElement("div"); rv.className = "areview"; rv.textContent = a.reviewNotes; adetail.appendChild(rv); }
+}
+async function showDiff(id, from, to) {
+  const d = await aApi(`/artifacts/diff?id=${encodeURIComponent(id)}&a=${from}&b=${to}`);
+  const box = document.createElement("div"); box.className = "adiff";
+  (d.diff || "(no diff)").split("\n").forEach((l) => { const ln = document.createElement("div"); if (l[0] === "+") ln.className = "add"; else if (l[0] === "-") ln.className = "del"; ln.textContent = l; box.appendChild(ln); });
+  const old = adetail.querySelector(".adiff"); if (old) old.remove(); adetail.appendChild(box); box.scrollIntoView();
+}
+async function reviseArtifact(a) { const t = prompt("Revise — the full new content:", a.content); if (t != null && t.trim()) { await aApi("/artifacts/version", { id: a.id, content: t }); openArtifact(a.id); } }
+async function exportArtifact(a) { const f = prompt("Export format (md, txt, json, html):", "md"); if (f == null) return; const r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim() }); alert(r.error ? "Export: " + r.error : "Exported to " + r.path); }
+async function setArtStatus(id, status) { await aApi("/artifacts/update", { id, status }); openArtifact(id); }
+async function renameArt(a) { const t = prompt("Rename artifact:", a.title); if (t != null && t.trim()) { await aApi("/artifacts/update", { id: a.id, title: t.trim() }); openArtifact(a.id); } }
+async function reviewArtifact(id) { const note = document.createElement("div"); note.className = "areview"; note.textContent = "Reviewing with the local model (≈20s)…"; adetail.appendChild(note); await aApi("/artifacts/review", { id }); openArtifact(id); }
+async function delArt(id) { await aApi("/artifacts/delete", { id }); showArtifactList(); }
+async function saveAsArtifact(content) {
+  const guess = (String(content).split("\n").find((l) => l.trim()) || "Document").replace(/^#+\s*/, "").replace(/[*_`]/g, "").slice(0, 60);
+  const t = prompt("Save as artifact — title:", guess); if (t == null) return;
+  const r = await aApi("/artifacts", { title: t || "Document", content, type: "markdown" });
+  if (r.item) { openArtifacts(); openArtifact(r.item.id); }
+}
+
 // ---------- wire up ----------
 input.addEventListener("input", autosize);
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
@@ -310,6 +386,9 @@ if (mfilterStatus) mfilterStatus.addEventListener("change", loadMemory);
 toolsBtn.addEventListener("click", openTools);
 tclose.addEventListener("click", closeTools);
 tmodal.addEventListener("click", (e) => { if (e.target === tmodal) closeTools(); });
+artifactsBtn.addEventListener("click", openArtifacts);
+aclose.addEventListener("click", closeArtifacts);
+amodal.addEventListener("click", (e) => { if (e.target === amodal) closeArtifacts(); });
 personaSel.addEventListener("change", () => { personaCustom.hidden = personaSel.value !== "custom"; });
 tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.value; });
 
