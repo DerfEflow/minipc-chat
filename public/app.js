@@ -11,7 +11,8 @@ const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"
       mlist = $("mlist"), mstats = $("mstats"), mfilterStatus = $("mfilter-status"),
       toolsBtn = $("tools"), tmodal = $("tmodal"), tclose = $("tclose"), tlist = $("tlist"), tstats = $("tstats"),
       confirmToolsBox = $("confirm-tools"),
-      artifactsBtn = $("artifacts"), amodal = $("amodal"), aclose = $("aclose"), alist = $("alist"), adetail = $("adetail"), astats = $("astats"), ahead = $("ahead");
+      artifactsBtn = $("artifacts"), amodal = $("amodal"), aclose = $("aclose"), alist = $("alist"), adetail = $("adetail"), astats = $("astats"), ahead = $("ahead"),
+      improveBtn = $("improve"), imodal = $("imodal"), iclose = $("iclose"), ilist = $("ilist"), istats = $("istats"), iadd = $("iadd"), iaddbtn = $("iaddbtn");
 
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
       LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
@@ -74,7 +75,7 @@ function renderMsg(m, i, isLastAi) {
   const b = document.createElement("div"); b.className = "bubble"; b.textContent = m.content; row.appendChild(b); turn.appendChild(row);
   const acts = document.createElement("div"); acts.className = "acts" + (m.role === "user" ? " me" : "");
   if (m.role === "user") { acts.append(mkAct("Edit", () => editUser(i)), mkAct("Copy", () => copyText(m.content))); }
-  else { acts.appendChild(mkAct("Copy", () => copyText(m.content))); acts.appendChild(mkAct("Save", () => saveAsArtifact(m.content))); if (isLastAi && !busy) acts.appendChild(mkAct("Regenerate", () => regenerate())); }
+  else { acts.appendChild(mkAct("Copy", () => copyText(m.content))); acts.appendChild(mkAct("Save", () => saveAsArtifact(m.content))); acts.appendChild(mkAct("Critique", () => critiqueMessage(i))); if (isLastAi && !busy) acts.appendChild(mkAct("Regenerate", () => regenerate())); }
   turn.appendChild(acts); wrap.appendChild(turn);
 }
 function renderAll() {
@@ -152,6 +153,10 @@ async function streamReply(c) {
           const note = document.createElement("div"); note.className = "ctx"; note.style.cursor = "pointer";
           note.textContent = "📄 saved artifact: " + ev.title + " (tap to open)";
           note.onclick = () => { openArtifacts(); openArtifact(ev.id); };
+          inner.insertBefore(note, tools); scroll();
+        } else if (ev.type === "mentor") {
+          const note = document.createElement("div"); note.className = "ctx";
+          note.textContent = "🎓 mentor: " + ev.score + "/10" + (ev.priority && ev.priority !== "none" ? " · revise " + ev.priority : "") + (ev.findings ? " · " + ev.findings + " finding(s)" : "");
           inner.insertBefore(note, tools); scroll();
         } else if (ev.type === "tool") {
           if (ev.status === "run") {
@@ -366,6 +371,90 @@ async function saveAsArtifact(content) {
   if (r.item) { openArtifacts(); openArtifact(r.item.id); }
 }
 
+// ---------- mentor critique (Phase 5) ----------
+const escapeHtml = (s) => String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+async function critiqueMessage(i) {
+  const c = cur(); if (!c || !c.messages[i]) return;
+  const answer = c.messages[i].content; let orig = "";
+  for (let k = i - 1; k >= 0; k--) if (c.messages[k].role === "user") { orig = c.messages[k].content; break; }
+  const card = document.createElement("div"); card.className = "critique"; card.textContent = "🎓 Mentor reviewing… (local model, ~15s)"; wrap.appendChild(card); scroll();
+  try {
+    const d = await aApi("/mentor/review", { content: answer, originalRequest: orig, taskType: "answer_review" });
+    renderCritiqueCard(card, d.critique || {}, orig);
+  } catch { card.textContent = "Mentor review failed."; }
+}
+function renderCritiqueCard(card, c, orig) {
+  card.innerHTML = "";
+  const head = document.createElement("div"); head.className = "crhead";
+  const sp = document.createElement("span"); sp.className = "scorepill"; sp.textContent = (c.overall_score ?? "?") + "/10"; head.appendChild(sp);
+  head.appendChild(Object.assign(document.createElement("span"), { className: "crsec", textContent: "risk " + (c.hallucination_risk || "?") + " · revise " + (c.revision_priority || "none") + " · " + (c._provider || "") }));
+  const x = document.createElement("button"); x.className = "act"; x.textContent = "✕"; x.style.marginLeft = "auto"; x.onclick = () => card.remove(); head.appendChild(x);
+  card.appendChild(head);
+  const sec = (label, a) => { if (!a || !a.length) return; const d = document.createElement("div"); d.className = "crsec"; d.innerHTML = "<b>" + label + ":</b> " + a.map(escapeHtml).join("; "); card.appendChild(d); };
+  sec("Major", c.major_findings); sec("Unsupported", c.unsupported_claims); sec("Reasoning", c.reasoning_errors); sec("Safety/Privacy", c.safety_or_privacy_issues);
+  if (c.recommended_revision) { const d = document.createElement("div"); d.className = "crsec"; d.innerHTML = "<b>Suggestion:</b> " + escapeHtml(c.recommended_revision); card.appendChild(d); }
+  const cand = (label, text, save) => { const r = document.createElement("div"); r.className = "cand"; r.appendChild(Object.assign(document.createElement("span"), { textContent: "💡 " + text })); const b = document.createElement("button"); b.textContent = label; b.onclick = async () => { b.disabled = true; await save(); b.textContent = "saved ✓"; }; r.appendChild(b); card.appendChild(r); };
+  (c.memory_candidates || []).forEach((t) => cand("→ memory", t, () => memApi("/memory", { content: t, source: "mentor_suggested" })));
+  (c.eval_case_candidates || []).forEach((t) => cand("→ eval", t, () => aApi("/evals", { title: t.slice(0, 80), input: t, source: "mentor" })));
+  (c.prompt_rule_candidates || []).forEach((t) => cand("→ rule", t, () => aApi("/rules", { content: t, scope: "global", status: "candidate" })));
+  cand("→ ledger", "log this review as a failure entry", () => aApi("/ledger", { category: "mentor_flag", severity: "low", originalRequest: orig, flawedOutput: "(see chat)", detectedBy: "mentor" }));
+  scroll();
+}
+
+// ---------- mentor & improvement panel (Phase 5) ----------
+let itab = "ledger";
+function openImprove() { imodal.hidden = false; setITab(itab); }
+const closeImprove = () => { imodal.hidden = true; };
+function setITab(t) {
+  itab = t; document.querySelectorAll(".itab").forEach((el) => el.classList.toggle("on", el.dataset.tab === t));
+  iadd.placeholder = t === "ledger" ? "Log a failure / lesson…" : t === "evals" ? "Eval input prompt…" : "Prompt rule (a compact instruction)…";
+  loadImprove();
+}
+async function loadImprove() {
+  ilist.textContent = "Loading…";
+  const path = itab === "ledger" ? "/ledger" : itab === "evals" ? "/evals" : "/rules";
+  const d = await aApi(path); const items = (d && d.items) || [];
+  if (istats && d.stats) { const s = d.stats; istats.textContent = `${s.failures}F · ${s.evals}E · ${s.rules}R (${s.activeRules} active)`; }
+  ilist.innerHTML = "";
+  if (!items.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "Nothing here yet."; ilist.appendChild(n); return; }
+  for (const it of items) ilist.appendChild(itab === "ledger" ? renderFailure(it) : itab === "evals" ? renderEval(it) : renderRule(it));
+}
+function renderFailure(f) {
+  const it = document.createElement("div"); it.className = "mitem";
+  const top = document.createElement("div"); top.className = "mtop";
+  top.append(badge(f.category), badge(f.severity, f.severity === "high" || f.severity === "critical" ? "rejected" : ""), badge(f.status, f.status === "open" ? "pending" : ""), Object.assign(document.createElement("span"), { textContent: "by " + f.detectedBy }));
+  const c = document.createElement("div"); c.className = "mc"; c.textContent = (f.originalRequest || "").slice(0, 160) || "(no request)";
+  const acts = document.createElement("div"); acts.className = "macts";
+  acts.append(mkAct(f.status === "open" ? "Mark resolved" : "Reopen", () => fUpdate("/ledger/update", { id: f.id, status: f.status === "open" ? "resolved" : "open" })), mkAct("Delete", () => fUpdate("/ledger/delete", { id: f.id })));
+  it.append(top, c, acts); return it;
+}
+function renderEval(e) {
+  const it = document.createElement("div"); it.className = "mitem";
+  const top = document.createElement("div"); top.className = "mtop";
+  top.append(badge(e.category), Object.assign(document.createElement("span"), { textContent: e.latestScore == null ? "not run" : "score " + e.latestScore + "/10" }), Object.assign(document.createElement("span"), { textContent: "src:" + e.source }));
+  const c = document.createElement("div"); c.className = "mc"; c.textContent = e.title;
+  const acts = document.createElement("div"); acts.className = "macts";
+  acts.append(mkAct("Run", async (ev) => { const b = ev && ev.target; if (b) { b.textContent = "running…"; } const r = await aApi("/evals/run", { id: e.id }); alert(r.run ? `Score ${r.run.score}/10 · ${r.run.passed ? "PASS" : "FAIL"}\n\n${(r.output || "").slice(0, 400)}` : "Run failed"); loadImprove(); }), mkAct("Delete", () => fUpdate("/evals/delete", { id: e.id })));
+  it.append(top, c, acts); return it;
+}
+function renderRule(r) {
+  const it = document.createElement("div"); it.className = "mitem";
+  const top = document.createElement("div"); top.className = "mtop";
+  top.append(badge(r.scope), badge(r.status, r.status === "active" ? "" : "pending"));
+  const c = document.createElement("div"); c.className = "mc"; c.textContent = r.content;
+  const acts = document.createElement("div"); acts.className = "macts";
+  acts.append(mkAct(r.status === "active" ? "Retire" : "Activate", () => fUpdate("/rules/update", { id: r.id, status: r.status === "active" ? "retired" : "active" })), mkAct("Delete", () => fUpdate("/rules/delete", { id: r.id })));
+  it.append(top, c, acts); return it;
+}
+async function fUpdate(path, body) { await aApi(path, body); loadImprove(); }
+async function addImprove() {
+  const v = (iadd.value || "").trim(); if (!v) return;
+  if (itab === "ledger") await aApi("/ledger", { category: "manual", severity: "low", originalRequest: v, detectedBy: "user" });
+  else if (itab === "evals") { const exp = prompt("Expected behavior (what a good answer must do):", ""); await aApi("/evals", { title: v.slice(0, 80), input: v, expectedBehavior: exp || "", source: "manual" }); }
+  else await aApi("/rules", { content: v, scope: "global", status: "candidate" });
+  iadd.value = ""; loadImprove();
+}
+
 // ---------- wire up ----------
 input.addEventListener("input", autosize);
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
@@ -389,6 +478,11 @@ tmodal.addEventListener("click", (e) => { if (e.target === tmodal) closeTools();
 artifactsBtn.addEventListener("click", openArtifacts);
 aclose.addEventListener("click", closeArtifacts);
 amodal.addEventListener("click", (e) => { if (e.target === amodal) closeArtifacts(); });
+improveBtn.addEventListener("click", openImprove);
+iclose.addEventListener("click", closeImprove);
+imodal.addEventListener("click", (e) => { if (e.target === imodal) closeImprove(); });
+iaddbtn.addEventListener("click", addImprove);
+document.querySelectorAll(".itab").forEach((el) => el.addEventListener("click", () => setITab(el.dataset.tab)));
 personaSel.addEventListener("change", () => { personaCustom.hidden = personaSel.value !== "custom"; });
 tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.value; });
 

@@ -166,6 +166,19 @@
   .adiff .add{color:#5fae6b}.adiff .del{color:#ff9a7a}
   .abadge{border:1px solid var(--line);border-radius:5px;padding:0 5px;font-size:10px;text-transform:capitalize}
   .abadge.final{color:#5fae6b}.abadge.reviewed{color:#7fa7ff}.abadge.draft{color:#e8b07c}.abadge.archived{opacity:.55}
+
+  /* ---- mentor & improvement ---- */
+  .itabs{display:flex;gap:6px;margin-bottom:8px}
+  .itab{flex:1;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--navy2);color:var(--muted);cursor:pointer;font-size:13px;text-align:center}
+  .itab.on{color:var(--copper2);border-color:var(--copper)}
+  .critique{border:1px solid var(--line);border-radius:10px;padding:10px;background:rgba(57,130,255,.06);display:flex;flex-direction:column;gap:7px;font-size:13px;margin:4px 0 8px}
+  .critique .crhead{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--sand)}
+  .scorepill{border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:12px;color:var(--copper2)}
+  .crsec{font-size:12.5px;color:var(--muted)}
+  .crsec b{color:var(--sand);font-weight:600}
+  .cand{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted);padding:2px 0;border-top:1px solid var(--line)}
+  .cand button{font-size:11px;border:1px solid var(--line);border-radius:6px;background:var(--navy2);color:var(--copper2);padding:1px 7px;cursor:pointer}
+  .cand button:disabled{opacity:.5}
 </style>
 </head>
 <body>
@@ -193,6 +206,7 @@
       <option value="draft">Draft</option>
     </select>
     <button id="artifacts" class="icon" title="Artifacts" aria-label="Artifacts">&#128196;</button>
+    <button id="improve" class="icon" title="Mentor &amp; improvement" aria-label="Mentor and improvement">&#127891;</button>
     <button id="memory" class="icon" title="Memory" aria-label="Memory">&#129504;</button>
     <button id="tools" class="icon" title="Tool activity" aria-label="Tool activity">&#128295;</button>
     <button id="settings" class="icon" title="Settings" aria-label="Settings">&#9881;</button>
@@ -273,6 +287,22 @@
     </div>
   </div>
 
-  <script src="/app.js?v=10"></script>
+  <div id="imodal" class="modal" hidden>
+    <div class="sheet">
+      <div class="sheet-h">Mentor &amp; Improvement <span id="istats" class="mstats"></span> <button id="iclose" class="icon" aria-label="Close">&times;</button></div>
+      <div class="itabs">
+        <div class="itab on" data-tab="ledger">Failures</div>
+        <div class="itab" data-tab="evals">Evals</div>
+        <div class="itab" data-tab="rules">Rules</div>
+      </div>
+      <div class="mrow-add">
+        <textarea id="iadd" rows="1" placeholder="Add…"></textarea>
+        <button id="iaddbtn" class="sb-new">Add</button>
+      </div>
+      <div id="ilist" class="mlist"></div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=11"></script>
 </body>
 </html>

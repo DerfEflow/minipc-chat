@@ -22,6 +22,8 @@ import { randomUUID } from "node:crypto";
 import { TOOL_DEFS, WRITE_TOOLS, runTool, toolMeta, assertNotProtected } from "./tools.mjs";
 import { createMemoryStore } from "./memory.mjs";
 import { createArtifactStore } from "./artifacts.mjs";
+import { createMentor } from "./mentor.mjs";
+import { createFlywheel } from "./flywheel.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -59,6 +61,8 @@ CTX.memory = memory;
 const ARTIFACT_DIR = cfgGet("ARTIFACT_DIR", "C:\\minipc-chat\\artifacts");
 const artifacts = createArtifactStore({ dir: ARTIFACT_DIR });
 CTX.artifacts = artifacts;
+// NOTE: the Phase 5 mentor/flywheel init lives further down — it needs MAIN_MODEL, which is
+// declared in the provider block below (a const referenced before init = TDZ crash).
 
 const TYPES = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -156,6 +160,28 @@ function awaitConfirm(runId, timeoutMs) {
   });
 }
 const CONFIRM_TOOLS_ENV = String(cfgGet("CONFIRM_TOOLS", "0")) === "1";
+
+// Phase 5: mentor bridge + improvement flywheel. Mentor defaults LOCAL (no egress); external is
+// opt-in via MENTOR_PROVIDER=external + MENTOR_API_KEY + MENTOR_MODEL. Auto-review default OFF (LAX).
+// (Placed after MAIN_MODEL so the const is initialized before createMentor reads it.)
+const FLYWHEEL_DIR = cfgGet("FLYWHEEL_DIR", "C:\\minipc-chat\\flywheel");
+const flywheel = createFlywheel({ dir: FLYWHEEL_DIR });
+const mentor = createMentor({
+  localChat: (m, msgs, o) => ollamaChat(m, msgs, o),
+  mainModel: MAIN_MODEL,
+  cfg: { provider: cfgGet("MENTOR_PROVIDER", "local"), apiKey: cfgGet("MENTOR_API_KEY", ""), model: cfgGet("MENTOR_MODEL", ""), endpoint: cfgGet("MENTOR_ENDPOINT", "https://openrouter.ai/api/v1/chat/completions") },
+});
+CTX.mentor = mentor;
+const AUTO_MENTOR = String(cfgGet("AUTO_MENTOR", "0")) === "1";
+// Adaptive mentor sampling policy (spec) — used only when AUTO_MENTOR is on.
+const MENTOR_SAMPLING = { casualChat: 0, shortDraft: 0.05, factualAnswer: 0.15, technicalAnswer: 0.25, documentDraft: 0.25, finalArtifact: 0.75, codeGeneration: 0.5, executableCode: 0.9, toolChainWithErrors: 1, userMarkedImportant: 1 };
+function sampleCategory(mode, toolFailed) {
+  if (toolFailed) return "toolChainWithErrors";
+  if (mode === "draft") return "documentDraft";
+  if (mode === "deep_think") return "technicalAnswer";
+  if (mode === "fast") return "casualChat";
+  return "factualAnswer";
+}
 
 function systemPrompt(persona, modeFrag) {
   let s = [
@@ -350,6 +376,58 @@ async function handleArtifacts(req, res, u) {
   return json(404, { error: "not found" });
 }
 
+// Mentor review (Phase 5): critique an answer or artifact -> structured critique; auto-log a ledger
+// entry when the mentor flags real issues; attach review notes to an artifact when given an id.
+async function handleMentorReview(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const b = await readJsonBody(req); if (!b) return json(400, { error: "bad json" });
+  let content = String(b.content || "");
+  if (b.artifactId) { const a = artifacts.get(b.artifactId); if (a) content = a.content; }
+  if (!content.trim()) return json(400, { error: "nothing to review" });
+  const c = await mentor.critique({ taskType: b.taskType || "answer_review", originalRequest: b.originalRequest || "", content, privacyMode: b.privacyMode || (mentor.info().externalConfigured ? "redacted_external" : "local_only") });
+  let ledgerId = null;
+  if (["medium", "high"].includes(c.revision_priority)) { const f = flywheel.addFailure({ category: "mentor_flag", severity: c.revision_priority === "high" ? "high" : "medium", originalRequest: b.originalRequest || "", flawedOutput: content, detectedBy: "mentor", rootCause: "unknown", improvementActions: ["manual_review"] }); ledgerId = f.item.id; }
+  if (b.artifactId) artifacts.attachReview(b.artifactId, "MENTOR (" + c._provider + "):\n" + (c.recommended_revision || "") + "\n\nMajor findings: " + (c.major_findings || []).join("; "));
+  return json(200, { critique: c, ledgerId, mentor: mentor.info() });
+}
+
+// Eval runner (Phase 5): run a case's input through the local model, judge it, store the run.
+async function runEval(id) {
+  const ev = flywheel.get("evals", id); if (!ev) return { error: "not found" };
+  const out = await ollamaChat(MAIN_MODEL, [{ role: "user", content: ev.input }], { temperature: 0.3, num_predict: 800, noTools: true });
+  const output = stripThink((out && out.message && out.message.content) || "");
+  const judgePrompt = 'You are scoring an AI answer. Return ONLY JSON {"score":0-10,"passed":true|false,"notes":"short"}.\nEXPECTED: ' + ev.expectedBehavior + (ev.forbiddenBehavior ? "\nFORBIDDEN: " + ev.forbiddenBehavior : "") + "\nRUBRIC: " + ev.scoringRubric + "\n\nINPUT: " + ev.input + "\n\nOUTPUT TO SCORE:\n" + output.slice(0, 4000);
+  const jd = await ollamaChat(MAIN_MODEL, [{ role: "user", content: judgePrompt }], { temperature: 0, num_predict: 300, noTools: true });
+  const jt = stripThink((jd && jd.message && jd.message.content) || ""); const m = jt.match(/\{[\s\S]*\}/);
+  let parsed = { score: 0, passed: false, notes: jt.slice(0, 200) }; if (m) { try { parsed = JSON.parse(m[0]); } catch {} }
+  const run = flywheel.addRun({ evalCaseId: id, modelProviderId: MAIN_MODEL, mode: "eval", input: ev.input, output, score: Number(parsed.score) || 0, passed: !!parsed.passed, mentorReviewed: true, notes: parsed.notes || "" });
+  return { run: run.item, output: output.slice(0, 2000) };
+}
+
+// Flywheel API (Phase 5): /ledger, /evals (+ /evals/run, /evals/runs), /rules — list/create/update/delete.
+async function handleFlywheel(req, res, u) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const p = u.pathname;
+  const MAP = { "/ledger": "failures", "/evals": "evals", "/rules": "rules" };
+  if (req.method === "GET") {
+    if (MAP[p]) return json(200, { items: flywheel.list(MAP[p], { status: u.searchParams.get("status") || "" }), stats: flywheel.stats() });
+    if (p === "/evals/runs") return json(200, { runs: flywheel.runsFor(u.searchParams.get("id")) });
+    return json(404, { error: "not found" });
+  }
+  if (req.method === "POST") {
+    const b = await readJsonBody(req); if (!b) return json(400, { error: "bad json" });
+    if (p === "/ledger") return json(200, flywheel.addFailure(b));
+    if (p === "/evals") return json(200, flywheel.addEval(b));
+    if (p === "/rules") return json(200, flywheel.addRule(b));
+    if (p === "/evals/run") return json(200, await runEval(b.id));
+    for (const [path, coll] of Object.entries(MAP)) {
+      if (p === path + "/update") return json(200, flywheel.update(coll, b.id, b));
+      if (p === path + "/delete") return json(200, flywheel.remove(coll, b.id));
+    }
+  }
+  return json(404, { error: "not found" });
+}
+
 async function handleChat(req, res) {
   let body = "";
   req.on("data", (d) => (body += d));
@@ -393,6 +471,8 @@ async function handleChat(req, res) {
   // Context builder (Phase 2): system -> relevant approved memory -> recent chat turns.
   const ctxInfo = buildMemoryContext(lastUser ? lastUser.content : "");
   const messages = [{ role: "system", content: systemPrompt(persona, md.frag) }];
+  const activeRules = flywheel.activeRules(mode);   // Phase 5: learned prompt rules
+  if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
   if (ctxInfo.block) messages.push({ role: "system", content: ctxInfo.block });
   messages.push(...history);
   if (ctxInfo.used.length) {
@@ -480,6 +560,14 @@ async function handleChat(req, res) {
           if (art.item) { sse({ type: "artifact", id: art.item.id, title: art.item.title, action: "saved" }); console.log(`[dominion-ai] artifact auto-saved: ${art.item.title} (${art.item.id.slice(0, 8)})`); }
         } catch {}
       }
+      // Phase 5: adaptive auto mentor-review (default OFF / LAX). Local-only on the auto path (no egress).
+      if (AUTO_MENTOR && Math.random() < (MENTOR_SAMPLING[sampleCategory(mode, false)] || 0)) {
+        try {
+          const c = await mentor.critique({ taskType: "answer_review", originalRequest: lastUser ? lastUser.content : "", content: answer, privacyMode: "local_only" });
+          sse({ type: "mentor", score: c.overall_score, priority: c.revision_priority, findings: (c.major_findings || []).length });
+          if (["medium", "high"].includes(c.revision_priority)) flywheel.addFailure({ category: "mentor_flag", severity: c.revision_priority === "high" ? "high" : "medium", originalRequest: lastUser ? lastUser.content : "", flawedOutput: answer, detectedBy: "mentor", rootCause: "unknown", improvementActions: ["manual_review"] });
+        } catch {}
+      }
       console.log(`[dominion-ai] usage ${model}/${mode} prompt=${(last && last.prompt_eval_count) || "?"} out=${(last && last.eval_count) || "?"} tools=${toolCount}`);
       await logUsage({ ts: startedAt, model, mode, reason, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, promptTokens: (last && last.prompt_eval_count) || null, outputTokens: (last && last.eval_count) || null });
       sse({ type: "done" });
@@ -504,6 +592,8 @@ const server = http.createServer(async (req, res) => {
     if (path === "/toolruns" && req.method === "GET") return handleToolRuns(req, res);
     if (path === "/tool-confirm" && req.method === "POST") return handleToolConfirm(req, res);
     if (path === "/artifacts" || path.startsWith("/artifacts/")) return handleArtifacts(req, res, u);
+    if (path === "/mentor/review" && req.method === "POST") return handleMentorReview(req, res);
+    if (["/ledger", "/evals", "/rules"].some((b) => path === b || path.startsWith(b + "/"))) return handleFlywheel(req, res, u);
 
     if (path === "/ollama" || path.startsWith("/ollama/")) {
       const rest = path.slice("/ollama".length) || "/";
@@ -535,5 +625,6 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON" : "off (LAX)"}  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl`);
   const as = artifacts.stats();
   console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review]  ·  draft-mode auto-saves`);
+  console.log(`[dominion-ai] mentor: ${mentor.info().provider}  ·  auto-review=${AUTO_MENTOR ? "ON" : "off (LAX)"}  ·  flywheel ${JSON.stringify(flywheel.stats())}  ·  endpoints: /mentor/review, /ledger, /evals(+run), /rules`);
   console.log("[dominion-ai] front this with: tailscale serve --bg " + PORT);
 });

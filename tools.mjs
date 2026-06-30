@@ -96,6 +96,7 @@ export const TOOLS = [
   { category: "document", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "list_artifacts", description: "List Fred's saved artifacts (id, title, type, status, version count).", parameters: { type: "object", properties: { q: { type: "string", description: "Optional keyword filter." } } } } } },
   { category: "document", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "read_artifact", description: "Read the current content of an artifact by id.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } } },
   { category: "document", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "export_artifact", description: "Export an artifact to a text file (md/txt/json/html) in the exports folder. docx/pdf must go through forge_send. Source versions are preserved.", parameters: { type: "object", properties: { id: { type: "string" }, format: { type: "string", description: "md|txt|json|html" } }, required: ["id"] } } } },
+  { category: "mentor", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "request_review", description: "Ask the mentor to critique a piece of text (an answer, plan, or document) and return a short structured critique. Use before finalizing important or high-stakes output. Runs locally (no data leaves the machine).", parameters: { type: "object", properties: { content: { type: "string" }, originalRequest: { type: "string" } }, required: ["content"] } } } },
 ];
 
 export const TOOL_DEFS = TOOLS.map((t) => t.def);
@@ -206,6 +207,15 @@ export async function runTool(name, args, ctx) {
         if (!ctx.artifacts) return "The artifact studio isn't available right now.";
         const r = ctx.artifacts.exportArtifact(args.id, args.format);
         return r.error ? "Couldn't export: " + r.error : `Exported to ${r.path} (${r.bytes} bytes).`;
+      }
+      case "request_review": {
+        if (!ctx.mentor) return "The mentor isn't available right now.";
+        const c = await ctx.mentor.critique({ taskType: "answer_review", originalRequest: args.originalRequest || "", content: args.content || "", privacyMode: "local_only" });
+        const lines = [`Score ${c.overall_score}/10 · hallucination risk ${c.hallucination_risk} · revise: ${c.revision_priority}`];
+        if ((c.major_findings || []).length) lines.push("Major: " + c.major_findings.join("; "));
+        if ((c.unsupported_claims || []).length) lines.push("Unsupported claims: " + c.unsupported_claims.join("; "));
+        if (c.recommended_revision) lines.push("Suggestion: " + c.recommended_revision);
+        return lines.join("\n");
       }
       default: return `Unknown tool: ${name}`;
     }
