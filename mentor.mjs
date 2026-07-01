@@ -93,7 +93,7 @@ export function createMentor({ localChat, mainModel, cfg = {} }) {
       if (txt) return txt;
       return JSON.stringify({ recommended_revision: "External mentor error (HTTP " + r.status + "): " + String(r.text).slice(0, 200), revision_priority: "none" });
     }
-    const d = await localChat(mainModel, messages, { temperature: 0.3, num_predict: 1400, noTools: true });
+    const d = await localChat(mainModel, messages, { temperature: 0.3, num_predict: 2000, noTools: true, format: "json" });
     return (d && d.message && d.message.content) || "";
   }
 

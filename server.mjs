@@ -202,6 +202,7 @@ async function ollamaChat(model, messages, opts = {}) {
   return await new Promise((resolve) => {
     const payload = { model, messages, stream: false };
     if (!opts.noTools) payload.tools = TOOL_DEFS;
+    if (opts.format) payload.format = opts.format;   // e.g. "json" — forces valid JSON, suppresses thinking spill
     const options = {};
     if (typeof opts.temperature === "number") options.temperature = opts.temperature;
     if (typeof opts.num_ctx === "number") options.num_ctx = opts.num_ctx;
@@ -397,7 +398,7 @@ async function runEval(id) {
   const out = await ollamaChat(MAIN_MODEL, [{ role: "user", content: ev.input }], { temperature: 0.3, num_predict: 800, noTools: true });
   const output = stripThink((out && out.message && out.message.content) || "");
   const judgePrompt = 'You are scoring an AI answer. Return ONLY JSON {"score":0-10,"passed":true|false,"notes":"short"}.\nEXPECTED: ' + ev.expectedBehavior + (ev.forbiddenBehavior ? "\nFORBIDDEN: " + ev.forbiddenBehavior : "") + "\nRUBRIC: " + ev.scoringRubric + "\n\nINPUT: " + ev.input + "\n\nOUTPUT TO SCORE:\n" + output.slice(0, 4000);
-  const jd = await ollamaChat(MAIN_MODEL, [{ role: "user", content: judgePrompt }], { temperature: 0, num_predict: 300, noTools: true });
+  const jd = await ollamaChat(MAIN_MODEL, [{ role: "user", content: judgePrompt }], { temperature: 0, num_predict: 500, noTools: true, format: "json" });
   const jt = stripThink((jd && jd.message && jd.message.content) || ""); const m = jt.match(/\{[\s\S]*\}/);
   let parsed = { score: 0, passed: false, notes: jt.slice(0, 200) }; if (m) { try { parsed = JSON.parse(m[0]); } catch {} }
   const run = flywheel.addRun({ evalCaseId: id, modelProviderId: MAIN_MODEL, mode: "eval", input: ev.input, output, score: Number(parsed.score) || 0, passed: !!parsed.passed, mentorReviewed: true, notes: parsed.notes || "" });
