@@ -70,6 +70,7 @@ const TYPES = {
   ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
   ".webmanifest": "application/manifest+json; charset=utf-8",
   ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+  ".mp4": "video/mp4",
 };
 
 // ---- /ollama/* reverse proxy (streams straight through) ----

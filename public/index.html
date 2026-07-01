@@ -21,14 +21,37 @@
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%}
   body{
-    background:radial-gradient(120% 80% at 50% -10%, #0a1240 0%, var(--navy) 55%, #000018 100%) fixed;
+    background:#000018;
     color:var(--sand); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
     display:flex; flex-direction:column; height:100dvh; overflow:hidden;
   }
+
+  /* ---- photoreal circuit-board background video + frosted glass ---- */
+  #bgvideo{
+    position:fixed; inset:0; width:100%; height:100%; object-fit:cover;
+    z-index:-3; pointer-events:none; background:#000018;
+  }
+  /* frosted glass pane over the footage: blurs + tints it so the floating UI reads clearly */
+  #bgglass{
+    position:fixed; inset:0; z-index:-2; pointer-events:none;
+    background:
+      radial-gradient(130% 90% at 50% -12%, rgba(12,22,74,.30) 0%, rgba(0,0,36,.52) 52%, rgba(0,0,20,.80) 100%),
+      linear-gradient(180deg, rgba(0,0,26,.30) 0%, rgba(0,0,20,.46) 100%);
+    -webkit-backdrop-filter:blur(7px) saturate(1.15) brightness(.92);
+    backdrop-filter:blur(7px) saturate(1.15) brightness(.92);
+  }
+  /* faint copper edge vignette to seat the glass in the frame */
+  #bgglass::after{
+    content:""; position:absolute; inset:0;
+    box-shadow:inset 0 0 180px 40px rgba(0,0,14,.7), inset 0 0 3px rgba(200,118,47,.18);
+  }
+  @media(prefers-reduced-motion:reduce){ #bgvideo{display:none} }
   header{
     display:flex; align-items:center; gap:8px; padding:max(10px,env(safe-area-inset-top)) 12px 10px;
-    border-bottom:1px solid var(--line); background:rgba(0,0,30,.55); backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line); background:rgba(6,11,34,.52);
+    -webkit-backdrop-filter:blur(16px) saturate(1.25); backdrop-filter:blur(16px) saturate(1.25);
     position:sticky; top:0; z-index:5;
+    box-shadow:0 10px 30px -8px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.06);
   }
   .dot{width:18px;height:18px;border-radius:50%;flex:none;
     background:radial-gradient(circle at 35% 30%, #fff 0%, var(--copper2) 25%, var(--copper) 60%, #7a3f12 100%);
@@ -67,9 +90,12 @@
   .turn{display:flex;flex-direction:column}
   .msg{display:flex}
   .msg.me{justify-content:flex-end}
-  .bubble{max-width:88%;padding:10px 13px;border-radius:16px;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere}
-  .me .bubble{background:var(--user);border:1px solid var(--line);color:#fff1e0;border-bottom-right-radius:5px}
-  .ai .bubble{background:var(--ai);border:1px solid rgba(255,255,255,.07);border-bottom-left-radius:5px}
+  .bubble{max-width:88%;padding:10px 13px;border-radius:16px;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;
+    -webkit-backdrop-filter:blur(10px) saturate(1.2); backdrop-filter:blur(10px) saturate(1.2);
+    box-shadow:0 14px 30px -12px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.08);}
+  .me .bubble{background:rgba(184,115,51,.26);border:1px solid rgba(232,176,124,.32);color:#fff1e0;border-bottom-right-radius:5px}
+  .ai .bubble{background:rgba(10,18,48,.42);border:1px solid rgba(255,255,255,.1);border-bottom-left-radius:5px;
+    box-shadow:0 14px 30px -12px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.06), 0 0 22px -6px var(--glow);}
   .ai .bubble.think{color:var(--muted);font-style:italic}
   .acts{display:flex;gap:12px;padding:3px 6px 8px}
   .acts.me{justify-content:flex-end}
@@ -82,14 +108,20 @@
   .tool.done .sp{background:#5fae6b;animation:none;box-shadow:none}
   .tool.gated{color:#e8b07c}
   @keyframes pulse{50%{opacity:.3}}
-  .empty{margin:14vh auto 0;text-align:center;color:var(--muted);max-width:320px}
+  .empty{margin:12vh auto 0;text-align:center;color:var(--muted);max-width:340px;
+    padding:30px 26px;border-radius:22px;border:1px solid rgba(232,176,124,.24);
+    background:rgba(7,13,36,.42);
+    -webkit-backdrop-filter:blur(16px) saturate(1.2); backdrop-filter:blur(16px) saturate(1.2);
+    box-shadow:0 26px 60px -18px rgba(0,0,0,.75), inset 0 1px 0 rgba(255,255,255,.08), 0 0 40px -10px var(--glow);}
   .empty .dot{margin:0 auto 14px;width:52px;height:52px}
   .empty .brand{margin:0;font-size:32px;font-weight:800;letter-spacing:.5px;color:var(--copper2);text-shadow:0 0 18px var(--glow)}
   .empty .byline{margin:8px 0 0;font-size:15px;letter-spacing:.4px;color:var(--sand);opacity:.85}
   .empty .hint{margin:14px 0 0;font-size:13px;opacity:.7}
   footer{
-    border-top:1px solid var(--line); background:rgba(0,0,30,.6); backdrop-filter:blur(8px);
+    border-top:1px solid var(--line); background:rgba(6,11,34,.55);
+    -webkit-backdrop-filter:blur(16px) saturate(1.25); backdrop-filter:blur(16px) saturate(1.25);
     padding:8px 10px calc(8px + env(safe-area-inset-bottom));
+    box-shadow:0 -12px 34px -10px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.05);
   }
   .bar{max-width:760px;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
   textarea{
@@ -182,6 +214,10 @@
 </style>
 </head>
 <body>
+  <video id="bgvideo" autoplay muted loop playsinline preload="auto" poster="/icon-512.png">
+    <source src="/circuit-bg.mp4" type="video/mp4" />
+  </video>
+  <div id="bgglass" aria-hidden="true"></div>
   <div id="overlay"></div>
   <aside id="sidebar">
     <div class="sb-head">
@@ -303,6 +339,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=12"></script>
+  <script src="/app.js?v=13"></script>
 </body>
 </html>
