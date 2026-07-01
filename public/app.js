@@ -97,8 +97,9 @@ async function loadModels() {
   try {
     const r = await fetch("/ollama/v1/models", { cache: "no-store" }); if (!r.ok) return;
     const ids = ((await r.json()).data || []).map((m) => m.id || m.name).filter(Boolean);
-    modelSel.innerHTML = "<option value='auto'>Auto (router picks)</option>";
-    for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = id; modelSel.appendChild(o); }
+    const FRIENDLY = { "qwen3:8b": "Fast", "qwen3:30b-a3b": "Deep" };
+    modelSel.innerHTML = "<option value='auto'>Auto (recommended)</option>";
+    for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = FRIENDLY[id] || id.replace(/:.*$/, ""); modelSel.appendChild(o); }
     const saved = localStorage.getItem(LS_MODEL);
     modelSel.value = (saved && (saved === "auto" || ids.includes(saved))) ? saved : "auto";
   } catch {}
@@ -113,9 +114,9 @@ async function streamReply(c) {
   const row = document.createElement("div"); row.className = "turn";
   const inner = document.createElement("div"); inner.className = "msg ai";
   const tools = document.createElement("div"); tools.className = "tools";
-  const live = document.createElement("div"); live.className = "bubble think cursor"; live.textContent = "thinking…";
+  const live = document.createElement("div"); live.className = "bubble think cursor"; live.textContent = "Dominion AI is working…";
   inner.append(tools, live); row.appendChild(inner); wrap.appendChild(row); scroll();
-  const warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "waking the model… first reply can take ~20s"; scroll(); } }, 6000);
+  const warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "Dominion AI is working… (first reply can take ~20s)"; scroll(); } }, 6000);
 
   setBusy(true); aborter = new AbortController();
   let raw = ""; let errMsg = ""; let routeEl = null; let ctxEl = null; const chips = [];
@@ -142,9 +143,7 @@ async function streamReply(c) {
         const s = line.trim(); if (!s.startsWith("data:")) continue;
         let ev; try { ev = JSON.parse(s.slice(5).trim()); } catch { continue; }
         if (ev.type === "route") {
-          if (!routeEl) { routeEl = document.createElement("div"); routeEl.className = "route"; inner.insertBefore(routeEl, tools); }
-          routeEl.textContent = ev.model + " · " + String(ev.mode || "").replace("_", " ") + (ev.reason ? " — " + ev.reason : "");
-          scroll();
+          // Model/mode intentionally NOT shown — the in-progress bubble just says "Dominion AI is working".
         } else if (ev.type === "context") {
           if (!ctxEl) { ctxEl = document.createElement("div"); ctxEl.className = "ctx"; inner.insertBefore(ctxEl, tools); }
           ctxEl.textContent = "🧠 used " + ev.memory + " memor" + (ev.memory === 1 ? "y" : "ies");
@@ -183,7 +182,7 @@ async function streamReply(c) {
           const decide = (approved) => { yes.disabled = no.disabled = true; box.remove(); fetch("/tool-confirm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runId: ev.runId, approved }) }).catch(() => {}); };
           yes.onclick = () => decide(true); no.onclick = () => decide(false);
           btns.append(yes, no); box.append(q, btns); tools.appendChild(box); scroll();
-        } else if (ev.type === "token") { raw += ev.delta || ""; const shown = stripThink(raw); live.classList.toggle("think", !shown); live.textContent = shown || "thinking…"; scroll(); }
+        } else if (ev.type === "token") { raw += ev.delta || ""; const shown = stripThink(raw); live.classList.toggle("think", !shown); live.textContent = shown || "Dominion AI is working…"; scroll(); }
         else if (ev.type === "error") { throw new Error(ev.error || "server error"); }
       }
     }
@@ -457,7 +456,9 @@ async function addImprove() {
 
 // ---------- wire up ----------
 input.addEventListener("input", autosize);
-input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+// Desktop (mouse) sends on Enter; phone/touch lets Enter insert a newline (use the send button).
+const enterSends = !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && enterSends) { e.preventDefault(); send(); } });
 sendBtn.addEventListener("click", send);
 menuBtn.addEventListener("click", () => (sidebar.classList.contains("open") ? closeSidebar() : openSidebar()));
 overlay.addEventListener("click", closeSidebar);
