@@ -24,6 +24,7 @@ import { createMemoryStore } from "./memory.mjs";
 import { createArtifactStore } from "./artifacts.mjs";
 import { createMentor } from "./mentor.mjs";
 import { createFlywheel } from "./flywheel.mjs";
+import { startWatchdog } from "./watchdog.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -628,4 +629,9 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review]  ·  draft-mode auto-saves`);
   console.log(`[dominion-ai] mentor: ${mentor.info().provider}  ·  auto-review=${AUTO_MENTOR ? "ON" : "off (LAX)"}  ·  flywheel ${JSON.stringify(flywheel.stats())}  ·  endpoints: /mentor/review, /ledger, /evals(+run), /rules`);
   console.log("[dominion-ai] front this with: tailscale serve --bg " + PORT);
+  if (String(cfgGet("WATCHDOG_ENABLED", "1")) !== "0") {
+    const wms = Number(cfgGet("WATCHDOG_INTERVAL_MS", "180000")) || 180000;
+    startWatchdog({ logDir: LOG_DIR, ollamaUrl: OLLAMA, intervalMs: wms });
+    console.log(`[dominion-ai] watchdog: ON  ·  heartbeat + poller self-heal every ${Math.round(wms / 1000)}s  ·  log=logs/watchdog.jsonl`);
+  }
 });
