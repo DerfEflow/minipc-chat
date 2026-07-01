@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "minipc-chat",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.mjs"],
+      "port": 8088
+    }
+  ]
+}

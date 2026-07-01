@@ -50,22 +50,35 @@ export function createArtifactStore(opts = {}) {
 
   const find = (id) => items.find((a) => a.id === id) || null;
   const curContent = (a) => { const v = a.versions[a.version - 1] || a.versions[a.versions.length - 1]; return v ? v.content : ""; };
-  const meta = (a) => ({ id: a.id, title: a.title, type: a.type, status: a.status, version: a.version, versionCount: a.versions.length, createdAt: a.createdAt, updatedAt: a.updatedAt, modelProviderId: a.modelProviderId, mentorReviewed: a.mentorReviewed, hasReview: !!a.reviewNotes, sourceChatId: a.sourceChatId, tags: a.tags, wordCount: wordCount(curContent(a)) });
+  const meta = (a) => { const c = curContent(a); return { id: a.id, title: a.title, type: a.type, status: a.status, version: a.version, versionCount: a.versions.length, createdAt: a.createdAt, updatedAt: a.updatedAt, modelProviderId: a.modelProviderId, mentorReviewed: a.mentorReviewed, hasReview: !!a.reviewNotes, sourceChatId: a.sourceChatId, sourceToolRunIds: a.sourceToolRunIds || [], sourceContextRefs: a.sourceContextRefs || [], tags: a.tags, wordCount: wordCount(c), tokenEstimate: Math.ceil(c.length / 4), exportFormats: ["md", "txt", "json", "html", "docx", "pdf"] }; };
   const full = (a) => ({ ...meta(a), content: curContent(a), reviewNotes: a.reviewNotes || null, versions: a.versions.map((v) => ({ version: v.version, createdAt: v.createdAt, model: v.model, promptSummary: v.promptSummary, wordCount: wordCount(v.content) })) });
 
-  function create({ title, type, content, model, sourceChatId, tags, promptSummary } = {}) {
+  function create({ title, type, content, model, sourceChatId, tags, promptSummary, sourceToolRunIds, sourceContextRefs } = {}) {
     const body = String(content || "").slice(0, MAX_LEN);
     if (body.trim().length < 1) return { error: "empty content" };
     const now = nowIso();
     const a = {
       id: randomUUID(), title: String(title || "Untitled").slice(0, 200), type: TYPES.has(type) ? type : "markdown",
       status: "draft", createdAt: now, updatedAt: now, sourceChatId: sourceChatId || null,
+      sourceToolRunIds: Array.isArray(sourceToolRunIds) ? sourceToolRunIds.slice(0, 20) : [],
+      sourceContextRefs: Array.isArray(sourceContextRefs) ? sourceContextRefs.slice(0, 20) : [],
       modelProviderId: model || "", mentorReviewed: false, reviewNotes: null, version: 1,
       tags: Array.isArray(tags) ? tags.slice(0, 12).map(String) : [],
       versions: [{ version: 1, content: body, createdAt: now, model: model || "", promptSummary: String(promptSummary || "").slice(0, 300) }],
     };
     items.push(a); if (items.length > MAX_ITEMS) items = items.slice(-MAX_ITEMS); persist();
     return { item: full(a) };
+  }
+
+  // Duplicate the current version into a fresh artifact (or a reusable template).
+  function duplicate(id, { asTemplate } = {}) {
+    const a = find(id); if (!a) return { error: "not found" };
+    return create({
+      title: (asTemplate ? "Template — " : "Copy of ") + a.title,
+      type: a.type, content: curContent(a), model: a.modelProviderId, sourceChatId: a.sourceChatId,
+      tags: asTemplate ? [...new Set([...(a.tags || []), "template"])] : a.tags,
+      promptSummary: (asTemplate ? "saved as template from " : "duplicated from ") + a.id.slice(0, 8),
+    });
   }
 
   // A revision is a NEW version — prior versions are never lost (the rollback guarantee).
@@ -129,5 +142,5 @@ export function createArtifactStore(opts = {}) {
 
   function stats() { const by = {}; for (const a of items) by[a.status] = (by[a.status] || 0) + 1; return { total: items.length, byStatus: by }; }
 
-  return { create, addVersion, setVersion, update, attachReview, remove, list, get, getContent, diff, exportArtifact, stats };
+  return { create, duplicate, addVersion, setVersion, update, attachReview, remove, list, get, getContent, diff, exportArtifact, stats };
 }
