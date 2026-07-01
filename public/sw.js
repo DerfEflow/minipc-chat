@@ -1,7 +1,7 @@
 // Minimal service worker: cache the app shell so the PWA installs + opens offline.
 // The live model/agent APIs (/ollama/*, /chat) are NEVER cached.
-const CACHE = "dominion-ai-v13";
-const SHELL = ["/", "/index.html", "/app.js?v=13", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png", "/circuit-bg.mp4"];
+const CACHE = "dominion-ai-v14";
+const SHELL = ["/", "/index.html", "/app.js?v=14", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png", "/circuit-bg.mp4"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -17,7 +17,7 @@ self.addEventListener("activate", (e) => {
 // cached shell only when offline. The live APIs are never touched by the worker.
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
-  const dyn = ["/chat", "/memory", "/toolruns", "/tool-confirm", "/artifacts", "/mentor", "/ledger", "/evals", "/rules"];
+  const dyn = ["/chat", "/memory", "/toolruns", "/tool-confirm", "/artifacts", "/mentor", "/ledger", "/evals", "/rules", "/prompts"];
   if (url.pathname.startsWith("/ollama") || dyn.some((b) => url.pathname === b || url.pathname.startsWith(b + "/"))) return;
   e.respondWith(
     fetch(e.request)

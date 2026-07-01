@@ -12,7 +12,8 @@ const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"
       toolsBtn = $("tools"), tmodal = $("tmodal"), tclose = $("tclose"), tlist = $("tlist"), tstats = $("tstats"),
       confirmToolsBox = $("confirm-tools"),
       artifactsBtn = $("artifacts"), amodal = $("amodal"), aclose = $("aclose"), alist = $("alist"), adetail = $("adetail"), astats = $("astats"), ahead = $("ahead"),
-      improveBtn = $("improve"), imodal = $("imodal"), iclose = $("iclose"), ilist = $("ilist"), istats = $("istats"), iadd = $("iadd"), iaddbtn = $("iaddbtn");
+      improveBtn = $("improve"), imodal = $("imodal"), iclose = $("iclose"), ilist = $("ilist"), istats = $("istats"), iadd = $("iadd"), iaddbtn = $("iaddbtn"),
+      chatSearch = $("chatsearch"), privacySel = $("privacy-sel");
 
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
       LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
@@ -24,8 +25,19 @@ const PRESETS = {
   code: "You are a precise coding assistant: give exact, runnable specifics; for real file changes use forge_send with complete instructions.",
 };
 
-let chats = [], curId = null, busy = false, aborter = null;
-let settings = { persona: "default", personaCustom: "", temperature: 0.7, confirmTools: false };
+let chats = [], curId = null, busy = false, aborter = null, chatQuery = "";
+let settings = { persona: "default", personaCustom: "", temperature: 0.7, confirmTools: false, privacy: "redacted_external" };
+
+// Background video: muted+playsinline autoplay is usually allowed, but Android suppresses it under
+// battery saver / when the PWA resumes from background — kick it back to life on those signals.
+(() => {
+  const v = document.getElementById("bgvideo"); if (!v) return;
+  const kick = () => { if (v.paused) v.play().catch(() => {}); };
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) kick(); });
+  window.addEventListener("pageshow", kick);
+  window.addEventListener("pointerdown", kick, { once: true });
+  kick();
+})();
 
 // ---------- persistence ----------
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "c" + Date.now() + Math.random().toString(36).slice(2));
@@ -45,23 +57,37 @@ const resolvePersona = () => settings.persona === "custom" ? (settings.personaCu
 const forcedModel = () => { const v = modelSel ? modelSel.value : "auto"; return v && v !== "auto" ? v : ""; };
 
 // ---------- chats ----------
-function newChat() { if (busy) return; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); closeSidebar(); input.focus(); }
-function switchChat(id) { if (busy) return; curId = id; save(); renderAll(); closeSidebar(); }
+// Leaving a substantial chat triggers a server-side episodic summary (fire-and-forget; the server
+// dedupes and skips chats it already summarized).
+function summarizeLeft(id) {
+  const c = chats.find((x) => x.id === id);
+  if (!c || c.messages.length < 4) return;
+  fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
+}
+function newChat() { if (busy) return; const prev = curId; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); closeSidebar(); input.focus(); if (prev) summarizeLeft(prev); }
+function switchChat(id) { if (busy) return; const prev = curId; curId = id; save(); renderAll(); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); }
 function deleteChat(id) { chats = chats.filter((c) => c.id !== id); if (curId === id) curId = (chats[0] && chats[0].id) || null; if (!curId) { newChat(); return; } save(); renderAll(); }
 function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = prompt("Rename chat", c.title); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); } }
 
 // ---------- sidebar ----------
 const openSidebar = () => { sidebar.classList.add("open"); overlay.classList.add("show"); };
 const closeSidebar = () => { sidebar.classList.remove("open"); overlay.classList.remove("show"); };
+const MODE_LABEL = { fast: "Fast", normal: "Normal", deep_think: "Deep", long_context: "Long", draft: "Draft", tool: "Tool", mentor: "Mentor" };
+const relTime = (ts) => { const d = Date.now() - (ts || 0); const m = Math.round(d / 60000); if (m < 60) return m + "m"; const h = Math.round(m / 60); if (h < 24) return h + "h"; return Math.round(h / 24) + "d"; };
 function renderSidebar() {
   chatlist.innerHTML = "";
+  const q = chatQuery.trim().toLowerCase();
   for (const c of [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) {
+    if (q && !(c.title || "").toLowerCase().includes(q) && !c.messages.some((m) => (m.content || "").toLowerCase().includes(q))) continue;
     const row = document.createElement("div"); row.className = "ci" + (c.id === curId ? " active" : "");
     const ttl = document.createElement("div"); ttl.className = "ttl"; ttl.textContent = c.title || "New chat"; ttl.onclick = () => switchChat(c.id);
+    const meta = document.createElement("span"); meta.className = "meta";
+    meta.textContent = (c.lastMode && MODE_LABEL[c.lastMode] ? MODE_LABEL[c.lastMode] + " · " : "") + (c.updatedAt ? relTime(c.updatedAt) : "");
     const ren = document.createElement("span"); ren.className = "x"; ren.textContent = "✎"; ren.title = "Rename"; ren.onclick = (e) => { e.stopPropagation(); renameChat(c.id); };
     const del = document.createElement("span"); del.className = "x"; del.textContent = "×"; del.title = "Delete"; del.onclick = (e) => { e.stopPropagation(); if (confirm("Delete this chat?")) deleteChat(c.id); };
-    row.append(ttl, ren, del); chatlist.appendChild(row);
+    row.append(ttl, meta, ren, del); chatlist.appendChild(row);
   }
+  if (!chatlist.children.length && q) { const n = document.createElement("div"); n.className = "none"; n.style.cssText = "color:var(--muted);font-size:13px;text-align:center;padding:14px"; n.textContent = "No chats match."; chatlist.appendChild(n); }
 }
 
 // ---------- rendering ----------
@@ -73,9 +99,26 @@ function renderMsg(m, i, isLastAi) {
   const turn = document.createElement("div"); turn.className = "turn";
   const row = document.createElement("div"); row.className = "msg " + (m.role === "user" ? "me" : "ai");
   const b = document.createElement("div"); b.className = "bubble"; b.textContent = m.content; row.appendChild(b); turn.appendChild(row);
+  // Persistent "context used" line (spec: show context/tool usage per message) — survives reloads.
+  if (m.role === "assistant" && m.meta && (m.meta.memory || m.meta.artifacts || m.meta.chats || m.meta.tools || m.meta.mode)) {
+    const mm = document.createElement("div"); mm.className = "msgmeta";
+    const bits = [];
+    if (m.meta.mode && MODE_LABEL[m.meta.mode]) bits.push(MODE_LABEL[m.meta.mode]);
+    if (m.meta.memory) bits.push("🧠 " + m.meta.memory);
+    if (m.meta.artifacts) bits.push("📄 " + m.meta.artifacts);
+    if (m.meta.chats) bits.push("💬 " + m.meta.chats);
+    if (m.meta.tools) bits.push("🔧 " + m.meta.tools);
+    mm.textContent = bits.join(" · ");
+    turn.appendChild(mm);
+  }
   const acts = document.createElement("div"); acts.className = "acts" + (m.role === "user" ? " me" : "");
   if (m.role === "user") { acts.append(mkAct("Edit", () => editUser(i)), mkAct("Copy", () => copyText(m.content))); }
-  else { acts.appendChild(mkAct("Copy", () => copyText(m.content))); acts.appendChild(mkAct("Save", () => saveAsArtifact(m.content))); acts.appendChild(mkAct("Critique", () => critiqueMessage(i))); if (isLastAi && !busy) acts.appendChild(mkAct("Regenerate", () => regenerate())); }
+  else {
+    acts.appendChild(mkAct("Copy", () => copyText(m.content)));
+    acts.appendChild(mkAct("Save", () => saveAsArtifact(m.content)));
+    acts.appendChild(mkAct("Critique", () => critiqueMessage(i)));
+    if (isLastAi && !busy) { acts.appendChild(mkAct("Continue", () => continueLast())); acts.appendChild(mkAct("Regenerate", () => regenerate())); }
+  }
   turn.appendChild(acts); wrap.appendChild(turn);
 }
 function renderAll() {
@@ -120,6 +163,7 @@ async function streamReply(c) {
 
   setBusy(true); aborter = new AbortController();
   let raw = ""; let errMsg = ""; let routeEl = null; let ctxEl = null; const chips = [];
+  let doneMeta = null, mentorCritique = null;
   try {
     const res = await fetch("/chat", {
       method: "POST", headers: { "content-type": "application/json" }, signal: aborter.signal,
@@ -146,8 +190,16 @@ async function streamReply(c) {
           // Model/mode intentionally NOT shown — the in-progress bubble just says "Dominion AI is working".
         } else if (ev.type === "context") {
           if (!ctxEl) { ctxEl = document.createElement("div"); ctxEl.className = "ctx"; inner.insertBefore(ctxEl, tools); }
-          ctxEl.textContent = "🧠 used " + ev.memory + " memor" + (ev.memory === 1 ? "y" : "ies");
+          const bits = [];
+          if (ev.memory) bits.push("🧠 " + ev.memory + " memor" + (ev.memory === 1 ? "y" : "ies"));
+          if (ev.artifacts) bits.push("📄 " + ev.artifacts + " artifact" + (ev.artifacts === 1 ? "" : "s"));
+          if (ev.chats) bits.push("💬 " + ev.chats + " past chat" + (ev.chats === 1 ? "" : "s"));
+          ctxEl.textContent = bits.join(" · ");
           scroll();
+        } else if (ev.type === "mentor_full") {
+          mentorCritique = ev.critique || null;
+        } else if (ev.type === "done") {
+          doneMeta = ev.meta || null;
         } else if (ev.type === "artifact") {
           const note = document.createElement("div"); note.className = "ctx"; note.style.cursor = "pointer";
           note.textContent = "📄 saved artifact: " + ev.title + " (tap to open)";
@@ -188,13 +240,20 @@ async function streamReply(c) {
     }
     clearTimeout(warm);
     const final = stripThink(raw) || "(no response)";
-    c.messages.push({ role: "assistant", content: final }); c.updatedAt = Date.now(); save();
+    const msg = { role: "assistant", content: final };
+    if (doneMeta) { msg.meta = doneMeta; if (doneMeta.mode) c.lastMode = doneMeta.mode; }
+    c.messages.push(msg); c.updatedAt = Date.now(); save();
   } catch (e) {
     clearTimeout(warm);
-    if (e.name === "AbortError") { const partial = stripThink(raw); if (partial) { c.messages.push({ role: "assistant", content: partial }); save(); } }
+    if (e.name === "AbortError") { const partial = stripThink(raw); if (partial) { c.messages.push({ role: "assistant", content: partial, meta: { interrupted: true } }); save(); } }
     else { errMsg = "Chat failed: " + (e.message || "network error") + " — tap send to retry."; }
   } finally {
     setBusy(false); aborter = null; renderAll(); if (errMsg) showErr(errMsg);
+    if (mentorCritique) {   // Mentor mode: show the critique card under the fresh answer
+      const card = document.createElement("div"); card.className = "critique";
+      renderCritiqueCard(card, mentorCritique, (c.messages.filter((m) => m.role === "user").slice(-1)[0] || {}).content || "", stripThink(raw));
+      wrap.appendChild(card); scroll();
+    }
   }
 }
 
@@ -213,6 +272,12 @@ function regenerate() {
   for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { c.messages.splice(i, 1); break; }
   save(); renderAll(); streamReply(c);
 }
+// Pick up where a (possibly stopped) answer left off (spec: offer continuation after stop).
+function continueLast() {
+  if (busy) return; const c = cur(); if (!c) return;
+  c.messages.push({ role: "user", content: "Continue exactly where you left off." });
+  c.updatedAt = Date.now(); save(); renderAll(); streamReply(c);
+}
 function editUser(i) {
   if (busy) return; const c = cur(); if (!c) return;
   input.value = c.messages[i].content; c.messages = c.messages.slice(0, i); c.updatedAt = Date.now(); save(); renderAll(); autosize(); input.focus();
@@ -224,6 +289,7 @@ function openSettings() {
   personaCustom.hidden = settings.persona !== "custom";
   tempInput.value = String(settings.temperature); tempVal.textContent = String(settings.temperature);
   if (confirmToolsBox) confirmToolsBox.checked = !!settings.confirmTools;
+  if (privacySel) privacySel.value = settings.privacy || "redacted_external";
   smodal.hidden = false;
 }
 const closeSettings = () => { smodal.hidden = true; };
@@ -231,6 +297,7 @@ function saveSettingsUI() {
   settings.persona = personaSel.value; settings.personaCustom = personaCustom.value.trim();
   settings.temperature = parseFloat(tempInput.value);
   if (confirmToolsBox) settings.confirmTools = confirmToolsBox.checked;
+  if (privacySel) settings.privacy = privacySel.value;
   if (modelSel) try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {}
   saveSettings(); closeSettings();
 }
@@ -263,6 +330,8 @@ function renderMemory(items) {
     acts.append(
       mkAct(m.pinned ? "Unpin" : "Pin", () => memUpdate(m.id, { action: m.pinned ? "unpin" : "pin" })),
       mkAct("Edit", () => { const t = prompt("Edit memory", m.content); if (t != null && t.trim()) memUpdate(m.id, { content: t.trim() }); }),
+      mkAct("→ Eval", async (ev) => { const exp = prompt("Expected behavior (what a good answer must do):", ""); if (exp == null) return; await aApi("/evals", { title: m.content.slice(0, 80), input: m.content, expectedBehavior: exp, source: "manual" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }),
+      mkAct("→ Rule", async (ev) => { await aApi("/rules", { content: m.content, scope: "global", status: "candidate" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }),
       mkAct(m.status === "archived" ? "Unarchive" : "Archive", () => memUpdate(m.id, { action: m.status === "archived" ? "approve" : "archive" })),
       mkAct("Delete", () => { if (confirm("Delete this memory?")) memDelete(m.id); }),
     );
@@ -336,19 +405,33 @@ async function openArtifact(id) {
   for (let v = 1; v <= a.versionCount; v++) { const o = document.createElement("option"); o.value = v; o.textContent = "v" + v; if (v === a.version) o.selected = true; sel.appendChild(o); }
   sel.onchange = async () => { await aApi("/artifacts/setversion", { id: a.id, version: Number(sel.value) }); openArtifact(a.id); };
   vrow.append(Object.assign(document.createElement("span"), { textContent: "Version" }), sel);
-  if (a.versionCount > 1) vrow.appendChild(mkAct("Diff vs prev", () => showDiff(a.id, a.version - 1 || 1, a.version)));
+  if (a.versionCount > 1) {
+    // Any-to-any version diff (the API always supported it; the UI now does too)
+    const dsel = document.createElement("select");
+    for (let v = 1; v <= a.versionCount; v++) { const o = document.createElement("option"); o.value = v; o.textContent = "vs v" + v; if (v === (a.version - 1 || 1)) o.selected = true; dsel.appendChild(o); }
+    vrow.append(dsel, mkAct("Diff", () => showDiff(a.id, Number(dsel.value), a.version)));
+  }
   adetail.appendChild(vrow);
   const c = document.createElement("div"); c.className = "acontent"; c.textContent = a.content; adetail.appendChild(c);
   const acts = document.createElement("div"); acts.className = "arow"; acts.style.marginTop = "8px";
   acts.append(
     mkAct("Revise", () => reviseArtifact(a)),
     mkAct("Export", () => exportArtifact(a)),
-    mkAct(a.status === "final" ? "Unfinalize" : "Mark final", () => setArtStatus(a.id, a.status === "final" ? "draft" : "final")),
+    mkAct(a.status === "final" ? "Unfinalize" : "Mark final", () => markFinal(a)),
     mkAct("Review", () => reviewArtifact(a.id)),
+    mkAct("Duplicate", async () => { const r = await aApi("/artifacts/duplicate", { id: a.id }); if (r.item) openArtifact(r.item.id); }),
+    mkAct("Save as template", async () => { const r = await aApi("/artifacts/duplicate", { id: a.id, asTemplate: true }); if (r.item) openArtifact(r.item.id); }),
     mkAct("Rename", () => renameArt(a)),
     mkAct("Delete", () => { if (confirm("Delete this artifact and all versions?")) delArt(a.id); }),
   );
   adetail.appendChild(acts);
+  const xrow = document.createElement("div"); xrow.className = "arow";
+  xrow.append(
+    mkAct("→ Checklist", () => transformArt(a.id, "checklist")),
+    mkAct("Extract tasks", () => transformArt(a.id, "tasks")),
+    mkAct("Extract memories", async (ev) => { if (ev && ev.target) ev.target.textContent = "extracting…"; const r = await aApi("/artifacts/transform", { id: a.id, kind: "memory" }); alert(r.error ? "Extract: " + r.error : (r.count ? "Saved " + r.count + " memor" + (r.count === 1 ? "y" : "ies") + ":\n\n- " + r.saved.join("\n- ") : "Nothing durable found.")); openArtifact(a.id); }),
+  );
+  adetail.appendChild(xrow);
   if (a.reviewNotes) { const rv = document.createElement("div"); rv.className = "areview"; rv.textContent = a.reviewNotes; adetail.appendChild(rv); }
 }
 async function showDiff(id, from, to) {
@@ -358,7 +441,27 @@ async function showDiff(id, from, to) {
   const old = adetail.querySelector(".adiff"); if (old) old.remove(); adetail.appendChild(box); box.scrollIntoView();
 }
 async function reviseArtifact(a) { const t = prompt("Revise — the full new content:", a.content); if (t != null && t.trim()) { await aApi("/artifacts/version", { id: a.id, content: t }); openArtifact(a.id); } }
-async function exportArtifact(a) { const f = prompt("Export format (md, txt, json, html):", "md"); if (f == null) return; const r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim() }); alert(r.error ? "Export: " + r.error : "Exported to " + r.path); }
+// Export safety (spec): warn when exporting an unreviewed artifact; docx/pdf auto-queue Forge conversion.
+async function exportArtifact(a) {
+  const f = prompt("Export format (md, txt, json, html, docx, pdf):", "md"); if (f == null) return;
+  if (!a.mentorReviewed && !confirm("This artifact hasn't been mentor-reviewed. Export anyway?")) return;
+  const r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim() });
+  alert(r.error ? "Export: " + r.error : "Exported to " + r.path + (r.queued ? "\n\nForge conversion queued — the " + f.trim() + " lands next to it shortly." : r.warning ? "\n\n" + r.warning : ""));
+}
+// Mark final offers a mentor review first (spec: review trigger on final) — one tap, never a blocker.
+async function markFinal(a) {
+  if (a.status === "final") return setArtStatus(a.id, "draft");
+  if (!a.mentorReviewed && confirm("Run a mentor review before finalizing? (Recommended — takes ~20s)")) {
+    const note = document.createElement("div"); note.className = "areview"; note.textContent = "Reviewing…"; adetail.appendChild(note);
+    await aApi("/artifacts/review", { id: a.id });
+  }
+  await setArtStatus(a.id, "final");
+}
+async function transformArt(id, kind) {
+  const note = document.createElement("div"); note.className = "areview"; note.textContent = "Transforming with the local model (~20s)…"; adetail.appendChild(note);
+  const r = await aApi("/artifacts/transform", { id, kind });
+  if (r.item) openArtifact(r.item.id); else { note.remove(); alert("Transform: " + (r.error || "failed")); }
+}
 async function setArtStatus(id, status) { await aApi("/artifacts/update", { id, status }); openArtifact(id); }
 async function renameArt(a) { const t = prompt("Rename artifact:", a.title); if (t != null && t.trim()) { await aApi("/artifacts/update", { id: a.id, title: t.trim() }); openArtifact(a.id); } }
 async function reviewArtifact(id) { const note = document.createElement("div"); note.className = "areview"; note.textContent = "Reviewing with the local model (≈20s)…"; adetail.appendChild(note); await aApi("/artifacts/review", { id }); openArtifact(id); }
@@ -376,13 +479,13 @@ async function critiqueMessage(i) {
   const c = cur(); if (!c || !c.messages[i]) return;
   const answer = c.messages[i].content; let orig = "";
   for (let k = i - 1; k >= 0; k--) if (c.messages[k].role === "user") { orig = c.messages[k].content; break; }
-  const card = document.createElement("div"); card.className = "critique"; card.textContent = "🎓 Mentor reviewing… (local model, ~15s)"; wrap.appendChild(card); scroll();
+  const card = document.createElement("div"); card.className = "critique"; card.textContent = "🎓 Mentor reviewing… (~15s)"; wrap.appendChild(card); scroll();
   try {
-    const d = await aApi("/mentor/review", { content: answer, originalRequest: orig, taskType: "answer_review" });
-    renderCritiqueCard(card, d.critique || {}, orig);
+    const d = await aApi("/mentor/review", { content: answer, originalRequest: orig, taskType: "answer_review", privacyMode: settings.privacy || "redacted_external" });
+    renderCritiqueCard(card, d.critique || {}, orig, answer);
   } catch { card.textContent = "Mentor review failed."; }
 }
-function renderCritiqueCard(card, c, orig) {
+function renderCritiqueCard(card, c, orig, answer) {
   card.innerHTML = "";
   const head = document.createElement("div"); head.className = "crhead";
   const sp = document.createElement("span"); sp.className = "scorepill"; sp.textContent = (c.overall_score ?? "?") + "/10"; head.appendChild(sp);
@@ -392,10 +495,29 @@ function renderCritiqueCard(card, c, orig) {
   const sec = (label, a) => { if (!a || !a.length) return; const d = document.createElement("div"); d.className = "crsec"; d.innerHTML = "<b>" + label + ":</b> " + a.map(escapeHtml).join("; "); card.appendChild(d); };
   sec("Major", c.major_findings); sec("Unsupported", c.unsupported_claims); sec("Reasoning", c.reasoning_errors); sec("Safety/Privacy", c.safety_or_privacy_issues);
   if (c.recommended_revision) { const d = document.createElement("div"); d.className = "crsec"; d.innerHTML = "<b>Suggestion:</b> " + escapeHtml(c.recommended_revision); card.appendChild(d); }
+  // Apply revision (spec): one tap -> the local model rewrites the answer using this critique.
+  if (answer && (c.recommended_revision || (c.major_findings || []).length)) {
+    const row = document.createElement("div"); row.className = "cand";
+    row.appendChild(Object.assign(document.createElement("span"), { textContent: "✍️ apply this critique to the answer" }));
+    const b = document.createElement("button"); b.textContent = "Apply revision";
+    b.onclick = async () => {
+      b.disabled = true; b.textContent = "revising… (~30s)";
+      try {
+        const d = await aApi("/mentor/revise", { content: answer, originalRequest: orig, critique: c });
+        if (d.revised) {
+          const ch = cur();
+          if (ch) { ch.messages.push({ role: "assistant", content: d.revised, meta: { revised: true } }); ch.updatedAt = Date.now(); save(); renderAll(); }
+          b.textContent = "applied ✓";
+        } else { b.textContent = "failed"; b.disabled = false; }
+      } catch { b.textContent = "failed"; b.disabled = false; }
+    };
+    row.appendChild(b); card.appendChild(row);
+  }
   const cand = (label, text, save) => { const r = document.createElement("div"); r.className = "cand"; r.appendChild(Object.assign(document.createElement("span"), { textContent: "💡 " + text })); const b = document.createElement("button"); b.textContent = label; b.onclick = async () => { b.disabled = true; await save(); b.textContent = "saved ✓"; }; r.appendChild(b); card.appendChild(r); };
   (c.memory_candidates || []).forEach((t) => cand("→ memory", t, () => memApi("/memory", { content: t, source: "mentor_suggested" })));
   (c.eval_case_candidates || []).forEach((t) => cand("→ eval", t, () => aApi("/evals", { title: t.slice(0, 80), input: t, source: "mentor" })));
   (c.prompt_rule_candidates || []).forEach((t) => cand("→ rule", t, () => aApi("/rules", { content: t, scope: "global", status: "candidate" })));
+  (c.retrieval_rule_candidates || []).forEach((t) => cand("→ retrieval rule", t, () => aApi("/rules", { content: t, scope: "retrieval", status: "candidate" })));
   cand("→ ledger", "log this review as a failure entry", () => aApi("/ledger", { category: "mentor_flag", severity: "low", originalRequest: orig, flawedOutput: "(see chat)", detectedBy: "mentor" }));
   scroll();
 }
@@ -406,17 +528,31 @@ function openImprove() { imodal.hidden = false; setITab(itab); }
 const closeImprove = () => { imodal.hidden = true; };
 function setITab(t) {
   itab = t; document.querySelectorAll(".itab").forEach((el) => el.classList.toggle("on", el.dataset.tab === t));
-  iadd.placeholder = t === "ledger" ? "Log a failure / lesson…" : t === "evals" ? "Eval input prompt…" : "Prompt rule (a compact instruction)…";
+  iadd.placeholder = t === "ledger" ? "Log a failure / lesson…" : t === "evals" ? "Eval input prompt…" : t === "prompts" ? "Prompt content (name/scope asked next)…" : "Prompt rule (a compact instruction)…";
   loadImprove();
 }
 async function loadImprove() {
   ilist.textContent = "Loading…";
-  const path = itab === "ledger" ? "/ledger" : itab === "evals" ? "/evals" : "/rules";
+  const path = itab === "ledger" ? "/ledger" : itab === "evals" ? "/evals" : itab === "prompts" ? "/prompts" : "/rules";
   const d = await aApi(path); const items = (d && d.items) || [];
-  if (istats && d.stats) { const s = d.stats; istats.textContent = `${s.failures}F · ${s.evals}E · ${s.rules}R (${s.activeRules} active)`; }
+  if (istats && d.stats) { const s = d.stats; istats.textContent = `${s.failures}F · ${s.evals}E · ${s.rules}R (${s.activeRules} active) · ${s.prompts || 0}P`; }
   ilist.innerHTML = "";
   if (!items.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "Nothing here yet."; ilist.appendChild(n); return; }
-  for (const it of items) ilist.appendChild(itab === "ledger" ? renderFailure(it) : itab === "evals" ? renderEval(it) : renderRule(it));
+  for (const it of items) ilist.appendChild(itab === "ledger" ? renderFailure(it) : itab === "evals" ? renderEval(it) : itab === "prompts" ? renderPrompt(it) : renderRule(it));
+}
+function renderPrompt(p) {
+  const it = document.createElement("div"); it.className = "mitem";
+  const top = document.createElement("div"); top.className = "mtop";
+  top.append(badge(p.name), badge(p.scope), badge("v" + p.version), badge(p.active ? "active" : "inactive", p.active ? "" : "pending"));
+  const c = document.createElement("div"); c.className = "mc"; c.textContent = p.content;
+  if (p.changeReason) { const r = document.createElement("div"); r.className = "mtop"; r.textContent = "why: " + p.changeReason; it.appendChild(r); }
+  const acts = document.createElement("div"); acts.className = "macts";
+  acts.append(
+    mkAct(p.active ? "Deactivate" : "Activate", async () => { if (p.active) await aApi("/prompts/update", { id: p.id, active: false }); else await aApi("/prompts/activate", { id: p.id }); loadImprove(); }),
+    mkAct("New version", async () => { const t = prompt("New version of \"" + p.name + "\":", p.content); if (t == null || !t.trim()) return; const why = prompt("Reason for the change:", "") || ""; await aApi("/prompts", { name: p.name, scope: p.scope, content: t.trim(), changeReason: why }); loadImprove(); }),
+    mkAct("Delete", () => fUpdate("/prompts/delete", { id: p.id })),
+  );
+  it.append(top, c, acts); return it;
 }
 function renderFailure(f) {
   const it = document.createElement("div"); it.className = "mitem";
@@ -440,9 +576,14 @@ function renderRule(r) {
   const it = document.createElement("div"); it.className = "mitem";
   const top = document.createElement("div"); top.className = "mtop";
   top.append(badge(r.scope), badge(r.status, r.status === "active" ? "" : "pending"));
+  if (typeof r.evalDelta === "number") top.append(badge((r.evalDelta > 0 ? "+" : "") + r.evalDelta + " on evals", r.evalDelta < 0 ? "rejected" : ""));
   const c = document.createElement("div"); c.className = "mc"; c.textContent = r.content;
   const acts = document.createElement("div"); acts.className = "macts";
-  acts.append(mkAct(r.status === "active" ? "Retire" : "Activate", () => fUpdate("/rules/update", { id: r.id, status: r.status === "active" ? "retired" : "active" })), mkAct("Delete", () => fUpdate("/rules/delete", { id: r.id })));
+  acts.append(
+    mkAct(r.status === "active" ? "Retire" : "Activate", () => fUpdate("/rules/update", { id: r.id, status: r.status === "active" ? "retired" : "active" })),
+    mkAct("Test", async (ev) => { const b = ev && ev.target; if (b) b.textContent = "testing… (minutes)"; const d = await aApi("/rules/test", { id: r.id }); alert(d.error ? "Test: " + d.error : "Δ " + d.delta + " — " + d.verdict + "\n\n" + d.results.map((x) => `${x.title}: ${x.before} → ${x.after}`).join("\n")); loadImprove(); }),
+    mkAct("Delete", () => fUpdate("/rules/delete", { id: r.id })),
+  );
   it.append(top, c, acts); return it;
 }
 async function fUpdate(path, body) { await aApi(path, body); loadImprove(); }
@@ -450,6 +591,12 @@ async function addImprove() {
   const v = (iadd.value || "").trim(); if (!v) return;
   if (itab === "ledger") await aApi("/ledger", { category: "manual", severity: "low", originalRequest: v, detectedBy: "user" });
   else if (itab === "evals") { const exp = prompt("Expected behavior (what a good answer must do):", ""); await aApi("/evals", { title: v.slice(0, 80), input: v, expectedBehavior: exp || "", source: "manual" }); }
+  else if (itab === "prompts") {
+    const name = prompt("Prompt name (same name = new version of that prompt):", "house-style"); if (name == null) return;
+    const scope = prompt("Scope (global, mode, tool, mentor, router):", "global") || "global";
+    const why = prompt("Reason for this prompt:", "") || "";
+    await aApi("/prompts", { name: name.trim() || "unnamed", scope: scope.trim(), content: v, changeReason: why });
+  }
   else await aApi("/rules", { content: v, scope: "global", status: "candidate" });
   iadd.value = ""; loadImprove();
 }
@@ -463,6 +610,7 @@ sendBtn.addEventListener("click", send);
 menuBtn.addEventListener("click", () => (sidebar.classList.contains("open") ? closeSidebar() : openSidebar()));
 overlay.addEventListener("click", closeSidebar);
 newBtn.addEventListener("click", newChat);
+if (chatSearch) chatSearch.addEventListener("input", () => { chatQuery = chatSearch.value || ""; renderSidebar(); });
 if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODE, modeSel.value); } catch {} });
 settingsBtn.addEventListener("click", openSettings);
 sclose.addEventListener("click", closeSettings);

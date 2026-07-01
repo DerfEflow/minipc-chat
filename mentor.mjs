@@ -65,8 +65,8 @@ function parseCritique(raw) {
 }
 
 const RUBRIC = "Factual accuracy, completeness, reasoning quality, usefulness, safety, privacy, formatting, tool-use correctness, and whether this should become a durable eval or prompt rule.";
-function mentorPrompt(taskType, originalRequest, content, rubric) {
-  return [
+function mentorPrompt(taskType, originalRequest, content, rubric, extras = {}) {
+  const parts = [
     "You are a mentor evaluator for a local AI assistant. Review the assistant output against the rubric.",
     "Do NOT rewrite unless asked. Identify unsupported claims, reasoning errors, tool-use risks, and privacy concerns. Be specific and concise.",
     "Return ONLY valid JSON (no prose) with these keys: overall_score (0-10), confidence (0-1), hallucination_risk (low|medium|high),",
@@ -76,8 +76,14 @@ function mentorPrompt(taskType, originalRequest, content, rubric) {
     "\nTask type: " + (taskType || "answer_review"),
     "Rubric: " + (rubric || RUBRIC),
     "\nOriginal request:\n" + String(originalRequest || "(none)").slice(0, 3000),
-    "\nAssistant output to review:\n" + String(content || "").slice(0, 12000),
-  ].join("\n");
+  ];
+  // Full review package (spec): what context the assistant actually saw + what tools it ran.
+  if (Array.isArray(extras.retrievedContext) && extras.retrievedContext.length)
+    parts.push("\nContext the assistant had loaded:\n" + extras.retrievedContext.map((c) => "- " + String(c).slice(0, 300)).join("\n").slice(0, 3000));
+  if (Array.isArray(extras.toolCalls) && extras.toolCalls.length)
+    parts.push("\nTool calls the assistant made (name · status):\n" + extras.toolCalls.map((t) => "- " + String(t).slice(0, 120)).join("\n").slice(0, 1500));
+  parts.push("\nAssistant output to review:\n" + String(content || "").slice(0, 12000));
+  return parts.join("\n");
 }
 
 export function createMentor({ localChat, mainModel, cfg = {} }) {
@@ -97,18 +103,37 @@ export function createMentor({ localChat, mainModel, cfg = {} }) {
     return (d && d.message && d.message.content) || "";
   }
 
-  // privacyMode: local_only | redacted_external | approved_external
-  async function critique({ taskType, originalRequest, content, rubric, privacyMode = "redacted_external" }) {
+  const stripThink = (t) => String(t || "").replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
+
+  // privacyMode: local_only | redacted_external | approved_external.
+  // local_only FORCES the local mentor even when an external one is configured (privacy override).
+  async function critique({ taskType, originalRequest, content, rubric, privacyMode = "redacted_external", retrievedContext, toolCalls }) {
+    const external = externalReady && privacyMode !== "local_only";
     let body = String(content || ""); let redactions = [];
-    if (externalReady && privacyMode !== "approved_external") { const r = redact(body); body = r.redacted; redactions = r.applied; }
-    const stripThink = (t) => String(t || "").replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
-    const raw = stripThink(await run([{ role: "user", content: mentorPrompt(taskType, originalRequest, body, rubric) }]));
+    if (external && privacyMode !== "approved_external") { const r = redact(body); body = r.redacted; redactions = r.applied; }
+    const prompt = mentorPrompt(taskType, originalRequest, body, rubric, { retrievedContext, toolCalls });
+    let raw;
+    if (external) raw = stripThink(await run([{ role: "user", content: prompt }]));
+    else { const d = await localChat(mainModel, [{ role: "user", content: prompt }], { temperature: 0.3, num_predict: 2000, noTools: true, format: "json" }); raw = stripThink((d && d.message && d.message.content) || ""); }
     const parsed = parseCritique(raw);
-    parsed._provider = externalReady ? cfg.model + " (external)" : mainModel + " (local)";
+    // UI-facing label — never surfaces underlying model names (house rule).
+    parsed._provider = external ? "external mentor" : "local mentor";
     parsed._redactions = redactions;
     return parsed;
   }
 
-  const info = () => ({ provider: externalReady ? "external:" + cfg.model : "local:" + mainModel, externalConfigured: externalReady });
-  return { critique, redact, info };
+  // Apply a critique: the local main model produces a revised version of the content.
+  async function revise({ originalRequest, content, critique: crit }) {
+    const prompt = [
+      "You are revising an assistant's output using a mentor's critique. Produce ONLY the fully revised output — no preamble, no meta-commentary, keep the original format.",
+      "\nOriginal request:\n" + String(originalRequest || "(none)").slice(0, 3000),
+      "\nCurrent output:\n" + String(content || "").slice(0, 12000),
+      "\nMentor critique to apply:\n" + JSON.stringify(crit || {}).slice(0, 4000),
+    ].join("\n");
+    const d = await localChat(mainModel, [{ role: "user", content: prompt }], { temperature: 0.4, num_predict: 4000, noTools: true });
+    return stripThink((d && d.message && d.message.content) || "");
+  }
+
+  const info = () => ({ provider: externalReady ? "external mentor" : "local mentor", externalConfigured: externalReady });
+  return { critique, revise, redact, info };
 }

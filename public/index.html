@@ -84,6 +84,11 @@
   .ci .x{opacity:.45;font-size:15px;padding:0 4px}
   .ci .x:hover{opacity:1;color:#ff9a7a}
   .sb-foot{padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+  .sb-search{padding:8px 10px 0}
+  .sb-search input{width:100%;background:var(--navy2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;color:var(--sand);font:inherit;font-size:14px;outline:none}
+  .sb-search input::placeholder{color:var(--muted)}
+  .ci .meta{font-size:10.5px;color:var(--muted);white-space:nowrap}
+  .msgmeta{font-size:10.5px;color:var(--muted);opacity:.7;padding:0 6px 2px}
 
   main{flex:1; overflow-y:auto; padding:14px 12px 6px; -webkit-overflow-scrolling:touch}
   .wrap{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:6px}
@@ -224,6 +229,7 @@
       <span class="h">Chats</span>
       <button id="newchat" class="sb-new">+ New</button>
     </div>
+    <div class="sb-search"><input id="chatsearch" type="search" placeholder="Search chats&#8230;" autocomplete="off" /></div>
     <div id="chatlist"></div>
     <div class="sb-foot">Dominion AI &middot; by Frederick Wolfe</div>
   </aside>
@@ -240,6 +246,8 @@
       <option value="deep_think">Deep Think</option>
       <option value="long_context">Long Context</option>
       <option value="draft">Draft</option>
+      <option value="tool">Tool</option>
+      <option value="mentor">Mentor</option>
     </select>
     <button id="artifacts" class="icon" title="Artifacts" aria-label="Artifacts">&#128196;</button>
     <button id="improve" class="icon" title="Mentor &amp; improvement" aria-label="Mentor and improvement">&#127891;</button>
@@ -284,6 +292,13 @@
         <input id="temp" type="range" min="0" max="1.2" step="0.1" value="0.7" />
       </label>
       <label class="toggle"><input type="checkbox" id="confirm-tools" /> Ask before risky tools (e.g. forge_send)</label>
+      <label class="frow">Mentor privacy (external mentors only; local reviews never leave the box)
+        <select id="privacy-sel">
+          <option value="local_only">Local only — never send content out</option>
+          <option value="redacted_external">Redacted — scrub secrets/PII first</option>
+          <option value="approved_external">Approved — send as-is</option>
+        </select>
+      </label>
       <button id="ssave" class="sb-new">Save</button>
     </div>
   </div>
@@ -330,6 +345,7 @@
         <div class="itab on" data-tab="ledger">Failures</div>
         <div class="itab" data-tab="evals">Evals</div>
         <div class="itab" data-tab="rules">Rules</div>
+        <div class="itab" data-tab="prompts">Prompts</div>
       </div>
       <div class="mrow-add">
         <textarea id="iadd" rows="1" placeholder="Add…"></textarea>
@@ -339,6 +355,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=13"></script>
+  <script src="/app.js?v=14"></script>
 </body>
 </html>
