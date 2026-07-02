@@ -663,7 +663,9 @@ async function distillPersona() {
   ].join("\n");
   const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: prompt }], { temperature: 0.3, num_predict: 2600, noTools: true, format: "json", think: false });
   let facets = null;
-  try { facets = JSON.parse(d && d.content ? d.content : "{}"); } catch { return { error: "The model didn't return valid JSON — try again." }; }
+  const raw = stripThink((d && d.message && d.message.content) || "");
+  try { facets = JSON.parse(raw || "{}"); } catch { const m = raw.match(/\{[\s\S]*\}/); try { facets = m ? JSON.parse(m[0]) : null; } catch { facets = null; } }
+  if (!facets) return { error: "The model didn't return valid JSON — try again." };
   if (!facets || typeof facets !== "object") return { error: "Empty profile came back — try again." };
   const systemBlock = renderFacets(facets) + (facets.summary ? "\n- In short: " + facets.summary : "");
   const p = persona.setProfile({ facets, systemBlock, model: "local" });
