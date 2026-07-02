@@ -718,7 +718,7 @@ async function handleChat(req, res) {
   let aborted = false;
   res.on("close", () => (aborted = true));
 
-  const persona = typeof input.persona === "string" ? input.persona.slice(0, 2000) : "";
+  const personaStyle = typeof input.persona === "string" ? input.persona.slice(0, 2000) : "";
   const userTemp = (typeof input.temperature === "number" && input.temperature >= 0 && input.temperature <= 2) ? input.temperature : undefined;
   const reqMode = typeof input.mode === "string" ? input.mode : "auto";
   const forced = (typeof input.model === "string" && input.model && input.model !== "auto") ? input.model : "";
@@ -747,7 +747,7 @@ async function handleChat(req, res) {
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
   // Fast mode skips retrieval (spec: fast = no retrieval overhead); durable pinned/profile still loads.
   const ctxInfo = await buildContext(lastUser ? lastUser.content : "", chatId, { skipRetrieval: mode === "fast" });
-  const messages = [{ role: "system", content: systemPrompt(persona, md.frag) }];
+  const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag) }];
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
   if (ctxInfo.block) messages.push({ role: "system", content: ctxInfo.block });
