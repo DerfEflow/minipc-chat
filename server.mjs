@@ -281,6 +281,7 @@ async function ollamaChat(model, messages, opts = {}) {
     const payload = { model, messages, stream: false };
     if (!opts.noTools) payload.tools = TOOL_DEFS;
     if (opts.format) payload.format = opts.format;   // e.g. "json" — forces valid JSON, suppresses thinking spill
+    if (opts.think === false) payload.think = false;  // disable qwen3 reasoning for structured extraction (thinking-on + json grammar collapses to "{}")
     const options = {};
     if (typeof opts.temperature === "number") options.temperature = opts.temperature;
     if (typeof opts.num_ctx === "number") options.num_ctx = opts.num_ctx;
@@ -660,7 +661,7 @@ async function distillPersona() {
     "SAMPLES:",
     corpus,
   ].join("\n");
-  const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: prompt }], { temperature: 0.3, num_predict: 2600, noTools: true, format: "json" });
+  const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: prompt }], { temperature: 0.3, num_predict: 2600, noTools: true, format: "json", think: false });
   let facets = null;
   try { facets = JSON.parse(d && d.content ? d.content : "{}"); } catch { return { error: "The model didn't return valid JSON — try again." }; }
   if (!facets || typeof facets !== "object") return { error: "Empty profile came back — try again." };
