@@ -92,11 +92,12 @@
   .turn{display:flex;flex-direction:column}
   .msg{display:flex}
   .msg.me{justify-content:flex-end}
-  .bubble{max-width:88%;padding:10px 13px;border-radius:16px;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;
-    text-shadow:0 1px 2px rgba(0,0,12,.65);
+  .bubble{max-width:92%;padding:12px 15px;border-radius:16px;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;
+    font-size:17.5px;line-height:1.5;font-weight:600;color:#fff;
+    text-shadow:0 1px 3px rgba(0,0,10,.8);
     -webkit-backdrop-filter:blur(6px) saturate(1.2); backdrop-filter:blur(6px) saturate(1.2);
     box-shadow:0 18px 36px -12px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.12);}
-  .me .bubble{background:rgba(184,115,51,.05);border:1px solid var(--rim);color:#fff1e0;border-bottom-right-radius:5px;
+  .me .bubble{background:rgba(184,115,51,.05);border:1px solid var(--rim);color:#fff;border-bottom-right-radius:5px;
     box-shadow:0 18px 36px -12px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.14), var(--rimglow);}
   .ai .bubble{background:var(--glass);border:1px solid var(--rim);border-bottom-left-radius:5px;
     box-shadow:0 18px 36px -12px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.12), var(--rimglow);}
@@ -108,6 +109,15 @@
   .route{font-size:11px;color:var(--muted);opacity:.75;padding:1px 4px 3px}
   /* small text that sits directly on the footage needs a shadow to stay legible */
   .route,.msgmeta,.ctx,.act{text-shadow:0 1px 2px rgba(0,0,12,.75)}
+
+  /* phone layout: the one-row header overflows at phone width and wraps raggedly ("off-kilter").
+     Break it into two deliberate rows: brand row, then mode + panel buttons. */
+  @media(max-width:560px){
+    header{flex-wrap:wrap;gap:5px;row-gap:8px}
+    header .spacer{flex-basis:100%;height:0}
+    #mode{flex:1;max-width:none;min-width:0}
+    .icon{font-size:19px;padding:4px 4px}
+  }
   .tools{display:flex;flex-direction:column;gap:4px;margin:0 0 6px}
   .tool{font-size:12.5px;color:var(--copper2);opacity:.92;display:flex;align-items:center;gap:6px}
   .tool .sp{width:8px;height:8px;border-radius:50%;background:var(--copper2);box-shadow:0 0 8px var(--glow);animation:pulse 1s infinite}
@@ -360,6 +370,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=16"></script>
+  <script src="/app.js?v=17"></script>
 </body>
 </html>
