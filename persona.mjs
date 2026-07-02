@@ -31,6 +31,11 @@ import https from "node:https";
 // chunk); "long" kinds are windowed. Unknown kinds fall back to "other" (windowed).
 export const KINDS = ["joke", "maxim", "essay", "story", "poem", "thought", "plan", "favorite", "chat", "web", "other"];
 const SHORT_KINDS = new Set(["joke", "maxim", "thought", "favorite"]);
+// VOICE kinds = Fred's own composed/conversational writing — the only material that trains the
+// profile and gets quoted as exemplars. "other"/"web" = reference KNOWLEDGE (manuals, specs,
+// scraped pages): searchable and useful, but never presented as Fred's voice.
+const NON_VOICE = ["other", "web"];
+const nonVoiceSql = "('" + NON_VOICE.join("','") + "')";
 
 const tokenize = (s) => (String(s || "").toLowerCase().match(/[a-z0-9]{2,}/g) || []);
 const norm = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
@@ -418,10 +423,12 @@ export function createPersonaStore(opts = {}) {
   // Hybrid retrieval at scale: FTS5 bm25 candidates (lexical) ∪ top-cosine candidates (semantic,
   // via the RAM vec cache) -> re-rank the union with 0.45*lex + 0.55*cos. Degrades gracefully:
   // no FTS -> bounded scan; no embedder/vectors -> pure lexical.
-  async function retrieve(query, { limit = 6, kind = "", minScore = 0.08 } = {}) {
+  async function retrieve(query, { limit = 6, kind = "", minScore = 0.08, voiceOnly = false } = {}) {
     const q = tokenize(query);
     let qvec = null;
     if (embed && query) { try { const v = await embed(String(query).slice(0, 2000)); if (Array.isArray(v) && v.length) qvec = new Float32Array(v); } catch {} }
+    const voiceClause = voiceOnly ? ` AND c.kind NOT IN ${nonVoiceSql} ` : " ";
+    const voiceClauseBare = voiceOnly ? ` kind NOT IN ${nonVoiceSql} ` : "";
 
     const candidates = new Map();   // id -> row
     if (fts && q.length) {
@@ -429,12 +436,13 @@ export function createPersonaStore(opts = {}) {
       try {
         const rows = db.prepare(
           "SELECT c.id, c.kind, c.title, c.text FROM chunks_fts f JOIN chunks c ON c.rowid = f.rowid WHERE chunks_fts MATCH ? " +
-          (kind ? "AND c.kind = ? " : "") + "ORDER BY bm25(chunks_fts) LIMIT 200"
+          (kind ? "AND c.kind = ? " : "") + voiceClause + "ORDER BY bm25(chunks_fts) LIMIT 200"
         ).all(...(kind ? [match, kind] : [match]));
         for (const r of rows) candidates.set(r.id, r);
       } catch {}
     } else if (q.length) {
-      const rows = db.prepare("SELECT id, kind, title, text FROM chunks " + (kind ? "WHERE kind = ? " : "") + "LIMIT 5000").all(...(kind ? [kind] : []));
+      const where = [kind ? "kind = ?" : "", voiceClauseBare].filter(Boolean).join(" AND ");
+      const rows = db.prepare("SELECT id, kind, title, text FROM chunks " + (where ? "WHERE " + where + " " : "") + "LIMIT 5000").all(...(kind ? [kind] : []));
       for (const r of rows) { if (lexScore(q, r.text) > 0) candidates.set(r.id, r); }
     }
     if (qvec) {
@@ -448,7 +456,8 @@ export function createPersonaStore(opts = {}) {
       const missing = top.map((t) => t.id).filter((id) => !candidates.has(id));
       for (let i = 0; i < missing.length; i += 100) {
         const ids = missing.slice(i, i + 100);
-        const rows = db.prepare(`SELECT id, kind, title, text FROM chunks WHERE id IN (${ids.map(() => "?").join(",")})` + (kind ? " AND kind = ?" : "")).all(...(kind ? [...ids, kind] : ids));
+        const extra = (kind ? " AND kind = ?" : "") + (voiceOnly ? ` AND kind NOT IN ${nonVoiceSql}` : "");
+        const rows = db.prepare(`SELECT id, kind, title, text FROM chunks WHERE id IN (${ids.map(() => "?").join(",")})` + extra).all(...(kind ? [...ids, kind] : ids));
         for (const r of rows) candidates.set(r.id, r);
       }
     }
@@ -467,9 +476,9 @@ export function createPersonaStore(opts = {}) {
   }
 
   // Distinctive vocabulary + recurring phrases across the WHOLE corpus (no LLM, no token limit).
-  function statVocab({ topWords = 50, topPhrases = 30 } = {}) {
+  function statVocab({ topWords = 50, topPhrases = 30, voiceOnly = true } = {}) {
     const wc = new Map(), pc = new Map();
-    const it = db.prepare("SELECT text FROM docs");
+    const it = db.prepare("SELECT text FROM docs" + (voiceOnly ? ` WHERE kind NOT IN ${nonVoiceSql}` : ""));
     for (const d of it.iterate()) {
       const toks = tokenize(d.text);
       for (const w of toks) { if (w.length >= 4 && !STOPWORDS.has(w)) wc.set(w, (wc.get(w) || 0) + 1); }
@@ -486,15 +495,16 @@ export function createPersonaStore(opts = {}) {
 
   // Build context-window-sized text batches over the corpus for map-reduce distillation.
   // Past the budget, chunks are stratified evenly (capped runs report digested X of Y).
-  function buildBatches({ batchChars = 90000, maxBatches = 60 } = {}) {
-    const totalChunks = stmt.counts.get().chunks;
-    const totalChars = (db.prepare("SELECT COALESCE(SUM(length(text)),0) AS n FROM chunks").get()).n;
+  function buildBatches({ batchChars = 90000, maxBatches = 60, voiceOnly = true } = {}) {
+    const kindFilter = voiceOnly ? ` WHERE kind NOT IN ${nonVoiceSql}` : "";
+    const totalChunks = (db.prepare("SELECT COUNT(*) AS n FROM chunks" + kindFilter).get()).n;
+    const totalChars = (db.prepare("SELECT COALESCE(SUM(length(text)),0) AS n FROM chunks" + kindFilter).get()).n;
     const budget = batchChars * maxBatches;
     const capped = totalChars > budget;
     const keepEvery = capped ? Math.ceil(totalChars / budget) : 1;
     const batches = [];
     let buf = "", bufN = 0, i = 0, pool = 0;
-    for (const c of db.prepare("SELECT kind, text FROM chunks ORDER BY rowid").iterate()) {
+    for (const c of db.prepare("SELECT kind, text FROM chunks" + kindFilter + " ORDER BY rowid").iterate()) {
       if (i++ % keepEvery !== 0) continue;
       pool++;
       const piece = `[${c.kind}] ${c.text}`;
@@ -533,7 +543,7 @@ export function createPersonaStore(opts = {}) {
     const parts = [];
     if (profile && profile.systemBlock) parts.push(profile.systemBlock);
     else if (profile && profile.facets) parts.push(renderFacets(profile.facets));
-    const ex = await retrieve(query || "", { limit: exemplars });
+    const ex = await retrieve(query || "", { limit: exemplars, voiceOnly: true });   // never quote reference material as Fred's voice
     if (ex.length) parts.push("Real examples of Fred's own writing (match this voice — echo the rhythm and word-choice, do NOT quote them verbatim unless asked):\n" + ex.map((e) => `— [${e.kind}] ${e.text.slice(0, 500)}`).join("\n\n"));
     return { block: parts.join("\n\n"), exemplars: ex, hasProfile: !!profile };
   }
