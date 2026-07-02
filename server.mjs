@@ -26,6 +26,7 @@ import { createMentor } from "./mentor.mjs";
 import { createFlywheel } from "./flywheel.mjs";
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
+import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -85,6 +86,12 @@ CTX.chatlog = chatlog;
 const ARTIFACT_DIR = cfgGet("ARTIFACT_DIR", "C:\\minipc-chat\\artifacts");
 const artifacts = createArtifactStore({ dir: ARTIFACT_DIR });
 CTX.artifacts = artifacts;
+
+// Persona Forge: Fred's own corpus (jokes/maxims/essays/stories/poems/thoughts/plans/favorites/chats/
+// web) + a distilled Fred Profile, for the "As Fred" mode. Retrieval-conditioned voice, not fine-tuning.
+const PERSONA_DIR = cfgGet("PERSONA_DIR", "C:\\minipc-chat\\corpus");
+const persona = createPersonaStore({ dir: PERSONA_DIR, embed: embedText });
+CTX.persona = persona;
 // NOTE: the Phase 5 mentor/flywheel init lives further down — it needs MAIN_MODEL, which is
 // declared in the provider block below (a const referenced before init = TDZ crash).
 
@@ -168,6 +175,7 @@ const MODES = {
   long_context: { tier: "main",  temp: 0.5, num_ctx: 32768, frag: "LONG CONTEXT MODE: the input may be large; be systematic and note which parts you used." },
   tool:         { tier: "main",  temp: 0.5, frag: "TOOL MODE: prefer acting through tools over describing what could be done. Read current state first, then act, then confirm exactly what you did." },
   mentor:       { tier: "main",  temp: 0.5, frag: "MENTOR MODE: give your best answer — it will be independently critiqued afterwards, so be precise and flag any uncertainty honestly." },
+  as_fred:      { tier: "main",  temp: 0.85, frag: "AS-FRED MODE: write and think AS Frederick Wolfe, in his own voice — using his profile and the real writing examples provided. Inhabit his humor, vocabulary, wit, and rhythm; hold his opinions and interests. Never announce that you are imitating him and never mention models or being an AI." },
 };
 // Mode "heaviness" ranking — the router takes the STRONGER of (heuristic, light-model classifier)
 // so it can never under-escalate a hard prompt down to the 8B (the old under-escalation bug).
@@ -627,6 +635,72 @@ async function handleFlywheel(req, res, u) {
   return json(404, { error: "not found" });
 }
 
+// Distill a structured "Fred Profile" from the corpus by having the 30B analyze a diverse sample.
+// JSON-out (format:"json") to dodge qwen's thinking-spill breaking the parse (the Phase-5 gotcha).
+async function distillPersona() {
+  const sample = persona.sampleForProfile({ perKind: 6, maxChars: 14000 });
+  if (!sample.length) return { error: "The corpus is empty — dump some of Fred's writing first (paste, scan the inbox, or scrape a page)." };
+  const corpus = sample.map((s, i) => `#${i + 1} [${s.kind}] ${s.title}\n${s.text}`).join("\n\n---\n\n");
+  const prompt = [
+    "You are building a PERSONA PROFILE of the writer Frederick (Fred) Wolfe from real samples of his own writing.",
+    "Study the samples and infer his enduring style — not the topic of any one piece. Be specific and concrete: name actual words he favors, the shape of his sentences, the mechanics of his humor. Avoid generic flattery.",
+    "",
+    "Return ONLY JSON with these string (or string-array) fields:",
+    '{ "voice_style": "...", "humor": "...", "vocabulary": "...", "wit": "...", "specialties": "...", "reasoning": "...", "interests": "...", "avoid": "...", "summary": "..." }',
+    "- voice_style: tone, sentence rhythm, formality, punctuation habits, POV.",
+    "- humor: what makes him funny — timing, irony, absurdity, wordplay, targets he mocks.",
+    "- vocabulary: his nuanced/favored words and phrases (list real ones seen in the samples).",
+    "- wit: rhetorical moves, turns of phrase, how he lands a point.",
+    "- specialties: subjects he clearly knows deeply.",
+    "- reasoning: how he thinks/argues/structures ideas.",
+    "- interests: recurring interests, habits, hobbies, life work.",
+    "- avoid: anti-patterns that would break his voice. ALWAYS include: never use antithesis constructions ('not X but Y', 'it's not X, it's Y', 'not X, not Y, but Z').",
+    "- summary: 2-3 sentences a ghostwriter could read to instantly write as Fred.",
+    "",
+    "SAMPLES:",
+    corpus,
+  ].join("\n");
+  const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: prompt }], { temperature: 0.3, num_predict: 2600, noTools: true, format: "json" });
+  let facets = null;
+  try { facets = JSON.parse(d && d.content ? d.content : "{}"); } catch { return { error: "The model didn't return valid JSON — try again." }; }
+  if (!facets || typeof facets !== "object") return { error: "Empty profile came back — try again." };
+  const systemBlock = renderFacets(facets) + (facets.summary ? "\n- In short: " + facets.summary : "");
+  const p = persona.setProfile({ facets, systemBlock, model: "local" });
+  return { profile: p, sampled: sample.length };
+}
+
+// Persona Forge API: dump material, scan the inbox, scrape a page, distill the profile, search exemplars.
+async function handlePersona(req, res, u) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const p = u.pathname;
+  if (req.method === "GET" && p === "/persona") return json(200, { stats: persona.stats(), kinds: PERSONA_KINDS, profile: persona.getProfile() ? { ...persona.getProfile(), facets: undefined } : null });
+  if (req.method === "GET" && p === "/persona/profile") return json(200, { profile: persona.getProfile() });
+  if (req.method === "GET" && p === "/persona/list") return json(200, { items: persona.list({ kind: u.searchParams.get("kind") || "", q: u.searchParams.get("q") || "" }), stats: persona.stats() });
+  if (req.method === "GET" && p === "/persona/search") return json(200, { hits: await persona.retrieve(u.searchParams.get("q") || "", { limit: 8, kind: u.searchParams.get("kind") || "" }) });
+
+  if (req.method === "POST") {
+    const body = await readJsonBody(req);
+    if (!body) return json(400, { error: "bad json" });
+    if (p === "/persona" || p === "/persona/ingest") {
+      const r = persona.ingestText({ text: body.text, kind: body.kind, title: body.title, source: body.source || "pasted", tags: body.tags });
+      return json(r.error ? 400 : 200, r.error ? r : { ok: true, docId: r.doc.id, chunks: r.chunks, deduped: !!r.deduped, stats: persona.stats() });
+    }
+    if (p === "/persona/scan") { const r = persona.scanInbox(); return json(200, { ...r, stats: persona.stats() }); }
+    if (p === "/persona/scrape") {
+      const r = await fetchUrl(String(body.url || ""));
+      if (r.error) return json(400, { error: "Couldn't fetch that URL: " + r.error });
+      if (r.status >= 400) return json(400, { error: "The site returned HTTP " + r.status });
+      const text = /html/i.test(r.contentType || "") || /<html/i.test(r.body || "") ? htmlToText(r.body) : String(r.body || "");
+      if (!text || text.length < 40) return json(400, { error: "Nothing readable came back from that page." });
+      const ing = persona.ingestText({ text, kind: body.kind || "web", title: body.title || body.url, source: "scrape:" + body.url });
+      return json(ing.error ? 400 : 200, ing.error ? ing : { ok: true, docId: ing.doc.id, chunks: ing.chunks, chars: text.length, deduped: !!ing.deduped, stats: persona.stats() });
+    }
+    if (p === "/persona/distill") { const r = await distillPersona(); return json(r.error ? 400 : 200, r); }
+    if (p === "/persona/delete") { return json(200, persona.removeDoc(body.id)); }
+  }
+  return json(404, { error: "not found" });
+}
+
 async function handleChat(req, res) {
   let body = "";
   req.on("data", (d) => (body += d));
@@ -674,6 +748,15 @@ async function handleChat(req, res) {
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
   if (ctxInfo.block) messages.push({ role: "system", content: ctxInfo.block });
+  // As-Fred mode: inject the distilled Fred Profile + real writing exemplars retrieved for this prompt.
+  let personaInfo = null;
+  if (mode === "as_fred") {
+    try {
+      personaInfo = await persona.personaBlock(lastUser ? lastUser.content : "", { exemplars: 6 });
+      if (personaInfo.block) messages.push({ role: "system", content: personaInfo.block });
+      sse({ type: "persona", hasProfile: personaInfo.hasProfile, exemplars: personaInfo.exemplars.length });
+    } catch {}
+  }
   messages.push(...history);
   const contextTokens = estTokens(messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0));
   if (ctxInfo.used.length || ctxInfo.artifactsUsed.length || ctxInfo.chatsUsed.length) {
@@ -838,6 +921,7 @@ const server = http.createServer(async (req, res) => {
     if (path === "/mentor/review" && req.method === "POST") return handleMentorReview(req, res);
     if (path === "/mentor/revise" && req.method === "POST") return handleMentorRevise(req, res);
     if (["/ledger", "/evals", "/rules", "/prompts"].some((b) => path === b || path.startsWith(b + "/"))) return handleFlywheel(req, res, u);
+    if (path === "/persona" || path.startsWith("/persona/")) return handlePersona(req, res, u);
 
     if (path === "/ollama" || path.startsWith("/ollama/")) {
       const rest = path.slice("/ollama".length) || "/";
@@ -871,8 +955,11 @@ server.listen(PORT, "127.0.0.1", () => {
   const as = artifacts.stats();
   console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review|duplicate|transform]`);
   console.log(`[dominion-ai] mentor: ${mentor.info().provider}  ·  auto-review=${AUTO_MENTOR ? "ON" : "off (LAX)"}  ·  periodic=${PERIODIC_MENTOR ? "every " + PERIODIC_EVERY : "off"}  ·  flywheel ${JSON.stringify(flywheel.stats())}`);
+  const ps = persona.stats();
+  console.log(`[dominion-ai] persona: ${ps.docs} doc(s) / ${ps.chunks} chunk(s) (${JSON.stringify(ps.byKind)})  ·  profile=${ps.profile ? "distilled " + String(ps.profile.updatedAt).slice(0, 10) : "none yet"}  ·  inbox=${persona.inbox}  ·  mode: as_fred`);
   // Backfill embeddings for pre-vector memories in the background (no-op if the embed model is absent).
   memory.backfillEmbeddings(100).then((n) => { if (n) console.log(`[dominion-ai] memory: backfilled ${n} embedding(s)`); }).catch(() => {});
+  persona.backfillEmbeddings(200).then((n) => { if (n) console.log(`[dominion-ai] persona: backfilled ${n} embedding(s)`); }).catch(() => {});
   console.log("[dominion-ai] front this with: tailscale serve --bg " + PORT);
   if (String(cfgGet("WATCHDOG_ENABLED", "1")) !== "0") {
     const wms = Number(cfgGet("WATCHDOG_INTERVAL_MS", "180000")) || 180000;

@@ -231,6 +231,15 @@
   .cand{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted);padding:2px 0;border-top:1px solid var(--line)}
   .cand button{font-size:11px;border:1px solid var(--line);border-radius:6px;background:var(--navy2);color:var(--copper2);padding:1px 7px;cursor:pointer}
   .cand button:disabled{opacity:.5}
+
+  /* ---- persona forge ---- */
+  .prow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .prow input[type=text],.prow input[type=url]{flex:1;min-width:120px;background:var(--navy2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;color:var(--sand);font:inherit;font-size:14px;outline:none}
+  .prow select{padding:7px 8px}
+  .pprofile{font-size:13px;color:var(--sand);border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:rgba(57,130,255,.06);white-space:pre-wrap;max-height:34vh;overflow:auto}
+  .pprofile .none{color:var(--muted);text-align:center;padding:8px}
+  .pmsg{font-size:12px;color:var(--copper2);margin-left:auto}
+  .pkind-badge{border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:10.5px;color:var(--copper2);text-transform:capitalize}
 </style>
 </head>
 <body>
@@ -263,9 +272,11 @@
       <option value="draft">Draft</option>
       <option value="tool">Tool</option>
       <option value="mentor">Mentor</option>
+      <option value="as_fred">As Fred</option>
     </select>
     <button id="artifacts" class="icon" title="Artifacts" aria-label="Artifacts">&#128196;</button>
     <button id="improve" class="icon" title="Mentor &amp; improvement" aria-label="Mentor and improvement">&#127891;</button>
+    <button id="persona" class="icon" title="Persona Forge (become an expert in me)" aria-label="Persona Forge">&#129516;</button>
     <button id="memory" class="icon" title="Memory" aria-label="Memory">&#129504;</button>
     <button id="tools" class="icon" title="Tool activity" aria-label="Tool activity">&#128295;</button>
     <button id="settings" class="icon" title="Settings" aria-label="Settings">&#9881;</button>
@@ -370,6 +381,43 @@
     </div>
   </div>
 
-  <script src="/app.js?v=18"></script>
+  <div id="pmodal" class="modal" hidden>
+    <div class="sheet">
+      <div class="sheet-h">Persona Forge <span id="pstats" class="mstats"></span> <button id="pclose" class="icon" aria-label="Close">&times;</button></div>
+      <div id="pprofile" class="pprofile"></div>
+      <div class="mrow-add">
+        <textarea id="padd" rows="2" placeholder="Paste your own writing — a joke, maxim, essay, poem, stray thought, plan, favorite, or an AI chat&#8230;"></textarea>
+      </div>
+      <div class="prow">
+        <select id="pkind">
+          <option value="joke">Joke</option>
+          <option value="maxim">Maxim</option>
+          <option value="essay">Essay</option>
+          <option value="story">Story</option>
+          <option value="poem">Poem</option>
+          <option value="thought">Stray thought</option>
+          <option value="plan">Future plan</option>
+          <option value="favorite">Favorite / list</option>
+          <option value="chat">AI chat</option>
+          <option value="other">Other</option>
+        </select>
+        <input id="ptitle" type="text" placeholder="Title (optional)" autocomplete="off" />
+        <button id="paddbtn" class="sb-new">Add</button>
+      </div>
+      <div class="prow">
+        <input id="purl" type="url" placeholder="https://your-site.com/page to scrape&#8230;" autocomplete="off" />
+        <button id="pscrape" class="ghost">Scrape</button>
+        <button id="pscan" class="ghost" title="Ingest files dropped in the mini-PC inbox folder">Scan inbox</button>
+        <button id="pdistill" class="sb-new" title="Analyze the corpus and (re)build Fred's voice profile">Refresh profile</button>
+      </div>
+      <div class="mfilter">Show
+        <select id="pfilter-kind"><option value="">All kinds</option></select>
+        <span id="pmsg" class="pmsg"></span>
+      </div>
+      <div id="plist" class="mlist"></div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=19"></script>
 </body>
 </html>

@@ -5,6 +5,7 @@ run-chat.cmd
 .env
 sandbox/
 logs/
+corpus/
 
 # misc
 .vercel

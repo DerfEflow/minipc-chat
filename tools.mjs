@@ -17,6 +17,7 @@ import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync, sta
 import { resolve, join, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { fetchUrl, htmlToText } from "./persona.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -136,6 +137,9 @@ export const TOOLS = [
   { category: "retrieval", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "retrieve_context_pack", description: "One-shot retrieval bundle: searches memory, artifacts, AND past chats for a query and returns the best hits from each. Prefer this over separate searches when gathering context.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } } },
   { category: "memory", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "update_memory", description: "Manage a saved memory by id (get ids from recall_memory): approve, reject, archive, pin, or unpin it.", parameters: { type: "object", properties: { id: { type: "string" }, action: { type: "string", enum: ["approve", "reject", "archive", "pin", "unpin"] } }, required: ["id", "action"] } } } },
   { category: "analysis", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "save_lesson", description: "Feed the improvement flywheel: log a FAILURE you noticed, add an EVAL case to test a behavior, or propose a prompt RULE. Use after mistakes, corrections from Fred, or recurring patterns.", parameters: { type: "object", properties: { kind: { type: "string", enum: ["failure", "eval", "rule"] }, content: { type: "string", description: "failure: what went wrong; eval: the input prompt to test; rule: the compact instruction." }, expectedBehavior: { type: "string", description: "eval only — what a good answer must do." }, category: { type: "string" } }, required: ["kind", "content"] } } } },
+  { category: "persona", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "add_to_persona", description: "Add a piece of Fred's OWN material to the Persona corpus (his voice-training set) — use when he shares one of his jokes, maxims, essays, stories, poems, stray thoughts, future plans, favorites, or a choice AI chat, or says 'save this as one of mine'. Not for facts to remember (use remember for those).", parameters: { type: "object", properties: { text: { type: "string", description: "The exact text in Fred's words." }, kind: { type: "string", enum: ["joke", "maxim", "essay", "story", "poem", "thought", "plan", "favorite", "chat", "other"] }, title: { type: "string" } }, required: ["text", "kind"] } } } },
+  { category: "persona", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "search_persona", description: "Retrieve real examples of Fred's own writing from the Persona corpus (to match his voice or recall something he wrote). Optionally filter by kind.", parameters: { type: "object", properties: { query: { type: "string" }, kind: { type: "string", enum: ["joke", "maxim", "essay", "story", "poem", "thought", "plan", "favorite", "chat", "web", "other"] } }, required: ["query"] } } } },
+  { category: "persona", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "scrape_to_persona", description: "Fetch a web page (e.g. one of Fred's own sites) and add its readable text to the Persona corpus as source material.", parameters: { type: "object", properties: { url: { type: "string" }, kind: { type: "string", description: "default 'web'" }, title: { type: "string" } }, required: ["url"] } } } },
 ];
 
 export const TOOL_DEFS = TOOLS.map((t) => t.def);
@@ -297,6 +301,28 @@ export async function runTool(name, args, ctx) {
         if ((c.unsupported_claims || []).length) lines.push("Unsupported claims: " + c.unsupported_claims.join("; "));
         if (c.recommended_revision) lines.push("Suggestion: " + c.recommended_revision);
         return lines.join("\n");
+      }
+      case "add_to_persona": {
+        if (!ctx.persona) return "The Persona corpus isn't available right now.";
+        const r = ctx.persona.ingestText({ text: args.text, kind: args.kind, title: args.title, source: "chat" });
+        if (r.error) return "Couldn't add that: " + r.error;
+        return r.deduped ? "Fred already has that in his corpus." : `Added to Fred's Persona corpus (${args.kind}, ${r.chunks} chunk${r.chunks === 1 ? "" : "s"}). Refresh the profile from the Persona panel to fold it into his voice.`;
+      }
+      case "search_persona": {
+        if (!ctx.persona) return "The Persona corpus isn't available right now.";
+        const hits = await ctx.persona.retrieve(args.query || "", { limit: 6, kind: args.kind || "" });
+        if (!hits.length) return "No matching material in Fred's corpus.";
+        return hits.map((h) => `— [${h.kind}] ${h.text.slice(0, 400)}`).join("\n\n");
+      }
+      case "scrape_to_persona": {
+        if (!ctx.persona) return "The Persona corpus isn't available right now.";
+        const r = await fetchUrl(String(args.url || ""));
+        if (r.error) return "Couldn't fetch that URL: " + r.error;
+        if ((r.status || 0) >= 400) return "The site returned HTTP " + r.status + ".";
+        const text = /html/i.test(r.contentType || "") || /<html/i.test(r.body || "") ? htmlToText(r.body) : String(r.body || "");
+        if (!text || text.length < 40) return "Nothing readable came back from that page.";
+        const ing = ctx.persona.ingestText({ text, kind: args.kind || "web", title: args.title || args.url, source: "scrape:" + args.url });
+        return ing.error ? "Couldn't add it: " + ing.error : `Scraped ${text.length} chars into Fred's corpus (${ing.chunks} chunk${ing.chunks === 1 ? "" : "s"}).`;
       }
       default: return `Unknown tool: ${name}`;
     }

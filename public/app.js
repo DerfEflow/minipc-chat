@@ -13,7 +13,11 @@ const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"
       confirmToolsBox = $("confirm-tools"),
       artifactsBtn = $("artifacts"), amodal = $("amodal"), aclose = $("aclose"), alist = $("alist"), adetail = $("adetail"), astats = $("astats"), ahead = $("ahead"),
       improveBtn = $("improve"), imodal = $("imodal"), iclose = $("iclose"), ilist = $("ilist"), istats = $("istats"), iadd = $("iadd"), iaddbtn = $("iaddbtn"),
-      chatSearch = $("chatsearch"), privacySel = $("privacy-sel");
+      chatSearch = $("chatsearch"), privacySel = $("privacy-sel"),
+      personaBtn = $("persona"), pmodal = $("pmodal"), pclose = $("pclose"), pstats = $("pstats"),
+      padd = $("padd"), pkind = $("pkind"), ptitle = $("ptitle"), paddbtn = $("paddbtn"),
+      purl = $("purl"), pscrape = $("pscrape"), pscan = $("pscan"), pdistill = $("pdistill"),
+      pprofile = $("pprofile"), pfilterKind = $("pfilter-kind"), pmsg = $("pmsg"), plist = $("plist");
 
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
       LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
@@ -349,6 +353,84 @@ async function addMemory() { const v = (madd.value || "").trim(); if (!v) return
 function openMemory() { mmodal.hidden = false; loadMemory(); }
 const closeMemory = () => { mmodal.hidden = true; };
 
+// ---------- persona forge ("become an expert in me") ----------
+let pKindsFilled = false;
+function setPMsg(t) { if (!pmsg) return; pmsg.textContent = t || ""; }
+async function loadPersona() {
+  const d = await memApi("/persona");
+  const s = (d && d.stats) || {};
+  if (pstats) pstats.textContent = (s.docs || 0) + " item" + (s.docs === 1 ? "" : "s") + " · " + (s.chunks || 0) + " chunks" + (s.embedded ? " · " + s.embedded + " embedded" : "");
+  renderProfile(d && d.profile);
+  if (!pKindsFilled && d && Array.isArray(d.kinds)) {
+    for (const k of d.kinds) { const o = document.createElement("option"); o.value = k; o.textContent = k[0].toUpperCase() + k.slice(1); pfilterKind.appendChild(o); }
+    pKindsFilled = true;
+  }
+  loadPersonaList();
+}
+function renderProfile(profile) {
+  pprofile.innerHTML = "";
+  if (!profile || !profile.systemBlock) { const n = document.createElement("div"); n.className = "none"; n.textContent = "No voice profile yet. Add some of your writing, then tap “Refresh profile” to distill your voice."; pprofile.appendChild(n); return; }
+  const when = profile.updatedAt ? " (updated " + String(profile.updatedAt).slice(0, 10) + ")" : "";
+  pprofile.textContent = "Fred Profile" + when + "\n\n" + profile.systemBlock;
+}
+async function loadPersonaList() {
+  plist.textContent = "Loading…";
+  const kind = pfilterKind ? pfilterKind.value : "";
+  const d = await memApi("/persona/list" + (kind ? "?kind=" + encodeURIComponent(kind) : ""));
+  renderPersonaDocs((d && d.items) || []);
+}
+function renderPersonaDocs(items) {
+  plist.innerHTML = "";
+  if (!items.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "Nothing in the corpus yet."; plist.appendChild(n); return; }
+  for (const it of items) {
+    const row = document.createElement("div"); row.className = "mitem";
+    const top = document.createElement("div"); top.className = "mtop";
+    const kb = document.createElement("span"); kb.className = "pkind-badge"; kb.textContent = it.kind; top.appendChild(kb);
+    const meta = document.createElement("span"); meta.textContent = (it.chunks || 0) + " chunk" + (it.chunks === 1 ? "" : "s") + " · " + it.chars + " chars"; top.appendChild(meta);
+    const c = document.createElement("div"); c.className = "mc"; c.textContent = it.title;
+    const acts = document.createElement("div"); acts.className = "macts";
+    acts.append(mkAct("Delete", () => { if (confirm("Remove this from the corpus?")) memApi("/persona/delete", { id: it.id }).then(loadPersona); }));
+    row.append(top, c, acts); plist.appendChild(row);
+  }
+}
+async function addPersonaText() {
+  const v = (padd.value || "").trim(); if (!v) return;
+  setPMsg("Adding…");
+  const d = await memApi("/persona/ingest", { text: v, kind: pkind.value, title: (ptitle.value || "").trim() });
+  if (d && d.error) return setPMsg(d.error);
+  padd.value = ""; ptitle.value = "";
+  setPMsg(d.deduped ? "Already had that." : "Added ✓ (" + (d.chunks || 0) + " chunks)");
+  loadPersona();
+}
+async function scrapePersona() {
+  const url = (purl.value || "").trim(); if (!url) return;
+  setPMsg("Fetching " + url + " …");
+  const d = await memApi("/persona/scrape", { url });
+  if (d && d.error) return setPMsg(d.error);
+  purl.value = "";
+  setPMsg("Scraped ✓ (" + (d.chars || 0) + " chars, " + (d.chunks || 0) + " chunks)");
+  loadPersona();
+}
+async function scanPersonaInbox() {
+  setPMsg("Scanning inbox…");
+  const d = await memApi("/persona/scan", {});
+  if (d && d.error) return setPMsg(d.error);
+  const skipped = (d.skipped && d.skipped.length) ? " · skipped " + d.skipped.length : "";
+  setPMsg("Ingested " + (d.ingested || 0) + " file(s), " + (d.chunks || 0) + " chunks" + skipped);
+  loadPersona();
+}
+async function distillProfile() {
+  setPMsg("Reading your corpus and distilling your voice… (~20–40s)");
+  pdistill.disabled = true;
+  const d = await memApi("/persona/distill", {});
+  pdistill.disabled = false;
+  if (d && d.error) return setPMsg(d.error);
+  setPMsg("Profile refreshed ✓ (from " + (d.sampled || 0) + " samples)");
+  renderProfile(d.profile);
+}
+function openPersona() { pmodal.hidden = false; setPMsg(""); loadPersona(); }
+const closePersona = () => { pmodal.hidden = true; };
+
 // ---------- tool activity panel (Phase 3) ----------
 const tfmt = (ts) => { try { return new Date(ts).toLocaleString(); } catch { return ts || ""; } };
 async function loadTools() {
@@ -635,6 +717,16 @@ amodal.addEventListener("click", (e) => { if (e.target === amodal) closeArtifact
 improveBtn.addEventListener("click", openImprove);
 iclose.addEventListener("click", closeImprove);
 imodal.addEventListener("click", (e) => { if (e.target === imodal) closeImprove(); });
+if (personaBtn) {
+  personaBtn.addEventListener("click", openPersona);
+  pclose.addEventListener("click", closePersona);
+  pmodal.addEventListener("click", (e) => { if (e.target === pmodal) closePersona(); });
+  paddbtn.addEventListener("click", addPersonaText);
+  pscrape.addEventListener("click", scrapePersona);
+  pscan.addEventListener("click", scanPersonaInbox);
+  pdistill.addEventListener("click", distillProfile);
+  pfilterKind.addEventListener("change", loadPersonaList);
+}
 iaddbtn.addEventListener("click", addImprove);
 document.querySelectorAll(".itab").forEach((el) => el.addEventListener("click", () => setITab(el.dataset.tab)));
 personaSel.addEventListener("change", () => { personaCustom.hidden = personaSel.value !== "custom"; });
