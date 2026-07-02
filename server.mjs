@@ -89,9 +89,47 @@ CTX.artifacts = artifacts;
 
 // Persona Forge: Fred's own corpus (jokes/maxims/essays/stories/poems/thoughts/plans/favorites/chats/
 // web) + a distilled Fred Profile, for the "As Fred" mode. Retrieval-conditioned voice, not fine-tuning.
+// SQLite-backed for a massive corpus; the E: flash drive is the staging inbox + backup target.
 const PERSONA_DIR = cfgGet("PERSONA_DIR", "C:\\minipc-chat\\corpus");
-const persona = createPersonaStore({ dir: PERSONA_DIR, embed: embedText });
+const PERSONA_STAGING = cfgGet("PERSONA_STAGING", "E:\\DominionCorpus");
+const persona = createPersonaStore({ dir: PERSONA_DIR, staging: PERSONA_STAGING, embed: embedText });
 CTX.persona = persona;
+
+// Continuous background embedder: drains the unembedded-chunk queue at a gentle pace so a bulk dump
+// "builds over time" without hogging Ollama. Backs off to 30s when the queue is empty or Ollama is down.
+let embedLoopOn = false;
+async function embedLoop() {
+  if (embedLoopOn) return;
+  embedLoopOn = true;
+  while (embedLoopOn) {
+    let n = 0;
+    try { n = await persona.embedPending(8); } catch { n = 0; }
+    await new Promise((r) => setTimeout(r, n ? 300 : 30000));
+  }
+}
+
+// Background inbox scan job (a massive dump = thousands of files; bounded passes keep the server responsive).
+let scanState = { running: false, ingested: 0, chunks: 0, skipped: 0, lastFiles: [], startedAt: null, finishedAt: null, error: null };
+async function runScan() {
+  try {
+    for (;;) {
+      if (!scanState.running) return;
+      const r = persona.scanInbox({ maxFiles: 25 });
+      scanState.ingested += r.ingested; scanState.chunks += r.chunks; scanState.skipped += r.skipped.length;
+      scanState.lastFiles = r.files.slice(-5);
+      if (!r.ingested && !r.skipped.length && !r.remaining) break;
+      await new Promise((res) => setTimeout(res, 50));   // yield between passes
+    }
+    const b = persona.backupTo();   // snapshot after a bulk ingest (no-op if the staging drive is absent)
+    scanState = { ...scanState, running: false, finishedAt: new Date().toISOString(), backup: b.ok ? b.path : (b.error || null) };
+  } catch (e) { scanState = { ...scanState, running: false, error: String(e.message || e) }; }
+}
+function startScan() {
+  if (scanState.running) return { running: true, ingested: scanState.ingested };
+  scanState = { running: true, ingested: 0, chunks: 0, skipped: 0, lastFiles: [], startedAt: new Date().toISOString(), finishedAt: null, error: null };
+  runScan();
+  return { started: true };
+}
 // NOTE: the Phase 5 mentor/flywheel init lives further down — it needs MAIN_MODEL, which is
 // declared in the provider block below (a const referenced before init = TDZ crash).
 
@@ -725,6 +763,7 @@ async function handlePersona(req, res, u) {
   if (req.method === "GET" && p === "/persona/list") return json(200, { items: persona.list({ kind: u.searchParams.get("kind") || "", q: u.searchParams.get("q") || "" }), stats: persona.stats() });
   if (req.method === "GET" && p === "/persona/search") return json(200, { hits: await persona.retrieve(u.searchParams.get("q") || "", { limit: 8, kind: u.searchParams.get("kind") || "" }) });
   if (req.method === "GET" && p === "/persona/distill/status") return json(200, distillState);
+  if (req.method === "GET" && p === "/persona/scan/status") return json(200, scanState);
 
   if (req.method === "POST") {
     const body = await readJsonBody(req);
@@ -733,7 +772,8 @@ async function handlePersona(req, res, u) {
       const r = persona.ingestText({ text: body.text, kind: body.kind, title: body.title, source: body.source || "pasted", tags: body.tags });
       return json(r.error ? 400 : 200, r.error ? r : { ok: true, docId: r.doc.id, chunks: r.chunks, deduped: !!r.deduped, stats: persona.stats() });
     }
-    if (p === "/persona/scan") { const r = persona.scanInbox(); return json(200, { ...r, stats: persona.stats() }); }
+    if (p === "/persona/scan") { return json(200, startScan()); }
+    if (p === "/persona/backup") { return json(200, persona.backupTo(body.dir)); }
     if (p === "/persona/scrape") {
       const r = await fetchUrl(String(body.url || ""));
       if (r.error) return json(400, { error: "Couldn't fetch that URL: " + r.error });
@@ -1004,10 +1044,11 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review|duplicate|transform]`);
   console.log(`[dominion-ai] mentor: ${mentor.info().provider}  ·  auto-review=${AUTO_MENTOR ? "ON" : "off (LAX)"}  ·  periodic=${PERIODIC_MENTOR ? "every " + PERIODIC_EVERY : "off"}  ·  flywheel ${JSON.stringify(flywheel.stats())}`);
   const ps = persona.stats();
-  console.log(`[dominion-ai] persona: ${ps.docs} doc(s) / ${ps.chunks} chunk(s) (${JSON.stringify(ps.byKind)})  ·  profile=${ps.profile ? "distilled " + String(ps.profile.updatedAt).slice(0, 10) : "none yet"}  ·  inbox=${persona.inbox}  ·  mode: as_fred`);
+  console.log(`[dominion-ai] persona: ${ps.docs} doc(s) / ${ps.chunks} chunk(s) (${JSON.stringify(ps.byKind)})  ·  ${ps.pendingEmbeds} pending embed(s)  ·  fts=${ps.fts ? "on" : "OFF"}  ·  profile=${ps.profile ? "distilled " + String(ps.profile.updatedAt).slice(0, 10) : "none yet"}  ·  db=${Math.round(ps.dbBytes / 1024)}KB  ·  inboxes: ${persona.inbox} + ${persona.stagingInbox}  ·  mode: as_fred`);
+  if (persona.migrated) console.log(`[dominion-ai] persona: migrated ${persona.migrated} doc(s) from the legacy JSON store into SQLite`);
   // Backfill embeddings for pre-vector memories in the background (no-op if the embed model is absent).
   memory.backfillEmbeddings(100).then((n) => { if (n) console.log(`[dominion-ai] memory: backfilled ${n} embedding(s)`); }).catch(() => {});
-  persona.backfillEmbeddings(200).then((n) => { if (n) console.log(`[dominion-ai] persona: backfilled ${n} embedding(s)`); }).catch(() => {});
+  embedLoop();   // continuous persona embedder: drains new chunks at a gentle pace, forever
   console.log("[dominion-ai] front this with: tailscale serve --bg " + PORT);
   if (String(cfgGet("WATCHDOG_ENABLED", "1")) !== "0") {
     const wms = Number(cfgGet("WATCHDOG_INTERVAL_MS", "180000")) || 180000;

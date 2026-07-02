@@ -359,7 +359,7 @@ function setPMsg(t) { if (!pmsg) return; pmsg.textContent = t || ""; }
 async function loadPersona() {
   const d = await memApi("/persona");
   const s = (d && d.stats) || {};
-  if (pstats) pstats.textContent = (s.docs || 0) + " item" + (s.docs === 1 ? "" : "s") + " · " + (s.chunks || 0) + " chunks" + (s.embedded ? " · " + s.embedded + " embedded" : "");
+  if (pstats) pstats.textContent = (s.docs || 0) + " item" + (s.docs === 1 ? "" : "s") + " · " + (s.chunks || 0) + " chunks" + (s.pendingEmbeds ? " · " + s.pendingEmbeds + " embedding…" : "");
   renderProfile(d && d.profile);
   if (!pKindsFilled && d && Array.isArray(d.kinds)) {
     for (const k of d.kinds) { const o = document.createElement("option"); o.value = k; o.textContent = k[0].toUpperCase() + k.slice(1); pfilterKind.appendChild(o); }
@@ -411,12 +411,25 @@ async function scrapePersona() {
   setPMsg("Scraped ✓ (" + (d.chars || 0) + " chars, " + (d.chunks || 0) + " chunks)");
   loadPersona();
 }
+let scanTimer = null;
 async function scanPersonaInbox() {
-  setPMsg("Scanning inbox…");
+  pscan.disabled = true;
+  setPMsg("Scanning inboxes…");
   const d = await memApi("/persona/scan", {});
-  if (d && d.error) return setPMsg(d.error);
-  const skipped = (d.skipped && d.skipped.length) ? " · skipped " + d.skipped.length : "";
-  setPMsg("Ingested " + (d.ingested || 0) + " file(s), " + (d.chunks || 0) + " chunks" + skipped);
+  if (d && d.error) { pscan.disabled = false; return setPMsg(d.error); }
+  pollScan();
+}
+async function pollScan() {
+  const s = await memApi("/persona/scan/status");
+  if (!s) { pscan.disabled = false; return; }
+  if (s.running) {
+    setPMsg("Ingesting… " + (s.ingested || 0) + " file(s), " + (s.chunks || 0) + " chunks so far" + (s.skipped ? " · " + s.skipped + " skipped" : ""));
+    clearTimeout(scanTimer); scanTimer = setTimeout(pollScan, 2000);
+    return;
+  }
+  pscan.disabled = false;
+  if (s.error) return setPMsg("Scan failed: " + s.error);
+  setPMsg("Ingested " + (s.ingested || 0) + " file(s), " + (s.chunks || 0) + " chunks" + (s.skipped ? " · " + s.skipped + " skipped" : "") + (s.backup && String(s.backup).includes("corpus-") ? " · backed up ✓" : ""));
   loadPersona();
 }
 let distillTimer = null;
@@ -446,7 +459,10 @@ async function pollDistill() {
     const d = await memApi("/persona/profile"); renderProfile(d && d.profile); loadPersona();
   }
 }
-async function resumeDistillIfRunning() { const s = await memApi("/persona/distill/status"); if (s && s.running) { pdistill.disabled = true; pollDistill(); } }
+async function resumeDistillIfRunning() {
+  const s = await memApi("/persona/distill/status"); if (s && s.running) { pdistill.disabled = true; pollDistill(); }
+  const sc = await memApi("/persona/scan/status"); if (sc && sc.running) { pscan.disabled = true; pollScan(); }
+}
 function openPersona() { pmodal.hidden = false; setPMsg(""); loadPersona(); resumeDistillIfRunning(); }
 const closePersona = () => { pmodal.hidden = true; };
 
