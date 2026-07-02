@@ -27,6 +27,8 @@ export const KINDS = ["joke", "maxim", "essay", "story", "poem", "thought", "pla
 const SHORT_KINDS = new Set(["joke", "maxim", "thought", "favorite"]);
 
 const tokenize = (s) => (String(s || "").toLowerCase().match(/[a-z0-9]{2,}/g) || []);
+// Common-word stoplist so statistical vocabulary surfaces Fred's DISTINCTIVE words, not "the/and/of".
+const STOPWORDS = new Set(("a about above after again against all am an and any are aren't as at be because been before being below between both but by can can't cannot could couldn't did didn't do does doesn't doing don't down during each few for from further had hadn't has hasn't have haven't having he he'd he'll he's her here here's hers herself him himself his how how's i i'd i'll i'm i've if in into is isn't it it's its itself let's me more most mustn't my myself no nor not of off on once only or other ought our ours ourselves out over own same shan't she she'd she'll she's should shouldn't so some such than that that's the their theirs them themselves then there there's these they they'd they'll they're they've this those through to too under until up very was wasn't we we'd we'll we're we've were weren't what what's when when's where where's which while who who's whom why why's will with won't would wouldn't you you'd you'll you're you've your yours yourself yourselves just also get got like really much many one two get").split(" "));
 const norm = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
 const nowIso = () => new Date().toISOString();
 
@@ -290,6 +292,44 @@ export function createPersonaStore(opts = {}) {
       .map(({ c, s }) => ({ id: c.id, kind: c.kind, title: c.title, text: c.text, score: Number(s.toFixed(3)) }));
   }
 
+  // Distinctive vocabulary + recurring phrases across the WHOLE corpus (no LLM, no token limit).
+  // Ground-truth word-choice coverage that a sampled LLM pass can't give.
+  function statVocab({ topWords = 50, topPhrases = 30 } = {}) {
+    const wc = new Map(), pc = new Map();
+    for (const d of docs) {
+      const toks = tokenize(d.text);
+      for (const w of toks) { if (w.length >= 4 && !STOPWORDS.has(w)) wc.set(w, (wc.get(w) || 0) + 1); }
+      for (let i = 0; i < toks.length - 1; i++) {
+        const a = toks[i], b = toks[i + 1];
+        if (!(STOPWORDS.has(a) && STOPWORDS.has(b))) { const bg = a + " " + b; pc.set(bg, (pc.get(bg) || 0) + 1); }
+        if (i < toks.length - 2) { const c = toks[i + 2]; if (!(STOPWORDS.has(a) && STOPWORDS.has(c))) { const tg = a + " " + b + " " + c; pc.set(tg, (pc.get(tg) || 0) + 1); } }
+      }
+    }
+    const words = [...wc.entries()].filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).slice(0, topWords).map(([w, n]) => ({ w, n }));
+    const phrases = [...pc.entries()].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).slice(0, topPhrases).map(([p, n]) => ({ p, n }));
+    return { words, phrases };
+  }
+
+  // Build context-window-sized text batches over the corpus for map-reduce distillation.
+  // If the corpus exceeds maxBatches*batchChars, evenly stratify chunks down to that budget (marked capped —
+  // never silently truncated; the caller surfaces "digested X of Y").
+  function buildBatches({ batchChars = 90000, maxBatches = 60 } = {}) {
+    const src = chunks.length ? chunks : docs.map((d) => ({ text: d.text, kind: d.kind }));
+    const totalChars = src.reduce((n, c) => n + (c.text ? c.text.length : 0), 0);
+    const budget = batchChars * maxBatches;
+    let pool = src, capped = false;
+    if (totalChars > budget) { capped = true; const keepEvery = Math.ceil(totalChars / budget); pool = src.filter((_, i) => i % keepEvery === 0); }
+    const batches = [];
+    let buf = "", bufN = 0;
+    for (const c of pool) {
+      const piece = `[${c.kind}] ${c.text}`;
+      if (bufN + piece.length > batchChars && buf) { batches.push(buf); buf = ""; bufN = 0; if (batches.length >= maxBatches) break; }
+      buf += (buf ? "\n\n---\n\n" : "") + piece; bufN += piece.length;
+    }
+    if (buf && batches.length < maxBatches) batches.push(buf);
+    return { batches, capped, totalChars, coveredChars: batches.reduce((n, b) => n + b.length, 0), poolChunks: pool.length, totalChunks: src.length };
+  }
+
   // A diverse sample across kinds for profile distillation (round-robin so no single kind dominates).
   function sampleForProfile({ perKind = 6, maxChars = 14000 } = {}) {
     const byKind = {};
@@ -348,7 +388,7 @@ export function createPersonaStore(opts = {}) {
     };
   }
 
-  return { ingestText, scanInbox, retrieve, sampleForProfile, personaBlock, getProfile, setProfile, list, getDoc, removeDoc, backfillEmbeddings, stats, KINDS, dir, inbox };
+  return { ingestText, scanInbox, retrieve, sampleForProfile, statVocab, buildBatches, personaBlock, getProfile, setProfile, list, getDoc, removeDoc, backfillEmbeddings, stats, KINDS, dir, inbox };
 }
 
 // Render the structured facets into a system-prompt block (fallback when no pre-rendered systemBlock).
@@ -362,6 +402,8 @@ export function renderFacets(f = {}) {
   add("Specialties & expertise", f.specialties);
   add("Reasoning & intelligence", f.reasoning);
   add("Interests, habits, hobbies, life work", f.interests);
+  add("Favored words (use naturally, don't force)", f.favored_words);
+  add("Recurring phrases", f.favored_phrases);
   add("Hard do-nots", f.avoid);
   return lines.join("\n");
 }

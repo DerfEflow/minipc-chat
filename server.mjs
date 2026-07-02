@@ -636,40 +636,84 @@ async function handleFlywheel(req, res, u) {
   return json(404, { error: "not found" });
 }
 
-// Distill a structured "Fred Profile" from the corpus by having the 30B analyze a diverse sample.
-// JSON-out (format:"json") to dodge qwen's thinking-spill breaking the parse (the Phase-5 gotcha).
-async function distillPersona() {
-  const sample = persona.sampleForProfile({ perKind: 6, maxChars: 14000 });
-  if (!sample.length) return { error: "The corpus is empty — dump some of Fred's writing first (paste, scan the inbox, or scrape a page)." };
-  const corpus = sample.map((s, i) => `#${i + 1} [${s.kind}] ${s.title}\n${s.text}`).join("\n\n---\n\n");
-  const prompt = [
-    "You are building a PERSONA PROFILE of the writer Frederick (Fred) Wolfe from real samples of his own writing.",
-    "Study the samples and infer his enduring style — not the topic of any one piece. Be specific and concrete: name actual words he favors, the shape of his sentences, the mechanics of his humor. Avoid generic flattery.",
-    "",
-    "Return ONLY JSON with these string (or string-array) fields:",
-    '{ "voice_style": "...", "humor": "...", "vocabulary": "...", "wit": "...", "specialties": "...", "reasoning": "...", "interests": "...", "avoid": "...", "summary": "..." }',
-    "- voice_style: tone, sentence rhythm, formality, punctuation habits, POV.",
-    "- humor: what makes him funny — timing, irony, absurdity, wordplay, targets he mocks.",
-    "- vocabulary: his nuanced/favored words and phrases (list real ones seen in the samples).",
-    "- wit: rhetorical moves, turns of phrase, how he lands a point.",
-    "- specialties: subjects he clearly knows deeply.",
-    "- reasoning: how he thinks/argues/structures ideas.",
-    "- interests: recurring interests, habits, hobbies, life work.",
-    "- avoid: anti-patterns that would break his voice. ALWAYS include: never use antithesis constructions ('not X but Y', 'it's not X, it's Y', 'not X, not Y, but Z').",
-    "- summary: 2-3 sentences a ghostwriter could read to instantly write as Fred.",
-    "",
-    "SAMPLES:",
-    corpus,
-  ].join("\n");
-  const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: prompt }], { temperature: 0.3, num_predict: 2600, noTools: true, format: "json", think: false });
-  let facets = null;
+// ---- Persona distillation: MAP-REDUCE over the WHOLE corpus (not a sample) ----
+// map: each context-window batch -> partial voice observations; reduce: synthesize all observations
+// + whole-corpus statistical vocabulary into the final profile. Runs as a background job with
+// progress (distillState), because a large corpus = many 30B calls = minutes. JSON-out + think:false
+// (qwen3 + format:json + thinking ON collapses to "{}"; the Phase-5 gotcha).
+const NOTE_KEYS = ["voice", "humor", "vocabulary", "wit", "specialties", "reasoning", "interests"];
+let distillState = { running: false, phase: "idle", batchesDone: 0, batchesTotal: 0, startedAt: null, finishedAt: null, error: null, capped: false, digestedChunks: 0, totalChunks: 0 };
+
+function parseJsonLoose(d) {
   const raw = stripThink((d && d.message && d.message.content) || "");
-  try { facets = JSON.parse(raw || "{}"); } catch { const m = raw.match(/\{[\s\S]*\}/); try { facets = m ? JSON.parse(m[0]) : null; } catch { facets = null; } }
-  if (!facets) return { error: "The model didn't return valid JSON — try again." };
-  if (!facets || typeof facets !== "object") return { error: "Empty profile came back — try again." };
-  const systemBlock = renderFacets(facets) + (facets.summary ? "\n- In short: " + facets.summary : "");
-  const p = persona.setProfile({ facets, systemBlock, model: "local" });
-  return { profile: p, sampled: sample.length };
+  try { return JSON.parse(raw || "{}"); } catch {}
+  const m = raw.match(/\{[\s\S]*\}/); if (m) { try { return JSON.parse(m[0]); } catch {} }
+  return null;
+}
+
+async function runDistill({ batchChars = 90000, maxBatches = 60 } = {}) {
+  try {
+    const vocab = persona.statVocab();
+    const { batches, capped, poolChunks, totalChunks, coveredChars, totalChars } = persona.buildBatches({ batchChars, maxBatches });
+    distillState.batchesTotal = batches.length; distillState.capped = capped; distillState.digestedChunks = poolChunks; distillState.totalChunks = totalChunks;
+    if (!batches.length) { distillState = { ...distillState, running: false, phase: "error", error: "The corpus is empty — dump some of Fred's writing first." }; return; }
+
+    // MAP: partial observations per batch.
+    const notes = Object.fromEntries(NOTE_KEYS.map((k) => [k, []]));
+    distillState.phase = "reading";
+    const mapPreamble =
+      "From this batch of Frederick (Fred) Wolfe's own writing, extract SHORT concrete observations about his enduring style (not the topic). " +
+      "Return ONLY JSON: {\"voice\":[],\"humor\":[],\"vocabulary\":[],\"wit\":[],\"specialties\":[],\"reasoning\":[],\"interests\":[]}. " +
+      "Each array = a few terse, specific bullet strings (real words/devices you SEE, no filler). Batch:\n\n";
+    for (let i = 0; i < batches.length; i++) {
+      if (!distillState.running) return;   // cancelled
+      const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: mapPreamble + batches[i] }], { temperature: 0.2, num_predict: 900, noTools: true, format: "json", think: false });
+      const o = parseJsonLoose(d);
+      if (o) for (const k of NOTE_KEYS) if (Array.isArray(o[k])) notes[k].push(...o[k].map((x) => String(x).slice(0, 300)));
+      distillState.batchesDone = i + 1;
+    }
+
+    // REDUCE: synthesize the observations + whole-corpus vocabulary into the final profile.
+    if (!distillState.running) return;
+    distillState.phase = "synthesizing";
+    const cap = (arr, n) => [...new Set(arr)].slice(0, n).join("; ");
+    const reducePrompt = [
+      "You are writing the definitive PERSONA PROFILE of the writer Frederick (Fred) Wolfe, synthesizing observations gathered across his ENTIRE body of writing.",
+      "Below are (a) observations pooled from every part of his corpus and (b) his statistically most-distinctive words and phrases (measured across everything he's written). Reconcile them into one sharp, specific profile. Prefer concrete detail over generic praise.",
+      "",
+      "Return ONLY JSON with these fields:",
+      '{ "voice_style":"...", "humor":"...", "vocabulary":"...", "wit":"...", "specialties":"...", "reasoning":"...", "interests":"...", "avoid":"...", "summary":"..." }',
+      "- avoid: MUST include never using antithesis constructions ('not X but Y', 'it's not X, it's Y', 'not X, not Y, but Z').",
+      "- summary: 3-4 sentences a ghostwriter reads to instantly write as Fred.",
+      "",
+      "OBSERVATIONS (pooled from the whole corpus):",
+      ...NOTE_KEYS.map((k) => `- ${k}: ${cap(notes[k], 40) || "(none)"}`),
+      "",
+      "MOST-DISTINCTIVE WORDS: " + (vocab.words.map((x) => x.w).join(", ") || "(none)"),
+      "MOST-RECURRING PHRASES: " + (vocab.phrases.map((x) => x.p).join("; ") || "(none)"),
+    ].join("\n");
+    const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: reducePrompt }], { temperature: 0.3, num_predict: 2600, noTools: true, format: "json", think: false });
+    const facets = parseJsonLoose(d);
+    if (!facets || typeof facets !== "object" || (!facets.voice_style && !facets.summary)) { distillState = { ...distillState, running: false, phase: "error", error: "The model didn't return a usable profile (is the local model busy or down?) — try again." }; return; }
+    // Fold in the measured vocabulary as ground truth (survives even if the model omitted words).
+    facets.favored_words = vocab.words.map((x) => x.w);
+    facets.favored_phrases = vocab.phrases.map((x) => x.p);
+    const systemBlock = renderFacets(facets) + (facets.summary ? "\n- In short: " + facets.summary : "");
+    persona.setProfile({ facets, systemBlock, model: "local", method: "map-reduce", batches: batches.length, capped, digestedChunks: poolChunks, totalChunks, coveredChars, totalChars });
+    distillState = { ...distillState, running: false, phase: "done", finishedAt: new Date().toISOString(), error: null };
+  } catch (e) {
+    distillState = { ...distillState, running: false, phase: "error", error: String(e.message || e) };
+  }
+}
+
+// Kick a distillation in the background (idempotent while one is running). Returns immediately.
+function startDistill(opts) {
+  if (distillState.running) return { running: true, phase: distillState.phase, batchesDone: distillState.batchesDone, batchesTotal: distillState.batchesTotal };
+  const maxBatches = Math.max(1, Math.min(300, Number(opts && opts.maxBatches) || 60));
+  const batchChars = Math.max(20000, Math.min(140000, Number(opts && opts.batchChars) || 90000));
+  distillState = { running: true, phase: "starting", batchesDone: 0, batchesTotal: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null, capped: false, digestedChunks: 0, totalChunks: 0 };
+  runDistill({ batchChars, maxBatches });   // not awaited — background job
+  return { started: true };
 }
 
 // Persona Forge API: dump material, scan the inbox, scrape a page, distill the profile, search exemplars.
@@ -680,6 +724,7 @@ async function handlePersona(req, res, u) {
   if (req.method === "GET" && p === "/persona/profile") return json(200, { profile: persona.getProfile() });
   if (req.method === "GET" && p === "/persona/list") return json(200, { items: persona.list({ kind: u.searchParams.get("kind") || "", q: u.searchParams.get("q") || "" }), stats: persona.stats() });
   if (req.method === "GET" && p === "/persona/search") return json(200, { hits: await persona.retrieve(u.searchParams.get("q") || "", { limit: 8, kind: u.searchParams.get("kind") || "" }) });
+  if (req.method === "GET" && p === "/persona/distill/status") return json(200, distillState);
 
   if (req.method === "POST") {
     const body = await readJsonBody(req);
@@ -698,7 +743,7 @@ async function handlePersona(req, res, u) {
       const ing = persona.ingestText({ text, kind: body.kind || "web", title: body.title || body.url, source: "scrape:" + body.url });
       return json(ing.error ? 400 : 200, ing.error ? ing : { ok: true, docId: ing.doc.id, chunks: ing.chunks, chars: text.length, deduped: !!ing.deduped, stats: persona.stats() });
     }
-    if (p === "/persona/distill") { const r = await distillPersona(); return json(r.error ? 400 : 200, r); }
+    if (p === "/persona/distill") { return json(200, startDistill(body)); }
     if (p === "/persona/delete") { return json(200, persona.removeDoc(body.id)); }
   }
   return json(404, { error: "not found" });

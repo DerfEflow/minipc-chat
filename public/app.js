@@ -419,16 +419,35 @@ async function scanPersonaInbox() {
   setPMsg("Ingested " + (d.ingested || 0) + " file(s), " + (d.chunks || 0) + " chunks" + skipped);
   loadPersona();
 }
+let distillTimer = null;
 async function distillProfile() {
-  setPMsg("Reading your corpus and distilling your voice… (~20–40s)");
   pdistill.disabled = true;
-  const d = await memApi("/persona/distill", {});
-  pdistill.disabled = false;
-  if (d && d.error) return setPMsg(d.error);
-  setPMsg("Profile refreshed ✓ (from " + (d.sampled || 0) + " samples)");
-  renderProfile(d.profile);
+  setPMsg("Starting a full read of your corpus…");
+  const start = await memApi("/persona/distill", {});
+  if (start && start.error) { pdistill.disabled = false; return setPMsg(start.error); }
+  pollDistill();
 }
-function openPersona() { pmodal.hidden = false; setPMsg(""); loadPersona(); }
+async function pollDistill() {
+  const s = await memApi("/persona/distill/status");
+  if (!s) { pdistill.disabled = false; return; }
+  if (s.running) {
+    const phase = s.phase === "reading" ? "Reading your whole corpus" : s.phase === "synthesizing" ? "Synthesizing your voice" : "Starting";
+    const prog = s.batchesTotal ? " — batch " + s.batchesDone + "/" + s.batchesTotal : "";
+    const cap = s.capped ? " · digesting " + s.digestedChunks + "/" + s.totalChunks + " chunks" : "";
+    setPMsg(phase + "…" + prog + cap);
+    clearTimeout(distillTimer); distillTimer = setTimeout(pollDistill, 2500);
+    return;
+  }
+  pdistill.disabled = false;
+  if (s.phase === "error") return setPMsg("Distill failed: " + (s.error || "unknown"));
+  if (s.phase === "done") {
+    const cov = s.capped ? " (digested " + s.digestedChunks + "/" + s.totalChunks + " chunks — cap reached)" : " (read the whole corpus)";
+    setPMsg("Profile refreshed ✓" + cov);
+    const d = await memApi("/persona/profile"); renderProfile(d && d.profile); loadPersona();
+  }
+}
+async function resumeDistillIfRunning() { const s = await memApi("/persona/distill/status"); if (s && s.running) { pdistill.disabled = true; pollDistill(); } }
+function openPersona() { pmodal.hidden = false; setPMsg(""); loadPersona(); resumeDistillIfRunning(); }
 const closePersona = () => { pmodal.hidden = true; };
 
 // ---------- tool activity panel (Phase 3) ----------
