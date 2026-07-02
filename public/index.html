@@ -16,10 +16,11 @@
     --navy:#000023; --navy2:#0a1230; --copper:#c8762f; --copper2:#e8b07c;
     --sand:#e9dcc6; --muted:#8b93a7; --line:rgba(184,115,51,.28);
     --user:rgba(184,115,51,.22); --ai:rgba(255,255,255,.05); --glow:rgba(80,150,255,.45);
-    --panel:rgba(7,12,34,.66);
-    --glass:rgba(9,15,40,.34);
-    --rim:rgba(120,170,255,.30);
-    --rimglow:0 0 14px -4px rgba(90,160,255,.6);
+    /* panes = 5% glass, 1px neon green rims (Fred spec 2026-07-01) */
+    --panel:rgba(7,12,34,.05);
+    --glass:rgba(9,15,40,.05);
+    --rim:rgba(57,255,20,.9);
+    --rimglow:0 0 9px -2px rgba(57,255,20,.55);
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%}
@@ -30,23 +31,13 @@
   }
 
   /* ---- photoreal circuit-board background video + frosted glass ---- */
+  /* crystal clear: whole frame visible (no crop/zoom), fixed in place, nothing on top of it */
   #bgvideo{
-    position:fixed; inset:0; width:100%; height:100%; object-fit:cover;
+    position:fixed; inset:0; width:100%; height:100%; object-fit:contain;
     z-index:-3; pointer-events:none; background:#000018;
   }
-  /* near-CLEAR glass pane: the footage + its light flashes must clearly read through.
-     Depth comes from the panels floating above, not from smothering the video. */
-  #bgglass{
-    position:fixed; inset:0; z-index:-2; pointer-events:none;
-    background:linear-gradient(180deg, rgba(0,0,24,.14) 0%, rgba(0,0,18,.28) 100%);
-    -webkit-backdrop-filter:blur(1.5px) saturate(1.1);
-    backdrop-filter:blur(1.5px) saturate(1.1);
-  }
-  /* whisper of an edge vignette to seat the pane — must not eat the flashes */
-  #bgglass::after{
-    content:""; position:absolute; inset:0;
-    box-shadow:inset 0 0 110px 6px rgba(0,0,12,.38);
-  }
+  /* overlay retired per Fred (2026-07-01): NOTHING obstructs the footage — no tint, no blur */
+  #bgglass{display:none}
   @media(prefers-reduced-motion:reduce){ #bgvideo{display:none} }
   /* header = a detached glass slab floating above the footage */
   header{
@@ -54,7 +45,7 @@
     margin:calc(env(safe-area-inset-top) + 10px) 10px 4px;
     padding:8px 12px; border-radius:18px;
     background:var(--glass); border:1px solid var(--rim);
-    -webkit-backdrop-filter:blur(16px) saturate(1.35); backdrop-filter:blur(16px) saturate(1.35);
+    -webkit-backdrop-filter:blur(8px) saturate(1.2); backdrop-filter:blur(8px) saturate(1.2);
     z-index:5;
     box-shadow:0 24px 46px -14px rgba(0,0,0,.9), var(--rimglow), inset 0 1px 0 rgba(255,255,255,.16);
   }
@@ -75,7 +66,7 @@
   #sidebar{
     position:fixed;top:0;left:0;height:100dvh;width:min(82vw,300px);z-index:9;display:flex;flex-direction:column;
     background:var(--panel);border-right:1px solid var(--rim);box-shadow:6px 0 26px rgba(0,0,0,.5);
-    -webkit-backdrop-filter:blur(22px) saturate(1.3);backdrop-filter:blur(22px) saturate(1.3);
+    -webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);
     transform:translateX(-102%);transition:transform .2s ease;padding-top:env(safe-area-inset-top);
   }
   #sidebar.open{transform:none}
@@ -103,11 +94,11 @@
   .msg.me{justify-content:flex-end}
   .bubble{max-width:88%;padding:10px 13px;border-radius:16px;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;
     text-shadow:0 1px 2px rgba(0,0,12,.65);
-    -webkit-backdrop-filter:blur(12px) saturate(1.3); backdrop-filter:blur(12px) saturate(1.3);
+    -webkit-backdrop-filter:blur(6px) saturate(1.2); backdrop-filter:blur(6px) saturate(1.2);
     box-shadow:0 18px 36px -12px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.12);}
-  .me .bubble{background:rgba(184,115,51,.26);border:1px solid rgba(232,176,124,.5);color:#fff1e0;border-bottom-right-radius:5px;
-    box-shadow:0 18px 36px -12px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.14), 0 0 12px -4px rgba(232,176,124,.55);}
-  .ai .bubble{background:rgba(9,15,40,.36);border:1px solid var(--rim);border-bottom-left-radius:5px;
+  .me .bubble{background:rgba(184,115,51,.05);border:1px solid var(--rim);color:#fff1e0;border-bottom-right-radius:5px;
+    box-shadow:0 18px 36px -12px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.14), var(--rimglow);}
+  .ai .bubble{background:var(--glass);border:1px solid var(--rim);border-bottom-left-radius:5px;
     box-shadow:0 18px 36px -12px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.12), var(--rimglow);}
   .ai .bubble.think{color:var(--muted);font-style:italic}
   .acts{display:flex;gap:12px;padding:3px 6px 8px}
@@ -126,7 +117,7 @@
   .empty{margin:12vh auto 0;text-align:center;color:var(--muted);max-width:340px;
     padding:30px 26px;border-radius:22px;border:1px solid var(--rim);
     background:var(--glass);
-    -webkit-backdrop-filter:blur(14px) saturate(1.3); backdrop-filter:blur(14px) saturate(1.3);
+    -webkit-backdrop-filter:blur(8px) saturate(1.2); backdrop-filter:blur(8px) saturate(1.2);
     box-shadow:0 30px 64px -18px rgba(0,0,0,.9), inset 0 1px 0 rgba(255,255,255,.14), var(--rimglow);}
   .empty .dot{margin:0 auto 14px;width:52px;height:52px}
   .empty .brand{margin:0;font-size:32px;font-weight:800;letter-spacing:.5px;color:var(--copper2);text-shadow:0 0 18px var(--glow)}
@@ -137,13 +128,13 @@
     flex:none; margin:4px 10px calc(10px + env(safe-area-inset-bottom));
     padding:8px 10px; border-radius:20px;
     background:var(--glass); border:1px solid var(--rim);
-    -webkit-backdrop-filter:blur(16px) saturate(1.35); backdrop-filter:blur(16px) saturate(1.35);
+    -webkit-backdrop-filter:blur(8px) saturate(1.2); backdrop-filter:blur(8px) saturate(1.2);
     box-shadow:0 24px 46px -14px rgba(0,0,0,.9), var(--rimglow), inset 0 1px 0 rgba(255,255,255,.14);
   }
   .bar{max-width:760px;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
   textarea{
     flex:1;resize:none;max-height:40vh;min-height:44px;padding:11px 13px;border-radius:14px;
-    background:rgba(8,14,36,.55);border:1px solid var(--rim);color:var(--sand);outline:none;font:inherit;
+    background:rgba(8,14,36,.35);border:1px solid var(--rim);color:var(--sand);outline:none;font:inherit;
   }
   textarea::placeholder{color:var(--muted)}
   .send{flex:none;width:44px;height:44px;border-radius:50%;border:none;cursor:pointer;
@@ -158,7 +149,7 @@
   .modal{position:fixed;inset:0;z-index:12;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,12,.5);backdrop-filter:blur(3px)}
   .modal[hidden]{display:none}
   .sheet{width:min(560px,96vw);background:var(--panel);border:1px solid var(--rim);border-radius:16px 16px 0 0;
-    -webkit-backdrop-filter:blur(22px) saturate(1.3);backdrop-filter:blur(22px) saturate(1.3);
+    -webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);
     box-shadow:0 -20px 60px -20px rgba(0,0,0,.9), var(--rimglow);
     padding:16px 16px calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:14px}
   @media(min-width:600px){.modal{align-items:center}.sheet{border-radius:16px}}
@@ -369,6 +360,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=15"></script>
+  <script src="/app.js?v=16"></script>
 </body>
 </html>
