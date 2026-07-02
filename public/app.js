@@ -32,9 +32,9 @@ let settings = { persona: "default", personaCustom: "", temperature: 0.7, confir
 // battery saver / when the PWA resumes from background — kick it back to life on those signals.
 (() => {
   const v = document.getElementById("bgvideo"); if (!v) return;
-  // The footage has a slow camera pan baked in; near-freeze playback so the board reads as
-  // still while the light flashes survive as slow pulses. (A locked-camera cut removes this.)
-  const RATE = 0.15;
+  // The footage has a slow camera pan baked in; half-speed playback tames the drift without
+  // the stutter of near-freeze rates. (A locked-camera cut removes the pan entirely.)
+  const RATE = 0.5;
   v.defaultPlaybackRate = RATE; v.playbackRate = RATE;
   const kick = () => { v.playbackRate = RATE; if (v.paused) v.play().catch(() => {}); };
   v.addEventListener("ratechange", () => { if (v.playbackRate !== RATE) v.playbackRate = RATE; });
