@@ -19,7 +19,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, normalize, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { TOOL_DEFS, WRITE_TOOLS, runTool, toolMeta, assertNotProtected } from "./tools.mjs";
+import { TOOL_DEFS, toolDefs, WRITE_TOOLS, runTool, toolMeta, assertNotProtected, effectivePermission, needsConfirm, lifecycle, passConfirmGate } from "./tools.mjs";
 import { createMemoryStore } from "./memory.mjs";
 import { createArtifactStore } from "./artifacts.mjs";
 import { createMentor, MENTOR_ROLES } from "./mentor.mjs";
@@ -74,9 +74,12 @@ function embedText(text) {
   });
 }
 
-// Phase 2: governed memory store. LAX -> candidates auto-approve unless MEMORY_AUTO_APPROVE=0.
+// Phase 2: governed memory store with the three-tier gating matrix (B1). MEMORY_GATING=lax|spec:
+// lax (default) auto-approves the approval tier but records gatedAs; spec lands it pending.
+// Legacy MEMORY_AUTO_APPROVE=0 still flips to spec mode. The never-save list blocks in BOTH modes.
 const MEMORY_DIR = cfgGet("MEMORY_DIR", "C:\\minipc-chat\\memory");
-const memory = createMemoryStore({ dir: MEMORY_DIR, autoApprove: String(cfgGet("MEMORY_AUTO_APPROVE", "1")) !== "0", embed: embedText });
+const MEMORY_GATING = String(cfgGet("MEMORY_GATING", String(cfgGet("MEMORY_AUTO_APPROVE", "1")) === "0" ? "spec" : "lax")).toLowerCase() === "spec" ? "spec" : "lax";
+const memory = createMemoryStore({ dir: MEMORY_DIR, gating: MEMORY_GATING, embed: embedText });
 CTX.memory = memory;
 
 // Server-side rolling chat transcripts (retrieval index for search_chats + episodic summaries).
@@ -263,7 +266,7 @@ async function logToolRun(entry) {
   } catch {}
 }
 const newRunId = () => "tr_" + randomUUID().slice(0, 8);
-const needsConfirm = (cls) => cls === "dangerous" || cls === "requires_confirmation";
+// (needsConfirm / lifecycle / passConfirmGate now live in tools.mjs — the C2 lifecycle machinery.)
 
 // Pending tool confirmations (Phase 3 confirmation flow). runId -> resolver. Default OFF under LAX;
 // turned on per-request via {confirmTools:true} or server-wide via CONFIRM_TOOLS=1.
@@ -305,8 +308,11 @@ const reviewEngine = createReviewEngine({
   ollamaChat: (m, msgs, o) => ollamaChat(m, msgs, o),
   lightModel: LIGHT_MODEL, mainModel: MAIN_MODEL,
   autoApply: String(cfgGet("REVIEW_AUTO_APPLY", "1")) !== "0",
+  toolNames: TOOL_DEFS.map((d) => d.function.name),   // C3: mentor tool findings map to real tools -> overlays
   log: (s) => console.log("[dominion-ai] " + s),
 });
+// C4: the formatting tools run on the LIGHT model through this hook (fast + cheap by design).
+CTX.lightChat = (messages, o = {}) => ollamaChat(LIGHT_MODEL, messages, { noTools: true, ...o });
 
 function systemPrompt(persona, modeFrag) {
   let s = [
@@ -327,8 +333,11 @@ function systemPrompt(persona, modeFrag) {
 
 async function ollamaChat(model, messages, opts = {}) {
   return await new Promise((resolve) => {
+    if (opts.signal && opts.signal.aborted) return resolve(null);
     const payload = { model, messages, stream: false };
-    if (!opts.noTools) payload.tools = TOOL_DEFS;
+    // C3: tool defs are assembled LIVE with the flywheel's active description overlays, so mentor
+    // tool-guidance actually changes what the model sees about each tool at prompt time.
+    if (!opts.noTools) payload.tools = toolDefs(flywheel.activeToolOverlays());
     if (opts.format) payload.format = opts.format;   // e.g. "json" — forces valid JSON, suppresses thinking spill
     if (opts.think === false) payload.think = false;  // disable qwen3 reasoning for structured extraction (thinking-on + json grammar collapses to "{}")
     const options = {};
@@ -342,6 +351,7 @@ async function ollamaChat(model, messages, opts = {}) {
         headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) }, timeout: 180000 },
       (resp) => { let buf = ""; resp.on("data", (d) => (buf += d)); resp.on("end", () => { try { resolve(JSON.parse(buf)); } catch { resolve(null); } }); }
     );
+    if (opts.signal) opts.signal.addEventListener("abort", () => { try { r.destroy(); } catch {} resolve(null); }, { once: true });
     r.on("error", () => resolve(null));
     r.on("timeout", () => { r.destroy(); resolve(null); });
     r.write(body); r.end();
@@ -431,9 +441,12 @@ async function routeDecision(lastUser, totalInputChars) {
 // approved memory (HYBRID lexical+vector) + relevant saved artifacts + snippets from earlier
 // conversations + active retrieval-scope rules. Pending/rejected/archived memory never appears.
 // Returns everything injected (for logging + the mentor review package) and a compact block.
-async function buildContext(lastUserText, chatId, { skipRetrieval = false } = {}) {
-  const pinned = memory.alwaysLoaded({ limit: 6 });
-  const retrieved = skipRetrieval ? [] : await memory.retrieveHybrid(lastUserText || "", { limit: 4 });
+async function buildContext(lastUserText, chatId, { skipRetrieval = false, mode = "", model = "" } = {}) {
+  // B2: the LIVE scope context — chat-scoped memories only surface in their chat, tool-scoped
+  // only in tool contexts, model-scoped only on the matching model. Global always loads.
+  const scopeCtx = { chatId, mode, model };
+  const pinned = memory.alwaysLoaded({ limit: 6, scopeCtx });
+  const retrieved = skipRetrieval ? [] : await memory.retrieveHybrid(lastUserText || "", { limit: 4, scopeCtx });
   const seen = new Set(), used = [];
   for (const c of [...pinned, ...retrieved]) { if (seen.has(c.id)) continue; seen.add(c.id); used.push(c); }
   const parts = [];
@@ -466,7 +479,7 @@ async function handleMemory(req, res, u) {
   }
   if (req.method === "POST" && path === "/memory") {
     const body = await readJsonBody(req); if (!body) return json(400, { error: "bad json" });
-    const r = memory.propose({ content: body.content, type: body.type, tags: body.tags, scope: body.scope, pinned: body.pinned, source: { kind: body.source || "user_explicit" } });
+    const r = memory.propose({ content: body.content, type: body.type, tags: body.tags, scope: body.scope, scopeRef: body.scopeRef, pinned: body.pinned, source: { kind: body.source || "user_explicit" } });
     return json(r.error ? 400 : 200, r);
   }
   if (req.method === "POST" && path === "/memory/update") {
@@ -726,7 +739,7 @@ async function testRule(id) {
 async function handleFlywheel(req, res, u) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   const p = u.pathname;
-  const MAP = { "/ledger": "failures", "/evals": "evals", "/rules": "rules", "/prompts": "prompts", "/finetune": "finetune", "/reviews": "reviews", "/pipeline": "pipeline" };
+  const MAP = { "/ledger": "failures", "/evals": "evals", "/rules": "rules", "/prompts": "prompts", "/finetune": "finetune", "/reviews": "reviews", "/pipeline": "pipeline", "/tool-overlays": "toolOverlays" };
   if (req.method === "GET") {
     if (MAP[p]) return json(200, { items: flywheel.list(MAP[p], { status: u.searchParams.get("status") || "" }), stats: flywheel.stats() });
     if (p === "/evals/runs") return json(200, { runs: flywheel.runsFor(u.searchParams.get("id")) });
@@ -741,6 +754,9 @@ async function handleFlywheel(req, res, u) {
     if (p === "/prompts") return json(200, flywheel.addPrompt(b));
     if (p === "/prompts/activate") return json(200, flywheel.activatePrompt(b.id));
     if (p === "/finetune") return json(200, flywheel.addFinetune(b));   // source must be a spec-allowed clean source
+    // C3: POST a per-tool description overlay. A manual POST defaults ACTIVE (Fred posting one
+    // wants it live); pipeline-generated overlays arrive as candidates needing activation.
+    if (p === "/tool-overlays") return json(200, flywheel.addToolOverlay({ ...b, status: b.status || "active", source: b.source || "manual" }));
     if (p === "/evals/run") return json(200, await runEval(b.id));
     if (p === "/rules/test") return json(200, await testRule(b.id));
     for (const [path, coll] of Object.entries(MAP)) {
@@ -878,7 +894,10 @@ async function handleChat(req, res) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
   const sse = (o) => { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
   let aborted = false;
-  res.on("close", () => (aborted = true));
+  // C5: one AbortController per request — client stop/disconnect aborts in-flight tools (HTTP tools
+  // destroy their request, the python sandbox SIGKILLs) and the in-flight model call.
+  const ac = new AbortController();
+  res.on("close", () => { aborted = true; try { ac.abort(); } catch {} });
 
   const personaStyle = typeof input.persona === "string" ? input.persona.slice(0, 2000) : "";
   const userTemp = (typeof input.temperature === "number" && input.temperature >= 0 && input.temperature <= 2) ? input.temperature : undefined;
@@ -899,7 +918,7 @@ async function handleChat(req, res) {
   if (aborted) return res.end();
   const md = MODES[mode];
   const model = forced || MODEL_FOR(tier);
-  const opts = { temperature: typeof userTemp === "number" ? userTemp : md.temp };
+  const opts = { temperature: typeof userTemp === "number" ? userTemp : md.temp, signal: ac.signal };   // C5: abort reaches the model call too
   // Long-context gating: only scale num_ctx up for long_context mode, sized to the input, capped at the provider limit.
   if (mode === "long_context") {
     const cap = (PROVIDERS[tier] || PROVIDERS.main).maxContextTokens;
@@ -909,9 +928,11 @@ async function handleChat(req, res) {
   sse({ type: "route", model, mode, reason, confidence: routeConfidence });
   console.log(`[dominion-ai] /chat route -> ${model} · ${mode} (${reason})`);
 
+  // Per-request tool context: the base CTX plus the live chat/mode (B2 scope for memory tools).
+  const reqCtx = { ...CTX, chatId, mode, model };
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
   // Fast mode skips retrieval (spec: fast = no retrieval overhead); durable pinned/profile still loads.
-  const ctxInfo = await buildContext(lastUser ? lastUser.content : "", chatId, { skipRetrieval: mode === "fast" });
+  const ctxInfo = await buildContext(lastUser ? lastUser.content : "", chatId, { skipRetrieval: mode === "fast", mode, model });
   const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag) }];
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
@@ -960,17 +981,22 @@ async function handleChat(req, res) {
           if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = {}; } }
           const meta = toolMeta(name);
           const runId = newRunId();
-          const cls = meta.permissionClass;
+          // C1: EFFECTIVE class — sandbox overwrite / inferred-memory save escalate to requires_confirmation.
+          const cls = effectivePermission(name, args, CTX);
           const startedAt = new Date().toISOString();
           const inPrev = meta.logsInputs ? JSON.stringify(args).slice(0, 200) : undefined;
+          // C2: the 9-state lifecycle — every transition timestamped, persisted with the run.
+          const life = lifecycle();
+          life.push("proposed");
           toolCount++;
           toolRunIds.push(runId);
 
           // 1) Ironclad carve-out: hard-deny protected resources (customer DBs / backups), even under LAX.
           const guard = assertNotProtected(name, args);
           if (!guard.ok) {
+            life.push("blocked", { reason: guard.reason });
             sse({ type: "tool", name, runId, cls, status: "blocked", preview: guard.reason });
-            await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "blocked", reason: guard.reason, input: inPrev, chatId, model });
+            await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "blocked", reason: guard.reason, states: life.states, input: inPrev, chatId, model });
             messages.push({ role: "tool", tool_name: name, content: `BLOCKED: this ${guard.reason}. I cannot do that.` });
             toolSummaries.push(name + " · blocked");
             continue;
@@ -978,36 +1004,49 @@ async function handleChat(req, res) {
 
           // 1b) Mode gate (spec allowedModes): e.g. forge_send is barred from Draft mode.
           if (meta.allowedModes && !meta.allowedModes.includes(mode)) {
+            life.push("blocked", { reason: "mode " + mode + " not in allowedModes" });
             sse({ type: "tool", name, runId, cls, status: "blocked", preview: "not allowed in " + mode + " mode" });
-            await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "blocked", reason: "mode " + mode + " not in allowedModes", input: inPrev, chatId, model });
+            await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "blocked", reason: "mode " + mode + " not in allowedModes", states: life.states, input: inPrev, chatId, model });
             messages.push({ role: "tool", tool_name: name, content: `BLOCKED: ${name} is not allowed in ${mode} mode. Tell Fred to switch modes if this action is really needed.` });
             toolSummaries.push(name + " · blocked (mode)");
             continue;
           }
 
-          // 2) Confirmation gate (Phase 3) — default OFF (LAX). When on, risky tools need user approval.
-          if (confirmTools && needsConfirm(cls)) {
-            sse({ type: "tool_confirm", name, runId, cls, preview: inPrev || "" });
-            const decision = await awaitConfirm(runId, 120000);
-            if (decision !== "approved") {
-              sse({ type: "tool", name, runId, cls, status: "cancelled", preview: decision });
-              await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "cancelled", decision, input: inPrev, chatId, model });
-              messages.push({ role: "tool", tool_name: name, content: `The user did not approve this ${cls} action (${decision}); it was not run.` });
-              toolSummaries.push(name + " · cancelled");
-              continue;
-            }
+          // 2) Confirmation gate — the machinery ALWAYS runs for gated classes (dangerous /
+          // requires_confirmation). LAX auto-answers "approve" and records the auto_approved
+          // transition; CONFIRM_TOOLS=1 (or {confirmTools:true}) makes it truly interactive.
+          const gate = await passConfirmGate({
+            cls, interactive: confirmTools, life,
+            ask: () => { sse({ type: "tool_confirm", name, runId, cls, preview: inPrev || "" }); return awaitConfirm(runId, 120000); },
+          });
+          if (!gate.proceed) {
+            sse({ type: "tool", name, runId, cls, status: "cancelled", preview: gate.decision });
+            await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "cancelled", decision: gate.decision, states: life.states, input: inPrev, chatId, model });
+            messages.push({ role: "tool", tool_name: name, content: `The user did not approve this ${cls} action (${gate.decision}); it was not run.` });
+            toolSummaries.push(name + " · denied");
+            continue;
           }
 
-          // 3) Run + report honestly.
+          // 3) Run + report honestly. The abort signal reaches the tool (C5).
+          life.push("executing");
           sse({ type: "tool", name, runId, cls, gated: WRITE_TOOLS.has(name), status: "run" });
-          const result = await runTool(name, args, CTX);
+          const result = await runTool(name, args, reqCtx, ac.signal);
+          if (aborted) {
+            // C5: client stopped mid-run. Abortable tools were cancelled; un-abortable ones
+            // finished but their answer is DISCARDED (never fed back to the model).
+            life.push("cancelled", { discarded: true, reason: String(result).startsWith("CANCELLED") ? "aborted in flight" : "finished but discarded (client stopped)" });
+            await logToolRun({ ts: startedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: "cancelled", states: life.states, discarded: true, confirmedByUser: gate.confirmedByUser, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model });
+            toolSummaries.push(name + " · cancelled");
+            break;
+          }
           const failed = /^(Tool .+ failed|Unknown tool|Couldn't|I can read and plan|Memory isn't available|BLOCKED)/i.test(String(result));
+          life.push(failed ? "failed" : "succeeded");
           if (failed) toolFailedThisTurn = true;
           if ((name === "create_artifact" || name === "revise_artifact") && !failed) artifactCreatedThisTurn = true;
           if ((name === "run_python_sandbox" || name === "forge_send") && !failed) executedCodeThisTurn = true;   // code went live → review trigger
           if (name === "export_artifact" && !failed) exportedThisTurn = true;                                     // export happened → review trigger
           sse({ type: "tool", name, runId, cls, status: failed ? "failed" : "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
-          await logToolRun({ ts: startedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model });
+          await logToolRun({ ts: startedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", states: life.states, confirmedByUser: gate.confirmedByUser, autoApproved: gate.autoApproved || undefined, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model });
           messages.push({ role: "tool", tool_name: name, content: String(result).slice(0, 8000) });
           toolSummaries.push(name + " · " + (failed ? "failed" : "succeeded"));
         }
@@ -1109,7 +1148,7 @@ const server = http.createServer(async (req, res) => {
     if (path === "/mentor/review" && req.method === "POST") return handleMentorReview(req, res);
     if (path === "/mentor/council" && req.method === "POST") return handleMentorCouncil(req, res);
     if (path === "/mentor/revise" && req.method === "POST") return handleMentorRevise(req, res);
-    if (["/ledger", "/evals", "/rules", "/prompts", "/finetune", "/reviews", "/pipeline"].some((b) => path === b || path.startsWith(b + "/"))) return handleFlywheel(req, res, u);
+    if (["/ledger", "/evals", "/rules", "/prompts", "/finetune", "/reviews", "/pipeline", "/tool-overlays"].some((b) => path === b || path.startsWith(b + "/"))) return handleFlywheel(req, res, u);
     if (path === "/persona" || path.startsWith("/persona/")) return handlePersona(req, res, u);
 
     if (path === "/ollama" || path.startsWith("/ollama/")) {
@@ -1138,9 +1177,9 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[dominion-ai] tools: deck/forge/sandbox  ·  sync=${CTX.syncKey ? "set" : "MISSING"}  ·  run-password=${CTX.runPassword ? "set" : "unset"}  ·  sandbox=${CTX.sandboxDir}`);
   console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  usage log=${LOG_DIR}`);
   const ms = memory.stats();
-  console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  auto-approve=${ms.autoApprove}  ·  vectors=${EMBED_MODEL} (${ms.embedded} embedded)  ·  dir=${MEMORY_DIR}`);
+  console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  gating=${ms.gating}${ms.gatedLax ? " (" + ms.gatedLax + " lax-auto-approved)" : ""}${ms.unverified ? " · " + ms.unverified + " unverified mentor claim(s) pending" : ""}  ·  scope-filtered retrieval  ·  vectors=${EMBED_MODEL} (${ms.embedded} embedded)  ·  dir=${MEMORY_DIR}`);
   console.log(`[dominion-ai] chatlog: ${chatlog.stats().chats} conversation(s) indexed  ·  episodic summaries via /memory/summarize-session`);
-  console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON" : "off (LAX)"}  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl (${toolRunTail.length} reloaded)`);
+  console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed (incl. 6 formatting on the light model)  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON (interactive)" : "auto-approve (LAX, recorded)"}  ·  9-state lifecycle persisted  ·  ${flywheel.stats().activeToolOverlays} active description overlay(s)  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl (${toolRunTail.length} reloaded)`);
   const as = artifacts.stats();
   console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review|duplicate|transform]`);
   console.log(`[dominion-ai] mentor: ${mentor.info().provider}  ·  auto-review=${AUTO_MENTOR ? "ON (tiered+adaptive)" : "OFF"}  ·  periodic=${PERIODIC_MENTOR ? "every " + PERIODIC_EVERY : "off"}  ·  council roles: ${Object.keys(MENTOR_ROLES).length}  ·  flywheel ${JSON.stringify(flywheel.stats())}`);

@@ -130,7 +130,7 @@ export function isTier0(sig = {}) {
   return false;
 }
 
-export function createReviewEngine({ mentor, flywheel, memory, ollamaChat, lightModel, mainModel, autoApply = true, log = () => {} }) {
+export function createReviewEngine({ mentor, flywheel, memory, ollamaChat, lightModel, mainModel, autoApply = true, toolNames = [], log = () => {} }) {
   // ---- adaptive sampling (spec: rate rises on recent ledger failures in that category, decays
   // back to baseline as the 7-day window slides past them) ----
   function effectiveRate(category) {
@@ -236,7 +236,7 @@ export function createReviewEngine({ mentor, flywheel, memory, ollamaChat, light
   // 4 classify · 5 generate candidates · 6 queue · 7 auto-apply safe ones · 8 eval linkage ·
   // 9 log · 10 retire stale rules. Returns a summary object that gets stored with the review.
   async function runPipeline(critique, ctx = {}) {
-    const out = { valid: false, classification: null, generated: { evals: [], rules: [], retrievalRules: [], toolRules: [], memories: [], finetune: [] }, autoApplied: [], localResponse: null, retired: [] };
+    const out = { valid: false, classification: null, generated: { evals: [], rules: [], retrievalRules: [], toolRules: [], toolOverlays: [], memories: [], finetune: [] }, autoApplied: [], localResponse: null, retired: [] };
     // 2) validate: a critique that failed to parse, or found nothing actionable, ends the pipeline.
     if (critique._parseError) { out.reason = "critique unparseable"; flywheel.addPipelineLog({ ...pipelineMeta(ctx), valid: false, reason: out.reason }); return out; }
     const hasFindings = (critique.major_findings || []).length || (critique.unsupported_claims || []).length ||
@@ -286,9 +286,17 @@ export function createReviewEngine({ mentor, flywheel, memory, ollamaChat, light
       const r = flywheel.addRule({ scope: "retrieval", content: String(c).slice(0, 800), status: "candidate", sourceEvalId: out.generated.evals[0] || null });
       if (r.item) out.generated.retrievalRules.push(r.item.id);
     }
-    // Tool-use issues become tool-scope rule candidates (Group C applies them as description overlays).
+    // Tool-use issues: when the finding names a REAL registered tool, it becomes a per-tool
+    // DESCRIPTION OVERLAY candidate (C3 Tool Description Update — activation folds it into the
+    // tool's model-facing description); otherwise it queues as a generic tool-scope rule.
     for (const c of (critique.tool_use_issues || []).slice(0, 2)) {
-      const r = flywheel.addRule({ scope: "tool", content: "Tool guidance: " + String(c).slice(0, 700), status: "candidate" });
+      const text = String(c);
+      const named = toolNames.find((n) => text.includes(n));
+      if (named && flywheel.addToolOverlay) {
+        const o = flywheel.addToolOverlay({ toolName: named, content: "Mentor guidance: " + text.slice(0, 500), source: "mentor", status: "candidate" });
+        if (o.item) out.generated.toolOverlays.push(o.item.id);
+      }
+      const r = flywheel.addRule({ scope: "tool", content: "Tool guidance: " + text.slice(0, 700), status: "candidate" });
       if (r.item) out.generated.toolRules.push(r.item.id);
     }
     for (const c of (critique.memory_candidates || []).slice(0, 3)) {

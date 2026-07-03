@@ -4,8 +4,10 @@
  * Zero-dep JSON store for the improvement loop: the failure/hallucination LEDGER (22-category
  * spec enum + typed rootCause/improvementActions), EVAL cases + eval RUNS, prompt RULES, versioned
  * PROMPTS, FINE-TUNING candidates (allowed-source-gated), stored REVIEWS (background critiques the
- * client can fetch after the stream closed), and the PIPELINE log (one line per improvement-pipeline
- * run). Mentor critiques and "save lesson" actions feed these; active prompt rules + prompt versions
+ * client can fetch after the stream closed), the PIPELINE log (one line per improvement-pipeline
+ * run), and per-tool description OVERLAYS (Tool Description Update — active overlays get folded
+ * into TOOL_DEFS descriptions at prompt time). Mentor critiques and "save lesson" actions feed
+ * these; active prompt rules + prompt versions
  * get injected into prompts; eval runs measure whether changes actually help; autoRetire() prunes
  * rules that A/B-test negative or age out untested. Never touches customer DBs or backups.
  */
@@ -74,8 +76,8 @@ export function normalizeCategory(raw) {
 export function createFlywheel(opts = {}) {
   const dir = resolve(opts.dir || "C:\\minipc-chat\\flywheel");
   const file = join(dir, "flywheel.json");
-  let db = { failures: [], evals: [], runs: [], rules: [], prompts: [], finetune: [], reviews: [], pipeline: [] };
-  const load = () => { try { if (existsSync(file)) { const j = JSON.parse(readFileSync(file, "utf8")); if (j && typeof j === "object") db = { failures: j.failures || [], evals: j.evals || [], runs: j.runs || [], rules: j.rules || [], prompts: j.prompts || [], finetune: j.finetune || [], reviews: j.reviews || [], pipeline: j.pipeline || [] }; } } catch {} };
+  let db = { failures: [], evals: [], runs: [], rules: [], prompts: [], finetune: [], reviews: [], pipeline: [], toolOverlays: [] };
+  const load = () => { try { if (existsSync(file)) { const j = JSON.parse(readFileSync(file, "utf8")); if (j && typeof j === "object") db = { failures: j.failures || [], evals: j.evals || [], runs: j.runs || [], rules: j.rules || [], prompts: j.prompts || [], finetune: j.finetune || [], reviews: j.reviews || [], pipeline: j.pipeline || [], toolOverlays: j.toolOverlays || [] }; } } catch {} };
   const persist = () => { try { mkdirSync(dir, { recursive: true }); const tmp = file + ".tmp"; writeFileSync(tmp, JSON.stringify(db, null, 2)); renameSync(tmp, file); } catch {} };
   load();
   const cap = (a, n = 1000) => { if (a.length > n) a.splice(0, a.length - n); };
@@ -185,6 +187,27 @@ export function createFlywheel(opts = {}) {
     db.reviews.push(it); cap(db.reviews, 300); persist(); return { item: it };
   }
 
+  // ---- C3: per-tool description overlays (spec Tool Description Update, 1258-1267) ----
+  // Mentor tool-guidance candidates + POSTs to /tool-overlays land here; ACTIVE overlays get folded
+  // into the tool's model-facing description by toolDefs() at prompt-assembly time. Overlays touch
+  // description prose only — never schemas or permission classes.
+  function addToolOverlay(e = {}) {
+    if (!S(e.toolName, 1).trim() || !S(e.content, 1).trim()) return { error: "toolName and content required" };
+    const it = {
+      id: randomUUID(), toolName: S(e.toolName, 60), content: S(e.content, 600),
+      source: S(e.source || "manual", 40), sourceReviewId: e.sourceReviewId || null,
+      status: ["candidate", "active", "retired"].includes(e.status) ? e.status : "candidate",
+      createdAt: nowIso(),
+    };
+    db.toolOverlays.push(it); cap(db.toolOverlays, 300); persist(); return { item: it };
+  }
+  // toolName -> [overlay content] map of ACTIVE overlays, in the shape toolDefs() consumes.
+  function activeToolOverlays() {
+    const map = {};
+    for (const o of db.toolOverlays) if (o.status === "active") (map[o.toolName] || (map[o.toolName] = [])).push(o.content);
+    return map;
+  }
+
   // ---- pipeline log (spec flywheel step 9: log whether/what each critique produced) ----
   function addPipelineLog(e = {}) {
     const it = { id: randomUUID(), createdAt: nowIso(), ...e };
@@ -210,13 +233,13 @@ export function createFlywheel(opts = {}) {
   }
 
   // ---- generic ops ----
-  const COLLS = new Set(["failures", "evals", "runs", "rules", "prompts", "finetune", "reviews", "pipeline"]);
+  const COLLS = new Set(["failures", "evals", "runs", "rules", "prompts", "finetune", "reviews", "pipeline", "toolOverlays"]);
   const update = (coll, id, patch = {}) => { if (!COLLS.has(coll)) return { error: "bad collection" }; const it = db[coll].find((x) => x.id === id); if (!it) return { error: "not found" }; for (const k of Object.keys(patch)) if (k !== "id") it[k] = patch[k]; persist(); return { item: it }; };
   const remove = (coll, id) => { if (!COLLS.has(coll)) return { error: "bad collection" }; const b = db[coll].length; db[coll] = db[coll].filter((x) => x.id !== id); persist(); return { removed: b - db[coll].length }; };
   const list = (coll, filter = {}) => { if (!COLLS.has(coll)) return []; let out = db[coll] || []; if (filter.status) out = out.filter((x) => x.status === filter.status); return [...out].reverse(); };
   const get = (coll, id) => (COLLS.has(coll) ? (db[coll] || []).find((x) => x.id === id) || null : null);
   const runsFor = (evalId) => db.runs.filter((r) => r.evalCaseId === evalId).reverse();
-  const stats = () => ({ failures: db.failures.length, evals: db.evals.length, runs: db.runs.length, rules: db.rules.length, prompts: db.prompts.length, finetune: db.finetune.length, reviews: db.reviews.length, openFailures: db.failures.filter((f) => f.status === "open").length, activeRules: db.rules.filter((r) => r.status === "active").length });
+  const stats = () => ({ failures: db.failures.length, evals: db.evals.length, runs: db.runs.length, rules: db.rules.length, prompts: db.prompts.length, finetune: db.finetune.length, reviews: db.reviews.length, toolOverlays: db.toolOverlays.length, activeToolOverlays: db.toolOverlays.filter((o) => o.status === "active").length, openFailures: db.failures.filter((f) => f.status === "open").length, activeRules: db.rules.filter((r) => r.status === "active").length });
 
-  return { addFailure, failuresSince, addEval, addRun, addRule, activeRules, addPrompt, activatePrompt, activePrompts, addFinetune, addReview, addPipelineLog, autoRetire, update, remove, list, get, runsFor, stats };
+  return { addFailure, failuresSince, addEval, addRun, addRule, activeRules, addPrompt, activatePrompt, activePrompts, addFinetune, addReview, addPipelineLog, addToolOverlay, activeToolOverlays, autoRetire, update, remove, list, get, runsFor, stats };
 }

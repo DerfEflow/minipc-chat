@@ -332,6 +332,10 @@ function renderMemory(items) {
     const it = document.createElement("div"); it.className = "mitem";
     const top = document.createElement("div"); top.className = "mtop";
     top.append(badge(m.type), badge(m.status, m.status));
+    if (m.scope && m.scope !== "global") top.append(badge("scope: " + m.scope));
+    if (m.unverified) top.append(badge("unverified mentor claim", "rejected"));          // pending until Fred validates it
+    else if (m.gatedAs === "approval" && m.status === "approved") top.append(badge("lax auto-approve", "pending"));   // spec mode would have gated this
+    if (m.sensitive) top.append(badge("sensitive", "pending"));
     if (m.pinned) { const p = document.createElement("span"); p.className = "pinned"; p.textContent = "📌"; top.appendChild(p); }
     const c = document.createElement("div"); c.className = "mc"; c.textContent = m.content;
     const acts = document.createElement("div"); acts.className = "macts";

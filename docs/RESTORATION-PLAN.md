@@ -29,19 +29,33 @@ defaults (cautious mode = a flag flip, never a rebuild).*
 - [x] A7. Fine-Tuning Candidate store + producer + queue + UI tab (19)
 
 ### B — Memory governance
-- [ ] B1. Three-tier per-category gating matrix (auto-save safest / approval for inferred, failure,
+- [x] B1. Three-tier per-category gating matrix (auto-save safest / approval for inferred, failure,
       mentor_suggested, sensitive) — machinery real, LAX default flips all to auto (6)
-- [ ] B2. scope enum validated AND used: retrieval/context filter by scope (18)
-- [ ] B3. Never-save list: raw reasoning, unverified mentor claims, sensitive detection (partial)
+      → memory.mjs GATING_MATRIX/classifyGate; MEMORY_GATING=lax|spec; lax records gatedAs/gatedReasons
+- [x] B2. scope enum validated AND used: retrieval/context filter by scope (18)
+      → scope+scopeRef validated on write; retrieve/retrieveHybrid/alwaysLoaded take scopeCtx;
+        buildContext + recall_memory/retrieve_context_pack pass the live {chatId, mode, model}
+- [x] B3. Never-save list: raw reasoning, unverified mentor claims, sensitive detection (partial)
+      → neverSaveCheck() blocks CoT/interrupted/secrets/unlabeled-hallucinations in BOTH modes;
+        mentor_suggested stays PENDING+unverified even under LAX (approval = validation)
 
 ### C — Tools & permissions
-- [ ] C1. requires_confirmation class assigned to the spec'd cases (overwrite, external send,
+- [x] C1. requires_confirmation class assigned to the spec'd cases (overwrite, external send,
       inferred-memory save); machinery on, LAX default answers "yes" automatically but LOGS it (17)
-- [ ] C2. 9-state tool lifecycle persisted (proposed / awaiting_confirmation / ... ) in toolruns (22)
-- [ ] C3. Tool Description Update: TOOL_DEFS dynamic — flywheel stores per-tool description
+      → deck_* writes static; effectivePermission() escalates sandbox overwrite + inferred remember
+- [x] C2. 9-state tool lifecycle persisted (proposed / awaiting_confirmation / ... ) in toolruns (22)
+      → lifecycle()/passConfirmGate() in tools.mjs; states[] on every toolruns.jsonl entry; top-level
+        status unchanged (UI/tail contracts hold)
+- [x] C3. Tool Description Update: TOOL_DEFS dynamic — flywheel stores per-tool description
       overlays, applied at prompt time (10)
-- [ ] C4. The 6 formatting tools (spec 858-865) implemented for real (20)
-- [ ] C5. In-flight tool abort on Stop where safe (partial)
+      → toolDefs(overlays) + flywheel toolOverlays store + /tool-overlays API; pipeline emits overlay
+        candidates from mentor tool findings that name a real tool
+- [x] C4. The 6 formatting tools (spec 858-865) implemented for real (20)
+      → format_as_markdown/json/checklist/table/report/scope on the LIGHT model (json+think:false)
+- [x] C5. In-flight tool abort on Stop where safe (partial)
+      → AbortController per /chat; HTTP tools destroy in-flight, python SIGKILLed, bridge poll stops;
+        un-abortable tools finish but the run logs status cancelled + discarded:true
+      (all proven by governance_test.mjs — 19/19)
 
 ### D — Routing
 - [ ] D1. routing confidence produced + surfaced (21, part of A1)

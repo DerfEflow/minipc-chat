@@ -20,12 +20,16 @@ import { randomUUID } from "node:crypto";
 import { fetchUrl, htmlToText } from "./persona.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const stripThink = (t) => String(t || "").replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
+const ABORTED = "CANCELLED: the run was aborted (client stopped/disconnected).";
 
 // Tiny dependency-free HTTP(S) JSON request (handles both protocols; the cloud is https).
-function request(method, url, headers = {}, body = null) {
+// C5: an optional AbortSignal destroys the in-flight request when the client stops mid-run.
+function request(method, url, headers = {}, body = null, signal = null) {
   return new Promise((res) => {
     let u;
     try { u = new URL(url); } catch { return res({ status: 0, text: "bad url" }); }
+    if (signal && signal.aborted) return res({ status: 0, text: "aborted", aborted: true });
     const mod = u.protocol === "https:" ? https : http;
     const data = body == null ? null : (typeof body === "string" ? body : JSON.stringify(body));
     const h = { ...headers };
@@ -34,7 +38,8 @@ function request(method, url, headers = {}, body = null) {
       { method, hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80), path: u.pathname + u.search, headers: h, timeout: 35000 },
       (resp) => { let buf = ""; resp.on("data", (d) => (buf += d)); resp.on("end", () => res({ status: resp.statusCode || 0, text: buf })); }
     );
-    r.on("error", (e) => res({ status: 0, text: String(e.message) }));
+    if (signal) signal.addEventListener("abort", () => { try { r.destroy(new Error("aborted")); } catch {} res({ status: 0, text: "aborted", aborted: true }); }, { once: true });
+    r.on("error", (e) => res({ status: 0, text: String(e.message), aborted: signal ? signal.aborted : false }));
     r.on("timeout", () => { r.destroy(); res({ status: 0, text: "timeout" }); });
     if (data != null) r.write(data);
     r.end();
@@ -43,22 +48,26 @@ function request(method, url, headers = {}, body = null) {
 const parse = (t) => { try { return JSON.parse(t); } catch { return null; } };
 
 // ---- Command Deck (cloud /api/agent) ----
-async function agent(ctx, action, extra = {}) {
+async function agent(ctx, action, extra = {}, signal = null) {
   if (!ctx.syncKey) return { error: "no SYNC_SECRET configured on the server" };
-  const r = await request("POST", ctx.baseUrl + "/api/agent", { "x-sync-key": ctx.syncKey }, { action, ...extra });
+  const r = await request("POST", ctx.baseUrl + "/api/agent", { "x-sync-key": ctx.syncKey }, { action, ...extra }, signal);
+  if (r.aborted) return { error: "aborted" };
   return parse(r.text) || { error: `HTTP ${r.status}: ${r.text.slice(0, 160)}` };
 }
 
 // ---- the bridge read API (read-only files on Fred's machine) ----
-async function forgeRead(ctx, op, path = "", query = "") {
+async function forgeRead(ctx, op, path = "", query = "", signal = null) {
   if (!ctx.syncKey) return "Not configured: no SYNC_SECRET on the server.";
-  const r = await request("POST", ctx.baseUrl + "/api/bridge/read", { "x-sync-key": ctx.syncKey }, { op, path, query });
+  const r = await request("POST", ctx.baseUrl + "/api/bridge/read", { "x-sync-key": ctx.syncKey }, { op, path, query }, signal);
+  if (r.aborted) return ABORTED;
   const rd = (parse(r.text) || {}).read;
   if (!rd) return "Couldn't queue the read: " + ((parse(r.text) || {}).error || `HTTP ${r.status}`);
   const deadline = Date.now() + 40000;
   while (Date.now() < deadline) {
+    if (signal && signal.aborted) return ABORTED;   // C5: stop polling the bridge on client stop
     await sleep(1500);
-    const c = await request("GET", ctx.baseUrl + "/api/bridge/read?id=" + encodeURIComponent(rd.id), { "x-sync-key": ctx.syncKey });
+    const c = await request("GET", ctx.baseUrl + "/api/bridge/read?id=" + encodeURIComponent(rd.id), { "x-sync-key": ctx.syncKey }, null, signal);
+    if (c.aborted) return ABORTED;
     const cur = (parse(c.text) || {}).read;
     if (!cur) continue;
     if (cur.status === "done") return (cur.content || "(empty)").slice(0, 8000);
@@ -77,8 +86,10 @@ function jail(ctx, filename) {
 }
 
 // ---- sandboxed python execution (real code exec, jailed cwd, scrubbed env, hard timeout) ----
-function runPythonSandbox(ctx, code, timeoutMs = 30000) {
+// C5: an AbortSignal SIGKILLs the child mid-run when the client stops/disconnects.
+function runPythonSandbox(ctx, code, timeoutMs = 30000, signal = null) {
   return new Promise((res) => {
+    if (signal && signal.aborted) return res(ABORTED);
     let file;
     try {
       const root = jail(ctx, "");
@@ -93,6 +104,7 @@ function runPythonSandbox(ctx, code, timeoutMs = 30000) {
     try { p = spawn("python", ["-I", file], { cwd: jail(ctx, ""), env, windowsHide: true }); }
     catch (e) { return finish("Couldn't start python: " + e.message); }
     const t = setTimeout(() => { try { p.kill("SIGKILL"); } catch {} finish("TIMED OUT after " + Math.round(timeoutMs / 1000) + "s.\n" + out.slice(0, 4000)); }, timeoutMs);
+    if (signal) signal.addEventListener("abort", () => { clearTimeout(t); try { p.kill("SIGKILL"); } catch {} finish(ABORTED + "\n" + out.slice(0, 2000)); }, { once: true });
     p.stdout.on("data", (d) => (out += d));
     p.stderr.on("data", (d) => (out += d));
     p.on("error", (e) => { clearTimeout(t); finish("python failed to run: " + e.message); });
@@ -100,28 +112,59 @@ function runPythonSandbox(ctx, code, timeoutMs = 30000) {
   });
 }
 
+// ---- C4: the six formatting tools (spec 858-865) — REAL tools on the LIGHT model ----
+// Fast + cheap deterministic-ish reformatting via ctx.lightChat (wired by the server to the 8B).
+// format_as_json runs with format:"json" + think:false (the qwen3 gotcha); the rest run plain.
+const FORMAT_SPECS = {
+  format_as_markdown: { json: false, instruction: "Reformat the content below as clean, well-structured markdown (headings, lists, emphasis, code fences where apt). Preserve ALL information — change structure only, add nothing. Output ONLY the markdown." },
+  format_as_json:     { json: true,  instruction: "Convert the content below into well-structured JSON that captures its data faithfully (sensible keys, arrays for lists). Add no new facts. Return ONLY the JSON." },
+  format_as_checklist:{ json: false, instruction: "Convert the content below into an actionable markdown checklist of '- [ ]' items, grouped under headings where natural, most important first. Output ONLY the checklist." },
+  format_as_table:    { json: false, instruction: "Convert the content below into one or more markdown tables with sensible column headers. Preserve all data. Output ONLY the table(s)." },
+  format_as_report:   { json: false, instruction: "Reformat the content below as a short structured report: a title, an executive summary, sections with headings, and a brief conclusion. Preserve all facts; add no new claims. Output ONLY the report." },
+  format_as_scope:    { json: false, instruction: "Rewrite the content below as a scope document with these sections: Objective, In Scope, Out of Scope, Deliverables, Assumptions & Constraints. Preserve all stated facts; mark anything you had to infer as (assumed). Output ONLY the scope document." },
+};
+async function runFormatting(ctx, name, args, signal = null) {
+  if (typeof ctx.lightChat !== "function") return "Formatting isn't available right now (no light model wired on the server).";
+  const spec = FORMAT_SPECS[name];
+  const content = String(args.content || "").slice(0, 12000);
+  if (!content.trim()) return "Nothing to format — pass the content to reformat.";
+  const prompt = spec.instruction +
+    (args.instructions ? "\nExtra instructions: " + String(args.instructions).slice(0, 500) : "") +
+    "\n\nCONTENT:\n" + content;
+  const opts = { temperature: 0.2, num_predict: 3000, think: false, signal };
+  if (spec.json) opts.format = "json";
+  const d = await ctx.lightChat([{ role: "user", content: prompt }], opts);
+  if (signal && signal.aborted) return ABORTED;
+  const out = stripThink((d && d.message && d.message.content) || "");
+  if (!out) return "The formatting model returned nothing — try again.";
+  if (spec.json) { try { JSON.parse(out); } catch { return "The model returned invalid JSON — raw output:\n" + out.slice(0, 4000); } }
+  return out.slice(0, 8000);
+}
+
 // ===================== typed tool registry (Phase 3) =====================
 // Each tool carries a category + permission class alongside its model-facing function schema.
 // Permission classes (spec): read_only | draft_only | safe_local_write | requires_confirmation | dangerous.
 // allowedModes (optional): modes a tool may run in — e.g. forge_send is barred from Draft mode
 // (spec: Draft mode avoids irreversible actions). Omitted = allowed in every mode.
-// The server enforces all of this (carve-out hard-deny + mode gate + optional confirmation) and logs every run.
-// NOT duplicated as tools on purpose: formatting (format_as_markdown/json/table/…) and pure-language
-// analysis (analyze_code, summarize_error, explain_stack_trace) — the model does these natively;
-// registering no-op wrappers only degrades tool selection.
+// The server enforces all of this (carve-out hard-deny + mode gate + confirmation machinery) and logs every run.
+// C1 (spec 780-791): requires_confirmation is a REAL assigned class — external sends (the deck_*
+// writes push data to the cloud Command Deck API) carry it statically; sandbox_write escalates to it
+// dynamically when it would OVERWRITE an existing file, and remember escalates when the model saves
+// an INFERRED (not user-explicit) memory — see effectivePermission(). Under LAX the confirmation
+// auto-answers "approve" (recorded in the lifecycle as auto_approved); CONFIRM_TOOLS=1 makes it interactive.
 export const TOOLS = [
   { category: "system", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "deck_list_projects", description: "List Fred's Command Deck projects (id, name, status, priority, next proof, open next-steps). Use this before acting on a project so you have its id and current state.", parameters: { type: "object", properties: {} } } } },
-  { category: "system", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "deck_capture", description: "Drop an idea, reminder, or link into Fred's capture inbox to triage later.", parameters: { type: "object", properties: { text: { type: "string", description: "What to capture." }, url: { type: "string", description: "Optional URL." } }, required: ["text"] } } } },
-  { category: "system", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "deck_add_note", description: "Append a note/log entry to a project (get the project id from deck_list_projects first).", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } } },
-  { category: "system", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "deck_add_next_step", description: "Add an actionable next-step to a project.", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } } },
-  { category: "system", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "deck_set_next_proof", description: "Set a project's Next Proof — the single riskiest thing it must prove next.", parameters: { type: "object", properties: { project_id: { type: "string" }, proof: { type: "string" } }, required: ["project_id", "proof"] } } } },
-  { category: "system", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "deck_create_project", description: "Create a new Command Deck project. discipline: Apps|Writing|Business|Product Development|Saints Dominion. status: Idea|Building|Live|Paused|Done.", parameters: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, discipline: { type: "string" }, status: { type: "string" }, priority: { type: "string" } }, required: ["name"] } } } },
+  { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_capture", description: "Drop an idea, reminder, or link into Fred's capture inbox to triage later.", parameters: { type: "object", properties: { text: { type: "string", description: "What to capture." }, url: { type: "string", description: "Optional URL." } }, required: ["text"] } } } },
+  { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_add_note", description: "Append a note/log entry to a project (get the project id from deck_list_projects first).", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } } },
+  { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_add_next_step", description: "Add an actionable next-step to a project.", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } } },
+  { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_set_next_proof", description: "Set a project's Next Proof — the single riskiest thing it must prove next.", parameters: { type: "object", properties: { project_id: { type: "string" }, proof: { type: "string" } }, required: ["project_id", "proof"] } } } },
+  { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_create_project", description: "Create a new Command Deck project. discipline: Apps|Writing|Business|Product Development|Saints Dominion. status: Idea|Building|Live|Paused|Done.", parameters: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, discipline: { type: "string" }, status: { type: "string" }, priority: { type: "string" } }, required: ["name"] } } } },
   { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "forge_read", description: "Read source/files on Fred's machine (READ-ONLY). op: 'read' a file or folder, 'list' a folder (omit path to see allowed roots), 'tree' a folder tree, 'grep' (needs query). Paths must be under the bridge's allowed roots.", parameters: { type: "object", properties: { op: { type: "string", enum: ["read", "list", "tree", "grep"] }, path: { type: "string" }, query: { type: "string" } }, required: ["op"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, allowedModes: ["fast", "normal", "deep_think", "long_context", "tool", "mentor"], def: { type: "function", function: { name: "forge_send", description: "Queue a REAL code/file work order for Claude Code on Fred's machine (the Forge). Use only for actual source/file changes or builds. repo is a named shortcut ('command-deck','cad-sandbox') or an absolute path under the allowed roots. Needs the run-password (configured on the server). The change snapshots first and is always rollback-able.", parameters: { type: "object", properties: { repo: { type: "string" }, title: { type: "string" }, instructions: { type: "string", description: "Clear, complete plain-English steps." } }, required: ["repo", "title", "instructions"] } } } },
   { category: "file", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "sandbox_write", description: "Write (overwrite) a text file in your private sandbox folder on the mini-PC.", parameters: { type: "object", properties: { filename: { type: "string" }, content: { type: "string" } }, required: ["filename", "content"] } } } },
   { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "sandbox_read", description: "Read a text file from your private sandbox folder.", parameters: { type: "object", properties: { filename: { type: "string" } }, required: ["filename"] } } } },
   { category: "file", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "sandbox_list", description: "List the files in your private sandbox folder.", parameters: { type: "object", properties: {} } } } },
-  { category: "memory", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "remember", description: "Save a durable fact or preference to long-term memory when Fred asks you to remember something, or clearly states a lasting preference (e.g. units, formats, how he likes answers). Keep it ONE concise fact — don't save one-off chatter, secrets, or hidden reasoning.", parameters: { type: "object", properties: { content: { type: "string", description: "The single fact/preference to remember." }, type: { type: "string", description: "profile (a preference about Fred, default) | workspace | episodic | failure" }, tags: { type: "array", items: { type: "string" } } }, required: ["content"] } } } },
+  { category: "memory", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "remember", description: "Save a durable fact or preference to long-term memory when Fred asks you to remember something, or clearly states a lasting preference (e.g. units, formats, how he likes answers). Keep it ONE concise fact — don't save one-off chatter, secrets, or hidden reasoning. If Fred did NOT explicitly ask and you are inferring the preference yourself, set source to assistant_inferred (it goes through approval gating).", parameters: { type: "object", properties: { content: { type: "string", description: "The single fact/preference to remember." }, type: { type: "string", description: "profile (a preference about Fred, default) | workspace | episodic | failure" }, source: { type: "string", enum: ["user_explicit", "assistant_inferred"], description: "user_explicit (default) when Fred asked; assistant_inferred when you deduced it yourself." }, scope: { type: "string", enum: ["global", "workspace", "chat", "tool", "model"], description: "Where the memory applies (default global). chat = only this conversation." }, tags: { type: "array", items: { type: "string" } } }, required: ["content"] } } } },
   { category: "memory", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "recall_memory", description: "Search Fred's saved long-term memory for facts/preferences relevant to a query. Relevant memory is usually already provided automatically; use this to look up something specific.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } } },
   { category: "document", permissionClass: "draft_only", logsInputs: true, def: { type: "function", function: { name: "create_artifact", description: "Save a generated document as a versioned artifact (not disposable chat text). Use when you produce a document, report, checklist, spec, or other reusable output Fred may revise or export. Returns the artifact id.", parameters: { type: "object", properties: { title: { type: "string" }, content: { type: "string", description: "The full document text (markdown preferred)." }, type: { type: "string", description: "markdown|report|checklist|code|json|other (default markdown)" }, tags: { type: "array", items: { type: "string" } } }, required: ["title", "content"] } } } },
   { category: "document", permissionClass: "draft_only", logsInputs: true, def: { type: "function", function: { name: "revise_artifact", description: "Save a revision of an existing artifact as a NEW version (prior versions are kept). Get the id from list_artifacts.", parameters: { type: "object", properties: { id: { type: "string" }, content: { type: "string", description: "The full revised document text." }, note: { type: "string", description: "Short summary of what changed." } }, required: ["id", "content"] } } } },
@@ -140,13 +183,65 @@ export const TOOLS = [
   { category: "persona", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "add_to_persona", description: "Add a piece of Fred's OWN material to the Persona corpus (his voice-training set) — use when he shares one of his jokes, maxims, essays, stories, poems, stray thoughts, future plans, favorites, or a choice AI chat, or says 'save this as one of mine'. Not for facts to remember (use remember for those).", parameters: { type: "object", properties: { text: { type: "string", description: "The exact text in Fred's words." }, kind: { type: "string", enum: ["joke", "maxim", "essay", "story", "poem", "thought", "plan", "favorite", "chat", "other"] }, title: { type: "string" } }, required: ["text", "kind"] } } } },
   { category: "persona", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "search_persona", description: "Retrieve real examples of Fred's own writing from the Persona corpus (to match his voice or recall something he wrote). Optionally filter by kind.", parameters: { type: "object", properties: { query: { type: "string" }, kind: { type: "string", enum: ["joke", "maxim", "essay", "story", "poem", "thought", "plan", "favorite", "chat", "web", "other"] } }, required: ["query"] } } } },
   { category: "persona", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "scrape_to_persona", description: "Fetch a web page (e.g. one of Fred's own sites) and add its readable text to the Persona corpus as source material.", parameters: { type: "object", properties: { url: { type: "string" }, kind: { type: "string", description: "default 'web'" }, title: { type: "string" } }, required: ["url"] } } } },
+  // C4: the six spec formatting tools — real tools on the light model (fast, cheap), read_only.
+  { category: "formatting", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "format_as_markdown", description: "Reformat text/data as clean structured markdown (headings, lists, emphasis). Runs on the fast model — use for pure reformatting instead of doing it yourself.", parameters: { type: "object", properties: { content: { type: "string", description: "The content to reformat." }, instructions: { type: "string", description: "Optional extra formatting guidance." } }, required: ["content"] } } } },
+  { category: "formatting", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "format_as_json", description: "Convert text/data into well-structured JSON (validated before returning). Runs on the fast model.", parameters: { type: "object", properties: { content: { type: "string" }, instructions: { type: "string", description: "Optional shape hints, e.g. desired keys." } }, required: ["content"] } } } },
+  { category: "formatting", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "format_as_checklist", description: "Convert text into an actionable markdown checklist of '- [ ]' items. Runs on the fast model.", parameters: { type: "object", properties: { content: { type: "string" }, instructions: { type: "string" } }, required: ["content"] } } } },
+  { category: "formatting", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "format_as_table", description: "Convert text/data into markdown table(s) with sensible headers. Runs on the fast model.", parameters: { type: "object", properties: { content: { type: "string" }, instructions: { type: "string", description: "Optional column hints." } }, required: ["content"] } } } },
+  { category: "formatting", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "format_as_report", description: "Reformat content as a short structured report (title, executive summary, sections, conclusion) without adding new claims. Runs on the fast model.", parameters: { type: "object", properties: { content: { type: "string" }, instructions: { type: "string" } }, required: ["content"] } } } },
+  { category: "formatting", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "format_as_scope", description: "Rewrite content as a scope document (Objective / In Scope / Out of Scope / Deliverables / Assumptions & Constraints). Runs on the fast model.", parameters: { type: "object", properties: { content: { type: "string" }, instructions: { type: "string" } }, required: ["content"] } } } },
 ];
 
-export const TOOL_DEFS = TOOLS.map((t) => t.def);
+// C3: Tool Description Update (spec 1258-1267) — TOOL_DEFS is a FUNCTION of the active overlays.
+// The flywheel stores per-tool description overlays (mentor tool-guidance + POST /tool-overlays);
+// the server calls toolDefs(flywheel.activeToolOverlays()) at prompt-assembly time, so what the
+// model sees about a tool improves without a code change. Overlays never alter schemas, only prose.
+export function toolDefs(overlays = null) {
+  return TOOLS.map((t) => {
+    const extra = overlays && overlays[t.def.function.name];
+    if (!extra || !extra.length) return t.def;
+    return { ...t.def, function: { ...t.def.function, description: t.def.function.description + " LEARNED GUIDANCE: " + extra.map((s) => String(s).slice(0, 300)).join(" · ") } };
+  });
+}
+export const TOOL_DEFS = toolDefs();   // static back-compat snapshot (no overlays)
 const META = new Map(TOOLS.map((t) => [t.def.function.name, t]));
 export const toolMeta = (name) => { const t = META.get(name); return t ? { category: t.category, permissionClass: t.permissionClass, logsInputs: t.logsInputs, allowedModes: t.allowedModes || null } : { category: "system", permissionClass: "read_only", logsInputs: false, allowedModes: null }; };
 // Back-compat: dangerous tools (real code/file changes) get the UI lock.
 export const WRITE_TOOLS = new Set(TOOLS.filter((t) => t.permissionClass === "dangerous").map((t) => t.def.function.name));
+
+// C1: dynamic permission escalation (spec requires_confirmation examples).
+//   - sandbox_write that would OVERWRITE an existing file -> requires_confirmation ("Overwrite file")
+//   - remember with an assistant-inferred source          -> requires_confirmation ("Save durable memory from an inference")
+export function effectivePermission(name, args = {}, ctx = {}) {
+  const base = toolMeta(name).permissionClass;
+  if (name === "sandbox_write" && ctx.sandboxDir) {
+    try { if (args.filename && existsSync(jail(ctx, args.filename))) return "requires_confirmation"; } catch {}
+  }
+  if (name === "remember" && (args.source === "assistant_inferred" || args.inferred === true)) return "requires_confirmation";
+  return base;
+}
+
+// ---- C2: the 9-state tool-call lifecycle (spec 867-903) ----
+// States: proposed, awaiting_confirmation, auto_approved, denied, executing, succeeded, failed,
+// blocked, cancelled. lifecycle() records timestamped transitions; the server persists the array
+// on every toolruns.jsonl entry (top-level status stays, so the tail/UI contracts hold).
+export function lifecycle() {
+  const states = [];
+  return { states, push(state, extra) { states.push({ state, at: new Date().toISOString(), ...(extra || {}) }); } };
+}
+export const needsConfirm = (cls) => cls === "dangerous" || cls === "requires_confirmation";
+// The confirmation gate — the machinery ALWAYS runs for gated classes. Interactive mode asks the
+// user (ask() resolves "approved"/"denied"/"timeout"); LAX auto-answers "approve" but records the
+// awaiting_confirmation → auto_approved transition so the friction is skipped, never the bookkeeping.
+export async function passConfirmGate({ cls, interactive, ask, life }) {
+  if (!needsConfirm(cls)) return { proceed: true };
+  life.push("awaiting_confirmation");
+  if (!interactive) { life.push("auto_approved", { lax: true }); return { proceed: true, autoApproved: true, confirmedByUser: false }; }
+  const decision = await ask();
+  if (decision === "approved") return { proceed: true, confirmedByUser: true };
+  life.push("denied", { decision });
+  return { proceed: false, decision };
+}
 
 // ---- ironclad carve-out guard (ALWAYS on, even under LAX) ----
 // Two resources the assistant must NEVER touch: (1) customer/production databases,
@@ -169,12 +264,16 @@ export function assertNotProtected(name, args) {
 }
 
 // ===================== dispatcher =====================
-export async function runTool(name, args, ctx) {
+// C5: signal (AbortSignal, optional) aborts the abortable tools mid-run — HTTP-based tools destroy
+// their request, the python sandbox SIGKILLs, the bridge poll loop stops. Sync fs tools are
+// effectively instantaneous and finish; the server records their result as discarded on abort.
+export async function runTool(name, args, ctx, signal = null) {
   args = args || {};
   try {
+    if (signal && signal.aborted) return ABORTED;
     switch (name) {
       case "deck_list_projects": {
-        const d = await agent(ctx, "list_projects");
+        const d = await agent(ctx, "list_projects", {}, signal);
         if (d.error) return "Couldn't list projects: " + d.error;
         const ps = d.projects || [];
         if (!ps.length) return "No synced projects yet.";
@@ -186,15 +285,16 @@ export async function runTool(name, args, ctx) {
           return line;
         }).join("\n");
       }
-      case "deck_capture": { const d = await agent(ctx, "capture_inbox", { text: args.text, url: args.url || "" }); return d.message || d.error || "Captured."; }
-      case "deck_add_note": { const d = await agent(ctx, "add_note", { projectId: args.project_id, text: args.text }); return d.message || d.error || "Note added."; }
-      case "deck_add_next_step": { const d = await agent(ctx, "add_next_step", { projectId: args.project_id, text: args.text }); return d.message || d.error || "Next step added."; }
-      case "deck_set_next_proof": { const d = await agent(ctx, "set_next_proof", { projectId: args.project_id, proof: args.proof }); return d.message || d.error || "Next proof set."; }
-      case "deck_create_project": { const d = await agent(ctx, "create_project", { name: args.name, description: args.description || "", discipline: args.discipline || "", status: args.status || "", priority: args.priority || "" }); return d.message || d.error || "Project created."; }
-      case "forge_read": return await forgeRead(ctx, args.op, args.path || "", args.query || "");
+      case "deck_capture": { const d = await agent(ctx, "capture_inbox", { text: args.text, url: args.url || "" }, signal); return d.message || d.error || "Captured."; }
+      case "deck_add_note": { const d = await agent(ctx, "add_note", { projectId: args.project_id, text: args.text }, signal); return d.message || d.error || "Note added."; }
+      case "deck_add_next_step": { const d = await agent(ctx, "add_next_step", { projectId: args.project_id, text: args.text }, signal); return d.message || d.error || "Next step added."; }
+      case "deck_set_next_proof": { const d = await agent(ctx, "set_next_proof", { projectId: args.project_id, proof: args.proof }, signal); return d.message || d.error || "Next proof set."; }
+      case "deck_create_project": { const d = await agent(ctx, "create_project", { name: args.name, description: args.description || "", discipline: args.discipline || "", status: args.status || "", priority: args.priority || "" }, signal); return d.message || d.error || "Project created."; }
+      case "forge_read": return await forgeRead(ctx, args.op, args.path || "", args.query || "", signal);
       case "forge_send": {
         if (!ctx.runPassword) return "I can read and plan, but real code/file changes need the run-password configured on the server (RUN_PASSWORD). Ask Fred to set it on the mini-PC.";
-        const r = await request("POST", ctx.baseUrl + "/api/jobs", { "x-sync-key": ctx.syncKey }, { repo: args.repo, title: args.title, instructions: args.instructions, pin: ctx.runPassword });
+        const r = await request("POST", ctx.baseUrl + "/api/jobs", { "x-sync-key": ctx.syncKey }, { repo: args.repo, title: args.title, instructions: args.instructions, pin: ctx.runPassword }, signal);
+        if (r.aborted) return ABORTED;
         const d = parse(r.text) || {};
         if (r.status === 200 && d.job) return `Queued work order "${d.job.title}" (id ${d.job.id.slice(0, 8)}). It runs on the mini-PC, snapshots first, and is rollback-able from the Forge.`;
         if (d.code === "bad_pin" || d.code === "pin_required") return "The run-password was wrong — ask Fred to check it.";
@@ -213,13 +313,21 @@ export async function runTool(name, args, ctx) {
       }
       case "remember": {
         if (!ctx.memory) return "Memory isn't available right now.";
-        const r = ctx.memory.propose({ content: args.content, type: args.type, tags: args.tags, source: { kind: "user_explicit" } });
+        const kind = args.source === "assistant_inferred" ? "assistant_inferred" : "user_explicit";
+        const r = ctx.memory.propose({
+          content: args.content, type: args.type, tags: args.tags,
+          scope: args.scope, scopeRef: args.scope === "chat" ? (ctx.chatId || null) : (args.scopeRef || null),
+          source: { kind },
+        });
         if (r.error) return "Couldn't save that to memory: " + r.error;
-        return r.deduped ? "I already had that in memory." : `Saved to long-term memory (${r.item.type}).`;
+        if (r.deduped) return "I already had that in memory.";
+        return r.item.status === "pending"
+          ? `Proposed to memory (${r.item.type}) — it's in Fred's approval inbox because it was ${kind === "assistant_inferred" ? "inferred, not explicitly requested" : "gated"}.`
+          : `Saved to long-term memory (${r.item.type}).`;
       }
       case "recall_memory": {
         if (!ctx.memory) return "Memory isn't available right now.";
-        const hits = ctx.memory.retrieve(args.query || "", { limit: 6, minScore: 0.1 });
+        const hits = ctx.memory.retrieve(args.query || "", { limit: 6, minScore: 0.1, scopeCtx: { chatId: ctx.chatId, mode: ctx.mode, model: ctx.model } });
         if (!hits.length) return "No saved memory matches that.";
         return hits.map((h) => `- (${h.title}) ${h.content}`).join("\n");
       }
@@ -252,7 +360,14 @@ export async function runTool(name, args, ctx) {
         return r.error ? "Couldn't export: " + r.error : `Exported to ${r.path} (${r.bytes} bytes).`;
       }
       case "sandbox_append": { const t = jail(ctx, args.filename); appendFileSync(t, args.content ?? "", "utf8"); return `Appended ${Buffer.byteLength(args.content || "")} bytes to ${args.filename}.`; }
-      case "run_python_sandbox": return await runPythonSandbox(ctx, args.code);
+      case "run_python_sandbox": return await runPythonSandbox(ctx, args.code, 30000, signal);
+      case "format_as_markdown":
+      case "format_as_json":
+      case "format_as_checklist":
+      case "format_as_table":
+      case "format_as_report":
+      case "format_as_scope":
+        return await runFormatting(ctx, name, args, signal);
       case "search_artifacts": {
         if (!ctx.artifacts) return "The artifact studio isn't available right now.";
         const hits = ctx.artifacts.list({ q: args.q || "" }).slice(0, 8);
@@ -272,7 +387,7 @@ export async function runTool(name, args, ctx) {
       }
       case "retrieve_context_pack": {
         const q = args.query || "";
-        const mem = ctx.memory ? (await ctx.memory.retrieveHybrid(q, { limit: 4, minScore: 0.1 })) : [];
+        const mem = ctx.memory ? (await ctx.memory.retrieveHybrid(q, { limit: 4, minScore: 0.1, scopeCtx: { chatId: ctx.chatId, mode: ctx.mode, model: ctx.model } })) : [];
         const arts = ctx.artifacts ? ctx.artifacts.list({ q }).slice(0, 3) : [];
         const chats = ctx.chatlog ? ctx.chatlog.search(q, { limit: 3 }) : [];
         const out = [];
