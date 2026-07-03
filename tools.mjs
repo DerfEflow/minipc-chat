@@ -170,7 +170,12 @@ export const TOOLS = [
   { category: "document", permissionClass: "draft_only", logsInputs: true, def: { type: "function", function: { name: "revise_artifact", description: "Save a revision of an existing artifact as a NEW version (prior versions are kept). Get the id from list_artifacts.", parameters: { type: "object", properties: { id: { type: "string" }, content: { type: "string", description: "The full revised document text." }, note: { type: "string", description: "Short summary of what changed." } }, required: ["id", "content"] } } } },
   { category: "document", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "list_artifacts", description: "List Fred's saved artifacts (id, title, type, status, version count).", parameters: { type: "object", properties: { q: { type: "string", description: "Optional keyword filter." } } } } } },
   { category: "document", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "read_artifact", description: "Read the current content of an artifact by id.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } } },
-  { category: "document", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "export_artifact", description: "Export an artifact to a text file (md/txt/json/html) in the exports folder. docx/pdf must go through forge_send. Source versions are preserved.", parameters: { type: "object", properties: { id: { type: "string" }, format: { type: "string", description: "md|txt|json|html" } }, required: ["id"] } } } },
+  { category: "document", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "export_artifact", description: "Export an artifact to a file in the exports folder — md/txt/json/html AND native docx/pdf/xlsx/csv. Every export passes the safety gate (title/format/destination echo, review-skipped + unsupported-claims warnings, sensitive-data block). Source versions are always preserved.", parameters: { type: "object", properties: { id: { type: "string" }, format: { type: "string", description: "md|txt|json|html|docx|pdf|xlsx|csv" }, acknowledge_sensitive: { type: "boolean", description: "ONLY set true when Fred has explicitly approved exporting despite a sensitive-data warning." } }, required: ["id"] } } } },
+  // E3 (spec 809-821): the three native document-generation tools. Each creates a versioned
+  // artifact AND exports it through the same safety gate the REST endpoint uses.
+  { category: "document", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "create_docx", description: "Create a Word document natively on the mini-PC: saves the content as a versioned artifact, then exports a real .docx (headings, bold/italic, lists from markdown). Returns the artifact id and the exported file path.", parameters: { type: "object", properties: { title: { type: "string" }, content: { type: "string", description: "The full document text (markdown — headings/lists/bold render in the docx)." } }, required: ["title", "content"] } } } },
+  { category: "document", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "create_pdf", description: "Create a PDF natively on the mini-PC: saves the content as a versioned artifact, then exports a real multi-page .pdf. Returns the artifact id and the exported file path.", parameters: { type: "object", properties: { title: { type: "string" }, content: { type: "string", description: "The full document text (markdown)." } }, required: ["title", "content"] } } } },
+  { category: "document", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "create_spreadsheet", description: "Create a spreadsheet natively on the mini-PC: saves the data as a versioned artifact, then exports .xlsx when the content is a markdown table or CSV (falls back to .csv otherwise). Returns the artifact id and the exported file path.", parameters: { type: "object", properties: { title: { type: "string" }, content: { type: "string", description: "A markdown table or CSV data." }, format: { type: "string", enum: ["xlsx", "csv"], description: "default xlsx (auto-falls back to csv when no table parses)" } }, required: ["title", "content"] } } } },
   { category: "mentor", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "request_review", description: "Ask the mentor to critique a piece of text and return a short structured critique. Use before finalizing important or high-stakes output. Runs locally (no data leaves the machine). taskType picks the review lens.", parameters: { type: "object", properties: { content: { type: "string" }, originalRequest: { type: "string" }, taskType: { type: "string", enum: ["answer_review", "code_review", "document_review", "hallucination_check", "tool_use_audit", "reasoning_review"] } }, required: ["content"] } } } },
   { category: "file", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "sandbox_append", description: "Append text to a file in your private sandbox folder (creates it if missing). Good for running logs and notes.", parameters: { type: "object", properties: { filename: { type: "string" }, content: { type: "string" } }, required: ["filename", "content"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "run_python_sandbox", description: "Execute a short Python script INSIDE your private sandbox folder and return its output. 30s limit, no secrets in the environment. Use for real computation, data munging, or checking that generated code actually runs. Files it writes land in the sandbox.", parameters: { type: "object", properties: { code: { type: "string", description: "The complete Python script." } }, required: ["code"] } } } },
@@ -263,6 +268,18 @@ export function assertNotProtected(name, args) {
   return { ok: true };
 }
 
+// E2: render a gated export result honestly for the model — blocked exports say WHY, warnings
+// ride along on success (the model must relay them, never bury them).
+function describeExportResult(r) {
+  if (!r) return "Export failed: no result.";
+  if (r.blocked === "sensitive_data") return "EXPORT BLOCKED: possible sensitive data detected (" + (r.detected || []).join(", ") + "). Tell Fred; only retry with acknowledge_sensitive:true after he explicitly approves.";
+  if (r.blocked) return "EXPORT BLOCKED (" + r.blocked + "): " + (r.error || r.message || "the export gate refused this export.");
+  if (r.error) return "Couldn't export: " + r.error;
+  const warns = r.gate && r.gate.warnings && r.gate.warnings.length ? " Warnings: " + r.gate.warnings.map((w) => w.message || w.check).join("; ") + "." : "";
+  const forge = r.queued ? " (Forge conversion queued as fallback — the file lands next to the export shortly.)" : "";
+  return `Exported "${(r.gate && r.gate.checks && r.gate.checks.title) || "artifact"}" as ${r.format} to ${r.path} (${r.bytes} bytes). Source versions preserved.${warns}${forge}`;
+}
+
 // ===================== dispatcher =====================
 // C5: signal (AbortSignal, optional) aborts the abortable tools mid-run — HTTP-based tools destroy
 // their request, the python sandbox SIGKILLs, the bridge poll loop stops. Sync fs tools are
@@ -333,14 +350,18 @@ export async function runTool(name, args, ctx, signal = null) {
       }
       case "create_artifact": {
         if (!ctx.artifacts) return "The artifact studio isn't available right now.";
-        const r = ctx.artifacts.create({ title: args.title, type: args.type, content: args.content, tags: args.tags, model: "qwen-local" });
+        const prov = typeof ctx.provenance === "function" ? ctx.provenance() : {};   // E4: per-version provenance
+        const r = ctx.artifacts.create({ title: args.title, type: args.type, content: args.content, tags: args.tags, model: "qwen-local", sourceChatId: prov.sourceChatId, sourceContextRefs: prov.sourceContextRefs, sourceToolRunIds: prov.sourceToolRunIds, promptSummary: prov.promptSummary });
         if (r.error) return "Couldn't save the artifact: " + r.error;
+        if (typeof ctx.artifactTriggers === "function") try { ctx.artifactTriggers(r.item.id, {}); } catch {}   // E1: trigger sweep on tool-created artifacts too
         return `Saved artifact "${r.item.title}" (id ${r.item.id.slice(0, 8)}, v1, ${r.item.wordCount} words). Fred can view, revise, diff, and export it from the Artifacts panel.`;
       }
       case "revise_artifact": {
         if (!ctx.artifacts) return "The artifact studio isn't available right now.";
-        const r = ctx.artifacts.addVersion(args.id, { content: args.content, promptSummary: args.note, model: "qwen-local" });
+        const prov = typeof ctx.provenance === "function" ? ctx.provenance() : {};   // E4: revisions carry provenance like creation does
+        const r = ctx.artifacts.addVersion(args.id, { content: args.content, promptSummary: args.note || prov.promptSummary, model: "qwen-local", sourceChatId: prov.sourceChatId, sourceContextRefs: prov.sourceContextRefs, sourceToolRunIds: prov.sourceToolRunIds });
         if (r.error) return "Couldn't revise that artifact: " + r.error;
+        if (typeof ctx.artifactTriggers === "function") try { ctx.artifactTriggers(args.id, {}); } catch {}   // E1: drift & co. re-checked on every revision
         return `Saved revision v${r.item.version} of "${r.item.title}" (prior versions kept).`;
       }
       case "list_artifacts": {
@@ -356,8 +377,28 @@ export async function runTool(name, args, ctx, signal = null) {
       }
       case "export_artifact": {
         if (!ctx.artifacts) return "The artifact studio isn't available right now.";
-        const r = ctx.artifacts.exportArtifact(args.id, args.format);
-        return r.error ? "Couldn't export: " + r.error : `Exported to ${r.path} (${r.bytes} bytes).`;
+        // E2: the model-facing export goes through the SAME server-side safety gate as the REST
+        // endpoint (ctx.exportGated, wired by server.mjs) — the old direct-store bypass is closed.
+        if (typeof ctx.exportGated !== "function") return "Export isn't available right now (no export gate wired on the server).";
+        const r = await ctx.exportGated(args.id, args.format, { overrideSensitive: args.acknowledge_sensitive === true, destination: "local exports folder (tool call)" });
+        return describeExportResult(r);
+      }
+      case "create_docx":
+      case "create_pdf":
+      case "create_spreadsheet": {
+        // E3 (spec 809-821): create a versioned artifact AND export it natively, through the E2 gate.
+        if (!ctx.artifacts) return "The artifact studio isn't available right now.";
+        if (typeof ctx.exportGated !== "function") return "Document export isn't available right now (no export gate wired on the server).";
+        // spreadsheet default = "spreadsheet" (auto: xlsx when a table parses, csv fallback);
+        // an explicit args.format pins it.
+        const fmt = name === "create_docx" ? "docx" : name === "create_pdf" ? "pdf" : (args.format === "csv" ? "csv" : args.format === "xlsx" ? "xlsx" : "spreadsheet");
+        const type = name === "create_spreadsheet" ? "spreadsheet" : name === "create_docx" ? "docx" : "pdf";
+        const prov = typeof ctx.provenance === "function" ? ctx.provenance() : {};
+        const made = ctx.artifacts.create({ title: args.title, type, content: args.content, model: "qwen-local", sourceChatId: prov.sourceChatId, sourceContextRefs: prov.sourceContextRefs, sourceToolRunIds: prov.sourceToolRunIds, promptSummary: prov.promptSummary });
+        if (made.error) return "Couldn't save the document as an artifact: " + made.error;
+        if (typeof ctx.artifactTriggers === "function") try { ctx.artifactTriggers(made.item.id, {}); } catch {}
+        const r = await ctx.exportGated(made.item.id, fmt, { overrideSensitive: args.acknowledge_sensitive === true, destination: "local exports folder (tool call)" });
+        return `Saved artifact "${made.item.title}" (id ${made.item.id.slice(0, 8)}, v1). ` + describeExportResult(r);
       }
       case "sandbox_append": { const t = jail(ctx, args.filename); appendFileSync(t, args.content ?? "", "utf8"); return `Appended ${Buffer.byteLength(args.content || "")} bytes to ${args.filename}.`; }
       case "run_python_sandbox": return await runPythonSandbox(ctx, args.code, 30000, signal);

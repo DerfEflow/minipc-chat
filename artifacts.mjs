@@ -11,6 +11,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { markdownToDocx, markdownToPdf, parseTable, toCsv, rowsToXlsx } from "./docwriters.mjs";
 
 const TYPES = new Set(["markdown", "docx", "pdf", "spreadsheet", "json", "code", "report", "checklist", "other"]);
 const nowIso = () => new Date().toISOString();
@@ -50,8 +51,9 @@ export function createArtifactStore(opts = {}) {
 
   const find = (id) => items.find((a) => a.id === id) || null;
   const curContent = (a) => { const v = a.versions[a.version - 1] || a.versions[a.versions.length - 1]; return v ? v.content : ""; };
-  const meta = (a) => { const c = curContent(a); return { id: a.id, title: a.title, type: a.type, status: a.status, version: a.version, versionCount: a.versions.length, createdAt: a.createdAt, updatedAt: a.updatedAt, modelProviderId: a.modelProviderId, mentorReviewed: a.mentorReviewed, hasReview: !!a.reviewNotes, sourceChatId: a.sourceChatId, sourceToolRunIds: a.sourceToolRunIds || [], sourceContextRefs: a.sourceContextRefs || [], tags: a.tags, wordCount: wordCount(c), tokenEstimate: Math.ceil(c.length / 4), exportFormats: ["md", "txt", "json", "html", "docx", "pdf"] }; };
-  const full = (a) => ({ ...meta(a), content: curContent(a), reviewNotes: a.reviewNotes || null, versions: a.versions.map((v) => ({ version: v.version, createdAt: v.createdAt, model: v.model, promptSummary: v.promptSummary, wordCount: wordCount(v.content) })) });
+  const meta = (a) => { const c = curContent(a); return { id: a.id, title: a.title, type: a.type, status: a.status, version: a.version, versionCount: a.versions.length, createdAt: a.createdAt, updatedAt: a.updatedAt, modelProviderId: a.modelProviderId, mentorReviewed: a.mentorReviewed, reviewedVersion: a.reviewedVersion || null, reviewRecommended: a.reviewRecommended || null, hasReview: !!a.reviewNotes, sourceChatId: a.sourceChatId, sourceToolRunIds: a.sourceToolRunIds || [], sourceContextRefs: a.sourceContextRefs || [], tags: a.tags, wordCount: wordCount(c), tokenEstimate: Math.ceil(c.length / 4), exportFormats: ["md", "txt", "json", "html", "docx", "pdf", "xlsx", "csv"] }; };
+  // E4: every version exposes its provenance (source chat / context refs / tool runs), not just v1.
+  const full = (a) => ({ ...meta(a), content: curContent(a), reviewNotes: a.reviewNotes || null, lastReview: a.lastReview || null, versions: a.versions.map((v) => ({ version: v.version, createdAt: v.createdAt, model: v.model, promptSummary: v.promptSummary, wordCount: wordCount(v.content), sourceChatId: v.sourceChatId || null, sourceContextRefs: v.sourceContextRefs || [], sourceToolRunIds: v.sourceToolRunIds || [] })) });
 
   function create({ title, type, content, model, sourceChatId, tags, promptSummary, sourceToolRunIds, sourceContextRefs } = {}) {
     const body = String(content || "").slice(0, MAX_LEN);
@@ -64,7 +66,10 @@ export function createArtifactStore(opts = {}) {
       sourceContextRefs: Array.isArray(sourceContextRefs) ? sourceContextRefs.slice(0, 20) : [],
       modelProviderId: model || "", mentorReviewed: false, reviewNotes: null, version: 1,
       tags: Array.isArray(tags) ? tags.slice(0, 12).map(String) : [],
-      versions: [{ version: 1, content: body, createdAt: now, model: model || "", promptSummary: String(promptSummary || "").slice(0, 300) }],
+      versions: [{ version: 1, content: body, createdAt: now, model: model || "", promptSummary: String(promptSummary || "").slice(0, 300),
+                   sourceChatId: sourceChatId || null,
+                   sourceContextRefs: Array.isArray(sourceContextRefs) ? sourceContextRefs.slice(0, 20) : [],
+                   sourceToolRunIds: Array.isArray(sourceToolRunIds) ? sourceToolRunIds.slice(0, 20) : [] }],
     };
     items.push(a); if (items.length > MAX_ITEMS) items = items.slice(-MAX_ITEMS); persist();
     return { item: full(a) };
@@ -82,10 +87,15 @@ export function createArtifactStore(opts = {}) {
   }
 
   // A revision is a NEW version — prior versions are never lost (the rollback guarantee).
-  function addVersion(id, { content, model, promptSummary } = {}) {
+  // E4: revisions record per-version provenance (spec 981-992 "source context used") exactly like
+  // creation does: the chat, the retrieval refs, and the tool runs that produced THIS version.
+  function addVersion(id, { content, model, promptSummary, sourceChatId, sourceContextRefs, sourceToolRunIds } = {}) {
     const a = find(id); if (!a) return { error: "not found" };
     const v = a.versions.length + 1;
-    a.versions.push({ version: v, content: String(content || "").slice(0, MAX_LEN), createdAt: nowIso(), model: model || "", promptSummary: String(promptSummary || "").slice(0, 300) });
+    a.versions.push({ version: v, content: String(content || "").slice(0, MAX_LEN), createdAt: nowIso(), model: model || "", promptSummary: String(promptSummary || "").slice(0, 300),
+                      sourceChatId: sourceChatId || null,
+                      sourceContextRefs: Array.isArray(sourceContextRefs) ? sourceContextRefs.slice(0, 20) : [],
+                      sourceToolRunIds: Array.isArray(sourceToolRunIds) ? sourceToolRunIds.slice(0, 20) : [] });
     a.version = v; a.updatedAt = nowIso(); if (a.status === "archived" || a.status === "final") a.status = "draft"; a.mentorReviewed = false;
     persist(); return { item: full(a) };
   }
@@ -102,7 +112,46 @@ export function createArtifactStore(opts = {}) {
     a.updatedAt = nowIso(); persist(); return { item: full(a) };
   }
 
-  function attachReview(id, notes) { const a = find(id); if (!a) return { error: "not found" }; a.reviewNotes = String(notes || "").slice(0, 20000); a.mentorReviewed = true; if (a.status === "draft") a.status = "reviewed"; a.updatedAt = nowIso(); persist(); return { item: full(a) }; }
+  // structured (optional) = the 10-field Document Review Output Schema object; the export gate's
+  // unsupported-claims check (E2) reads it back from a.lastReview. reviewedVersion powers drift (E1).
+  function attachReview(id, notes, structured = null) {
+    const a = find(id); if (!a) return { error: "not found" };
+    a.reviewNotes = String(notes || "").slice(0, 20000); a.mentorReviewed = true; a.reviewedVersion = a.version; a.reviewRecommended = null;
+    if (structured && typeof structured === "object") {
+      a.lastReview = {
+        overall_score: structured.overall_score ?? null, ready_for_use: !!structured.ready_for_use,
+        unsupported_claims: Array.isArray(structured.unsupported_claims) ? structured.unsupported_claims.slice(0, 20).map(String) : [],
+        risk_flags: Array.isArray(structured.risk_flags) ? structured.risk_flags.slice(0, 20).map(String) : [],
+        should_generate_revision: !!structured.should_generate_revision, version: a.version, at: nowIso(),
+      };
+    }
+    if (a.status === "draft") a.status = "reviewed"; a.updatedAt = nowIso(); persist(); return { item: full(a) };
+  }
+
+  // E1: mark an artifact review-recommended (additive — the UI can render the triggers).
+  function flagReview(id, triggers) {
+    const a = find(id); if (!a) return { error: "not found" };
+    a.reviewRecommended = Array.isArray(triggers) && triggers.length ? triggers.slice(0, 12).map(String) : null;
+    a.reviewRecommendedAt = a.reviewRecommended ? nowIso() : null;
+    persist(); return { item: full(a) };
+  }
+
+  // Change ratio between two versions (E1 drift detection): changed diff lines / total diff lines.
+  // Falls back to a crude length delta when the docs are too large for the LCS diff.
+  function changeRatio(id, fromV, toV) {
+    const a = find(id); if (!a) return null;
+    const A = a.versions[fromV - 1], B = a.versions[toV - 1];
+    if (!A || !B) return null;
+    const d = lineDiff(A.content, B.content);
+    if (/^\(too large/.test(d)) {
+      const la = A.content.length, lb = B.content.length;
+      return Math.min(1, Math.abs(la - lb) / Math.max(la, 1));
+    }
+    const lines = d.split("\n");
+    if (!lines.length) return 0;
+    const changed = lines.filter((l) => l[0] === "+" || l[0] === "-").length;
+    return changed / lines.length;
+  }
 
   function remove(id) { const before = items.length; items = items.filter((a) => a.id !== id); persist(); return { removed: before - items.length }; }
 
@@ -123,24 +172,47 @@ export function createArtifactStore(opts = {}) {
     return { from: A.version, to: B.version, diff: lineDiff(A.content, B.content) };
   }
 
-  // Text export — writes a NEW file (source versions preserved). docx/pdf go through the Forge.
+  // Export — always writes a NEW file (source versions preserved; spec export safety #7).
+  // E3 (audit item 7): docx/pdf/xlsx/csv now generate NATIVELY via docwriters.mjs (zero-dep OOXML/
+  // PDF/zip writers). nativeFailed:true on a writer throw lets the server fall back to the Forge
+  // work-order path for docx/pdf ONLY in that case. spreadsheet = xlsx when the content parses as a
+  // table (markdown table or CSV), else CSV of the raw lines.
   function exportArtifact(id, format) {
     const a = find(id); if (!a) return { error: "not found" };
-    const fmt = String(format || a.type || "markdown").toLowerCase();
-    if (["docx", "pdf", "spreadsheet"].includes(fmt)) return { error: `${fmt} export needs the Forge (Claude Code holds those skills) — export markdown here, then use forge_send to convert.` };
-    let body = curContent(a);
+    let fmt = String(format || a.type || "markdown").toLowerCase();
+    const body0 = curContent(a);
+    const safe = (a.title || "artifact").replace(/[^a-z0-9._-]+/gi, "_").slice(0, 60);
+    const writeOut = (ext, data, extra = {}) => {
+      mkdirSync(exportsDir, { recursive: true });
+      const path = join(exportsDir, `${safe}-v${a.version}.${ext}`);
+      if (Buffer.isBuffer(data)) writeFileSync(path, data); else writeFileSync(path, data, "utf8");
+      return { path, bytes: Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data), format: ext, ...extra };
+    };
+    if (fmt === "docx" || fmt === "pdf") {
+      try {
+        const buf = fmt === "docx" ? markdownToDocx(body0, a.title) : markdownToPdf(body0, a.title);
+        return writeOut(fmt, buf, { native: true });
+      } catch (e) { return { error: `native ${fmt} generation failed: ${e.message}`, nativeFailed: true }; }
+    }
+    if (fmt === "xlsx" || fmt === "csv" || fmt === "spreadsheet") {
+      try {
+        const rows = parseTable(body0);
+        const fallbackRows = () => body0.split("\n").filter((l) => l.trim()).map((l) => [l]);
+        if (fmt === "csv") return writeOut("csv", toCsv(rows || fallbackRows()), { native: true, tableParsed: !!rows });
+        if (rows) return writeOut("xlsx", rowsToXlsx(rows), { native: true, tableParsed: true });
+        if (fmt === "xlsx") return writeOut("xlsx", rowsToXlsx(fallbackRows()), { native: true, tableParsed: false });
+        return writeOut("csv", toCsv(fallbackRows()), { native: true, tableParsed: false, note: "no table structure found — exported CSV of the raw lines instead of xlsx" });
+      } catch (e) { return { error: `native ${fmt} generation failed: ${e.message}`, nativeFailed: true }; }
+    }
+    let body = body0;
     const ext = EXT[fmt] || "txt";
     if (fmt === "json") { try { body = JSON.stringify(JSON.parse(body), null, 2); } catch {} }
     try {
-      mkdirSync(exportsDir, { recursive: true });
-      const safe = (a.title || "artifact").replace(/[^a-z0-9._-]+/gi, "_").slice(0, 60);
-      const path = join(exportsDir, `${safe}-v${a.version}.${ext}`);
-      writeFileSync(path, body, "utf8");
-      return { path, bytes: Buffer.byteLength(body), format: fmt };
+      return writeOut(ext, body);
     } catch (e) { return { error: "export failed: " + e.message }; }
   }
 
   function stats() { const by = {}; for (const a of items) by[a.status] = (by[a.status] || 0) + 1; return { total: items.length, byStatus: by }; }
 
-  return { create, duplicate, addVersion, setVersion, update, attachReview, remove, list, get, getContent, diff, exportArtifact, stats };
+  return { create, duplicate, addVersion, setVersion, update, attachReview, flagReview, changeRatio, remove, list, get, getContent, diff, exportArtifact, stats };
 }

@@ -18,6 +18,7 @@
  *   candidates needing activation. Cautious mode = flip REVIEW_AUTO_APPLY / AUTO_MENTOR, no rebuild.
  */
 import { FAILURE_CATEGORIES, ROOT_CAUSES, normalizeCategory } from "./flywheel.mjs";
+import { redact } from "./mentor.mjs";
 
 const stripThink = (t) => String(t || "").replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -116,6 +117,71 @@ export function categorizeTurn(sig = {}) {
   if (sig.mode === "fast" || answer.length < 160) return "casualChat";
   if (answer.length < 900) return "shortDraft";
   return "factualAnswer";
+}
+
+// ---- E1: the NINE artifact mentor-review triggers (spec 1011-1023, audit item 8), detected
+// server-side in ONE place. a = artifact (title/type/status/content/sourceContextRefs/
+// versionCount/mentorReviewed), sig = event signals { markedFinal, exported, externalSend,
+// driftRatio }. Returns the trigger names that fired; the server schedules a background
+// documentReview + marks the artifact review-recommended when any fire. ----
+const LONG_DOC_WORDS = 1200, LONG_DOC_CHARS = 8000;
+const DRIFT_RATIO = 0.4;
+const TECH_TERM_RE = /\b(api|schema|latency|throughput|bandwidth|voltage|amperage|wattage|kwh|psi|mils?|coverage rate|sq\.? ?ft|tolerance|algorithm|protocol|encryption|database|server|kernel|compiler|benchmark|spec(ification)?s?|firmware|calibrat\w*)\b/i;
+const LEGAL_FIN_RE = /\b(contract|liabilit\w*|indemnif\w*|warrant(y|ies)|legal|lawsuit|statute|regulation|compliance|jurisdiction|invoice|payment terms|interest rate|loan|mortgage|tax(es)?|financial|investment|medical|diagnos\w*|dosage|prescription|standard operating procedure|safety procedure|operational (procedure|protocol))\b/i;
+export function detectArtifactTriggers(a = {}, sig = {}) {
+  const content = String(a.content || "");
+  const fired = [];
+  // 1. user marks it final
+  if (sig.markedFinal || a.status === "final") fired.push("final_output");
+  // 2. it will be sent externally (export counts — it leaves the studio)
+  if (sig.exported || sig.externalSend) fired.push("external_send");
+  // 3. it's long
+  const words = (content.match(/\S+/g) || []).length;
+  if (words > LONG_DOC_WORDS || content.length > LONG_DOC_CHARS) fired.push("long_document");
+  // 4. it carries technical claims
+  if (countClaims(content) >= CLAIM_THRESHOLD && TECH_TERM_RE.test(content)) fired.push("technical_claims");
+  // 5. it contains code
+  if (CODE_FENCE.test(content) || a.type === "code") fired.push("code_content");
+  // 6. it was created from retrieved documents (provenance says retrieval contributed)
+  if ((a.sourceContextRefs || []).length) fired.push("retrieval_sourced");
+  // 7. legal / financial / medical / operational language
+  if (LEGAL_FIN_RE.test(content)) fired.push("legal_financial_language");
+  // 8. the local model self-reported uncertainty
+  if ((content.match(UNCERTAIN_RE) || []).length >= 2) fired.push("uncertainty");
+  // 9. drift: multiple revisions and the latest diverges heavily from the reviewed one
+  const vc = a.versionCount || (Array.isArray(a.versions) ? a.versions.length : 1);
+  if ((typeof sig.driftRatio === "number" && sig.driftRatio > DRIFT_RATIO && vc >= 3) ||
+      (sig.driftRatio == null && vc >= 4 && !a.mentorReviewed)) fired.push("drift");
+  return fired;
+}
+
+// ---- E2: the SEVEN export safety checks (spec 1042-1052, audit item 9) — ONE server-side gate
+// that both the REST export endpoint and the model-facing export tools pass through.
+//   1-3: confirm title / format / destination  -> structured echo in checks{}
+//   4:   mentor review skipped                 -> warning
+//   5:   unsupported claims remain (from the artifact's latest structured review) -> warning
+//   6:   sensitive data may be included (redact() detection) -> BLOCKS without an explicit
+//        override flag, even under LAX (the one check that keeps its teeth)
+//   7:   preserve editable source              -> structural guarantee, echoed in checks{}
+// LAX posture: warnings return + the export proceeds; spec mode (lax=false) additionally requires
+// confirmed=true whenever any warning fired. ----
+export const EXPORT_FORMATS = new Set(["md", "markdown", "txt", "text", "json", "html", "htm", "docx", "pdf", "xlsx", "csv", "spreadsheet", "code", "checklist", "report"]);
+export function exportSafetyGate({ artifact, format, destination = "local exports folder", overrideSensitive = false, lax = true, confirmed = false } = {}) {
+  const a = artifact || {};
+  const fmt = String(format || a.type || "md").toLowerCase();
+  const checks = { title: a.title || "Untitled", format: fmt, destination, preservesSource: true };
+  if (!EXPORT_FORMATS.has(fmt)) return { ok: false, blocked: "unsupported_format", message: `unsupported export format "${fmt}"`, checks, warnings: [] };
+  const warnings = [];
+  if (!a.mentorReviewed) warnings.push({ check: "review_skipped", message: "this artifact has not been mentor-reviewed" });
+  const claims = a.lastReview && Array.isArray(a.lastReview.unsupported_claims) ? a.lastReview.unsupported_claims : [];
+  if (claims.length) warnings.push({ check: "unsupported_claims", message: `${claims.length} unsupported claim(s) flagged by the last review`, claims: claims.slice(0, 5).map(String) });
+  const r = redact(String(a.content || ""));
+  if (r.applied.length) {
+    if (!overrideSensitive) return { ok: false, blocked: "sensitive_data", detected: r.applied, message: "possible sensitive data detected (" + r.applied.join(", ") + ") — exporting needs an explicit override", checks, warnings };
+    warnings.push({ check: "sensitive_data", overridden: true, detected: r.applied, message: "sensitive-data warning overridden explicitly" });
+  }
+  if (!lax && warnings.length && !confirmed) return { ok: false, blocked: "needs_confirmation", message: "export needs explicit confirmation (spec mode): " + warnings.map((w) => w.check).join(", "), checks, warnings };
+  return { ok: true, checks, warnings };
 }
 
 // ---- Tier 0 (spec): content-level skip-list — never mentor these ----

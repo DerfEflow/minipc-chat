@@ -548,9 +548,17 @@ async function openArtifact(id) {
     mkAct("Duplicate", async () => { const r = await aApi("/artifacts/duplicate", { id: a.id }); if (r.item) openArtifact(r.item.id); }),
     mkAct("Save as template", async () => { const r = await aApi("/artifacts/duplicate", { id: a.id, asTemplate: true }); if (r.item) openArtifact(r.item.id); }),
     mkAct("Rename", () => renameArt(a)),
+    // E4: archived status reachable from the artifact panel (backend always supported it).
+    mkAct(a.status === "archived" ? "Unarchive" : "Archive", () => setArtStatus(a.id, a.status === "archived" ? "draft" : "archived")),
     mkAct("Delete", () => { if (confirm("Delete this artifact and all versions?")) delArt(a.id); }),
   );
   adetail.appendChild(acts);
+  // E1: server-side trigger sweep marked this artifact review-recommended.
+  if (a.reviewRecommended && a.reviewRecommended.length && !(a.mentorReviewed && a.reviewedVersion === a.version)) {
+    const rr = document.createElement("div"); rr.className = "arow";
+    rr.textContent = "⚠ Mentor review recommended: " + a.reviewRecommended.join(", ").replace(/_/g, " ");
+    adetail.appendChild(rr);
+  }
   const xrow = document.createElement("div"); xrow.className = "arow";
   xrow.append(
     mkAct("→ Checklist", () => transformArt(a.id, "checklist")),
@@ -567,12 +575,18 @@ async function showDiff(id, from, to) {
   const old = adetail.querySelector(".adiff"); if (old) old.remove(); adetail.appendChild(box); box.scrollIntoView();
 }
 async function reviseArtifact(a) { const t = prompt("Revise — the full new content:", a.content); if (t != null && t.trim()) { await aApi("/artifacts/version", { id: a.id, content: t }); openArtifact(a.id); } }
-// Export safety (spec): warn when exporting an unreviewed artifact; docx/pdf auto-queue Forge conversion.
+// Export safety (spec, E2): the SERVER gate runs the seven checks — docx/pdf/xlsx/csv now export
+// natively. Sensitive-data detection blocks until explicitly overridden; other warnings ride along.
 async function exportArtifact(a) {
-  const f = prompt("Export format (md, txt, json, html, docx, pdf):", "md"); if (f == null) return;
+  const f = prompt("Export format (md, txt, json, html, docx, pdf, xlsx, csv):", "md"); if (f == null) return;
   if (!a.mentorReviewed && !confirm("This artifact hasn't been mentor-reviewed. Export anyway?")) return;
-  const r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim() });
-  alert(r.error ? "Export: " + r.error : "Exported to " + r.path + (r.queued ? "\n\nForge conversion queued — the " + f.trim() + " lands next to it shortly." : r.warning ? "\n\n" + r.warning : ""));
+  let r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim() });
+  if (r.blocked === "sensitive_data") {
+    if (!confirm("⚠ Possible sensitive data detected: " + (r.detected || []).join(", ") + "\n\nExport anyway?")) return;
+    r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim(), override_sensitive: true });
+  }
+  const warns = r.gate && r.gate.warnings && r.gate.warnings.length ? "\n\nWarnings: " + r.gate.warnings.map((w) => w.message || w.check).join("; ") : "";
+  alert(r.error ? "Export: " + r.error : "Exported to " + r.path + warns + (r.queued ? "\n\nForge conversion queued — the " + f.trim() + " lands next to it shortly." : r.warning ? "\n\n" + r.warning : ""));
 }
 // Mark final offers a mentor review first (spec: review trigger on final) — one tap, never a blocker.
 async function markFinal(a) {

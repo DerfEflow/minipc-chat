@@ -24,7 +24,8 @@ import { createMemoryStore } from "./memory.mjs";
 import { createArtifactStore } from "./artifacts.mjs";
 import { createMentor, MENTOR_ROLES } from "./mentor.mjs";
 import { createFlywheel } from "./flywheel.mjs";
-import { createReviewEngine, computeQuality, extractCitations, wantsReview } from "./review.mjs";
+import { createReviewEngine, computeQuality, extractCitations, wantsReview, detectArtifactTriggers, exportSafetyGate } from "./review.mjs";
+import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./routing.mjs";
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
@@ -171,10 +172,21 @@ const stripThink = (t) => String(t || "").replace(/<think>[\s\S]*?<\/think>/g, "
 // with the capability fields the router cares about. qwen3:8b = fast light worker; qwen3:30b-a3b = heavy reasoning.
 const LIGHT_MODEL = cfgGet("LIGHT_MODEL", "qwen3:8b");
 const MAIN_MODEL = cfgGet("MAIN_MODEL", "qwen3:30b-a3b");
-// Full spec ModelProvider fields. maxContextTokens is the HONEST Ollama-served window (40960);
-// the earlier 262144 was the family's theoretical YaRN ceiling, which this box neither serves
-// (Ollama doesn't expose YaRN rope-scaling params) nor has the RAM to hold — long-context gating
-// caps at what the runtime actually delivers. Displays never leak underlying model names.
+// Full spec ModelProvider fields. maxContextTokens is the HONEST Ollama-served window (40960).
+//
+// D4 — YaRN, the honest closure (spec 19/428/1841, audit item 11): the spec claims "YaRN enabled
+// for thinking or long-context jobs" as baseline and says deep-think should "use YaRN when
+// required by context size". That is NOT implementable on this stack, and this codebase does not
+// pretend otherwise:
+//   1. Ollama's /api/chat exposes no rope-scaling parameters (no rope_frequency_scale /
+//      yarn_ext_factor equivalents reach the loaded model) — YaRN would require re-serving the
+//      model with a modified Modelfile context ceiling, not a per-request option.
+//   2. Even if it did, qwen3's YaRN ceiling (~131-262k tokens) needs KV-cache RAM this 32GB box
+//      does not have; the machine would swap or OOM long before the window filled.
+// So "long context" here = num_ctx escalation up to the provider cap below (40960), which IS what
+// the runtime actually serves. The earlier 262144 figure was the family's theoretical YaRN
+// ceiling and was removed as dishonest. See docs/RESTORATION-PLAN.md "Spec deviations".
+// Displays never leak underlying model names.
 const PROVIDERS = {
   light: { id: "local_light", displayName: "Fast", modelName: LIGHT_MODEL, providerType: "local", maxContextTokens: 40960,
            supportsThinking: true, supportsTools: true, supportsStructuredOutput: true, supportsVision: false, supportsAudio: false, supportsVideo: false,
@@ -425,12 +437,16 @@ async function routeDecision(lastUser, totalInputChars) {
   // Routing confidence (spec quality.confidence seed): a confident heuristic beats a classifier
   // verdict beats a shrug. Surfaced in the route/done SSE meta and consumed by computeQuality.
   const confidence = h.confident ? 0.9 : src === "classifier" ? 0.7 : 0.55;
+  // D1: the full spec routing decision (spec ~352-363) — route enum + needs_* + confidence +
+  // reason, ALL consumed downstream (D3) and logged to usage.jsonl + the route SSE event.
   return {
+    route: routeOf(tier, mode),
     mode, tier, reason: `${src}: ${reason}`.slice(0, 80), confidence,
     privacyRisk: privacyRiskOf(lastUser),
-    needsTools: /\b(deck|forge|file|sandbox|remember|artifact|project|capture|run|search)\b/.test(t),
+    needsTools: /\b(deck|forge|file|sandbox|remember|artifact|project|capture|run|search|export|save|write|python|scrape)\b/.test(t),
     needsMemory: true,                       // approved memory is always considered
-    needsRetrieval: mode !== "fast",
+    // D3: self-contained transform asks skip retrieval even outside fast mode.
+    needsRetrieval: mode !== "fast" && !NO_RETRIEVAL_RE.test(String(lastUser || "").trim()),
     // Real pre-answer signal (spec): explicit critique ask or hallucination-prone/high-stakes topic.
     // Consumed post-answer — it forces the review path instead of leaving it to sampling luck.
     needsMentorReview: wantsReview(lastUser),
@@ -540,22 +556,44 @@ function renderDocReview(r) {
   ].filter(Boolean).join("\n\n");
 }
 
-// Background artifact review on the spec'd automatic triggers (mark-final / export) — server-side
-// detection, never a client confirm(). Fire-and-forget on the review lane; results attach to the
-// artifact and land in the reviews store.
-function scheduleArtifactReview(a, trigger) {
+// Background artifact review — server-side detection, never a client confirm(). Fire-and-forget;
+// results attach to the artifact (structured review stored for the E2 unsupported-claims check)
+// and land in the reviews store. One in-flight review per artifact keeps the CPU box sane.
+const artifactReviewsInFlight = new Set();
+function scheduleArtifactReview(a, triggers) {
   if (!AUTO_MENTOR || !a) return;
+  const trig = Array.isArray(triggers) ? triggers : [String(triggers || "manual")];
+  if (artifactReviewsInFlight.has(a.id)) return;
+  artifactReviewsInFlight.add(a.id);
   setImmediate(async () => {
     try {
       const r = await mentor.documentReview({ title: a.title, type: a.type, content: a.content, privacyMode: "local_only" });
-      artifacts.attachReview(a.id, `AUTO REVIEW (${trigger}, local mentor):\n\n` + renderDocReview(r));
-      flywheel.addReview({ tier: 2, trigger: [trigger], taskType: "document_review", artifactId: a.id, provider: r._provider, critique: r, contentPreview: String(a.content || "").slice(0, 300) });
+      artifacts.attachReview(a.id, `AUTO REVIEW (${trig.join("+")}, local mentor):\n\n` + renderDocReview(r), r);
+      flywheel.addReview({ tier: 2, trigger: trig, taskType: "document_review", artifactId: a.id, provider: r._provider, critique: r, contentPreview: String(a.content || "").slice(0, 300) });
       if (!r.ready_for_use && (r.major_issues.length || r.risk_flags.length)) {
         flywheel.addFailure({ category: r.unsupported_claims.length ? "unsupported_factual_claim" : "weak_structure", severity: r.risk_flags.length ? "high" : "medium", originalRequest: "artifact: " + a.title, flawedOutput: String(a.content || "").slice(0, 4000), detectedBy: "mentor", rootCause: r.unsupported_claims.length ? "missing_retrieval" : "bad_prompt", improvementActions: ["add_eval", r.unsupported_claims.length ? "update_retrieval" : "update_prompt"], samplingCategory: "finalArtifact" });
       }
-      console.log(`[dominion-ai] auto artifact review (${trigger}): "${a.title}" score ${r.overall_score}/10 ready=${r.ready_for_use}`);
-    } catch {}
+      console.log(`[dominion-ai] auto artifact review (${trig.join("+")}): "${a.title}" score ${r.overall_score}/10 ready=${r.ready_for_use}`);
+    } catch {} finally { artifactReviewsInFlight.delete(a.id); }
   });
+}
+
+// E1: ONE server-side sweep of the nine artifact mentor-review triggers (spec 1011-1023).
+// Runs on create / revise / mark-final / export — REST and tool paths alike. Any firing trigger
+// marks the artifact review-recommended (additive field the UI can show) and schedules a
+// background documentReview unless the CURRENT version was already reviewed.
+function evalArtifactTriggers(id, sig = {}) {
+  const a = artifacts.get(id); if (!a) return null;
+  let driftRatio = null;
+  if (a.reviewedVersion && a.versionCount >= 2 && a.reviewedVersion !== a.version) {
+    try { driftRatio = artifacts.changeRatio(id, a.reviewedVersion, a.version); } catch {}
+  }
+  const triggers = detectArtifactTriggers(a, { ...sig, driftRatio });
+  if (!triggers.length) return { triggers };
+  artifacts.flagReview(id, triggers);
+  const reviewedCurrent = a.mentorReviewed && a.reviewedVersion === a.version;
+  if (!reviewedCurrent) scheduleArtifactReview(a, triggers);
+  return { triggers, driftRatio };
 }
 
 // Artifact studio API (Phase 4): list/get/create/version/update/delete/diff/export/review.
@@ -568,27 +606,36 @@ async function handleArtifacts(req, res, u) {
   if (req.method === "GET" && p === "/artifacts/diff") return json(200, artifacts.diff(u.searchParams.get("id"), Number(u.searchParams.get("a")) || 0, Number(u.searchParams.get("b")) || 0));
   if (req.method === "POST") {
     const body = await readJsonBody(req); if (!body) return json(400, { error: "bad json" });
-    if (p === "/artifacts") return json(200, artifacts.create(body));
-    if (p === "/artifacts/version") return json(200, artifacts.addVersion(body.id, body));
+    if (p === "/artifacts") {
+      const r = artifacts.create(body);
+      if (r.item) evalArtifactTriggers(r.item.id, {});   // E1: trigger sweep on creation
+      return json(200, r);
+    }
+    if (p === "/artifacts/version") {
+      const r = artifacts.addVersion(body.id, body);     // E4: body may carry per-version provenance
+      if (r.item) evalArtifactTriggers(body.id, {});     // E1: drift & co. re-checked on revision
+      return json(200, r);
+    }
     if (p === "/artifacts/setversion") return json(200, artifacts.setVersion(body.id, Number(body.version)));
     if (p === "/artifacts/update") {
       const wasFinal = (artifacts.get(body.id) || {}).status === "final";
       const r = artifacts.update(body.id, body);
-      // Spec auto-review trigger: user marks an artifact FINAL → background mentor review.
-      if (!wasFinal && body.status === "final" && r.item) scheduleArtifactReview(artifacts.get(body.id), "final_output");
+      // E1: user marks an artifact FINAL → full trigger sweep (final_output + whatever else fires).
+      if (!wasFinal && body.status === "final" && r.item) evalArtifactTriggers(body.id, { markedFinal: true });
       return json(200, r);
     }
     if (p === "/artifacts/delete") return json(200, artifacts.remove(body.id));
     if (p === "/artifacts/export") {
-      const r = await exportWithForge(body.id, body.format);
-      // Spec auto-review trigger: artifact exported → background mentor review.
-      if (!r.error) scheduleArtifactReview(artifacts.get(body.id), "export");
+      // E2: the single gated export path (safety checks + native generation + Forge fallback).
+      const r = await exportGated(body.id, body.format, { destination: body.destination, overrideSensitive: body.override_sensitive === true });
+      // E1: artifact exported → trigger sweep (external_send + whatever else fires).
+      if (!r.error && !r.blocked) evalArtifactTriggers(body.id, { exported: true });
       return json(200, r);
     }
     if (p === "/artifacts/review") {
       const a = artifacts.get(body.id); if (!a) return json(404, { error: "not found" });
       const review = await mentor.documentReview({ title: a.title, type: a.type, content: a.content, originalRequest: body.originalRequest || "", privacyMode: body.privacyMode || "local_only" });
-      const attached = artifacts.attachReview(body.id, `DOCUMENT REVIEW (${review._provider}):\n\n` + renderDocReview(review));
+      const attached = artifacts.attachReview(body.id, `DOCUMENT REVIEW (${review._provider}):\n\n` + renderDocReview(review), review);
       flywheel.addReview({ tier: 2, trigger: ["manual"], taskType: "document_review", artifactId: a.id, provider: review._provider, critique: review, contentPreview: String(a.content || "").slice(0, 300) });
       return json(200, { ...attached, review });   // additive: structured 10-field schema rides along
     }
@@ -625,16 +672,38 @@ async function transformArtifact(id, kind) {
   return { error: "unknown transform: " + kind };
 }
 
-// Export with the Forge chained in: text formats export locally as before; docx/pdf exports the
-// markdown source, then AUTOMATICALLY queues a Forge work order to convert it (Claude Code holds
-// the docx/pdf skills). Editable source is always preserved (spec export safety).
-async function exportWithForge(id, format) {
-  const fmt = String(format || "").toLowerCase();
-  if (!["docx", "pdf"].includes(fmt)) return artifacts.exportArtifact(id, format);
+// E2 + E3: the ONE gated export path. Every export — REST endpoint AND the model-facing
+// export_artifact / create_docx / create_pdf / create_spreadsheet tools (via CTX.exportGated) —
+// passes the seven-check safety gate, then generates NATIVELY (docwriters.mjs via the artifact
+// store). The Forge work-order conversion survives ONLY as the docx/pdf fallback when native
+// generation throws. EXPORT_SAFETY=spec makes warning-bearing exports require confirmed:true;
+// the default LAX posture returns the warnings and proceeds — EXCEPT sensitive-data, which
+// requires an explicit override in both modes.
+const EXPORT_SAFETY_LAX = String(cfgGet("EXPORT_SAFETY", "lax")).toLowerCase() !== "spec";
+async function exportGated(id, format, { destination = "", overrideSensitive = false, confirmed = false } = {}) {
   const a = artifacts.get(id); if (!a) return { error: "not found" };
-  const md = artifacts.exportArtifact(id, "md");
+  const gate = exportSafetyGate({ artifact: a, format, destination: destination || "local exports folder", overrideSensitive, lax: EXPORT_SAFETY_LAX, confirmed });
+  if (!gate.ok) {
+    console.log(`[dominion-ai] export BLOCKED (${gate.blocked}): "${a.title}" as ${gate.checks.format}`);
+    return { blocked: gate.blocked, detected: gate.detected, error: gate.message, gate: { checks: gate.checks, warnings: gate.warnings } };
+  }
+  if (gate.warnings.length) console.log(`[dominion-ai] export warnings for "${a.title}": ${gate.warnings.map((w) => w.check).join(", ")} (proceeding — LAX)`);
+  let r = artifacts.exportArtifact(id, gate.checks.format);
+  if (r && r.nativeFailed && ["docx", "pdf"].includes(gate.checks.format)) {
+    console.log(`[dominion-ai] native ${gate.checks.format} failed ("${r.error}") — falling back to the Forge work order`);
+    r = await forgeConvertFallback(a, gate.checks.format);
+  }
+  if (r.error) return { ...r, gate: { checks: gate.checks, warnings: gate.warnings } };
+  return { ...r, gate: { checks: gate.checks, warnings: gate.warnings } };
+}
+CTX.exportGated = exportGated;   // the tool bus goes through the same gate (bypass closed)
+
+// Forge fallback (docx/pdf only, when the native writer throws): export the markdown source, then
+// queue a Claude Code work order to convert it. Editable source is always preserved.
+async function forgeConvertFallback(a, fmt) {
+  const md = artifacts.exportArtifact(a.id, "md");
   if (md.error) return md;
-  if (!CTX.runPassword) return { ...md, warning: `Exported markdown. ${fmt} conversion needs the Forge run-password configured on the server.` };
+  if (!CTX.runPassword) return { ...md, warning: `Native ${fmt} generation failed and the Forge fallback needs the run-password configured on the server — exported markdown instead.` };
   const instructions = `Convert the exported artifact markdown at ${md.path} into a well-formatted .${fmt} file saved NEXT TO the source (same folder, same base name, .${fmt} extension). Use your document skills; preserve headings, lists, and tables. Do not modify the source .md.`;
   const out = await runTool("forge_send", { repo: "cad-sandbox", title: `Export artifact "${a.title}" to ${fmt}`, instructions }, CTX);
   return { ...md, forge: String(out), queued: /Queued work order/i.test(String(out)) };
@@ -909,30 +978,47 @@ async function handleChat(req, res) {
   const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
 
   // Route: an explicit mode wins; otherwise the combined heuristic+light-model router picks.
-  // routeConfidence seeds the response quality block; routeNeedsReview is the spec's pre-answer
+  // routeConfidence seeds the response quality block; needs.mentorReview is the spec's pre-answer
   // mentor signal (explicit ask / high-stakes topic) and forces the post-answer review path.
-  let mode, tier, reason, privacyRisk = privacyRiskOf(lastUser ? lastUser.content : "");
-  let routeConfidence = 0.95, routeNeedsReview = wantsReview(lastUser ? lastUser.content : "");
-  if (reqMode !== "auto" && MODES[reqMode]) { mode = reqMode; tier = MODES[mode].tier; reason = "you chose " + mode.replace("_", " "); }
-  else { const c = await routeDecision(lastUser ? lastUser.content : "", totalInputChars); mode = c.mode; tier = c.tier; reason = c.reason; privacyRisk = c.privacyRisk; routeConfidence = c.confidence; routeNeedsReview = c.needsMentorReview; }
+  const lastUserText = lastUser ? String(lastUser.content) : "";
+  let mode, tier, reason, privacyRisk = privacyRiskOf(lastUserText);
+  let routeConfidence = 0.95;
+  // D1/D3: the needs_* block, produced for BOTH the auto route and explicit mode picks.
+  let needs = { tools: true, memory: true, retrieval: true, mentorReview: wantsReview(lastUserText) };
+  if (reqMode !== "auto" && MODES[reqMode]) {
+    mode = reqMode; tier = MODES[mode].tier; reason = "you chose " + mode.replace("_", " ");
+    needs.retrieval = mode !== "fast";
+    needs.tools = mode !== "fast" || /\b(deck|forge|file|sandbox|remember|artifact|project|capture|run|search|export|save|write|python|scrape)\b/i.test(lastUserText);
+  } else {
+    const c = await routeDecision(lastUserText, totalInputChars);
+    mode = c.mode; tier = c.tier; reason = c.reason; privacyRisk = c.privacyRisk; routeConfidence = c.confidence;
+    needs = { tools: c.needsTools, memory: c.needsMemory, retrieval: c.needsRetrieval, mentorReview: c.needsMentorReview };
+  }
+  const routeNeedsReview = needs.mentorReview;
   if (aborted) return res.end();
   const md = MODES[mode];
   const model = forced || MODEL_FOR(tier);
+  const provCap = PROVIDER_FOR_MODEL(model).maxContextTokens;
   const opts = { temperature: typeof userTemp === "number" ? userTemp : md.temp, signal: ac.signal };   // C5: abort reaches the model call too
-  // Long-context gating: only scale num_ctx up for long_context mode, sized to the input, capped at the provider limit.
+  // Long-context gating pass 1 (raw input size): scale num_ctx for long_context mode, capped at the
+  // provider limit. Pass 2 (the POST-RETRIEVAL re-check, D2) runs after context assembly below.
   if (mode === "long_context") {
-    const cap = (PROVIDERS[tier] || PROVIDERS.main).maxContextTokens;
-    const want = Math.min(estTokens(totalInputChars) * 2 + 8192, cap);
+    const want = Math.min(estTokens(totalInputChars) * 2 + 8192, provCap);
     opts.num_ctx = Math.max(md.num_ctx || 32768, Math.ceil(want / 4096) * 4096);
   } else if (md.num_ctx) opts.num_ctx = md.num_ctx;
-  sse({ type: "route", model, mode, reason, confidence: routeConfidence });
-  console.log(`[dominion-ai] /chat route -> ${model} · ${mode} (${reason})`);
+  // D3: consume needs_retrieval / needs_tools. Chat-only turns drop the tool defs from the prompt
+  // (token savings); conservative bias — only fast-mode turns with no tool language skip them.
+  const { skipRetrieval, attachTools } = consumeNeeds({ mode, needsTools: needs.tools, needsRetrieval: needs.retrieval, lastUserText });
+  opts.noTools = !attachTools;
+  // D1: the full routing decision surfaces immediately (spec routing JSON shape)...
+  sse({ type: "route", model, mode, route: routeOf(tier, mode), reason, confidence: routeConfidence,
+        needs: { tools: attachTools, memory: needs.memory, retrieval: !skipRetrieval, mentor_review: needs.mentorReview }, privacyRisk });
+  console.log(`[dominion-ai] /chat route -> ${model} · ${mode} (${reason}) · tools=${attachTools ? "on" : "off"} retrieval=${skipRetrieval ? "skip" : "on"}`);
 
   // Per-request tool context: the base CTX plus the live chat/mode (B2 scope for memory tools).
   const reqCtx = { ...CTX, chatId, mode, model };
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
-  // Fast mode skips retrieval (spec: fast = no retrieval overhead); durable pinned/profile still loads.
-  const ctxInfo = await buildContext(lastUser ? lastUser.content : "", chatId, { skipRetrieval: mode === "fast", mode, model });
+  const ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model });
   const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag) }];
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
@@ -941,13 +1027,32 @@ async function handleChat(req, res) {
   let personaInfo = null;
   if (mode === "as_fred") {
     try {
-      personaInfo = await persona.personaBlock(lastUser ? lastUser.content : "", { exemplars: 6 });
+      personaInfo = await persona.personaBlock(lastUserText, { exemplars: 6 });
       if (personaInfo.block) messages.push({ role: "system", content: personaInfo.block });
       sse({ type: "persona", hasProfile: personaInfo.hasProfile, exemplars: personaInfo.exemplars.length });
     } catch {}
   }
   messages.push(...history);
   const contextTokens = estTokens(messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0));
+  // D2 (audit item 12): the long-context re-check AFTER retrieval. Routing ran before context
+  // assembly, so only NOW do we know what retrieval actually loaded — if the assembled prompt
+  // would overflow the current window, escalate num_ctx (and the mode label) per the spec's first
+  // long-context entry condition ("retrieved context exceeds normal limit").
+  let escalated = false;
+  const esc = escalateForContext({ contextTokens, numCtx: opts.num_ctx, cap: provCap });
+  if (esc.escalate) {
+    escalated = true;
+    opts.num_ctx = esc.numCtx;
+    if (mode !== "long_context") { messages[0].content += "\n\n" + MODES.long_context.frag; mode = "long_context"; }
+    reason = (reason + ` · post-retrieval long-context escalation (~${contextTokens} tok > window)`).slice(0, 140);
+    sse({ type: "route", model, mode, route: routeOf(tier, mode), reason, confidence: routeConfidence, escalated: true, num_ctx: opts.num_ctx,
+          needs: { tools: attachTools, memory: needs.memory, retrieval: !skipRetrieval, mentor_review: needs.mentorReview }, privacyRisk });
+    console.log(`[dominion-ai] post-retrieval escalation: ~${contextTokens} tok assembled -> num_ctx ${opts.num_ctx}${esc.atCap ? " (AT PROVIDER CAP — may truncate)" : ""}`);
+  }
+  // D1: the final decision object — logged with every usage.jsonl entry for this run.
+  const routeInfo = { route: routeOf(tier, mode), mode, needs_tools: attachTools, needs_memory: needs.memory, needs_retrieval: !skipRetrieval,
+                      needs_mentor_review: needs.mentorReview, privacy_risk: privacyRisk, confidence: routeConfidence, reason,
+                      escalated: escalated || undefined, num_ctx: opts.num_ctx || undefined };
   if (ctxInfo.used.length || ctxInfo.artifactsUsed.length || ctxInfo.chatsUsed.length) {
     sse({ type: "context", memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, items: ctxInfo.used.map((c) => ({ title: c.title, label: c.citationLabel, score: c.score })) });
     console.log(`[dominion-ai] context: ${ctxInfo.used.length} mem · ${ctxInfo.artifactsUsed.length} artifact(s) · ${ctxInfo.chatsUsed.length} chat(s) · ~${contextTokens} tok`);
@@ -956,6 +1061,11 @@ async function handleChat(req, res) {
   let toolCount = 0, roundsUsed = 0, artifactCreatedThisTurn = false, toolFailedThisTurn = false;
   let executedCodeThisTurn = false, exportedThisTurn = false;   // real trigger signals (spec auto-review)
   const toolRunIds = [], toolSummaries = [];
+  // E4: tools that create/revise artifacts stamp THIS turn's provenance on the version they write;
+  // E1: and re-sweep the artifact triggers after doing so.
+  reqCtx.provenance = () => ({ sourceChatId: chatId, sourceContextRefs: ctxInfo.used.map((c) => c.citationLabel),
+                               sourceToolRunIds: [...toolRunIds], promptSummary: lastUserText.slice(0, 200) });
+  reqCtx.artifactTriggers = (id, sig) => { try { return evalArtifactTriggers(id, sig || {}); } catch { return null; } };
 
   try {
     let last = null;
@@ -967,7 +1077,7 @@ async function handleChat(req, res) {
       last = d;
       if (aborted) break;
       const msg = d && d.message;
-      if (!msg) { sse({ type: "error", error: "The model didn't respond (it may still be warming up — try again)." }); await logUsage({ ts: startedAt, model, mode, reason, status: "no_response", rounds: roundsUsed }); return res.end(); }
+      if (!msg) { sse({ type: "error", error: "The model didn't respond (it may still be warming up — try again)." }); await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "no_response", rounds: roundsUsed }); return res.end(); }
 
       const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
       if (calls.length && round < MAX_ROUNDS - 1) {
@@ -1070,7 +1180,11 @@ async function handleChat(req, res) {
             promptSummary: lastUser ? String(lastUser.content).slice(0, 200) : "",
             sourceToolRunIds: toolRunIds, sourceContextRefs: ctxInfo.used.map((c) => c.citationLabel),
           });
-          if (art.item) { sse({ type: "artifact", id: art.item.id, title: art.item.title, action: "saved" }); console.log(`[dominion-ai] artifact auto-saved: ${art.item.title} (${art.item.id.slice(0, 8)})`); }
+          if (art.item) {
+            sse({ type: "artifact", id: art.item.id, title: art.item.title, action: "saved" });
+            console.log(`[dominion-ai] artifact auto-saved: ${art.item.title} (${art.item.id.slice(0, 8)})`);
+            try { evalArtifactTriggers(art.item.id, {}); } catch {}   // E1: sweep the auto-saved draft too
+          }
         } catch {}
       }
       // A1: full NormalizedModelResponse — citations extracted from the answer, quality computed
@@ -1121,16 +1235,16 @@ async function handleChat(req, res) {
       }
       const norm = normalizeResponse(last, model, mode, { quality, citations, warnings, metadata: { chatId, reason, rounds: roundsUsed, tools: toolCount, privacyRisk } });
       console.log(`[dominion-ai] usage ${model}/${mode} prompt=${norm.usage.inputTokens || "?"} out=${norm.usage.outputTokens || "?"} tools=${toolCount} conf=${quality.confidence} risk=${quality.hallucinationRisk}`);
-      await logUsage({ ts: startedAt, model, mode, reason, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: norm.usage.inputTokens, outputTokens: norm.usage.outputTokens, latencyMs: norm.usage.latencyMs, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview });
+      await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: norm.usage.inputTokens, outputTokens: norm.usage.outputTokens, latencyMs: norm.usage.latencyMs, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview });
       try { chatlog.record(chatId, history, answer); } catch {}
       sse({ type: "done", meta: { mode, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, outputTokens: norm.usage.outputTokens, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview }, warnings: norm.warnings } });
       return res.end();
     }
-    if (aborted) { await logUsage({ ts: startedAt, model, mode, reason, status: "interrupted", rounds: roundsUsed, tools: toolCount }); }
-    else { sse({ type: "error", error: "I used too many tool steps without finishing — try rephrasing." }); await logUsage({ ts: startedAt, model, mode, reason, status: "max_rounds", rounds: roundsUsed, tools: toolCount }); }
+    if (aborted) { await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "interrupted", rounds: roundsUsed, tools: toolCount }); }
+    else { sse({ type: "error", error: "I used too many tool steps without finishing — try rephrasing." }); await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "max_rounds", rounds: roundsUsed, tools: toolCount }); }
   } catch (e) {
     sse({ type: "error", error: "Server error: " + e.message });
-    await logUsage({ ts: startedAt, model, mode, reason, status: "error", error: String(e.message).slice(0, 200) });
+    await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "error", error: String(e.message).slice(0, 200) });
   }
   res.end();
 }
@@ -1175,13 +1289,13 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`[dominion-ai] http://127.0.0.1:${PORT}  ->  Ollama ${OLLAMA}`);
   console.log(`[dominion-ai] tools: deck/forge/sandbox  ·  sync=${CTX.syncKey ? "set" : "MISSING"}  ·  run-password=${CTX.runPassword ? "set" : "unset"}  ·  sandbox=${CTX.sandboxDir}`);
-  console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  usage log=${LOG_DIR}`);
+  console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  needs_* consumed (retrieval skip + tool-def gating)  ·  post-retrieval long-context re-check  ·  usage log=${LOG_DIR}`);
   const ms = memory.stats();
   console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  gating=${ms.gating}${ms.gatedLax ? " (" + ms.gatedLax + " lax-auto-approved)" : ""}${ms.unverified ? " · " + ms.unverified + " unverified mentor claim(s) pending" : ""}  ·  scope-filtered retrieval  ·  vectors=${EMBED_MODEL} (${ms.embedded} embedded)  ·  dir=${MEMORY_DIR}`);
   console.log(`[dominion-ai] chatlog: ${chatlog.stats().chats} conversation(s) indexed  ·  episodic summaries via /memory/summarize-session`);
   console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed (incl. 6 formatting on the light model)  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON (interactive)" : "auto-approve (LAX, recorded)"}  ·  9-state lifecycle persisted  ·  ${flywheel.stats().activeToolOverlays} active description overlay(s)  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl (${toolRunTail.length} reloaded)`);
   const as = artifacts.stats();
-  console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review|duplicate|transform]`);
+  console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  native exports: docx/pdf/xlsx/csv (Forge = docx/pdf fallback only)  ·  export gate: ${EXPORT_SAFETY_LAX ? "LAX (warn+proceed, sensitive blocks)" : "SPEC (confirm on warnings)"}  ·  9 review triggers server-side  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review|duplicate|transform]`);
   console.log(`[dominion-ai] mentor: ${mentor.info().provider}  ·  auto-review=${AUTO_MENTOR ? "ON (tiered+adaptive)" : "OFF"}  ·  periodic=${PERIODIC_MENTOR ? "every " + PERIODIC_EVERY : "off"}  ·  council roles: ${Object.keys(MENTOR_ROLES).length}  ·  flywheel ${JSON.stringify(flywheel.stats())}`);
   const ps = persona.stats();
   console.log(`[dominion-ai] persona: ${ps.docs} doc(s) / ${ps.chunks} chunk(s) (${JSON.stringify(ps.byKind)})  ·  ${ps.pendingEmbeds} pending embed(s)  ·  fts=${ps.fts ? "on" : "OFF"}  ·  profile=${ps.profile ? "distilled " + String(ps.profile.updatedAt).slice(0, 10) : "none yet"}  ·  db=${Math.round(ps.dbBytes / 1024)}KB  ·  inboxes: ${persona.inbox} + ${persona.stagingInbox}  ·  mode: as_fred`);

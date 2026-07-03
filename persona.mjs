@@ -97,7 +97,8 @@ export function htmlToText(html) {
 }
 
 // Minimal .docx reader: a .docx is a ZIP; pull word/document.xml (DEFLATE via zlib) and strip XML.
-function docxToText(buf) {
+// Exported so docwriters.mjs's writer can be round-trip verified against it (E3 test).
+export function docxToText(buf) {
   try {
     const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
     if (eocd < 0) return "";

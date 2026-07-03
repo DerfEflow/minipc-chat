@@ -58,19 +58,55 @@ defaults (cautious mode = a flag flip, never a rebuild).*
       (all proven by governance_test.mjs — 19/19)
 
 ### D — Routing
-- [ ] D1. routing confidence produced + surfaced (21, part of A1)
-- [ ] D2. Long-context re-check AFTER retrieval (retrieved context overflow can trigger it) (12)
-- [ ] D3. needs_retrieval / needs_tools / needs_mentor_review actually consumed by the pipeline
-- [ ] D4. YaRN: document as hardware/runtime-bound (Ollama doesn't expose rope-scaling; 32GB box)
-      — spec note, not code (11). DONE = honest note in code + spec-deviation ledger.
+- [x] D1. routing confidence produced + surfaced (21, part of A1)
+      → routeDecision returns the full spec decision {route, mode, needs_*, privacy_risk,
+        confidence, reason} (route enum via routing.mjs routeOf); surfaced in the route SSE event
+        AND logged as `route:{...}` on every usage.jsonl entry (all statuses)
+- [x] D2. Long-context re-check AFTER retrieval (retrieved context overflow can trigger it) (12)
+      → routing.mjs escalateForContext(): handleChat estimates the FULLY ASSEMBLED prompt after
+        buildContext and escalates num_ctx (4096-aligned, capped at the honest 40960) + the mode
+        label + the long-context frag when it would overflow; second route SSE with escalated:true
+- [x] D3. needs_retrieval / needs_tools / needs_mentor_review actually consumed by the pipeline
+      → consumeNeeds(): needs_retrieval=false (or a self-contained transform ask) skips retrieval;
+        needs_tools gates whether tool defs are attached to the model call (conservative: only
+        fast-mode turns with no tool language drop them — opts.noTools); needs_mentor_review flows
+        as routeNeedsReview → reviewEngine.schedule → detectTriggers "user_ask" → hard Tier 2
+        (verified end-to-end; explicit-mode picks now produce a needs block too)
+- [x] D4. YaRN: document as hardware/runtime-bound (Ollama doesn't expose rope-scaling; 32GB box)
+      — spec note, not code (11). DONE = honest comment at PROVIDERS in server.mjs + the
+      Spec-deviations ledger below. No pretend implementation.
 
 ### E — Artifacts & documents
-- [ ] E1. The 9 artifact mentor-review triggers detected server-side (long, technical, code, export,
+- [x] E1. The 9 artifact mentor-review triggers detected server-side (long, technical, code, export,
       legal/financial, retrieval-sourced, uncertainty, drift, final) (8)
-- [ ] E2. The 7 export safety checks, enforced server-side so the model-facing tool can't bypass (9)
-- [ ] E3. Native DOCX export (zero-dep zip writer), minimal PDF export (zero-dep text PDF),
+      → review.mjs detectArtifactTriggers() — ONE detector; server evalArtifactTriggers() sweeps on
+        create / revise / mark-final / export, REST and tool paths alike; firing = artifact marked
+        reviewRecommended (additive field, small UI hint) + background documentReview scheduled
+        (skipped when the current version is already reviewed); drift uses the LCS-diff changeRatio
+        vs the last reviewed version
+- [x] E2. The 7 export safety checks, enforced server-side so the model-facing tool can't bypass (9)
+      → review.mjs exportSafetyGate() + server exportGated() — the ONE path for the REST endpoint
+        AND export_artifact/create_docx/create_pdf/create_spreadsheet (tools go through
+        CTX.exportGated; the raw-store bypass is closed — no gate wired = tool refuses). Structured
+        title/format/destination echo; review-skipped + unsupported-claims (from the stored
+        structured lastReview) warnings; sensitive-data (redact() detection) BLOCKS without an
+        explicit override in BOTH modes; source always preserved. EXPORT_SAFETY=spec = warnings
+        require confirmed:true (cautious flip, no rebuild)
+- [x] E3. Native DOCX export (zero-dep zip writer), minimal PDF export (zero-dep text PDF),
       spreadsheet (CSV/XLSX zip) — no Forge dependency for basic docs (7)
-- [ ] E4. Per-version provenance; archived state reachable in UI (partial)
+      → docwriters.mjs: table-based crc32 + zip writer (DEFLATE/STORED + central directory),
+        markdown→OOXML docx (headings/bold/italic/lists/code), multi-page text PDF (Helvetica +
+        bold, Tj ops, real xref), markdown-table/CSV → xlsx (inline strings) with csv fallback;
+        wired into artifacts.exportArtifact (Forge = docx/pdf fallback ONLY when the native writer
+        throws); create_docx/create_pdf/create_spreadsheet registered as model tools (spec 809-821).
+        Verified: docx round-trips persona.mjs docxToText; pdf passes %PDF/Tj/xref checks; xlsx zip
+        lists correct OOXML entries + cell data (artifacts_test.mjs)
+- [x] E4. Per-version provenance; archived state reachable in UI (partial)
+      → addVersion (and v1) records sourceChatId/sourceContextRefs/sourceToolRunIds/promptSummary
+        per version; tools stamp the live turn's provenance via reqCtx.provenance(); Archive/
+        Unarchive action added to the artifact panel (app.js v22)
+      (D+E proven by routing_test.mjs 11/11 + artifacts_test.mjs 36/36; review_test 13/13 and
+       governance_test 19/19 still pass)
 
 ### F — UI completions
 - [ ] F1. Per-message: Hallucination-check control, Save lesson, Convert to eval, Show tool log (23-26)
@@ -78,6 +114,23 @@ defaults (cautious mode = a flag flip, never a rebuild).*
 - [ ] F3. Memory inbox: Convert to retrieval note (28)
 - [ ] F4. Context chip expands to show which items loaded; interrupted answers visibly marked;
       artifact panel: model + source-chat link; ledger shows rootCause/actions (partials)
+
+## Spec deviations (honest ledger)
+
+- **YaRN rope-scaling (spec 19 / 428 / 1841, audit item 11): NOT implementable on this stack —
+  deliberately not faked.** The spec claims "YaRN enabled for thinking or long-context jobs" as
+  baseline and tells deep-think to "use YaRN when required by context size". Two hard blockers:
+  (1) Ollama's /api/chat exposes no rope-scaling parameters — enabling YaRN would mean re-serving
+  the model from a modified Modelfile, not a per-request toggle; (2) qwen3's YaRN window
+  (~131-262k tokens) needs KV-cache RAM far beyond this 32GB mini-PC. **Long context in this build
+  = num_ctx escalation up to the provider cap (40960), which is what the runtime actually
+  serves.** The escalation machinery (D2) is real and spec-shaped — if the box or runtime ever
+  gains YaRN, only the PROVIDERS cap and the Modelfile change. Code note lives at the PROVIDERS
+  block in server.mjs.
+- **Route enum edge:** the auto-router only emits the three local routes; `external_mentor` never
+  appears as a routing destination because the mentor bridge defaults local and mentor review is a
+  post-answer concern (carried by needs_mentor_review). Explicit mentor mode maps to
+  `multi_model_review` (answer + independent critique pass).
 
 ## Sequencing
 A (core) → B+C (governance) → D → E → F. Commit per group; deploy all after distill completes.
