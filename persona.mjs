@@ -582,6 +582,11 @@ export function createPersonaStore(opts = {}) {
     return profile;
   }
 
+  // Boot-time warmer: load the in-RAM vector cache eagerly so the first semantic retrieve (e.g. the
+  // first As-Fred query after a restart) doesn't pay the full whole-corpus vector load inside an
+  // interactive request. Pure wrapper around the existing lazy loader; returns the cached count.
+  function warmCache() { return ensureVecCache().size; }
+
   // The block injected into "As Fred" prompts: the rendered profile + retrieved exemplars.
   async function personaBlock(query, { exemplars = 6 } = {}) {
     const profile = getProfile();
@@ -672,7 +677,7 @@ export function createPersonaStore(opts = {}) {
 
   const migrated = migrateFromJson();
 
-  return { ingestText, scanInbox, retrieve, sampleForProfile, statVocab, buildBatches, personaBlock, getProfile, setProfile, list, getDoc, removeDoc, reprocessChats, embedPending, backfillEmbeddings: embedPending, backupTo, stats, KINDS, dir, inbox, stagingInbox, staging, migrated, fts };
+  return { ingestText, scanInbox, retrieve, sampleForProfile, statVocab, buildBatches, personaBlock, getProfile, setProfile, list, getDoc, removeDoc, reprocessChats, embedPending, backfillEmbeddings: embedPending, warmCache, backupTo, stats, KINDS, dir, inbox, stagingInbox, staging, migrated, fts };
 }
 
 // Render the structured facets into a system-prompt block (fallback when no pre-rendered systemBlock).

@@ -259,6 +259,23 @@ await t("A2/A4: schedule() is non-blocking and the tier-1 screen escalates to a 
   assert.ok(rec.pipeline && rec.pipeline.valid, "pipeline ran on the escalated critique");
 });
 
+await t("interactive-lane deferral: a queued review WAITS while the lane is busy, runs after release, never dropped", async () => {
+  let released;                                      // mock interactive lane: busy until released()
+  const gate = new Promise((r) => (released = r));
+  let critiques = 0;
+  const countingMentor = { ...mentor, critique: async (o) => { critiques++; return mentor.critique(o); } };
+  const eng2 = createReviewEngine({ mentor: countingMentor, flywheel: fw, memory: mem, ollamaChat: mockChat, lightModel: "mock-light", mainModel: "mock-main", autoApply: false, log: () => {}, waitIdle: () => gate });
+  // user_ask trigger => hard Tier 2 => a full mentor critique gets queued on the background lane
+  const decision = eng2.schedule({ answer: "The default is 8080.", lastUserText: "are you sure? double-check this for me", mode: "normal", chatId: "lane_test", retrievedContext: [], toolCalls: [] });
+  assert.equal(decision.tier, 2, "hard tier-2 via user_ask");
+  assert.ok(decision.queued, "job queued, not dropped");
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(critiques, 0, "review DEFERRED while the interactive lane is busy");
+  released();                                        // interactive work ends -> lane goes idle
+  await new Promise((r) => setTimeout(r, 200));      // let the background lane drain
+  assert.ok(critiques >= 1, "the deferred review ran after the lane released (deferred, not dropped)");
+});
+
 const done = () => {
   rmSync(dir, { recursive: true, force: true });
   console.log(`\n${passed} passed, ${failed} failed`);

@@ -107,6 +107,9 @@ async function embedLoop() {
   if (embedLoopOn) return;
   embedLoopOn = true;
   while (embedLoopOn) {
+    // Interactive-priority: never run an embed batch while a chat is streaming (or within the
+    // cooldown after one) — the 8B/embedder would evict/contend with the interactive model.
+    if (interactiveBusy()) { await new Promise((r) => setTimeout(r, 5000)); continue; }
     let n = 0;
     try { n = await persona.embedPending(8); } catch { n = 0; }
     await new Promise((r) => setTimeout(r, n ? 300 : 30000));
@@ -166,6 +169,21 @@ function proxy(req, res, upstreamPath) {
 // ---- the agent loop (server-side tool-calling) + Phase 1 router/modes ----
 const MAX_ROUNDS = 6;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---- interactive-priority lane ----
+// A single Ollama on a slow CPU box: background machinery (auto reviews, the persona embed loop,
+// periodic mentor passes) must NEVER contend with a live chat. Every streaming /chat request holds
+// the lane; background work polls waitInteractiveIdle() and defers (with backoff + a cooldown after
+// the last request ends) — deferred, never dropped.
+const INTERACTIVE_COOLDOWN_MS = 20000;
+const interactiveLane = { active: 0, lastEndAt: 0 };
+const interactiveBusy = () => interactiveLane.active > 0 || (Date.now() - interactiveLane.lastEndAt) < INTERACTIVE_COOLDOWN_MS;
+function enterInteractive() { interactiveLane.active++; }
+function leaveInteractive() { interactiveLane.active = Math.max(0, interactiveLane.active - 1); interactiveLane.lastEndAt = Date.now(); }
+async function waitInteractiveIdle({ startMs = 1000, maxMs = 8000 } = {}) {
+  let delay = startMs;
+  while (interactiveBusy()) { await sleep(delay); delay = Math.min(maxMs, Math.round(delay * 1.5)); }
+}
 const stripThink = (t) => String(t || "").replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
 
 // Provider abstraction (local) — spec Phase 1 "model provider abstraction". Each tier is a provider
@@ -321,6 +339,7 @@ const reviewEngine = createReviewEngine({
   lightModel: LIGHT_MODEL, mainModel: MAIN_MODEL,
   autoApply: String(cfgGet("REVIEW_AUTO_APPLY", "1")) !== "0",
   toolNames: TOOL_DEFS.map((d) => d.function.name),   // C3: mentor tool findings map to real tools -> overlays
+  waitIdle: () => waitInteractiveIdle(),               // background reviews defer to live chats
   log: (s) => console.log("[dominion-ai] " + s),
 });
 // C4: the formatting tools run on the LIGHT model through this hook (fast + cheap by design).
@@ -347,6 +366,9 @@ async function ollamaChat(model, messages, opts = {}) {
   return await new Promise((resolve) => {
     if (opts.signal && opts.signal.aborted) return resolve(null);
     const payload = { model, messages, stream: false };
+    // Model residency (RAM pressure fix): the 17.7GB 30B stays hot for an hour; the light model
+    // expires after 5m so IT gets evicted first instead of swapping the big one out mid-conversation.
+    payload.keep_alive = opts.keep_alive || (model === MAIN_MODEL ? "60m" : "5m");
     // C3: tool defs are assembled LIVE with the flywheel's active description overlays, so mentor
     // tool-guidance actually changes what the model sees about each tool at prompt time.
     if (!opts.noTools) payload.tools = toolDefs(flywheel.activeToolOverlays());
@@ -567,6 +589,7 @@ function scheduleArtifactReview(a, triggers) {
   artifactReviewsInFlight.add(a.id);
   setImmediate(async () => {
     try {
+      await waitInteractiveIdle();   // never contend with a live chat — defer, don't drop
       const r = await mentor.documentReview({ title: a.title, type: a.type, content: a.content, privacyMode: "local_only" });
       artifacts.attachReview(a.id, `AUTO REVIEW (${trig.join("+")}, local mentor):\n\n` + renderDocReview(r), r);
       flywheel.addReview({ tier: 2, trigger: trig, taskType: "document_review", artifactId: a.id, provider: r._provider, critique: r, contentPreview: String(a.content || "").slice(0, 300) });
@@ -986,10 +1009,28 @@ async function handleChat(req, res) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
   const sse = (o) => { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
   let aborted = false;
+  // Interactive lane: hold it for the whole stream so background work defers; released exactly once
+  // on end OR abort (finish + close both fire — the guard keeps the count honest).
+  enterInteractive();
+  let laneOpen = true;
+  const releaseLane = () => { if (laneOpen) { laneOpen = false; leaveInteractive(); } };
+  res.on("finish", releaseLane);
   // C5: one AbortController per request — client stop/disconnect aborts in-flight tools (HTTP tools
   // destroy their request, the python sandbox SIGKILLs) and the in-flight model call.
   const ac = new AbortController();
-  res.on("close", () => { aborted = true; try { ac.abort(); } catch {} });
+  res.on("close", () => { aborted = true; try { ac.abort(); } catch {} releaseLane(); });
+  // SSE working heartbeat: while a slow model call / tool round is in flight, tell the client every
+  // ~8s that we're alive ({type:"working", phase, elapsed seconds}) — cleared before tokens stream.
+  const chatT0 = Date.now();
+  let workTimer = null;
+  const workStop = () => { if (workTimer) { clearInterval(workTimer); workTimer = null; } };
+  const working = (phase) => {
+    workStop();
+    if (aborted) return;
+    const emit = () => sse({ type: "working", phase, elapsed: Math.round((Date.now() - chatT0) / 1000) });
+    emit();
+    workTimer = setInterval(emit, 8000);
+  };
 
   const personaStyle = typeof input.persona === "string" ? input.persona.slice(0, 2000) : "";
   const userTemp = (typeof input.temperature === "number" && input.temperature >= 0 && input.temperature <= 2) ? input.temperature : undefined;
@@ -1013,12 +1054,13 @@ async function handleChat(req, res) {
     needs.retrieval = mode !== "fast";
     needs.tools = mode !== "fast" || /\b(deck|forge|file|sandbox|remember|artifact|project|capture|run|search|export|save|write|python|scrape)\b/i.test(lastUserText);
   } else {
+    working("thinking");   // the ambiguous-case classifier can stall on a cold light model
     const c = await routeDecision(lastUserText, totalInputChars);
     mode = c.mode; tier = c.tier; reason = c.reason; privacyRisk = c.privacyRisk; routeConfidence = c.confidence;
     needs = { tools: c.needsTools, memory: c.needsMemory, retrieval: c.needsRetrieval, mentorReview: c.needsMentorReview };
   }
   const routeNeedsReview = needs.mentorReview;
-  if (aborted) return res.end();
+  if (aborted) { workStop(); return res.end(); }
   const md = MODES[mode];
   const model = forced || MODEL_FOR(tier);
   const provCap = PROVIDER_FOR_MODEL(model).maxContextTokens;
@@ -1031,7 +1073,11 @@ async function handleChat(req, res) {
   } else if (md.num_ctx) opts.num_ctx = md.num_ctx;
   // D3: consume needs_retrieval / needs_tools. Chat-only turns drop the tool defs from the prompt
   // (token savings); conservative bias — only fast-mode turns with no tool language skip them.
-  const { skipRetrieval, attachTools } = consumeNeeds({ mode, needsTools: needs.tools, needsRetrieval: needs.retrieval, lastUserText });
+  let { skipRetrieval, attachTools } = consumeNeeds({ mode, needsTools: needs.tools, needsRetrieval: needs.retrieval, lastUserText });
+  // As-Fred latency fix: voice writing needs no deck/forge tools (exemplars are injected) and CoT
+  // adds minutes of invisible prefill+thinking for zero voice fidelity — one round, no think,
+  // tokens start right after a single prefill.
+  if (mode === "as_fred") { attachTools = false; opts.think = false; }
   opts.noTools = !attachTools;
   // D1: the full routing decision surfaces immediately (spec routing JSON shape)...
   sse({ type: "route", model, mode, route: routeOf(tier, mode), reason, confidence: routeConfidence,
@@ -1041,6 +1087,7 @@ async function handleChat(req, res) {
   // Per-request tool context: the base CTX plus the live chat/mode (B2 scope for memory tools).
   const reqCtx = { ...CTX, chatId, mode, model };
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
+  working("reading context");   // retrieval (embed call + vec cache) can be slow on a cold box
   const ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model });
   const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag) }];
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
@@ -1099,16 +1146,20 @@ async function handleChat(req, res) {
     let last = null;
     for (let round = 0; round < MAX_ROUNDS && !aborted; round++) {
       roundsUsed = round + 1;
+      // heartbeat phase: think-less runs (and post-tool rounds) go straight to writing
+      working(opts.think === false ? "writing" : round === 0 ? "thinking" : "writing");
       let d = await ollamaChat(model, messages, opts);
       // the heavier 30B can return null on a cold load / transient blip — retry once on the first round
       if (!d && round === 0 && !aborted) { await sleep(1500); d = await ollamaChat(model, messages, opts); }
       last = d;
+      workStop();   // model call finished (tokens or tool calls next) — heartbeat pauses here
       if (aborted) break;
       const msg = d && d.message;
       if (!msg) { sse({ type: "error", error: "The model didn't respond (it may still be warming up — try again)." }); await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "no_response", rounds: roundsUsed }); return res.end(); }
 
       const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
       if (calls.length && round < MAX_ROUNDS - 1) {
+        working("running tools");   // round 2+ visibility: tools now, then "writing" on the next model call
         // record the assistant's tool-call turn (thinking stripped — hygiene), then run each tool and feed results back
         messages.push({ role: "assistant", content: stripThink(msg.content), tool_calls: calls });
         for (const c of calls) {
@@ -1230,7 +1281,7 @@ async function handleChat(req, res) {
           const c = await mentor.critique({ taskType: "answer_review", originalRequest: lastUser ? lastUser.content : "", content: answer, privacyMode: "local_only", retrievedContext: ctxInfo.used.map((x) => x.content), toolCalls: toolSummaries, mode, chatId });
           sse({ type: "mentor_full", critique: c });
           const req0 = lastUser ? String(lastUser.content) : "";
-          setImmediate(() => reviewEngine.runPipeline(c, { answer, originalRequest: req0, chatId, samplingCategory: "userMarkedImportant", tier: 2, retrievalCount: ctxInfo.used.length, toolCount }).catch(() => {}));
+          setImmediate(() => waitInteractiveIdle().then(() => reviewEngine.runPipeline(c, { answer, originalRequest: req0, chatId, samplingCategory: "userMarkedImportant", tier: 2, retrievalCount: ctxInfo.used.length, toolCount })).catch(() => {}));
         } catch {}
       }
       // Phase 5 (full): tiered adaptive auto-review — fire-and-forget, never delays this stream.
@@ -1256,6 +1307,7 @@ async function handleChat(req, res) {
         const n = completedRuns;
         setImmediate(async () => {
           try {
+            await waitInteractiveIdle();   // periodic reviews also yield to live chats
             const r = await reviewEngine.reviewNow({ tier: 2, answer, originalRequest: req0, chatId, samplingCategory: "factualAnswer", triggers: ["periodic"], mode });
             console.log(`[dominion-ai] periodic mentor review #${n}: score ${r.critique.overall_score}/10, priority ${r.critique.revision_priority}`);
           } catch {}
@@ -1270,9 +1322,11 @@ async function handleChat(req, res) {
       sse({ type: "done", meta: { mode, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: toolRunIds, outputTokens: norm.usage.outputTokens, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview }, warnings: norm.warnings } });
       return res.end();
     }
+    workStop();   // aborted mid-tool-round / max_rounds — never leave the heartbeat ticking
     if (aborted) { await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "interrupted", rounds: roundsUsed, tools: toolCount }); }
     else { sse({ type: "error", error: "I used too many tool steps without finishing — try rephrasing." }); await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "max_rounds", rounds: roundsUsed, tools: toolCount }); }
   } catch (e) {
+    workStop();
     sse({ type: "error", error: "Server error: " + e.message });
     await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "error", error: String(e.message).slice(0, 200) });
   }
@@ -1334,6 +1388,9 @@ server.listen(PORT, "127.0.0.1", () => {
   // Backfill embeddings for pre-vector memories in the background (no-op if the embed model is absent).
   memory.backfillEmbeddings(100).then((n) => { if (n) console.log(`[dominion-ai] memory: backfilled ${n} embedding(s)`); }).catch(() => {});
   embedLoop();   // continuous persona embedder: drains new chunks at a gentle pace, forever
+  // Warm the persona vector cache in the background so the FIRST As-Fred query doesn't pay the
+  // full 14k-vector SQLite load inside an interactive request.
+  setTimeout(() => { try { const n = persona.warmCache(); console.log(`[dominion-ai] persona: vec cache warmed (${n} vector(s) in RAM)`); } catch (e) { console.log("[dominion-ai] persona: vec cache warm failed: " + (e && e.message)); } }, 1500);
   console.log("[dominion-ai] front this with: tailscale serve --bg " + PORT);
   if (String(cfgGet("WATCHDOG_ENABLED", "1")) !== "0") {
     const wms = Number(cfgGet("WATCHDOG_INTERVAL_MS", "180000")) || 180000;

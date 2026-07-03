@@ -297,6 +297,10 @@ async function streamReply(c) {
           const decide = (approved) => { yes.disabled = no.disabled = true; box.remove(); fetch("/tool-confirm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runId: ev.runId, approved }) }).catch(() => {}); };
           yes.onclick = () => decide(true); no.onclick = () => decide(false);
           btns.append(yes, no); box.append(q, btns); tools.appendChild(box); scroll();
+        } else if (ev.type === "working") {
+          // Server heartbeat while the model grinds — keeps the bubble alive instead of dead air.
+          // Never names models; phases: reading context / thinking / writing / running tools.
+          if (!stripThink(raw)) { clearTimeout(warm); live.textContent = "Dominion AI is working — " + (ev.phase || "thinking") + "… " + (ev.elapsed != null ? ev.elapsed + "s" : ""); scroll(); }
         } else if (ev.type === "token") { raw += ev.delta || ""; const shown = stripThink(raw); live.classList.toggle("think", !shown); live.textContent = shown || "Dominion AI is working…"; scroll(); }
         else if (ev.type === "error") { throw new Error(ev.error || "server error"); }
       }

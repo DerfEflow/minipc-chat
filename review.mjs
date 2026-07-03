@@ -196,7 +196,7 @@ export function isTier0(sig = {}) {
   return false;
 }
 
-export function createReviewEngine({ mentor, flywheel, memory, ollamaChat, lightModel, mainModel, autoApply = true, toolNames = [], log = () => {} }) {
+export function createReviewEngine({ mentor, flywheel, memory, ollamaChat, lightModel, mainModel, autoApply = true, toolNames = [], waitIdle = null, log = () => {} }) {
   // ---- adaptive sampling (spec: rate rises on recent ledger failures in that category, decays
   // back to baseline as the 7-day window slides past them) ----
   function effectiveRate(category) {
@@ -394,11 +394,14 @@ export function createReviewEngine({ mentor, flywheel, memory, ollamaChat, light
   };
 
   // ---- the background lane: one review at a time, small backlog cap (the 30B is slow) ----
+  // Interactive-priority: when a waitIdle hook is provided (server passes the interactive-lane
+  // waiter), every queued job WAITS for live chats to finish (+ cooldown) before touching the
+  // model. Jobs are deferred, never dropped — the backlog cap only guards runaway queueing.
   let lane = Promise.resolve(); let backlog = 0;
   function enqueue(job) {
     if (backlog >= 4) { log("review backlog full — dropping an auto review"); return false; }
     backlog++;
-    lane = lane.then(job).catch((e) => log("review job error: " + (e && e.message))).finally(() => backlog--);
+    lane = lane.then(async () => { if (waitIdle) await waitIdle(); return job(); }).catch((e) => log("review job error: " + (e && e.message))).finally(() => backlog--);
     return true;
   }
 
