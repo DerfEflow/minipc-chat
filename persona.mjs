@@ -41,6 +41,39 @@ const tokenize = (s) => (String(s || "").toLowerCase().match(/[a-z0-9]{2,}/g) ||
 const norm = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
 const nowIso = () => new Date().toISOString();
 
+// Vocab-grade tokenizer for statVocab: keeps apostrophes ("didn't", not "didn"), drops URLs/domains,
+// bare numbers/years, and AI-transcript artifacts — the first whole-corpus distill surfaced
+// "chatgpt/user/https/didn" as Fred's "favored words", which was the tooling, not Fred.
+const VOCAB_JUNK = new Set(["chatgpt", "gpt", "openai", "user", "assistant", "http", "https", "www", "com"]);
+function vocabTokenize(s) {
+  const cleaned = String(s || "").toLowerCase().replace(/https?:\/\/\S+|www\.\S+|\S+\.(com|net|org|io)\b/g, " ");
+  const raw = cleaned.match(/[a-z][a-z0-9']*[a-z0-9]/g) || [];
+  return raw.map((w) => w.replace(/^'+|'+$/g, "")).filter((w) => w.length >= 2 && !VOCAB_JUNK.has(w) && !/^\d+$/.test(w));
+}
+
+// Split an AI-chat transcript into Fred's turns vs the assistant's. Handles the common export
+// shapes: "You said:" / "ChatGPT said:", "**You:**" / "**ChatGPT:**", "User:" / "Assistant:".
+// Returns null when no markers are found (can't attribute — caller keeps the text whole).
+const USER_MARK = /^\s*(?:\*\*)?(you said:|you:|user:|fred:)(?:\*\*)?\s*$/i;
+const AI_MARK = /^\s*(?:\*\*)?(chatgpt said:|chatgpt:|assistant:|ai:|gpt(?:-[\w.]+)? said:)(?:\*\*)?\s*$/i;
+const INLINE_USER = /^\s*(?:\*\*)?(?:you said:|you:|user:|fred:)(?:\*\*)?\s+/i;
+const INLINE_AI = /^\s*(?:\*\*)?(?:chatgpt said:|chatgpt:|assistant:|ai:)(?:\*\*)?\s+/i;
+export function splitChatTranscript(text) {
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  let sawMarker = false, side = null;   // null until the first marker
+  const fred = [];
+  for (const line of lines) {
+    if (USER_MARK.test(line)) { sawMarker = true; side = "user"; continue; }
+    if (AI_MARK.test(line)) { sawMarker = true; side = "ai"; continue; }
+    if (INLINE_USER.test(line)) { sawMarker = true; side = "user"; fred.push(line.replace(INLINE_USER, "")); continue; }
+    if (INLINE_AI.test(line)) { sawMarker = true; side = "ai"; continue; }
+    if (side === "user") fred.push(line);
+  }
+  if (!sawMarker) return null;
+  const out = fred.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return out.length >= 20 ? out : null;   // markers but nothing usable -> treat as unsplittable
+}
+
 // Common-word stoplist so statistical vocabulary surfaces Fred's DISTINCTIVE words, not "the/and/of".
 const STOPWORDS = new Set(("a about above after again against all am an and any are aren't as at be because been before being below between both but by can can't cannot could couldn't did didn't do does doesn't doing don't down during each few for from further had hadn't has hasn't have haven't having he he'd he'll he's her here here's hers herself him himself his how how's i i'd i'll i'm i've if in into is isn't it it's its itself let's me more most mustn't my myself no nor not of off on once only or other ought our ours ourselves out over own same shan't she she'd she'll she's should shouldn't so some such than that that's the their theirs them themselves then there there's these they they'd they'll they're they've this those through to too under until up very was wasn't we we'd we'll we're we've were weren't what what's when when's where where's which while who who's whom why why's will with won't would wouldn't you you'd you'll you're you've your yours yourself yourselves just also get got like really much many one two get").split(" "));
 
@@ -340,10 +373,21 @@ export function createPersonaStore(opts = {}) {
   }
 
   // Ingest a block of text as one document + its chunks. Dedupes identical documents.
-  function ingestText({ text, kind, title, source, tags } = {}) {
-    const body = String(text || "").trim();
-    if (body.length < 2) return { error: "empty text" };
-    const k = KINDS.includes(kind) ? kind : "other";
+  // AI-chat transcripts get speaker-split: only Fred's turns land as VOICE (kind chat); the full
+  // two-sided transcript is kept as knowledge (kind other) so nothing is lost — the assistant's
+  // half must never train the profile or be quoted as Fred (the first distill proved why).
+  function ingestText({ text, kind, title, source, tags, _noSplit } = {}) {
+    const body0 = String(text || "").trim();
+    if (body0.length < 2) return { error: "empty text" };
+    let body = body0;
+    let k = KINDS.includes(kind) ? kind : "other";
+    if (k === "chat" && !_noSplit) {
+      const fredOnly = splitChatTranscript(body0);
+      if (fredOnly) {
+        ingestText({ text: body0, kind: "other", title: (title || "chat") + " (full transcript)", source, tags, _noSplit: true });
+        body = fredOnly;
+      }
+    }
     // cheap dedupe: same kind + same length -> compare normalized text
     for (const c of stmt.dupDoc.all(k, body.length)) {
       const full = stmt.docById.get(c.id);
@@ -481,7 +525,7 @@ export function createPersonaStore(opts = {}) {
     const wc = new Map(), pc = new Map();
     const it = db.prepare("SELECT text FROM docs" + (voiceOnly ? ` WHERE kind NOT IN ${nonVoiceSql}` : ""));
     for (const d of it.iterate()) {
-      const toks = tokenize(d.text);
+      const toks = vocabTokenize(d.text);
       for (const w of toks) { if (w.length >= 4 && !STOPWORDS.has(w)) wc.set(w, (wc.get(w) || 0) + 1); }
       for (let i = 0; i < toks.length - 1; i++) {
         const a = toks[i], b = toks[i + 1];
@@ -572,6 +616,32 @@ export function createPersonaStore(opts = {}) {
     } catch (e) { try { db.exec("ROLLBACK"); } catch {} return { removed: 0, error: e.message }; }
   }
 
+  // One-time migration for chats ingested BEFORE speaker-splitting existed: each chat doc with
+  // detectable markers is retagged to knowledge (kind other, incl. its chunks) and Fred's turns
+  // are re-ingested fresh as the voice doc. Idempotent: split docs carry a splitDone tag.
+  function reprocessChats() {
+    const out = { checked: 0, split: 0, unsplittable: 0 };
+    const docsToCheck = db.prepare("SELECT id, title, source, tags, text FROM docs WHERE kind = 'chat'").all();
+    for (const d of docsToCheck) {
+      out.checked++;
+      const tags = JSON.parse(d.tags || "[]");
+      if (tags.includes("splitDone")) continue;
+      const fredOnly = splitChatTranscript(d.text);
+      if (!fredOnly) { out.unsplittable++; continue; }
+      // retag the full transcript (and its chunks) to knowledge
+      db.exec("BEGIN");
+      try {
+        db.prepare("UPDATE docs SET kind = 'other', title = title || ' (full transcript)' WHERE id = ?").run(d.id);
+        db.prepare("UPDATE chunks SET kind = 'other' WHERE docId = ?").run(d.id);
+        db.exec("COMMIT");
+      } catch (e) { try { db.exec("ROLLBACK"); } catch {} continue; }
+      const r = ingestText({ text: fredOnly, kind: "chat", title: d.title, source: d.source, tags: [...tags, "splitDone"], _noSplit: true });
+      if (!r.error) out.split++;
+    }
+    if (out.split) vecCache = null;   // kinds moved; rebuild the cache lazily
+    return out;
+  }
+
   // Online backup: VACUUM INTO a timestamped snapshot (default target = the staging/flash drive).
   // Prunes to the newest 5. No-op (with reason) if the target drive is absent.
   function backupTo(destDir) {
@@ -602,7 +672,7 @@ export function createPersonaStore(opts = {}) {
 
   const migrated = migrateFromJson();
 
-  return { ingestText, scanInbox, retrieve, sampleForProfile, statVocab, buildBatches, personaBlock, getProfile, setProfile, list, getDoc, removeDoc, embedPending, backfillEmbeddings: embedPending, backupTo, stats, KINDS, dir, inbox, stagingInbox, staging, migrated, fts };
+  return { ingestText, scanInbox, retrieve, sampleForProfile, statVocab, buildBatches, personaBlock, getProfile, setProfile, list, getDoc, removeDoc, reprocessChats, embedPending, backfillEmbeddings: embedPending, backupTo, stats, KINDS, dir, inbox, stagingInbox, staging, migrated, fts };
 }
 
 // Render the structured facets into a system-prompt block (fallback when no pre-rendered systemBlock).
