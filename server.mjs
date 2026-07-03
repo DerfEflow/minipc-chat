@@ -1079,7 +1079,10 @@ async function handleChat(req, res) {
   // As-Fred latency fix: voice writing needs no deck/forge tools (exemplars are injected) and CoT
   // adds minutes of invisible prefill+thinking for zero voice fidelity — one round, no think,
   // tokens start right after a single prefill.
-  if (mode === "as_fred") { attachTools = false; opts.think = false; }
+  // as_fred: no tools (kills the multi-round re-prefill that caused the 4-minute hang) but
+  // thinking STAYS ON — think:false makes the 30B narrate its plan as the visible answer, and
+  // generation is cheap on this MoE (~80 tok/s); the prefill, not the thinking, is the cost.
+  if (mode === "as_fred") { attachTools = false; }
   opts.noTools = !attachTools;
   // D1: the full routing decision surfaces immediately (spec routing JSON shape)...
   sse({ type: "route", model, mode, route: routeOf(tier, mode), reason, confidence: routeConfidence,
