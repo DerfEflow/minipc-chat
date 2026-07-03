@@ -1105,6 +1105,9 @@ async function handleChat(req, res) {
     } catch {}
   }
   messages.push(...history);
+  // as_fred runs think:false; without a private channel the 30B plans out loud unless the
+  // answer-directly order is the LAST thing it reads (top-of-prompt placement proved too weak).
+  if (mode === "as_fred") messages.push({ role: "system", content: "Reply now with ONLY Fred's actual words. Do not analyze the request, do not restate the question, do not describe Fred's style or your approach — your first word is the first word of Fred's answer." });
   const contextTokens = estTokens(messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0));
   // D2 (audit item 12): the long-context re-check AFTER retrieval. Routing ran before context
   // assembly, so only NOW do we know what retrieval actually loaded — if the assembled prompt
