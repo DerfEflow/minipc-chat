@@ -22,8 +22,9 @@ import { randomUUID } from "node:crypto";
 import { TOOL_DEFS, WRITE_TOOLS, runTool, toolMeta, assertNotProtected } from "./tools.mjs";
 import { createMemoryStore } from "./memory.mjs";
 import { createArtifactStore } from "./artifacts.mjs";
-import { createMentor } from "./mentor.mjs";
+import { createMentor, MENTOR_ROLES } from "./mentor.mjs";
 import { createFlywheel } from "./flywheel.mjs";
+import { createReviewEngine, computeQuality, extractCitations, wantsReview } from "./review.mjs";
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
@@ -184,14 +185,19 @@ const PROVIDERS = {
 const MODEL_FOR = (tier) => (PROVIDERS[tier] || PROVIDERS.light).modelName;
 const PROVIDER_FOR_MODEL = (m) => Object.values(PROVIDERS).find((p) => p.modelName === m) || PROVIDERS.main;
 
-// Normalized response shape (spec NormalizedModelResponse) — one place that translates an Ollama
-// reply into provider-agnostic usage/quality fields for logging and the done event.
-function normalizeResponse(d, model, mode) {
+// Normalized response shape (spec NormalizedModelResponse, FULL) — one place that translates an
+// Ollama reply into the provider-agnostic object. extras carries the spec's quality block
+// (confidence/hallucinationRisk/needsReview), citations, warnings, structured, and metadata —
+// produced for every completed run and CONSUMED downstream (route/done SSE meta + auto-review).
+function normalizeResponse(d, model, mode, extras = {}) {
   const p = PROVIDER_FOR_MODEL(model);
   return {
     providerId: p.id, modelName: model, mode,
     content: (d && d.message && d.message.content) || "",
+    structured: extras.structured ?? null,
     toolCalls: (d && d.message && d.message.tool_calls) || [],
+    citations: extras.citations || [],
+    warnings: extras.warnings || [],
     usage: {
       inputTokens: (d && d.prompt_eval_count) || null,
       outputTokens: (d && d.eval_count) || null,
@@ -199,6 +205,8 @@ function normalizeResponse(d, model, mode) {
       latencyMs: d && d.total_duration ? Math.round(d.total_duration / 1e6) : null,
       costUsd: 0,
     },
+    quality: extras.quality || { confidence: 0.5, hallucinationRisk: "low", needsReview: false },
+    metadata: extras.metadata || {},
   };
 }
 
@@ -280,22 +288,25 @@ const mentor = createMentor({
 });
 CTX.mentor = mentor;
 CTX.flywheel = flywheel;
-const AUTO_MENTOR = String(cfgGet("AUTO_MENTOR", "0")) === "1";
+// Auto mentor review — DEFAULT ON per Fred's LAX call (the self-improving loop stays alive):
+// tiered + sampled + fire-and-forget, all local (zero egress). AUTO_MENTOR=0 is the cautious flip.
+const AUTO_MENTOR = String(cfgGet("AUTO_MENTOR", "1")) !== "0";
 // Periodic mentor review (spec): every Nth completed answer gets a lightweight LOCAL critique in the
 // background — catches drift without per-response cost. Default ON (local-only = zero egress);
 // PERIODIC_MENTOR=0 disables, PERIODIC_MENTOR_EVERY tunes the stride.
 const PERIODIC_MENTOR = String(cfgGet("PERIODIC_MENTOR", "1")) !== "0";
 const PERIODIC_EVERY = Math.max(5, Number(cfgGet("PERIODIC_MENTOR_EVERY", "25")) || 25);
 let completedRuns = 0;
-// Adaptive mentor sampling policy (spec) — used only when AUTO_MENTOR is on.
-const MENTOR_SAMPLING = { casualChat: 0, shortDraft: 0.05, factualAnswer: 0.15, technicalAnswer: 0.25, documentDraft: 0.25, finalArtifact: 0.75, codeGeneration: 0.5, executableCode: 0.9, toolChainWithErrors: 1, userMarkedImportant: 1 };
-function sampleCategory(mode, toolFailed) {
-  if (toolFailed) return "toolChainWithErrors";
-  if (mode === "draft") return "documentDraft";
-  if (mode === "deep_think") return "technicalAnswer";
-  if (mode === "fast") return "casualChat";
-  return "factualAnswer";
-}
+// The review engine (Phase 5, full): 8 auto triggers, 10-category ADAPTIVE sampling, 4 tiers
+// (light-model screen before any full 30B review), and the 10-step critique→improvement pipeline.
+// REVIEW_AUTO_APPLY=0 stops auto-applying even the safe classes (evals/memory) — cautious flip.
+const reviewEngine = createReviewEngine({
+  mentor, flywheel, memory,
+  ollamaChat: (m, msgs, o) => ollamaChat(m, msgs, o),
+  lightModel: LIGHT_MODEL, mainModel: MAIN_MODEL,
+  autoApply: String(cfgGet("REVIEW_AUTO_APPLY", "1")) !== "0",
+  log: (s) => console.log("[dominion-ai] " + s),
+});
 
 function systemPrompt(persona, modeFrag) {
   let s = [
@@ -401,13 +412,18 @@ async function routeDecision(lastUser, totalInputChars) {
   let tier = MODES[mode].tier;
   if (wantMain && tier !== "main") { mode = "deep_think"; tier = "main"; }   // honor main even on a light-tier mode
   const t = String(lastUser || "").toLowerCase();
+  // Routing confidence (spec quality.confidence seed): a confident heuristic beats a classifier
+  // verdict beats a shrug. Surfaced in the route/done SSE meta and consumed by computeQuality.
+  const confidence = h.confident ? 0.9 : src === "classifier" ? 0.7 : 0.55;
   return {
-    mode, tier, reason: `${src}: ${reason}`.slice(0, 80),
+    mode, tier, reason: `${src}: ${reason}`.slice(0, 80), confidence,
     privacyRisk: privacyRiskOf(lastUser),
     needsTools: /\b(deck|forge|file|sandbox|remember|artifact|project|capture|run|search)\b/.test(t),
     needsMemory: true,                       // approved memory is always considered
     needsRetrieval: mode !== "fast",
-    needsMentorReview: false,                // manual / sampled / periodic paths decide this
+    // Real pre-answer signal (spec): explicit critique ask or hallucination-prone/high-stakes topic.
+    // Consumed post-answer — it forces the review path instead of leaving it to sampling luck.
+    needsMentorReview: wantsReview(lastUser),
   };
 }
 
@@ -495,15 +511,38 @@ async function handleToolConfirm(req, res) {
   res.end(JSON.stringify({ ok }));
 }
 
-// Local document review (Phase 4 mentor-hook stand-in) — the main model critiques an artifact.
-// Phase 5 swaps in external mentors + the full structured critique/ledger.
-async function localReview(a) {
-  const prompt =
-    "You are a careful reviewer of a document. Review it and return a SHORT plain-text critique with these labeled sections:\n" +
-    "SCORE (0-10):\nREADY FOR USE (yes/no):\nMAJOR ISSUES:\nMINOR ISSUES:\nUNSUPPORTED CLAIMS:\nSUGGESTIONS:\n" +
-    "Do not rewrite the document. Be concise and specific.\n\nTITLE: " + a.title + "\nTYPE: " + a.type + "\n\nDOCUMENT:\n" + String(a.content || "").slice(0, 12000);
-  const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: prompt }], { temperature: 0.3, num_predict: 700, noTools: true });
-  return stripThink((d && d.message && d.message.content) || "") || "(no review produced)";
+// Structured document review (spec Document Review Output Schema): the mentor returns the 10
+// machine-readable fields; a readable rendering is attached to the artifact, the structured object
+// is stored as a review record and returned to the client.
+function renderDocReview(r) {
+  return [
+    `SCORE: ${r.overall_score}/10 · READY FOR USE: ${r.ready_for_use ? "yes" : "no"} · REVISION RECOMMENDED: ${r.should_generate_revision ? "yes" : "no"}`,
+    r.major_issues.length ? "MAJOR ISSUES:\n" + r.major_issues.map((x) => "- " + x).join("\n") : "",
+    r.minor_issues.length ? "MINOR ISSUES:\n" + r.minor_issues.map((x) => "- " + x).join("\n") : "",
+    r.unsupported_claims.length ? "UNSUPPORTED CLAIMS:\n" + r.unsupported_claims.map((x) => "- " + x).join("\n") : "",
+    r.risk_flags.length ? "RISK FLAGS:\n" + r.risk_flags.map((x) => "- " + x).join("\n") : "",
+    r.clarity_suggestions.length ? "CLARITY:\n" + r.clarity_suggestions.map((x) => "- " + x).join("\n") : "",
+    r.formatting_suggestions.length ? "FORMATTING:\n" + r.formatting_suggestions.map((x) => "- " + x).join("\n") : "",
+    r.recommended_revision_plan.length ? "REVISION PLAN:\n" + r.recommended_revision_plan.map((x, i) => `${i + 1}. ${x}`).join("\n") : "",
+  ].filter(Boolean).join("\n\n");
+}
+
+// Background artifact review on the spec'd automatic triggers (mark-final / export) — server-side
+// detection, never a client confirm(). Fire-and-forget on the review lane; results attach to the
+// artifact and land in the reviews store.
+function scheduleArtifactReview(a, trigger) {
+  if (!AUTO_MENTOR || !a) return;
+  setImmediate(async () => {
+    try {
+      const r = await mentor.documentReview({ title: a.title, type: a.type, content: a.content, privacyMode: "local_only" });
+      artifacts.attachReview(a.id, `AUTO REVIEW (${trigger}, local mentor):\n\n` + renderDocReview(r));
+      flywheel.addReview({ tier: 2, trigger: [trigger], taskType: "document_review", artifactId: a.id, provider: r._provider, critique: r, contentPreview: String(a.content || "").slice(0, 300) });
+      if (!r.ready_for_use && (r.major_issues.length || r.risk_flags.length)) {
+        flywheel.addFailure({ category: r.unsupported_claims.length ? "unsupported_factual_claim" : "weak_structure", severity: r.risk_flags.length ? "high" : "medium", originalRequest: "artifact: " + a.title, flawedOutput: String(a.content || "").slice(0, 4000), detectedBy: "mentor", rootCause: r.unsupported_claims.length ? "missing_retrieval" : "bad_prompt", improvementActions: ["add_eval", r.unsupported_claims.length ? "update_retrieval" : "update_prompt"], samplingCategory: "finalArtifact" });
+      }
+      console.log(`[dominion-ai] auto artifact review (${trigger}): "${a.title}" score ${r.overall_score}/10 ready=${r.ready_for_use}`);
+    } catch {}
+  });
 }
 
 // Artifact studio API (Phase 4): list/get/create/version/update/delete/diff/export/review.
@@ -519,13 +558,26 @@ async function handleArtifacts(req, res, u) {
     if (p === "/artifacts") return json(200, artifacts.create(body));
     if (p === "/artifacts/version") return json(200, artifacts.addVersion(body.id, body));
     if (p === "/artifacts/setversion") return json(200, artifacts.setVersion(body.id, Number(body.version)));
-    if (p === "/artifacts/update") return json(200, artifacts.update(body.id, body));
+    if (p === "/artifacts/update") {
+      const wasFinal = (artifacts.get(body.id) || {}).status === "final";
+      const r = artifacts.update(body.id, body);
+      // Spec auto-review trigger: user marks an artifact FINAL → background mentor review.
+      if (!wasFinal && body.status === "final" && r.item) scheduleArtifactReview(artifacts.get(body.id), "final_output");
+      return json(200, r);
+    }
     if (p === "/artifacts/delete") return json(200, artifacts.remove(body.id));
-    if (p === "/artifacts/export") return json(200, await exportWithForge(body.id, body.format));
+    if (p === "/artifacts/export") {
+      const r = await exportWithForge(body.id, body.format);
+      // Spec auto-review trigger: artifact exported → background mentor review.
+      if (!r.error) scheduleArtifactReview(artifacts.get(body.id), "export");
+      return json(200, r);
+    }
     if (p === "/artifacts/review") {
       const a = artifacts.get(body.id); if (!a) return json(404, { error: "not found" });
-      const notes = "LOCAL REVIEW (local mentor):\n\n" + await localReview(a);
-      return json(200, artifacts.attachReview(body.id, notes));
+      const review = await mentor.documentReview({ title: a.title, type: a.type, content: a.content, originalRequest: body.originalRequest || "", privacyMode: body.privacyMode || "local_only" });
+      const attached = artifacts.attachReview(body.id, `DOCUMENT REVIEW (${review._provider}):\n\n` + renderDocReview(review));
+      flywheel.addReview({ tier: 2, trigger: ["manual"], taskType: "document_review", artifactId: a.id, provider: review._provider, critique: review, contentPreview: String(a.content || "").slice(0, 300) });
+      return json(200, { ...attached, review });   // additive: structured 10-field schema rides along
     }
     if (p === "/artifacts/duplicate") return json(200, artifacts.duplicate(body.id, { asTemplate: !!body.asTemplate }));
     if (p === "/artifacts/transform") return json(200, await transformArtifact(body.id, body.kind));
@@ -575,19 +627,37 @@ async function exportWithForge(id, format) {
   return { ...md, forge: String(out), queued: /Queued work order/i.test(String(out)) };
 }
 
-// Mentor review (Phase 5): critique an answer or artifact -> structured critique; auto-log a ledger
-// entry when the mentor flags real issues; attach review notes to an artifact when given an id.
+// Mentor review (Phase 5): critique an answer or artifact -> structured critique -> the FULL
+// improvement pipeline (22-category classification, inferred root cause, candidate generation,
+// queueing, safe auto-apply, retirement). Attaches review notes to an artifact when given an id.
 async function handleMentorReview(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   const b = await readJsonBody(req); if (!b) return json(400, { error: "bad json" });
   let content = String(b.content || "");
   if (b.artifactId) { const a = artifacts.get(b.artifactId); if (a) content = a.content; }
   if (!content.trim()) return json(400, { error: "nothing to review" });
-  const c = await mentor.critique({ taskType: b.taskType || "answer_review", originalRequest: b.originalRequest || "", content, privacyMode: b.privacyMode || (mentor.info().externalConfigured ? "redacted_external" : "local_only") });
-  let ledgerId = null;
-  if (["medium", "high"].includes(c.revision_priority)) { const f = flywheel.addFailure({ category: "mentor_flag", severity: c.revision_priority === "high" ? "high" : "medium", originalRequest: b.originalRequest || "", flawedOutput: content, detectedBy: "mentor", rootCause: "unknown", improvementActions: ["manual_review"] }); ledgerId = f.item.id; }
+  const c = await mentor.critique({ taskType: b.taskType || "answer_review", originalRequest: b.originalRequest || "", content, privacyMode: b.privacyMode || (mentor.info().externalConfigured ? "redacted_external" : "local_only"), artifactId: b.artifactId, chatId: b.chatId });
+  const pipeline = await reviewEngine.runPipeline(c, { answer: content, originalRequest: b.originalRequest || "", chatId: b.chatId, artifactId: b.artifactId, samplingCategory: "userMarkedImportant", tier: 2 });
+  const rec = flywheel.addReview({ tier: 2, trigger: ["manual"], taskType: b.taskType || "answer_review", chatId: b.chatId, artifactId: b.artifactId, provider: c._provider, critique: c, request: c._request, pipeline: { valid: pipeline.valid, ledgerId: pipeline.ledgerId, classification: pipeline.classification, generated: pipeline.generated, autoApplied: pipeline.autoApplied }, contentPreview: content.slice(0, 300) });
   if (b.artifactId) artifacts.attachReview(b.artifactId, "MENTOR (" + c._provider + "):\n" + (c.recommended_revision || "") + "\n\nMajor findings: " + (c.major_findings || []).join("; "));
-  return json(200, { critique: c, ledgerId, mentor: mentor.info() });
+  return json(200, { critique: c, ledgerId: pipeline.ledgerId || null, classification: pipeline.classification, pipeline: { generated: pipeline.generated, autoApplied: pipeline.autoApplied }, reviewId: rec.item.id, mentor: mentor.info() });
+}
+
+// Tier-3 Multi-Mentor Council (spec): several role-specialized mentors review independently, then a
+// reconciliation pass merges agreements/conflicts. Manual / high-stakes only — N+1 heavy model calls
+// on this box. Council results are stored as eval cases (spec: "store results as evals").
+async function handleMentorCouncil(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const b = await readJsonBody(req); if (!b) return json(400, { error: "bad json" });
+  let content = String(b.content || "");
+  if (b.artifactId) { const a = artifacts.get(b.artifactId); if (a) content = a.content; }
+  if (!content.trim()) return json(400, { error: "nothing to review" });
+  const roles = Array.isArray(b.roles) ? b.roles.filter((r) => MENTOR_ROLES[r]) : undefined;
+  const result = await mentor.council({ content, originalRequest: b.originalRequest || "", roles, taskType: b.taskType || "answer_review", privacyMode: b.privacyMode || "local_only", chatId: b.chatId, artifactId: b.artifactId });
+  const pipeline = await reviewEngine.runPipeline(result.critique, { answer: content, originalRequest: b.originalRequest || "", chatId: b.chatId, artifactId: b.artifactId, samplingCategory: "userMarkedImportant", tier: 3 });
+  const rec = flywheel.addReview({ tier: 3, trigger: ["council"], taskType: b.taskType || "answer_review", chatId: b.chatId, artifactId: b.artifactId, provider: result.critique._provider, critique: { ...result.critique, _council: { roles: result.roles, agreements: result.reconciliation.agreements, conflicts: result.reconciliation.conflicts, perRole: result.reviews.map((r) => ({ role: r.label, score: r.critique.overall_score, priority: r.critique.revision_priority })) } }, pipeline: { valid: pipeline.valid, ledgerId: pipeline.ledgerId, classification: pipeline.classification, generated: pipeline.generated, autoApplied: pipeline.autoApplied }, contentPreview: content.slice(0, 300) });
+  if (b.artifactId) artifacts.attachReview(b.artifactId, "COUNCIL (" + result.roles.length + " mentors):\n" + (result.critique.recommended_revision || "") + "\n\nAgreements: " + result.reconciliation.agreements.join("; "));
+  return json(200, { roles: result.roles, reviews: result.reviews.map((r) => ({ role: r.role, label: r.label, score: r.critique.overall_score, priority: r.critique.revision_priority, major_findings: r.critique.major_findings })), agreements: result.reconciliation.agreements, conflicts: result.reconciliation.conflicts, critique: result.critique, pipeline: { generated: pipeline.generated, autoApplied: pipeline.autoApplied }, reviewId: rec.item.id });
 }
 
 // Apply a mentor critique (spec "Apply revision"): the local model produces the revised output.
@@ -600,6 +670,10 @@ async function handleMentorRevise(req, res) {
   if (!content.trim()) return json(400, { error: "nothing to revise" });
   const revised = await mentor.revise({ originalRequest: b.originalRequest || "", content, critique: b.critique || {} });
   if (!revised) return json(500, { error: "the mentor produced no revision — try again" });
+  // Fine-tuning candidate producer (spec allowed source "user-approved corrections"): Fred clicking
+  // Apply revision IS the approval — the corrected pair queues as a candidate (still needs approval
+  // in the finetune queue before any training use).
+  if (b.originalRequest) flywheel.addFinetune({ input: b.originalRequest, idealOutput: revised, source: "user_approved_correction", notes: "from applied mentor revision", tags: ["revision"] });
   if (b.artifactId) return json(200, { revised, ...artifacts.addVersion(b.artifactId, { content: revised, model: MAIN_MODEL, promptSummary: "mentor revision applied" }) });
   return json(200, { revised });
 }
@@ -647,11 +721,12 @@ async function testRule(id) {
 }
 
 // Flywheel API (Phase 5): /ledger, /evals (+ /evals/run, /evals/runs), /rules (+ /rules/test),
-// /prompts (+ /prompts/activate) — list/create/update/delete.
+// /prompts (+ /prompts/activate), /finetune (fine-tuning candidate queue), /reviews (stored
+// background/auto critiques), /pipeline (improvement-pipeline log) — list/create/update/delete.
 async function handleFlywheel(req, res, u) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   const p = u.pathname;
-  const MAP = { "/ledger": "failures", "/evals": "evals", "/rules": "rules", "/prompts": "prompts" };
+  const MAP = { "/ledger": "failures", "/evals": "evals", "/rules": "rules", "/prompts": "prompts", "/finetune": "finetune", "/reviews": "reviews", "/pipeline": "pipeline" };
   if (req.method === "GET") {
     if (MAP[p]) return json(200, { items: flywheel.list(MAP[p], { status: u.searchParams.get("status") || "" }), stats: flywheel.stats() });
     if (p === "/evals/runs") return json(200, { runs: flywheel.runsFor(u.searchParams.get("id")) });
@@ -662,8 +737,10 @@ async function handleFlywheel(req, res, u) {
     if (p === "/ledger") return json(200, flywheel.addFailure(b));
     if (p === "/evals") return json(200, flywheel.addEval(b));
     if (p === "/rules") return json(200, flywheel.addRule(b));
+    if (p === "/rules/retire") return json(200, { retired: flywheel.autoRetire() });
     if (p === "/prompts") return json(200, flywheel.addPrompt(b));
     if (p === "/prompts/activate") return json(200, flywheel.activatePrompt(b.id));
+    if (p === "/finetune") return json(200, flywheel.addFinetune(b));   // source must be a spec-allowed clean source
     if (p === "/evals/run") return json(200, await runEval(b.id));
     if (p === "/rules/test") return json(200, await testRule(b.id));
     for (const [path, coll] of Object.entries(MAP)) {
@@ -813,9 +890,12 @@ async function handleChat(req, res) {
   const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
 
   // Route: an explicit mode wins; otherwise the combined heuristic+light-model router picks.
+  // routeConfidence seeds the response quality block; routeNeedsReview is the spec's pre-answer
+  // mentor signal (explicit ask / high-stakes topic) and forces the post-answer review path.
   let mode, tier, reason, privacyRisk = privacyRiskOf(lastUser ? lastUser.content : "");
+  let routeConfidence = 0.95, routeNeedsReview = wantsReview(lastUser ? lastUser.content : "");
   if (reqMode !== "auto" && MODES[reqMode]) { mode = reqMode; tier = MODES[mode].tier; reason = "you chose " + mode.replace("_", " "); }
-  else { const c = await routeDecision(lastUser ? lastUser.content : "", totalInputChars); mode = c.mode; tier = c.tier; reason = c.reason; privacyRisk = c.privacyRisk; }
+  else { const c = await routeDecision(lastUser ? lastUser.content : "", totalInputChars); mode = c.mode; tier = c.tier; reason = c.reason; privacyRisk = c.privacyRisk; routeConfidence = c.confidence; routeNeedsReview = c.needsMentorReview; }
   if (aborted) return res.end();
   const md = MODES[mode];
   const model = forced || MODEL_FOR(tier);
@@ -826,7 +906,7 @@ async function handleChat(req, res) {
     const want = Math.min(estTokens(totalInputChars) * 2 + 8192, cap);
     opts.num_ctx = Math.max(md.num_ctx || 32768, Math.ceil(want / 4096) * 4096);
   } else if (md.num_ctx) opts.num_ctx = md.num_ctx;
-  sse({ type: "route", model, mode, reason });
+  sse({ type: "route", model, mode, reason, confidence: routeConfidence });
   console.log(`[dominion-ai] /chat route -> ${model} · ${mode} (${reason})`);
 
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
@@ -853,6 +933,7 @@ async function handleChat(req, res) {
   }
   const startedAt = new Date().toISOString();
   let toolCount = 0, roundsUsed = 0, artifactCreatedThisTurn = false, toolFailedThisTurn = false;
+  let executedCodeThisTurn = false, exportedThisTurn = false;   // real trigger signals (spec auto-review)
   const toolRunIds = [], toolSummaries = [];
 
   try {
@@ -923,6 +1004,8 @@ async function handleChat(req, res) {
           const failed = /^(Tool .+ failed|Unknown tool|Couldn't|I can read and plan|Memory isn't available|BLOCKED)/i.test(String(result));
           if (failed) toolFailedThisTurn = true;
           if ((name === "create_artifact" || name === "revise_artifact") && !failed) artifactCreatedThisTurn = true;
+          if ((name === "run_python_sandbox" || name === "forge_send") && !failed) executedCodeThisTurn = true;   // code went live → review trigger
+          if (name === "export_artifact" && !failed) exportedThisTurn = true;                                     // export happened → review trigger
           sse({ type: "tool", name, runId, cls, status: failed ? "failed" : "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
           await logToolRun({ ts: startedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model });
           messages.push({ role: "tool", tool_name: name, content: String(result).slice(0, 8000) });
@@ -951,40 +1034,57 @@ async function handleChat(req, res) {
           if (art.item) { sse({ type: "artifact", id: art.item.id, title: art.item.title, action: "saved" }); console.log(`[dominion-ai] artifact auto-saved: ${art.item.title} (${art.item.id.slice(0, 8)})`); }
         } catch {}
       }
-      // Mentor mode (spec): the answer is ALWAYS critiqued afterwards — full card goes to the client.
+      // A1: full NormalizedModelResponse — citations extracted from the answer, quality computed
+      // from routing confidence + real content signals, warnings from what actually went wrong.
+      const citations = extractCitations(answer);
+      const quality = computeQuality({ answer, routeConfidence, toolFailed: toolFailedThisTurn, retrievalCount: ctxInfo.used.length, citations });
+      const warnings = [];
+      if (toolFailedThisTurn) warnings.push("a tool call failed this turn");
+      if (quality.hallucinationRisk !== "low") warnings.push("elevated hallucination risk (" + quality.hallucinationRisk + ")");
+
+      // Mentor mode (spec): the answer is ALWAYS critiqued afterwards — full card goes to the client,
+      // then the critique runs the full improvement pipeline (classification, candidates, queueing).
       if (mode === "mentor") {
         try {
-          const c = await mentor.critique({ taskType: "answer_review", originalRequest: lastUser ? lastUser.content : "", content: answer, privacyMode: "local_only", retrievedContext: ctxInfo.used.map((x) => x.content), toolCalls: toolSummaries });
+          const c = await mentor.critique({ taskType: "answer_review", originalRequest: lastUser ? lastUser.content : "", content: answer, privacyMode: "local_only", retrievedContext: ctxInfo.used.map((x) => x.content), toolCalls: toolSummaries, mode, chatId });
           sse({ type: "mentor_full", critique: c });
-          if (["medium", "high"].includes(c.revision_priority)) flywheel.addFailure({ category: "mentor_flag", severity: c.revision_priority === "high" ? "high" : "medium", originalRequest: lastUser ? lastUser.content : "", flawedOutput: answer, detectedBy: "mentor", rootCause: "unknown", improvementActions: ["manual_review"] });
+          const req0 = lastUser ? String(lastUser.content) : "";
+          setImmediate(() => reviewEngine.runPipeline(c, { answer, originalRequest: req0, chatId, samplingCategory: "userMarkedImportant", tier: 2, retrievalCount: ctxInfo.used.length, toolCount }).catch(() => {}));
         } catch {}
       }
-      // Phase 5: adaptive auto mentor-review (default OFF / LAX). Local-only on the auto path (no egress).
-      else if (AUTO_MENTOR && Math.random() < (MENTOR_SAMPLING[sampleCategory(mode, toolFailedThisTurn)] || 0)) {
+      // Phase 5 (full): tiered adaptive auto-review — fire-and-forget, never delays this stream.
+      // Tier decision + trigger detection are synchronous (breadcrumb SSE below); the actual light
+      // screen / full critique / pipeline run on the single-lane background queue.
+      else if (AUTO_MENTOR) {
         try {
-          const c = await mentor.critique({ taskType: "answer_review", originalRequest: lastUser ? lastUser.content : "", content: answer, privacyMode: "local_only", retrievedContext: ctxInfo.used.map((x) => x.content), toolCalls: toolSummaries });
-          sse({ type: "mentor", score: c.overall_score, priority: c.revision_priority, findings: (c.major_findings || []).length });
-          if (["medium", "high"].includes(c.revision_priority)) flywheel.addFailure({ category: "mentor_flag", severity: c.revision_priority === "high" ? "high" : "medium", originalRequest: lastUser ? lastUser.content : "", flawedOutput: answer, detectedBy: "mentor", rootCause: "unknown", improvementActions: ["manual_review"] });
+          const decision = reviewEngine.schedule({
+            answer, lastUserText: lastUser ? String(lastUser.content) : "", mode, chatId,
+            toolCount, toolFailed: toolFailedThisTurn, executedCode: executedCodeThisTurn, exported: exportedThisTurn,
+            artifactCreated: artifactCreatedThisTurn, routeNeedsReview, quality, claimCount: quality.claimCount,
+            retrievedContext: ctxInfo.used.map((x) => x.content), toolCalls: toolSummaries,
+          });
+          quality.needsReview = decision.tier > 0;
+          if (decision.tier > 0) sse({ type: "mentor_queued", tier: decision.tier, triggers: decision.triggers, category: decision.category });
         } catch {}
       }
-      // Periodic mentor review (spec): every Nth completed answer gets a background local critique —
-      // findings land in the ledger, nothing blocks the reply.
+      // Periodic mentor review (spec): every Nth completed answer gets a background full review
+      // through the SAME pipeline (classified ledger entries, not hardcoded stubs).
       completedRuns++;
       if (PERIODIC_MENTOR && mode !== "mentor" && completedRuns % PERIODIC_EVERY === 0) {
         const req0 = lastUser ? String(lastUser.content) : "";
+        const n = completedRuns;
         setImmediate(async () => {
           try {
-            const c = await mentor.critique({ taskType: "answer_review", originalRequest: req0, content: answer, privacyMode: "local_only" });
-            if (["medium", "high"].includes(c.revision_priority)) flywheel.addFailure({ category: "periodic_review", severity: c.revision_priority === "high" ? "high" : "medium", originalRequest: req0, flawedOutput: answer.slice(0, 4000), detectedBy: "mentor", rootCause: "unknown", improvementActions: ["manual_review"] });
-            console.log(`[dominion-ai] periodic mentor review #${completedRuns}: score ${c.overall_score}/10, priority ${c.revision_priority}`);
+            const r = await reviewEngine.reviewNow({ tier: 2, answer, originalRequest: req0, chatId, samplingCategory: "factualAnswer", triggers: ["periodic"], mode });
+            console.log(`[dominion-ai] periodic mentor review #${n}: score ${r.critique.overall_score}/10, priority ${r.critique.revision_priority}`);
           } catch {}
         });
       }
-      const norm = normalizeResponse(last, model, mode);
-      console.log(`[dominion-ai] usage ${model}/${mode} prompt=${norm.usage.inputTokens || "?"} out=${norm.usage.outputTokens || "?"} tools=${toolCount}`);
-      await logUsage({ ts: startedAt, model, mode, reason, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: norm.usage.inputTokens, outputTokens: norm.usage.outputTokens, latencyMs: norm.usage.latencyMs });
+      const norm = normalizeResponse(last, model, mode, { quality, citations, warnings, metadata: { chatId, reason, rounds: roundsUsed, tools: toolCount, privacyRisk } });
+      console.log(`[dominion-ai] usage ${model}/${mode} prompt=${norm.usage.inputTokens || "?"} out=${norm.usage.outputTokens || "?"} tools=${toolCount} conf=${quality.confidence} risk=${quality.hallucinationRisk}`);
+      await logUsage({ ts: startedAt, model, mode, reason, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: norm.usage.inputTokens, outputTokens: norm.usage.outputTokens, latencyMs: norm.usage.latencyMs, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview });
       try { chatlog.record(chatId, history, answer); } catch {}
-      sse({ type: "done", meta: { mode, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, outputTokens: norm.usage.outputTokens } });
+      sse({ type: "done", meta: { mode, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, outputTokens: norm.usage.outputTokens, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview }, warnings: norm.warnings } });
       return res.end();
     }
     if (aborted) { await logUsage({ ts: startedAt, model, mode, reason, status: "interrupted", rounds: roundsUsed, tools: toolCount }); }
@@ -1007,8 +1107,9 @@ const server = http.createServer(async (req, res) => {
     if (path === "/tool-confirm" && req.method === "POST") return handleToolConfirm(req, res);
     if (path === "/artifacts" || path.startsWith("/artifacts/")) return handleArtifacts(req, res, u);
     if (path === "/mentor/review" && req.method === "POST") return handleMentorReview(req, res);
+    if (path === "/mentor/council" && req.method === "POST") return handleMentorCouncil(req, res);
     if (path === "/mentor/revise" && req.method === "POST") return handleMentorRevise(req, res);
-    if (["/ledger", "/evals", "/rules", "/prompts"].some((b) => path === b || path.startsWith(b + "/"))) return handleFlywheel(req, res, u);
+    if (["/ledger", "/evals", "/rules", "/prompts", "/finetune", "/reviews", "/pipeline"].some((b) => path === b || path.startsWith(b + "/"))) return handleFlywheel(req, res, u);
     if (path === "/persona" || path.startsWith("/persona/")) return handlePersona(req, res, u);
 
     if (path === "/ollama" || path.startsWith("/ollama/")) {
@@ -1042,7 +1143,7 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON" : "off (LAX)"}  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl (${toolRunTail.length} reloaded)`);
   const as = artifacts.stats();
   console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review|duplicate|transform]`);
-  console.log(`[dominion-ai] mentor: ${mentor.info().provider}  ·  auto-review=${AUTO_MENTOR ? "ON" : "off (LAX)"}  ·  periodic=${PERIODIC_MENTOR ? "every " + PERIODIC_EVERY : "off"}  ·  flywheel ${JSON.stringify(flywheel.stats())}`);
+  console.log(`[dominion-ai] mentor: ${mentor.info().provider}  ·  auto-review=${AUTO_MENTOR ? "ON (tiered+adaptive)" : "OFF"}  ·  periodic=${PERIODIC_MENTOR ? "every " + PERIODIC_EVERY : "off"}  ·  council roles: ${Object.keys(MENTOR_ROLES).length}  ·  flywheel ${JSON.stringify(flywheel.stats())}`);
   const ps = persona.stats();
   console.log(`[dominion-ai] persona: ${ps.docs} doc(s) / ${ps.chunks} chunk(s) (${JSON.stringify(ps.byKind)})  ·  ${ps.pendingEmbeds} pending embed(s)  ·  fts=${ps.fts ? "on" : "OFF"}  ·  profile=${ps.profile ? "distilled " + String(ps.profile.updatedAt).slice(0, 10) : "none yet"}  ·  db=${Math.round(ps.dbBytes / 1024)}KB  ·  inboxes: ${persona.inbox} + ${persona.stagingInbox}  ·  mode: as_fred`);
   if (persona.migrated) console.log(`[dominion-ai] persona: migrated ${persona.migrated} doc(s) from the legacy JSON store into SQLite`);
