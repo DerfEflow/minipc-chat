@@ -540,8 +540,13 @@ export function createPersonaStore(opts = {}) {
 
   // Build context-window-sized text batches over the corpus for map-reduce distillation.
   // Past the budget, chunks are stratified evenly (capped runs report digested X of Y).
-  function buildBatches({ batchChars = 90000, maxBatches = 60, voiceOnly = true } = {}) {
-    const kindFilter = voiceOnly ? ` WHERE kind NOT IN ${nonVoiceSql}` : "";
+  // opts.kinds restricts to a kind whitelist — used by the dedicated CONVICTIONS pass, because
+  // majority-voting beliefs across a volume-skewed corpus buries them (200 poems outvoted the
+  // Westminster-confessional essays in distill v3; convictions come from ASSERTION kinds only).
+  function buildBatches({ batchChars = 90000, maxBatches = 60, voiceOnly = true, kinds = null } = {}) {
+    const kindFilter = Array.isArray(kinds) && kinds.length
+      ? ` WHERE kind IN ('${kinds.map((k) => String(k).replace(/'/g, "")).join("','")}')`
+      : (voiceOnly ? ` WHERE kind NOT IN ${nonVoiceSql}` : "");
     const totalChunks = (db.prepare("SELECT COUNT(*) AS n FROM chunks" + kindFilter).get()).n;
     const totalChars = (db.prepare("SELECT COALESCE(SUM(length(text)),0) AS n FROM chunks" + kindFilter).get()).n;
     const budget = batchChars * maxBatches;
