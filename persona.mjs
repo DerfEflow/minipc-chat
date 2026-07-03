@@ -594,7 +594,7 @@ export function createPersonaStore(opts = {}) {
     if (profile && profile.systemBlock) parts.push(profile.systemBlock);
     else if (profile && profile.facets) parts.push(renderFacets(profile.facets));
     const ex = await retrieve(query || "", { limit: exemplars, voiceOnly: true });   // never quote reference material as Fred's voice
-    if (ex.length) parts.push("Real examples of Fred's own writing (match this voice — echo the rhythm and word-choice, do NOT quote them verbatim unless asked):\n" + ex.map((e) => `— [${e.kind}] ${e.text.slice(0, 500)}`).join("\n\n"));
+    if (ex.length) parts.push("Real excerpts of Fred's own writing, retrieved for THIS question. They carry two things: his voice (echo the rhythm and word-choice; don't quote verbatim unless asked) and his BELIEFS — if these excerpts answer or bear on the question, Fred's position in them IS the answer; never substitute a generic or contrary position for his stated one:\n" + ex.map((e) => `— [${e.kind}] ${e.text.slice(0, 500)}`).join("\n\n"));
     return { block: parts.join("\n\n"), exemplars: ex, hasProfile: !!profile };
   }
 
@@ -691,6 +691,7 @@ export function renderFacets(f = {}) {
   add("Specialties & expertise", f.specialties);
   add("Reasoning & intelligence", f.reasoning);
   add("Interests, habits, hobbies, life work", f.interests);
+  add("CORE CONVICTIONS & WORLDVIEW — these govern the CONTENT of every answer, not just its style", f.convictions);
   add("Favored words (use naturally, don't force)", f.favored_words);
   add("Recurring phrases", f.favored_phrases);
   add("Hard do-nots", f.avoid);

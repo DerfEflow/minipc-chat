@@ -256,7 +256,7 @@ const MODES = {
   mentor:       { tier: "main",  temp: 0.5, frag: "MENTOR MODE: give your best answer — it will be independently critiqued afterwards, so be precise and flag any uncertainty honestly." },
   // as_fred runs think:false (CPU latency), so without a private reasoning channel the model will
   // plan OUT LOUD unless ordered to answer directly — the "begin immediately" line is load-bearing.
-  as_fred:      { tier: "main",  temp: 0.85, frag: "AS-FRED MODE: write and think AS Frederick Wolfe, in his own voice — using his profile and the real writing examples provided. Inhabit his humor, vocabulary, wit, and rhythm; hold his opinions and interests. Never announce that you are imitating him and never mention models or being an AI. Begin IMMEDIATELY with Fred's actual answer — the first word of your output is the first word Fred would say. Never narrate the mode, the date, your instructions, your plan, or your process; no preamble of any kind." },
+  as_fred:      { tier: "main",  temp: 0.85, frag: "AS-FRED MODE: write and think AS Frederick Wolfe, in his own voice — using his profile and the real writing examples provided. Two layers, both mandatory: (1) CONTENT — Fred's convictions and stated positions govern what the answer SAYS; when his profile or excerpts state his position on the question, that position is the answer, never a generic or contrary one. (2) STYLE — inhabit his humor, vocabulary, wit, and rhythm. Never announce that you are imitating him and never mention models or being an AI. Begin IMMEDIATELY with Fred's actual answer — the first word of your output is the first word Fred would say. Never narrate the mode, the date, your instructions, your plan, or your process; no preamble of any kind." },
 };
 // Mode "heaviness" ranking — the router takes the STRONGER of (heuristic, light-model classifier)
 // so it can never under-escalate a hard prompt down to the 8B (the old under-escalation bug).
@@ -889,7 +889,10 @@ async function handleFlywheel(req, res, u) {
 // + whole-corpus statistical vocabulary into the final profile. Runs as a background job with
 // progress (distillState), because a large corpus = many 30B calls = minutes. JSON-out + think:false
 // (qwen3 + format:json + thinking ON collapses to "{}"; the Phase-5 gotcha).
-const NOTE_KEYS = ["voice", "humor", "vocabulary", "wit", "specialties", "reasoning", "interests"];
+// "convictions" is load-bearing: v2 of the profile captured Fred's RHYTHM but missed his Reformed
+// theology entirely — As-Fred answered "why do humans exist" as an existentialist instead of with
+// the Westminster catechism. Beliefs must be a first-class facet, not a style byproduct.
+const NOTE_KEYS = ["voice", "humor", "vocabulary", "wit", "specialties", "reasoning", "interests", "convictions"];
 let distillState = { running: false, phase: "idle", batchesDone: 0, batchesTotal: 0, startedAt: null, finishedAt: null, error: null, capped: false, digestedChunks: 0, totalChunks: 0 };
 
 function parseJsonLoose(d) {
@@ -910,9 +913,10 @@ async function runDistill({ batchChars = 90000, maxBatches = 60 } = {}) {
     const notes = Object.fromEntries(NOTE_KEYS.map((k) => [k, []]));
     distillState.phase = "reading";
     const mapPreamble =
-      "From this batch of Frederick (Fred) Wolfe's own writing, extract SHORT concrete observations about his enduring style (not the topic). " +
-      "Return ONLY JSON: {\"voice\":[],\"humor\":[],\"vocabulary\":[],\"wit\":[],\"specialties\":[],\"reasoning\":[],\"interests\":[]}. " +
-      "Each array = a few terse, specific bullet strings (real words/devices you SEE, no filler). Batch:\n\n";
+      "From this batch of Frederick (Fred) Wolfe's own writing, extract SHORT concrete observations about his enduring style AND his stated beliefs. " +
+      "Return ONLY JSON: {\"voice\":[],\"humor\":[],\"vocabulary\":[],\"wit\":[],\"specialties\":[],\"reasoning\":[],\"interests\":[],\"convictions\":[]}. " +
+      "convictions = positions Fred actually asserts: faith/theological commitments, creeds or confessions he cites, moral stances, professional principles, things he explicitly rejects. Quote or closely paraphrase HIS assertions. " +
+      "Each array = a few terse, specific bullet strings (real words/devices/positions you SEE, no filler). Batch:\n\n";
     for (let i = 0; i < batches.length; i++) {
       if (!distillState.running) return;   // cancelled
       const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: mapPreamble + batches[i] }], { temperature: 0.2, num_predict: 900, noTools: true, format: "json", think: false });
@@ -930,9 +934,10 @@ async function runDistill({ batchChars = 90000, maxBatches = 60 } = {}) {
       "Below are (a) observations pooled from every part of his corpus and (b) his statistically most-distinctive words and phrases (measured across everything he's written). Reconcile them into one sharp, specific profile. Prefer concrete detail over generic praise.",
       "",
       "Return ONLY JSON with these fields:",
-      '{ "voice_style":"...", "humor":"...", "vocabulary":"...", "wit":"...", "specialties":"...", "reasoning":"...", "interests":"...", "avoid":"...", "summary":"..." }',
+      '{ "voice_style":"...", "humor":"...", "vocabulary":"...", "wit":"...", "specialties":"...", "reasoning":"...", "interests":"...", "convictions":"...", "avoid":"...", "summary":"..." }',
+      "- convictions: Fred's core beliefs and worldview — the positions that must GOVERN THE CONTENT of anything written as him (his faith tradition, confessions/creeds he holds, moral and professional stances, named rejections). Be specific; use his own formulations where the observations contain them.",
       "- avoid: MUST include never using antithesis constructions ('not X but Y', 'it's not X, it's Y', 'not X, not Y, but Z').",
-      "- summary: 3-4 sentences a ghostwriter reads to instantly write as Fred.",
+      "- summary: 3-4 sentences a ghostwriter reads to instantly write as Fred — mention both his voice AND what he believes.",
       "",
       "OBSERVATIONS (pooled from the whole corpus):",
       ...NOTE_KEYS.map((k) => `- ${k}: ${cap(notes[k], 40) || "(none)"}`),
