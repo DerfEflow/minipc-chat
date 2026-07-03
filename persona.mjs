@@ -593,7 +593,7 @@ export function createPersonaStore(opts = {}) {
   function warmCache() { return ensureVecCache().size; }
 
   // The block injected into "As Fred" prompts: the rendered profile + retrieved exemplars.
-  async function personaBlock(query, { exemplars = 6 } = {}) {
+  async function personaBlock(query, { exemplars = 4 } = {}) {   // 4×400 chars: prefill is the latency bottleneck on the CPU box
     const profile = getProfile();
     const parts = [];
     // Render LIVE from facets (not the stored systemBlock) so hard-coded voice laws in
@@ -602,7 +602,7 @@ export function createPersonaStore(opts = {}) {
       parts.push(renderFacets(profile.facets) + (profile.facets.summary ? "\n- In short: " + profile.facets.summary : ""));
     } else if (profile && profile.systemBlock) parts.push(profile.systemBlock);
     const ex = await retrieve(query || "", { limit: exemplars, voiceOnly: true });   // never quote reference material as Fred's voice
-    if (ex.length) parts.push("Real excerpts of Fred's own writing, retrieved for THIS question. They carry two things: his voice (echo the rhythm and word-choice; don't quote verbatim unless asked) and his BELIEFS — if these excerpts answer or bear on the question, Fred's position in them IS the answer; never substitute a generic or contrary position for his stated one:\n" + ex.map((e) => `— [${e.kind}] ${e.text.slice(0, 500)}`).join("\n\n"));
+    if (ex.length) parts.push("Real excerpts of Fred's own writing, retrieved for THIS question. They carry two things: his voice (echo the rhythm and word-choice; don't quote verbatim unless asked) and his BELIEFS — if these excerpts answer or bear on the question, Fred's position in them IS the answer; never substitute a generic or contrary position for his stated one:\n" + ex.map((e) => `— [${e.kind}] ${e.text.slice(0, 400)}`).join("\n\n"));
     return { block: parts.join("\n\n"), exemplars: ex, hasProfile: !!profile };
   }
 
