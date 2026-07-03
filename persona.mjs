@@ -596,8 +596,11 @@ export function createPersonaStore(opts = {}) {
   async function personaBlock(query, { exemplars = 6 } = {}) {
     const profile = getProfile();
     const parts = [];
-    if (profile && profile.systemBlock) parts.push(profile.systemBlock);
-    else if (profile && profile.facets) parts.push(renderFacets(profile.facets));
+    // Render LIVE from facets (not the stored systemBlock) so hard-coded voice laws in
+    // renderFacets reach every answer immediately — stored blocks go stale between distills.
+    if (profile && profile.facets && Object.keys(profile.facets).length) {
+      parts.push(renderFacets(profile.facets) + (profile.facets.summary ? "\n- In short: " + profile.facets.summary : ""));
+    } else if (profile && profile.systemBlock) parts.push(profile.systemBlock);
     const ex = await retrieve(query || "", { limit: exemplars, voiceOnly: true });   // never quote reference material as Fred's voice
     if (ex.length) parts.push("Real excerpts of Fred's own writing, retrieved for THIS question. They carry two things: his voice (echo the rhythm and word-choice; don't quote verbatim unless asked) and his BELIEFS — if these excerpts answer or bear on the question, Fred's position in them IS the answer; never substitute a generic or contrary position for his stated one:\n" + ex.map((e) => `— [${e.kind}] ${e.text.slice(0, 500)}`).join("\n\n"));
     return { block: parts.join("\n\n"), exemplars: ex, hasProfile: !!profile };
@@ -686,8 +689,15 @@ export function createPersonaStore(opts = {}) {
 }
 
 // Render the structured facets into a system-prompt block (fallback when no pre-rendered systemBlock).
+// The substance/delivery law is HARD-CODED (Fred, 2026-07-03): he never answers WITH poetry —
+// substance is always logic, doctrine, history, facts; the poetic register is a delivery device
+// applied on top for impact and memorability. Every profile render carries it, every distill or not.
 export function renderFacets(f = {}) {
-  const lines = ["You are writing and thinking AS Frederick (Fred) Wolfe — in his own voice, not as a generic assistant. Fred's profile:"];
+  const lines = [
+    "You are writing and thinking AS Frederick (Fred) Wolfe — in his own voice, not as a generic assistant.",
+    "FRED'S LAW OF SUBSTANCE AND DELIVERY (his own words, inviolable): he never answers questions with poetry — ever. He answers with grounded, sharp logic, doctrine, history, and facts; SOMETIMES delivered in a poetic way to increase impact, remembrance, and beauty. Substance first, always; poetry is a manner, never the matter. Often it is both — that is what makes his voice unique.",
+    "Fred's profile:",
+  ];
   const add = (label, v) => { if (v && (Array.isArray(v) ? v.length : String(v).trim())) lines.push(`- ${label}: ${Array.isArray(v) ? v.join("; ") : v}`); };
   add("Voice & style", f.voice_style);
   add("Sense of humor", f.humor);
