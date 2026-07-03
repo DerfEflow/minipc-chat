@@ -82,6 +82,8 @@ function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) retu
 const openSidebar = () => { sidebar.classList.add("open"); overlay.classList.add("show"); };
 const closeSidebar = () => { sidebar.classList.remove("open"); overlay.classList.remove("show"); };
 const MODE_LABEL = { fast: "Fast", normal: "Normal", deep_think: "Deep", long_context: "Long", draft: "Draft", tool: "Tool", mentor: "Mentor" };
+// Friendly tier labels — raw model names never surface anywhere in the UI (Fred's lock).
+const MODEL_TIER_LABEL = { "qwen3:8b": "Fast", "qwen3:30b-a3b": "Deep" };
 const relTime = (ts) => { const d = Date.now() - (ts || 0); const m = Math.round(d / 60000); if (m < 60) return m + "m"; const h = Math.round(m / 60); if (h < 24) return h + "h"; return Math.round(h / 24) + "d"; };
 function renderSidebar() {
   chatlist.innerHTML = "";
@@ -102,33 +104,84 @@ function renderSidebar() {
 // ---------- rendering ----------
 const stripThink = (t) => t.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
 const scroll = () => { main.scrollTop = main.scrollHeight; };
-function mkAct(label, fn) { const b = document.createElement("button"); b.className = "act"; b.textContent = label; b.onclick = fn; return b; }
+function mkAct(label, fn, title) { const b = document.createElement("button"); b.className = "act"; b.textContent = label; if (title) b.title = title; b.onclick = fn; return b; }
+// The user prompt that preceded message i (feeds hallucination check / save lesson / convert-to-eval).
+function precedingUser(c, i) { for (let k = i - 1; k >= 0; k--) if (c.messages[k].role === "user") return c.messages[k].content; return ""; }
 async function copyText(t) { try { await navigator.clipboard.writeText(t); } catch { const a = document.createElement("textarea"); a.value = t; document.body.appendChild(a); a.select(); try { document.execCommand("copy"); } catch {} a.remove(); } }
 function renderMsg(m, i, isLastAi) {
   const turn = document.createElement("div"); turn.className = "turn";
   const row = document.createElement("div"); row.className = "msg " + (m.role === "user" ? "me" : "ai");
   const b = document.createElement("div"); b.className = "bubble"; b.textContent = m.content; row.appendChild(b); turn.appendChild(row);
   // Persistent "context used" line (spec: show context/tool usage per message) — survives reloads.
-  if (m.role === "assistant" && m.meta && (m.meta.memory || m.meta.artifacts || m.meta.chats || m.meta.tools || m.meta.mode)) {
+  // F4: the 🧠/📄/💬 chip expands on tap to list WHICH items were loaded (when the meta carries
+  // them); the 🔧 chip opens the tool panel filtered to this message's runs. ⏸ marks interrupted.
+  if (m.role === "assistant" && m.meta && (m.meta.memory || m.meta.artifacts || m.meta.chats || m.meta.tools || m.meta.mode || m.meta.interrupted)) {
     const mm = document.createElement("div"); mm.className = "msgmeta";
-    const bits = [];
-    if (m.meta.mode && MODE_LABEL[m.meta.mode]) bits.push(MODE_LABEL[m.meta.mode]);
-    if (m.meta.memory) bits.push("🧠 " + m.meta.memory);
-    if (m.meta.artifacts) bits.push("📄 " + m.meta.artifacts);
-    if (m.meta.chats) bits.push("💬 " + m.meta.chats);
-    if (m.meta.tools) bits.push("🔧 " + m.meta.tools);
-    mm.textContent = bits.join(" · ");
+    const sep = () => mm.appendChild(document.createTextNode(" · "));
+    const bit = (text, title, fn) => { const s = document.createElement("span"); s.textContent = text; if (title) s.title = title; if (fn) { s.style.cursor = "pointer"; s.onclick = fn; } if (mm.childNodes.length) sep(); mm.appendChild(s); return s; };
+    if (m.meta.mode && MODE_LABEL[m.meta.mode]) bit(MODE_LABEL[m.meta.mode]);
+    if (m.meta.interrupted) { const b = bit("⏸ interrupted", "You stopped this answer before it finished"); b.style.color = "#e8b07c"; }
+    const ctxBits = [];
+    if (m.meta.memory) ctxBits.push("🧠 " + m.meta.memory);
+    if (m.meta.artifacts) ctxBits.push("📄 " + m.meta.artifacts);
+    if (m.meta.chats) ctxBits.push("💬 " + m.meta.chats);
+    if (ctxBits.length) {
+      const ci = m.meta.contextItems;
+      bit(ctxBits.join(" · "), ci ? "Tap to see which items were loaded" : "Context loaded for this answer (per-item detail unavailable for this message)", ci ? () => toggleCtxDetail(turn, mm, ci) : null);
+    }
+    if (m.meta.tools) bit("🔧 " + m.meta.tools, "Tap to show this message's tool log", () => openTools({ runIds: m.meta.runIds, chatId: curId, label: "this message" }));
     turn.appendChild(mm);
   }
   const acts = document.createElement("div"); acts.className = "acts" + (m.role === "user" ? " me" : "");
   if (m.role === "user") { acts.append(mkAct("Edit", () => editUser(i)), mkAct("Copy", () => copyText(m.content))); }
   else {
     acts.appendChild(mkAct("Copy", () => copyText(m.content)));
-    acts.appendChild(mkAct("Save", () => saveAsArtifact(m.content)));
-    acts.appendChild(mkAct("Critique", () => critiqueMessage(i)));
+    acts.appendChild(mkAct("Save", () => saveAsArtifact(m.content), "Save as artifact"));
+    acts.appendChild(mkAct("Critique", () => critiqueMessage(i), "Full mentor critique"));
+    // F1 (audit items 23-25): distinct per-message spec controls, compact glyphs to fit 375px.
+    acts.appendChild(mkAct("🔎", () => critiqueMessage(i, "hallucination_check"), "Hallucination check"));
+    acts.appendChild(mkAct("💡", () => saveLesson(i), "Save lesson"));
+    acts.appendChild(mkAct("🧪", () => convertToEval(i), "Convert to eval"));
     if (isLastAi && !busy) { acts.appendChild(mkAct("Continue", () => continueLast())); acts.appendChild(mkAct("Regenerate", () => regenerate())); }
   }
   turn.appendChild(acts); wrap.appendChild(turn);
+}
+// F4: expandable context detail — lists the actual memory/artifact/chat items the server loaded.
+function toggleCtxDetail(turn, anchor, ci) {
+  const old = turn.querySelector(".ctxdetail"); if (old) { old.remove(); return; }
+  const d = document.createElement("div"); d.className = "ctx ctxdetail"; d.style.whiteSpace = "pre-wrap";
+  const lines = [];
+  for (const it of ci.memory || []) lines.push("🧠 " + (it.title || "memory") + (it.label ? "  [" + it.label + "]" : ""));
+  for (const it of ci.artifacts || []) lines.push("📄 " + (it.title || "artifact"));
+  for (const it of ci.chats || []) lines.push("💬 " + (it.title || "past chat"));
+  d.textContent = lines.length ? lines.join("\n") : "(nothing was loaded)";
+  anchor.after(d);
+}
+// F1 (item 24): Save lesson — pick where it lands: failure ledger / eval case / prompt rule.
+async function saveLesson(i) {
+  const c = cur(); if (!c || !c.messages[i]) return;
+  const answer = c.messages[i].content, orig = precedingUser(c, i);
+  const kind = (prompt("Save lesson as — failure, eval, or rule:", "failure") || "").trim().toLowerCase();
+  if (!kind) return;
+  if (kind.startsWith("f")) {
+    const note = prompt("The lesson — what should have happened instead:", ""); if (note == null) return;
+    const r = await aApi("/ledger", { category: "manual", severity: "low", originalRequest: orig.slice(0, 2000), flawedOutput: answer.slice(0, 4000), correctedOutput: note.trim(), detectedBy: "user" });
+    alert(r.item ? "Lesson logged to the failure ledger." : "Ledger: " + (r.error || "failed"));
+  } else if (kind.startsWith("e")) {
+    await convertToEval(i);
+  } else if (kind.startsWith("r")) {
+    const t = prompt("Rule (a compact instruction the assistant should follow):", ""); if (t == null || !t.trim()) return;
+    const r = await aApi("/rules", { content: t.trim(), scope: "global", status: "candidate" });
+    alert(r.item ? "Saved as a candidate rule — test/activate it in Mentor & Improvement." : "Rule: " + (r.error || "failed"));
+  } else alert("Unknown kind — use failure, eval, or rule.");
+}
+// F1 (item 25): Convert to eval — the preceding user prompt becomes the eval input.
+async function convertToEval(i) {
+  const c = cur(); if (!c || !c.messages[i]) return;
+  const orig = precedingUser(c, i) || c.messages[i].content;
+  const exp = prompt("Expected behavior (what a good answer must do):", ""); if (exp == null) return;
+  const r = await aApi("/evals", { title: orig.replace(/\s+/g, " ").slice(0, 80), input: orig.slice(0, 4000), expectedBehavior: exp, source: "manual" });
+  alert(r.item ? "Eval case saved — run it from Mentor & Improvement." : "Eval: " + (r.error || "failed"));
 }
 function renderAll() {
   wrap.querySelectorAll(".turn, .err").forEach((n) => n.remove());
@@ -149,9 +202,8 @@ async function loadModels() {
   try {
     const r = await fetch("/ollama/v1/models", { cache: "no-store" }); if (!r.ok) return;
     const ids = ((await r.json()).data || []).map((m) => m.id || m.name).filter(Boolean);
-    const FRIENDLY = { "qwen3:8b": "Fast", "qwen3:30b-a3b": "Deep" };
     modelSel.innerHTML = "<option value='auto'>Auto (recommended)</option>";
-    for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = FRIENDLY[id] || id.replace(/:.*$/, ""); modelSel.appendChild(o); }
+    for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = MODEL_TIER_LABEL[id] || id.replace(/:.*$/, ""); modelSel.appendChild(o); }
     const saved = localStorage.getItem(LS_MODEL);
     modelSel.value = (saved && (saved === "auto" || ids.includes(saved))) ? saved : "auto";
   } catch {}
@@ -172,7 +224,7 @@ async function streamReply(c) {
 
   setBusy(true); aborter = new AbortController();
   let raw = ""; let errMsg = ""; let routeEl = null; let ctxEl = null; const chips = [];
-  let doneMeta = null, mentorCritique = null;
+  let doneMeta = null, mentorCritique = null, ctxItems = null;
   try {
     const res = await fetch("/chat", {
       method: "POST", headers: { "content-type": "application/json" }, signal: aborter.signal,
@@ -198,6 +250,8 @@ async function streamReply(c) {
         if (ev.type === "route") {
           // Model/mode intentionally NOT shown — the in-progress bubble just says "Dominion AI is working".
         } else if (ev.type === "context") {
+          // F4: keep the per-item detail the server sends (it was previously discarded).
+          ctxItems = { memory: ev.items || [], artifacts: ev.artifactItems || [], chats: ev.chatItems || [] };
           if (!ctxEl) { ctxEl = document.createElement("div"); ctxEl.className = "ctx"; inner.insertBefore(ctxEl, tools); }
           const bits = [];
           if (ev.memory) bits.push("🧠 " + ev.memory + " memor" + (ev.memory === 1 ? "y" : "ies"));
@@ -250,7 +304,7 @@ async function streamReply(c) {
     clearTimeout(warm);
     const final = stripThink(raw) || "(no response)";
     const msg = { role: "assistant", content: final };
-    if (doneMeta) { msg.meta = doneMeta; if (doneMeta.mode) c.lastMode = doneMeta.mode; }
+    if (doneMeta) { msg.meta = doneMeta; if (ctxItems) msg.meta.contextItems = ctxItems; if (doneMeta.mode) c.lastMode = doneMeta.mode; }
     c.messages.push(msg); c.updatedAt = Date.now(); save();
   } catch (e) {
     clearTimeout(warm);
@@ -345,6 +399,9 @@ function renderMemory(items) {
       mkAct("Edit", () => { const t = prompt("Edit memory", m.content); if (t != null && t.trim()) memUpdate(m.id, { content: t.trim() }); }),
       mkAct("→ Eval", async (ev) => { const exp = prompt("Expected behavior (what a good answer must do):", ""); if (exp == null) return; await aApi("/evals", { title: m.content.slice(0, 80), input: m.content, expectedBehavior: exp, source: "manual" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }),
       mkAct("→ Rule", async (ev) => { await aApi("/rules", { content: m.content, scope: "global", status: "candidate" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }),
+      // F3 (item 28, spec 616): the 8th inbox action — convert a memory into a retrieval-scope note
+      // (guides what gets looked up; mirrors → Rule with scope:"retrieval").
+      mkAct("→ Retrieval note", async (ev) => { await aApi("/rules", { content: m.content, scope: "retrieval", status: "candidate" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }, "Save as a retrieval guidance note"),
       mkAct(m.status === "archived" ? "Unarchive" : "Archive", () => memUpdate(m.id, { action: m.status === "archived" ? "approve" : "archive" })),
       mkAct("Delete", () => { if (confirm("Delete this memory?")) memDelete(m.id); }),
     );
@@ -472,13 +529,28 @@ const closePersona = () => { pmodal.hidden = true; };
 
 // ---------- tool activity panel (Phase 3) ----------
 const tfmt = (ts) => { try { return new Date(ts).toLocaleString(); } catch { return ts || ""; } };
+// F1 (item 26): the panel can open FILTERED to one message's runs — exact runIds when the message
+// meta carries them, else the honest fallback of everything logged for this chat.
+let toolFilter = null;   // { runIds?: [], chatId?: "", label: "" }
 async function loadTools() {
   tlist.textContent = "Loading…";
-  let runs = [];
-  try { runs = ((await (await fetch("/toolruns", { cache: "no-store" })).json()).runs) || []; } catch {}
-  if (tstats) tstats.textContent = runs.length ? runs.length + " recent" : "";
+  let all = [];
+  try { all = ((await (await fetch("/toolruns", { cache: "no-store" })).json()).runs) || []; } catch {}
+  let runs = all;
+  if (toolFilter) {
+    runs = (toolFilter.runIds && toolFilter.runIds.length)
+      ? all.filter((r) => toolFilter.runIds.includes(r.runId))
+      : toolFilter.chatId ? all.filter((r) => r.chatId === toolFilter.chatId) : all;
+  }
+  if (tstats) tstats.textContent = toolFilter ? runs.length + " of " + all.length + " (" + (toolFilter.label || "filtered") + ")" : (runs.length ? runs.length + " recent" : "");
   tlist.innerHTML = "";
-  if (!runs.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "No tool activity yet."; tlist.appendChild(n); return; }
+  if (toolFilter) {
+    const bar = document.createElement("div"); bar.className = "mfilter";
+    bar.appendChild(Object.assign(document.createElement("span"), { textContent: "Filtered to " + (toolFilter.label || "selection") }));
+    bar.appendChild(mkAct("Show all", () => { toolFilter = null; loadTools(); }));
+    tlist.appendChild(bar);
+  }
+  if (!runs.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = toolFilter ? "No matching tool runs (runs before this update aren't tracked per message)." : "No tool activity yet."; tlist.appendChild(n); return; }
   for (const r of runs) {
     const it = document.createElement("div"); it.className = "tritem";
     const top = document.createElement("div"); top.className = "trtop";
@@ -493,7 +565,7 @@ async function loadTools() {
     tlist.appendChild(it);
   }
 }
-function openTools() { tmodal.hidden = false; loadTools(); }
+function openTools(filter) { toolFilter = filter && (filter.runIds || filter.chatId) ? filter : null; tmodal.hidden = false; loadTools(); }
 const closeTools = () => { tmodal.hidden = true; };
 
 // ---------- artifact studio (Phase 4) ----------
@@ -525,6 +597,20 @@ async function openArtifact(id) {
   const h = document.createElement("div"); h.className = "sheet-h"; h.textContent = a.title; adetail.appendChild(h);
   const meta = document.createElement("div"); meta.className = "arow";
   meta.innerHTML = `<span class="abadge ${a.status}">${a.status}</span><span>${a.type}</span><span>v${a.version} of ${a.versionCount}</span><span>${a.wordCount} words</span>`;
+  // F4: model used (friendly tier label only — underlying model names never surface).
+  if (a.modelProviderId) meta.appendChild(Object.assign(document.createElement("span"), { textContent: "model: " + (MODEL_TIER_LABEL[a.modelProviderId] || "local") }));
+  // F4: explicit mentor-review status — "reviewed" only when the CURRENT version was reviewed.
+  if (a.mentorReviewed && a.reviewedVersion === a.version) { const b = document.createElement("span"); b.className = "abadge reviewed"; b.textContent = "reviewed"; meta.appendChild(b); }
+  else if (a.reviewRecommended && a.reviewRecommended.length) { const b = document.createElement("span"); b.className = "abadge draft"; b.textContent = "review suggested"; b.title = a.reviewRecommended.join(", ").replace(/_/g, " "); meta.appendChild(b); }
+  // F4: tappable source-chat link (chats live in this browser's storage; gone = said honestly).
+  if (a.sourceChatId) {
+    const l = mkAct("from chat ↗", () => {
+      const ch = chats.find((x) => x.id === a.sourceChatId);
+      if (!ch) return alert("The source chat no longer exists on this device.");
+      closeArtifacts(); switchChat(ch.id);
+    }, "Open the chat this artifact came from");
+    meta.appendChild(l);
+  }
   adetail.appendChild(meta);
   const vrow = document.createElement("div"); vrow.className = "arow";
   const sel = document.createElement("select");
@@ -615,22 +701,32 @@ async function saveAsArtifact(content) {
 
 // ---------- mentor critique (Phase 5) ----------
 const escapeHtml = (s) => String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-async function critiqueMessage(i) {
+// F1 (item 23): taskType picks the lens — the default full critique or the distinct
+// hallucination_check (the server maps it to the factual-review specialist rubric).
+async function critiqueMessage(i, taskType = "answer_review") {
   const c = cur(); if (!c || !c.messages[i]) return;
-  const answer = c.messages[i].content; let orig = "";
-  for (let k = i - 1; k >= 0; k--) if (c.messages[k].role === "user") { orig = c.messages[k].content; break; }
-  const card = document.createElement("div"); card.className = "critique"; card.textContent = "🎓 Mentor reviewing… (~15s)"; wrap.appendChild(card); scroll();
+  const answer = c.messages[i].content; const orig = precedingUser(c, i);
+  const card = document.createElement("div"); card.className = "critique";
+  card.textContent = (taskType === "hallucination_check" ? "🔎 Checking for hallucinations…" : "🎓 Mentor reviewing…") + " (~15s)";
+  wrap.appendChild(card); scroll();
   try {
-    const d = await aApi("/mentor/review", { content: answer, originalRequest: orig, taskType: "answer_review", privacyMode: settings.privacy || "redacted_external" });
-    renderCritiqueCard(card, d.critique || {}, orig, answer);
+    const d = await aApi("/mentor/review", { content: answer, originalRequest: orig, taskType, privacyMode: settings.privacy || "redacted_external", chatId: c.id });
+    renderCritiqueCard(card, d.critique || {}, orig, answer, { reviewId: d.reviewId, ledgerId: d.ledgerId, taskType });
   } catch { card.textContent = "Mentor review failed."; }
 }
-function renderCritiqueCard(card, c, orig, answer) {
+function renderCritiqueCard(card, c, orig, answer, ids = {}) {
   card.innerHTML = "";
   const head = document.createElement("div"); head.className = "crhead";
   const sp = document.createElement("span"); sp.className = "scorepill"; sp.textContent = (c.overall_score ?? "?") + "/10"; head.appendChild(sp);
-  head.appendChild(Object.assign(document.createElement("span"), { className: "crsec", textContent: "risk " + (c.hallucination_risk || "?") + " · revise " + (c.revision_priority || "none") + " · " + (c._provider || "") }));
-  const x = document.createElement("button"); x.className = "act"; x.textContent = "✕"; x.style.marginLeft = "auto"; x.onclick = () => card.remove(); head.appendChild(x);
+  head.appendChild(Object.assign(document.createElement("span"), { className: "crsec", textContent: (ids.taskType === "hallucination_check" ? "hallucination check · " : "") + "risk " + (c.hallucination_risk || "?") + " · revise " + (c.revision_priority || "none") + " · " + (c._provider || "") }));
+  // F2 (item 27): rejecting a critique is RECORDED — the review record is marked rejected and the
+  // auto-created ledger entry is removed, so a bad critique never poisons the flywheel.
+  const x = document.createElement("button"); x.className = "act"; x.textContent = "✕"; x.title = "Reject critique (recorded — removes its ledger entry)"; x.style.marginLeft = "auto";
+  x.onclick = () => {
+    card.remove();
+    aApi("/mentor/reject", { reviewId: ids.reviewId || null, ledgerId: ids.ledgerId || null, taskType: ids.taskType || "answer_review", chatId: curId, contentPreview: String(answer || "").slice(0, 300) }).catch(() => {});
+  };
+  head.appendChild(x);
   card.appendChild(head);
   const sec = (label, a) => { if (!a || !a.length) return; const d = document.createElement("div"); d.className = "crsec"; d.innerHTML = "<b>" + label + ":</b> " + a.map(escapeHtml).join("; "); card.appendChild(d); };
   sec("Major", c.major_findings); sec("Unsupported", c.unsupported_claims); sec("Reasoning", c.reasoning_errors); sec("Safety/Privacy", c.safety_or_privacy_issues);
@@ -668,17 +764,17 @@ function openImprove() { imodal.hidden = false; setITab(itab); }
 const closeImprove = () => { imodal.hidden = true; };
 function setITab(t) {
   itab = t; document.querySelectorAll(".itab").forEach((el) => el.classList.toggle("on", el.dataset.tab === t));
-  iadd.placeholder = t === "ledger" ? "Log a failure / lesson…" : t === "evals" ? "Eval input prompt…" : t === "prompts" ? "Prompt content (name/scope asked next)…" : "Prompt rule (a compact instruction)…";
+  iadd.placeholder = t === "ledger" ? "Log a failure / lesson…" : t === "evals" ? "Eval input prompt…" : t === "prompts" ? "Prompt content (name/scope asked next)…" : t === "finetune" ? "Instruction / input (ideal output asked next)…" : "Prompt rule (a compact instruction)…";
   loadImprove();
 }
 async function loadImprove() {
   ilist.textContent = "Loading…";
-  const path = itab === "ledger" ? "/ledger" : itab === "evals" ? "/evals" : itab === "prompts" ? "/prompts" : "/rules";
+  const path = itab === "ledger" ? "/ledger" : itab === "evals" ? "/evals" : itab === "prompts" ? "/prompts" : itab === "finetune" ? "/finetune" : "/rules";
   const d = await aApi(path); const items = (d && d.items) || [];
-  if (istats && d.stats) { const s = d.stats; istats.textContent = `${s.failures}F · ${s.evals}E · ${s.rules}R (${s.activeRules} active) · ${s.prompts || 0}P`; }
+  if (istats && d.stats) { const s = d.stats; istats.textContent = `${s.failures}F · ${s.evals}E · ${s.rules}R (${s.activeRules} active) · ${s.prompts || 0}P · ${s.finetune || 0}FT`; }
   ilist.innerHTML = "";
   if (!items.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "Nothing here yet."; ilist.appendChild(n); return; }
-  for (const it of items) ilist.appendChild(itab === "ledger" ? renderFailure(it) : itab === "evals" ? renderEval(it) : itab === "prompts" ? renderPrompt(it) : renderRule(it));
+  for (const it of items) ilist.appendChild(itab === "ledger" ? renderFailure(it) : itab === "evals" ? renderEval(it) : itab === "prompts" ? renderPrompt(it) : itab === "finetune" ? renderFinetune(it) : renderRule(it));
 }
 function renderPrompt(p) {
   const it = document.createElement("div"); it.className = "mitem";
@@ -701,6 +797,30 @@ function renderFailure(f) {
   const c = document.createElement("div"); c.className = "mc"; c.textContent = (f.originalRequest || "").slice(0, 160) || "(no request)";
   const acts = document.createElement("div"); acts.className = "macts";
   acts.append(mkAct(f.status === "open" ? "Mark resolved" : "Reopen", () => fUpdate("/ledger/update", { id: f.id, status: f.status === "open" ? "resolved" : "open" })), mkAct("Delete", () => fUpdate("/ledger/delete", { id: f.id })));
+  it.append(top, c);
+  // F4 (spec 1819-1831): root cause + improvement actions (+ sampling category / linked items)
+  // were stored by the Group-A pipeline but never displayed.
+  const detail = [
+    f.rootCause && f.rootCause !== "unknown" ? "root: " + f.rootCause.replace(/_/g, " ") : "",
+    (f.improvementActions || []).length ? "actions: " + f.improvementActions.map((a) => a.replace(/_/g, " ")).join(", ") : "",
+    f.samplingCategory ? "sampled: " + f.samplingCategory : "",
+    (f.linkedEvalIds || []).length ? "evals: " + f.linkedEvalIds.length : "",
+    (f.linkedRuleIds || []).length ? "rules: " + f.linkedRuleIds.length : "",
+  ].filter(Boolean).join(" · ");
+  if (detail) { const d = document.createElement("div"); d.className = "mtop"; d.textContent = detail; it.appendChild(d); }
+  if (f.correctedOutput) { const d = document.createElement("div"); d.className = "mtop"; d.textContent = "lesson: " + String(f.correctedOutput).slice(0, 140); it.appendChild(d); }
+  it.appendChild(acts); return it;
+}
+// A7 completion: the fine-tuning candidate queue tab (store/endpoints landed in Group A; the tab
+// itself never did). Candidates need explicit approval here before any training use.
+function renderFinetune(t) {
+  const it = document.createElement("div"); it.className = "mitem";
+  const top = document.createElement("div"); top.className = "mtop";
+  top.append(badge(t.source.replace(/_/g, " ")), badge(t.status, t.status === "candidate" ? "pending" : t.status === "rejected" ? "rejected" : ""));
+  const c = document.createElement("div"); c.className = "mc"; c.textContent = (t.input || "").slice(0, 160) + (t.idealOutput ? "\n→ " + String(t.idealOutput).slice(0, 120) : "");
+  const acts = document.createElement("div"); acts.className = "macts";
+  if (t.status === "candidate") acts.append(mkAct("Approve", () => fUpdate("/finetune/update", { id: t.id, status: "approved" })), mkAct("Reject", () => fUpdate("/finetune/update", { id: t.id, status: "rejected" })));
+  acts.append(mkAct("Delete", () => fUpdate("/finetune/delete", { id: t.id })));
   it.append(top, c, acts); return it;
 }
 function renderEval(e) {
@@ -737,6 +857,10 @@ async function addImprove() {
     const why = prompt("Reason for this prompt:", "") || "";
     await aApi("/prompts", { name: name.trim() || "unnamed", scope: scope.trim(), content: v, changeReason: why });
   }
+  else if (itab === "finetune") {
+    const ideal = prompt("Ideal output (what the model SHOULD produce for this input):", ""); if (ideal == null) return;
+    await aApi("/finetune", { input: v, idealOutput: ideal, source: "user_authored_instruction" });
+  }
   else await aApi("/rules", { content: v, scope: "global", status: "candidate" });
   iadd.value = ""; loadImprove();
 }
@@ -761,7 +885,7 @@ mclose.addEventListener("click", closeMemory);
 msave.addEventListener("click", addMemory);
 mmodal.addEventListener("click", (e) => { if (e.target === mmodal) closeMemory(); });
 if (mfilterStatus) mfilterStatus.addEventListener("change", loadMemory);
-toolsBtn.addEventListener("click", openTools);
+toolsBtn.addEventListener("click", () => openTools());   // unfiltered (a click event is not a filter)
 tclose.addEventListener("click", closeTools);
 tmodal.addEventListener("click", (e) => { if (e.target === tmodal) closeTools(); });
 artifactsBtn.addEventListener("click", openArtifacts);

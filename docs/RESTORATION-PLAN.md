@@ -109,11 +109,33 @@ defaults (cautious mode = a flag flip, never a rebuild).*
        governance_test 19/19 still pass)
 
 ### F — UI completions
-- [ ] F1. Per-message: Hallucination-check control, Save lesson, Convert to eval, Show tool log (23-26)
-- [ ] F2. Reject critique = recorded rejection (feeds pipeline; removes ledger entry) (27)
-- [ ] F3. Memory inbox: Convert to retrieval note (28)
-- [ ] F4. Context chip expands to show which items loaded; interrupted answers visibly marked;
+- [x] F1. Per-message: Hallucination-check control, Save lesson, Convert to eval, Show tool log (23-26)
+      → 🔎/💡/🧪 glyph actions in the .acts row (wraps at 375px); 🔎 = /mentor/review with
+        taskType hallucination_check (factual-specialist lens), same critique card; 💡 = kind
+        chooser → ledger (lesson lands in correctedOutput) / eval / candidate rule; 🧪 = preceding
+        user prompt as eval input + prompted expectedBehavior → /evals; 🔧 n chip is tappable →
+        tool panel filtered to the message's runIds (done-meta now carries them; older messages
+        fall back to chatId — honest empty-state when neither matches)
+- [x] F2. Reject critique = recorded rejection (feeds pipeline; removes ledger entry) (27)
+      → new /mentor/reject: marks the stored review record rejected (or stores a standalone
+        user-rejection record for SSE-only mentor-mode cards), REMOVES the critique's auto-created
+        ledger entry (rejected critiques must not inflate adaptive sampling), pipeline-logs the
+        rejection; the card ✕ posts it before removing the DOM node
+- [x] F3. Memory inbox: Convert to retrieval note (28)
+      → "→ Retrieval note" on every memory item (POST /rules scope:"retrieval", mirroring → Rule);
+        the inbox now has all 8 spec'd actions
+- [x] F4. Context chip expands to show which items loaded; interrupted answers visibly marked;
       artifact panel: model + source-chat link; ledger shows rootCause/actions (partials)
+      → context SSE now also sends artifactItems/chatItems; the client keeps all per-item detail
+        on message meta and the 🧠/📄/💬 chip toggles the list on tap; ⏸ interrupted badge renders
+        from the saved flag; artifact detail shows model as the friendly tier label ONLY
+        (never a model name), a "reviewed"/"review suggested" badge (reviewed = current version),
+        and a tappable "from chat ↗" link (honest alert when the chat is gone from this device);
+        ledger items render rootCause/improvementActions/samplingCategory/lesson + linked counts.
+        BONUS (A7 gap): the Finetune tab (list + approve/reject/delete + add) actually exists now —
+        the store/endpoints landed in Group A but the tab itself had never been built.
+      (verified live: panels/REST/render paths exercised at 375px with zero console errors;
+       review/governance/routing/artifacts self-tests all still pass; app.js+sw bumped to v23)
 
 ## Spec deviations (honest ledger)
 

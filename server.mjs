@@ -760,6 +760,29 @@ async function handleMentorRevise(req, res) {
   return json(200, { revised });
 }
 
+// F2 (audit item 27, spec 1816/1432): Reject critique = a RECORDED rejection that feeds the
+// pipeline — never just a DOM removal. Marks the stored review record rejected (or stores a
+// standalone rejection record for SSE-only mentor-mode cards that never got a reviewId), REMOVES
+// the critique's auto-created ledger entry (a rejected critique must not inflate the adaptive
+// sampling failure counts), and logs the rejection to the pipeline log.
+async function handleMentorReject(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const b = await readJsonBody(req); if (!b) return json(400, { error: "bad json" });
+  const reason = String(b.reason || "").slice(0, 300);
+  let reviewId = b.reviewId && flywheel.get("reviews", b.reviewId) ? b.reviewId : null;
+  if (reviewId) {
+    flywheel.update("reviews", reviewId, { rejected: true, rejectedAt: new Date().toISOString(), rejectReason: reason });
+  } else {
+    const rec = flywheel.addReview({ tier: 0, trigger: ["user_rejected"], taskType: String(b.taskType || "answer_review").slice(0, 40), chatId: b.chatId, provider: "user", critique: null, pipeline: { rejected: true }, contentPreview: String(b.contentPreview || "").slice(0, 300) });
+    reviewId = rec.item.id;
+    flywheel.update("reviews", reviewId, { rejected: true, rejectedAt: new Date().toISOString(), rejectReason: reason });
+  }
+  const ledgerRemoved = b.ledgerId ? (flywheel.remove("failures", b.ledgerId).removed || 0) : 0;
+  flywheel.addPipelineLog({ step: "critique_rejected", reviewId, ledgerId: b.ledgerId || null, ledgerRemoved, reason });
+  console.log(`[dominion-ai] critique rejected by Fred (review ${reviewId.slice(0, 8)}, ledger entries removed: ${ledgerRemoved})`);
+  return json(200, { ok: true, reviewId, ledgerRemoved });
+}
+
 // Eval runner (Phase 5): route the case's input through the REAL router (so routing itself is
 // testable), run it, judge it with the main model, store the run. extraRule lets /rules/test
 // measure a candidate rule's effect without activating it.
@@ -1054,7 +1077,12 @@ async function handleChat(req, res) {
                       needs_mentor_review: needs.mentorReview, privacy_risk: privacyRisk, confidence: routeConfidence, reason,
                       escalated: escalated || undefined, num_ctx: opts.num_ctx || undefined };
   if (ctxInfo.used.length || ctxInfo.artifactsUsed.length || ctxInfo.chatsUsed.length) {
-    sse({ type: "context", memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, items: ctxInfo.used.map((c) => ({ title: c.title, label: c.citationLabel, score: c.score })) });
+    // F4 (audit "Show context used"): per-item detail — memory items were already sent (and
+    // discarded client-side); artifact/chat titles now ride along so the chip can expand honestly.
+    sse({ type: "context", memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length,
+          items: ctxInfo.used.map((c) => ({ title: c.title, label: c.citationLabel, score: c.score })),
+          artifactItems: ctxInfo.artifactsUsed.map((a) => ({ id: a.id, title: a.title })),
+          chatItems: ctxInfo.chatsUsed.map((h) => ({ id: h.id, title: h.title })) });
     console.log(`[dominion-ai] context: ${ctxInfo.used.length} mem · ${ctxInfo.artifactsUsed.length} artifact(s) · ${ctxInfo.chatsUsed.length} chat(s) · ~${contextTokens} tok`);
   }
   const startedAt = new Date().toISOString();
@@ -1237,7 +1265,9 @@ async function handleChat(req, res) {
       console.log(`[dominion-ai] usage ${model}/${mode} prompt=${norm.usage.inputTokens || "?"} out=${norm.usage.outputTokens || "?"} tools=${toolCount} conf=${quality.confidence} risk=${quality.hallucinationRisk}`);
       await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: norm.usage.inputTokens, outputTokens: norm.usage.outputTokens, latencyMs: norm.usage.latencyMs, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview });
       try { chatlog.record(chatId, history, answer); } catch {}
-      sse({ type: "done", meta: { mode, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, outputTokens: norm.usage.outputTokens, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview }, warnings: norm.warnings } });
+      // F1 (audit item 26): runIds travel with the message meta so "show tool log" can filter the
+      // tool panel to exactly this answer's runs (older messages fall back to chatId).
+      sse({ type: "done", meta: { mode, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: toolRunIds, outputTokens: norm.usage.outputTokens, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview }, warnings: norm.warnings } });
       return res.end();
     }
     if (aborted) { await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "interrupted", rounds: roundsUsed, tools: toolCount }); }
@@ -1262,6 +1292,7 @@ const server = http.createServer(async (req, res) => {
     if (path === "/mentor/review" && req.method === "POST") return handleMentorReview(req, res);
     if (path === "/mentor/council" && req.method === "POST") return handleMentorCouncil(req, res);
     if (path === "/mentor/revise" && req.method === "POST") return handleMentorRevise(req, res);
+    if (path === "/mentor/reject" && req.method === "POST") return handleMentorReject(req, res);
     if (["/ledger", "/evals", "/rules", "/prompts", "/finetune", "/reviews", "/pipeline", "/tool-overlays"].some((b) => path === b || path.startsWith(b + "/"))) return handleFlywheel(req, res, u);
     if (path === "/persona" || path.startsWith("/persona/")) return handlePersona(req, res, u);
 
