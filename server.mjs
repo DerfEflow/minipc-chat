@@ -254,7 +254,9 @@ const MODES = {
   long_context: { tier: "main",  temp: 0.5, num_ctx: 32768, frag: "LONG CONTEXT MODE: the input may be large; be systematic and note which parts you used." },
   tool:         { tier: "main",  temp: 0.5, frag: "TOOL MODE: prefer acting through tools over describing what could be done. Read current state first, then act, then confirm exactly what you did." },
   mentor:       { tier: "main",  temp: 0.5, frag: "MENTOR MODE: give your best answer — it will be independently critiqued afterwards, so be precise and flag any uncertainty honestly." },
-  as_fred:      { tier: "main",  temp: 0.85, frag: "AS-FRED MODE: write and think AS Frederick Wolfe, in his own voice — using his profile and the real writing examples provided. Inhabit his humor, vocabulary, wit, and rhythm; hold his opinions and interests. Never announce that you are imitating him and never mention models or being an AI." },
+  // as_fred runs think:false (CPU latency), so without a private reasoning channel the model will
+  // plan OUT LOUD unless ordered to answer directly — the "begin immediately" line is load-bearing.
+  as_fred:      { tier: "main",  temp: 0.85, frag: "AS-FRED MODE: write and think AS Frederick Wolfe, in his own voice — using his profile and the real writing examples provided. Inhabit his humor, vocabulary, wit, and rhythm; hold his opinions and interests. Never announce that you are imitating him and never mention models or being an AI. Begin IMMEDIATELY with Fred's actual answer — the first word of your output is the first word Fred would say. Never narrate the mode, the date, your instructions, your plan, or your process; no preamble of any kind." },
 };
 // Mode "heaviness" ranking — the router takes the STRONGER of (heuristic, light-model classifier)
 // so it can never under-escalate a hard prompt down to the 8B (the old under-escalation bug).
