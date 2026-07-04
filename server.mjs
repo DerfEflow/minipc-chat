@@ -967,33 +967,31 @@ async function runDistill({ batchChars = 90000, maxBatches = 60 } = {}) {
 
 // Convictions-only map-reduce over the assertion kinds (essay/maxim/plan/thought) — small and fast
 // (a fraction of the corpus). Returns the synthesized convictions string, or null on failure.
+// KEY: format is a STRICT JSON SCHEMA, not the "json" string. Probed live — format:"json" lets the
+// 30B smuggle story-narration inside a JSON wrapper (both prior passes returned nothing usable); a
+// real schema hard-constrains generation and both a raw batch AND a clean snippet extracted cleanly.
+const CONV_MAP_SCHEMA = { type: "object", properties: { convictions: { type: "array", items: { type: "string" } } }, required: ["convictions"] };
+const CONV_REDUCE_SCHEMA = { type: "object", properties: { convictions: { type: "string" } }, required: ["convictions"] };
 async function distillConvictions() {
-  // 30k batches, not 90k: on huge mixed batches the 30B derails into narrating (even think:false)
-  // and burns num_predict before any JSON — probed live, done_reason=length with story-babble.
-  // Smaller batches keep it on task, and more batches give the pass redundancy per derailment.
   const { batches } = persona.buildBatches({ kinds: ["essay", "maxim", "plan", "thought"], batchChars: 30000, maxBatches: 30 });
   if (!batches.length) return null;
   distillState.batchesTotal += batches.length;
   const notes = [];
   const pre =
-    "You are an information extractor. From this batch of Frederick (Fred) Wolfe's own ASSERTION writing (essays, maxims, plans, thoughts), extract his stated BELIEFS and positions: " +
-    "faith and theological commitments, creeds/confessions/catechisms he cites (quote them), moral stances, professional principles, and explicit rejections. " +
-    "Do NOT summarize, continue, or discuss the text. Batch:\n\n";
-  const post = '\n\nNow return ONLY the JSON object {"convictions":["..."]} — terse specific strings that quote or closely paraphrase HIM. No other keys, no prose.';
+    "Extract the writer Frederick (Fred) Wolfe's stated BELIEFS from the text: faith and theological commitments, creeds/confessions/catechisms he cites (quote them), moral stances, professional principles, and explicit rejections. Do NOT narrate, summarize, or continue the text — only extract his assertions.\n\nTEXT:\n";
   for (let i = 0; i < batches.length; i++) {
     if (!distillState.running) return null;
-    const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: pre + batches[i] + post }], { temperature: 0.2, num_predict: 1400, noTools: true, format: "json", think: false });
+    const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: pre + batches[i] }], { temperature: 0.2, num_predict: 1400, noTools: true, format: CONV_MAP_SCHEMA, think: false });
     const o = parseJsonLoose(d);
-    if (o && Array.isArray(o.convictions)) notes.push(...o.convictions.map((x) => String(x).slice(0, 300)));
+    if (o && Array.isArray(o.convictions)) notes.push(...o.convictions.map((x) => String(x).slice(0, 300)).filter((s) => s.length > 8));
     distillState.batchesDone++;
   }
   if (!notes.length) return null;
   const rp =
-    "Synthesize Frederick (Fred) Wolfe's CORE CONVICTIONS & WORLDVIEW from these observations pooled from his assertion writing. " +
-    "Preserve his OWN formulations — the creeds, confessions, and catechisms he cites, the doctrines he affirms, the moral and professional stances he takes, and what he explicitly rejects. Concrete, no softening.\n" +
-    'Return ONLY JSON: {"convictions":"..."} (one dense string).\n\nOBSERVATIONS:\n' +
-    [...new Set(notes)].slice(0, 80).map((n) => "- " + n).join("\n");
-  const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: rp }], { temperature: 0.3, num_predict: 1200, noTools: true, format: "json", think: false });
+    "Synthesize Frederick (Fred) Wolfe's CORE CONVICTIONS & WORLDVIEW into one dense paragraph from these observations pooled from his assertion writing. " +
+    "Preserve his OWN formulations — the creeds, confessions, and catechisms he cites, the doctrines he affirms, the moral and professional stances he takes, and what he explicitly rejects. Concrete, no softening.\n\nOBSERVATIONS:\n" +
+    [...new Set(notes)].slice(0, 90).map((n) => "- " + n).join("\n");
+  const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: rp }], { temperature: 0.3, num_predict: 1200, noTools: true, format: CONV_REDUCE_SCHEMA, think: false });
   const o = parseJsonLoose(d);
   return o && o.convictions ? String(o.convictions) : null;
 }
