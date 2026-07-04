@@ -968,17 +968,21 @@ async function runDistill({ batchChars = 90000, maxBatches = 60 } = {}) {
 // Convictions-only map-reduce over the assertion kinds (essay/maxim/plan/thought) — small and fast
 // (a fraction of the corpus). Returns the synthesized convictions string, or null on failure.
 async function distillConvictions() {
-  const { batches } = persona.buildBatches({ kinds: ["essay", "maxim", "plan", "thought"], maxBatches: 12 });
+  // 30k batches, not 90k: on huge mixed batches the 30B derails into narrating (even think:false)
+  // and burns num_predict before any JSON — probed live, done_reason=length with story-babble.
+  // Smaller batches keep it on task, and more batches give the pass redundancy per derailment.
+  const { batches } = persona.buildBatches({ kinds: ["essay", "maxim", "plan", "thought"], batchChars: 30000, maxBatches: 30 });
   if (!batches.length) return null;
   distillState.batchesTotal += batches.length;
   const notes = [];
   const pre =
-    "From this batch of Frederick (Fred) Wolfe's own ASSERTION writing (essays, maxims, plans, thoughts), extract his stated BELIEFS and positions: " +
+    "You are an information extractor. From this batch of Frederick (Fred) Wolfe's own ASSERTION writing (essays, maxims, plans, thoughts), extract his stated BELIEFS and positions: " +
     "faith and theological commitments, creeds/confessions/catechisms he cites (quote them), moral stances, professional principles, and explicit rejections. " +
-    'Return ONLY JSON: {"convictions":[]} — terse specific strings that quote or closely paraphrase HIM. Batch:\n\n';
+    "Do NOT summarize, continue, or discuss the text. Batch:\n\n";
+  const post = '\n\nNow return ONLY the JSON object {"convictions":["..."]} — terse specific strings that quote or closely paraphrase HIM. No other keys, no prose.';
   for (let i = 0; i < batches.length; i++) {
     if (!distillState.running) return null;
-    const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: pre + batches[i] }], { temperature: 0.2, num_predict: 900, noTools: true, format: "json", think: false });
+    const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: pre + batches[i] + post }], { temperature: 0.2, num_predict: 1400, noTools: true, format: "json", think: false });
     const o = parseJsonLoose(d);
     if (o && Array.isArray(o.convictions)) notes.push(...o.convictions.map((x) => String(x).slice(0, 300)));
     distillState.batchesDone++;
