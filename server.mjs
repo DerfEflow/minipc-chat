@@ -951,6 +951,12 @@ async function runDistill({ batchChars = 90000, maxBatches = 60 } = {}) {
     // Fold in the measured vocabulary as ground truth (survives even if the model omitted words).
     facets.favored_words = vocab.words.map((x) => x.w);
     facets.favored_phrases = vocab.phrases.map((x) => x.p);
+    // Dedicated convictions pass: beliefs from ASSERTION kinds only. Distill v3 proved that
+    // majority-voting convictions across the whole voice corpus buries them under poem volume
+    // (200 poems outvoted the confessional essays). Voice comes from everything; beliefs don't.
+    distillState.phase = "distilling convictions";
+    const conv = await distillConvictions();
+    if (conv) facets.convictions = conv;
     const systemBlock = renderFacets(facets) + (facets.summary ? "\n- In short: " + facets.summary : "");
     persona.setProfile({ facets, systemBlock, model: "local", method: "map-reduce", batches: batches.length, capped, digestedChunks: poolChunks, totalChunks, coveredChars, totalChars });
     distillState = { ...distillState, running: false, phase: "done", finishedAt: new Date().toISOString(), error: null };
@@ -959,13 +965,61 @@ async function runDistill({ batchChars = 90000, maxBatches = 60 } = {}) {
   }
 }
 
+// Convictions-only map-reduce over the assertion kinds (essay/maxim/plan/thought) — small and fast
+// (a fraction of the corpus). Returns the synthesized convictions string, or null on failure.
+async function distillConvictions() {
+  const { batches } = persona.buildBatches({ kinds: ["essay", "maxim", "plan", "thought"], maxBatches: 12 });
+  if (!batches.length) return null;
+  distillState.batchesTotal += batches.length;
+  const notes = [];
+  const pre =
+    "From this batch of Frederick (Fred) Wolfe's own ASSERTION writing (essays, maxims, plans, thoughts), extract his stated BELIEFS and positions: " +
+    "faith and theological commitments, creeds/confessions/catechisms he cites (quote them), moral stances, professional principles, and explicit rejections. " +
+    'Return ONLY JSON: {"convictions":[]} — terse specific strings that quote or closely paraphrase HIM. Batch:\n\n';
+  for (let i = 0; i < batches.length; i++) {
+    if (!distillState.running) return null;
+    const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: pre + batches[i] }], { temperature: 0.2, num_predict: 900, noTools: true, format: "json", think: false });
+    const o = parseJsonLoose(d);
+    if (o && Array.isArray(o.convictions)) notes.push(...o.convictions.map((x) => String(x).slice(0, 300)));
+    distillState.batchesDone++;
+  }
+  if (!notes.length) return null;
+  const rp =
+    "Synthesize Frederick (Fred) Wolfe's CORE CONVICTIONS & WORLDVIEW from these observations pooled from his assertion writing. " +
+    "Preserve his OWN formulations — the creeds, confessions, and catechisms he cites, the doctrines he affirms, the moral and professional stances he takes, and what he explicitly rejects. Concrete, no softening.\n" +
+    'Return ONLY JSON: {"convictions":"..."} (one dense string).\n\nOBSERVATIONS:\n' +
+    [...new Set(notes)].slice(0, 80).map((n) => "- " + n).join("\n");
+  const d = await ollamaChat(MAIN_MODEL, [{ role: "user", content: rp }], { temperature: 0.3, num_predict: 1200, noTools: true, format: "json", think: false });
+  const o = parseJsonLoose(d);
+  return o && o.convictions ? String(o.convictions) : null;
+}
+
+// Quick refresh: re-run ONLY the convictions pass over the existing profile (minutes, not an hour).
+async function runConvictionsOnly() {
+  try {
+    const profile = persona.getProfile();
+    if (!profile || !profile.facets) { distillState = { ...distillState, running: false, phase: "error", error: "No existing profile — run a full distill first." }; return; }
+    distillState.phase = "distilling convictions";
+    const conv = await distillConvictions();
+    if (!conv) { distillState = { ...distillState, running: false, phase: "error", error: "The convictions pass produced nothing usable — try again." }; return; }
+    const facets = { ...profile.facets, convictions: conv };
+    const systemBlock = renderFacets(facets) + (facets.summary ? "\n- In short: " + facets.summary : "");
+    persona.setProfile({ ...profile, facets, systemBlock, method: (profile.method || "map-reduce") + "+convictions" });
+    distillState = { ...distillState, running: false, phase: "done", finishedAt: new Date().toISOString(), error: null };
+  } catch (e) {
+    distillState = { ...distillState, running: false, phase: "error", error: String(e.message || e) };
+  }
+}
+
 // Kick a distillation in the background (idempotent while one is running). Returns immediately.
+// { convictionsOnly: true } refreshes just the beliefs facet on the existing profile (fast).
 function startDistill(opts) {
   if (distillState.running) return { running: true, phase: distillState.phase, batchesDone: distillState.batchesDone, batchesTotal: distillState.batchesTotal };
   const maxBatches = Math.max(1, Math.min(300, Number(opts && opts.maxBatches) || 60));
   const batchChars = Math.max(20000, Math.min(140000, Number(opts && opts.batchChars) || 90000));
   distillState = { running: true, phase: "starting", batchesDone: 0, batchesTotal: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null, capped: false, digestedChunks: 0, totalChunks: 0 };
-  runDistill({ batchChars, maxBatches });   // not awaited — background job
+  if (opts && opts.convictionsOnly) runConvictionsOnly();   // not awaited — background job
+  else runDistill({ batchChars, maxBatches });
   return { started: true };
 }
 
@@ -1004,6 +1058,70 @@ async function handlePersona(req, res, u) {
   return json(404, { error: "not found" });
 }
 
+// ---- durable chat jobs (PWA suspend/resume) ----
+// A phone switching apps suspends the PWA and kills the /chat SSE socket mid-answer. The turn must
+// survive that: every /chat run is a JOB — all SSE events are buffered in RAM as they're emitted,
+// GET /chat/attach?job=<id>&from=<n> replays events[n..] and live-tails until the job ends, and
+// POST /chat/stop is now the ONLY thing that aborts generation (a dead socket never does).
+// Ring-capped + TTL'd with lazy GC — this is a reconnect window, not persistence.
+const CHAT_JOBS = new Map();
+const JOB_CAP = 24, JOB_TTL_MS = 45 * 60 * 1000;
+function gcChatJobs() {
+  const now = Date.now();
+  for (const [id, j] of CHAT_JOBS) if (now - (j.endedAt || j.startedAt) > JOB_TTL_MS) CHAT_JOBS.delete(id);
+  while (CHAT_JOBS.size > JOB_CAP) {
+    let victim = null;
+    for (const j of CHAT_JOBS.values()) if (j.done && (!victim || j.startedAt < victim.startedAt)) victim = j;
+    if (!victim) for (const j of CHAT_JOBS.values()) { victim = j; break; }   // all still live: drop the oldest
+    CHAT_JOBS.delete(victim.id);
+  }
+}
+function createChatJob() {
+  gcChatJobs();
+  const job = { id: "job_" + randomUUID().slice(0, 12), chatId: "", startedAt: Date.now(), endedAt: 0,
+                events: [], listeners: [], done: false, stopped: false, stop: () => {} };
+  CHAT_JOBS.set(job.id, job);
+  return job;
+}
+function jobEmit(job, o) {
+  if (job.done) return;
+  job.events.push(o);
+  for (const l of [...job.listeners]) { try { l(o); } catch {} }
+}
+function finishJob(job) {
+  if (job.done) return;
+  job.done = true; job.endedAt = Date.now();
+  for (const l of [...job.listeners]) { try { l(null); } catch {} }   // null = end-of-stream
+  job.listeners.length = 0;
+}
+// POST /chat/stop {jobId} — the Stop button. Fires the turn's AbortController (in-flight tools +
+// model call); the /chat handler then appends its stopped tail to the buffer and seals the job.
+async function handleChatStop(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const b = await readJsonBody(req);
+  const job = b && CHAT_JOBS.get(String(b.jobId || ""));
+  if (!job) return json(404, { error: "unknown or expired job" });
+  if (job.done) return json(200, { ok: true, alreadyDone: true, stopped: job.stopped });
+  job.stopped = true;
+  try { job.stop(); } catch {}
+  console.log(`[dominion-ai] /chat/stop -> ${job.id}`);
+  return json(200, { ok: true });
+}
+// GET /chat/attach?job=<id>&from=<n> — SSE: replay events[n..] immediately, then live-tail new
+// events until the job ends. Unknown/expired job -> one {type:"gone"} event, then end.
+function handleChatAttach(req, res, u) {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
+  const write = (o) => { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
+  const job = CHAT_JOBS.get(String(u.searchParams.get("job") || ""));
+  if (!job) { write({ type: "gone" }); return res.end(); }
+  const from = Math.max(0, Math.floor(Number(u.searchParams.get("from")) || 0));
+  for (const ev of job.events.slice(from)) write(ev);   // catch-up replay (same tick as the subscribe — no gap)
+  if (job.done) return res.end();
+  const listener = (ev) => { if (ev === null) { try { res.end(); } catch {} } else write(ev); };
+  job.listeners.push(listener);
+  res.on("close", () => { const i = job.listeners.indexOf(listener); if (i >= 0) job.listeners.splice(i, 1); });
+}
+
 async function handleChat(req, res) {
   let body = "";
   req.on("data", (d) => (body += d));
@@ -1014,18 +1132,26 @@ async function handleChat(req, res) {
   if (!history.length) { res.writeHead(400, { "content-type": "application/json" }); return res.end('{"error":"no messages"}'); }
 
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
-  const sse = (o) => { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
+  // Durable turn: every SSE event is ALSO buffered in the job so a suspended phone can reattach
+  // (/chat/attach) and catch up mid-stream or after the fact. Generation runs to completion
+  // regardless of the client connection — writes to a dead res are harmless (try/catch below).
+  const job = createChatJob();
+  const sse = (o) => { jobEmit(job, o); try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
+  // `aborted` = EXPLICIT stop only (POST /chat/stop). A client disconnect no longer aborts the turn.
   let aborted = false;
-  // Interactive lane: hold it for the whole stream so background work defers; released exactly once
-  // on end OR abort (finish + close both fire — the guard keeps the count honest).
+  // Interactive lane: held until the JOB completes (not the socket) — background reviews/embeds
+  // keep deferring while a detached turn is still generating. Released exactly once via endStream.
   enterInteractive();
   let laneOpen = true;
   const releaseLane = () => { if (laneOpen) { laneOpen = false; leaveInteractive(); } };
-  res.on("finish", releaseLane);
-  // C5: one AbortController per request — client stop/disconnect aborts in-flight tools (HTTP tools
-  // destroy their request, the python sandbox SIGKILLs) and the in-flight model call.
+  // C5: one AbortController per request — now fired ONLY by explicit stop. It still reaches
+  // in-flight tools (HTTP tools destroy their request, the python sandbox SIGKILLs) + the model call.
   const ac = new AbortController();
-  res.on("close", () => { aborted = true; try { ac.abort(); } catch {} releaseLane(); });
+  job.stop = () => { if (job.done) return; aborted = true; try { ac.abort(); } catch {} };
+  // The single teardown for every exit path: heartbeat off, buffer sealed (drains attach
+  // listeners), lane released, socket closed if it's still alive.
+  const endStream = () => { workStop(); finishJob(job); releaseLane(); try { res.end(); } catch {} };
+  sse({ type: "job", id: job.id });
   // SSE working heartbeat: while a slow model call / tool round is in flight, tell the client every
   // ~8s that we're alive ({type:"working", phase, elapsed seconds}) — cleared before tokens stream.
   const chatT0 = Date.now();
@@ -1045,6 +1171,7 @@ async function handleChat(req, res) {
   const forced = (typeof input.model === "string" && input.model && input.model !== "auto") ? input.model : "";
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
+  job.chatId = chatId;
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
 
@@ -1067,7 +1194,7 @@ async function handleChat(req, res) {
     needs = { tools: c.needsTools, memory: c.needsMemory, retrieval: c.needsRetrieval, mentorReview: c.needsMentorReview };
   }
   const routeNeedsReview = needs.mentorReview;
-  if (aborted) { workStop(); return res.end(); }
+  if (aborted) { sse({ type: "stopped" }); return endStream(); }
   const md = MODES[mode];
   const model = forced || MODEL_FOR(tier);
   const provCap = PROVIDER_FOR_MODEL(model).maxContextTokens;
@@ -1098,7 +1225,11 @@ async function handleChat(req, res) {
   const reqCtx = { ...CTX, chatId, mode, model };
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
   working("reading context");   // retrieval (embed call + vec cache) can be slow on a cold box
-  const ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model });
+  // Degrade, don't die: this runs BEFORE the try below, and with disconnect decoupled from abort
+  // an uncaught throw here would leak the lane + leave the job unsealed. Empty context is honest.
+  let ctxInfo;
+  try { ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model }); }
+  catch { ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" }; }
   const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag) }];
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
@@ -1112,9 +1243,13 @@ async function handleChat(req, res) {
       sse({ type: "persona", hasProfile: personaInfo.hasProfile, exemplars: personaInfo.exemplars.length });
     } catch {}
   }
-  messages.push(...history);
-  // as_fred runs think:false; without a private channel the 30B plans out loud unless the
-  // answer-directly order is the LAST thing it reads (top-of-prompt placement proved too weak).
+  // Prefill is the latency bottleneck (~35 tok/s on this CPU): re-reading a whole long conversation
+  // every turn costs real minutes. Cap the replayed history — retrieval + episodic memory carry the
+  // older context. long_context keeps a much deeper window on purpose (it is the intentional mode).
+  const HISTORY_CAP = mode === "long_context" ? 48 : 16;
+  messages.push(...history.slice(-HISTORY_CAP));
+  // as_fred keeps thinking ON (think:false made the model plan out loud); the answer-directly
+  // order is the LAST thing it reads (top-of-prompt placement proved too weak).
   if (mode === "as_fred") messages.push({ role: "system", content: "Reply now with ONLY Fred's actual words. Do not analyze the request, do not restate the question, do not describe Fred's style or your approach — your first word is the first word of Fred's answer." });
   const contextTokens = estTokens(messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0));
   // D2 (audit item 12): the long-context re-check AFTER retrieval. Routing ran before context
@@ -1168,7 +1303,7 @@ async function handleChat(req, res) {
       workStop();   // model call finished (tokens or tool calls next) — heartbeat pauses here
       if (aborted) break;
       const msg = d && d.message;
-      if (!msg) { sse({ type: "error", error: "The model didn't respond (it may still be warming up — try again)." }); await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "no_response", rounds: roundsUsed }); return res.end(); }
+      if (!msg) { sse({ type: "error", error: "The model didn't respond (it may still be warming up — try again)." }); await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "no_response", rounds: roundsUsed }); return endStream(); }
 
       const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
       if (calls.length && round < MAX_ROUNDS - 1) {
@@ -1333,17 +1468,17 @@ async function handleChat(req, res) {
       // F1 (audit item 26): runIds travel with the message meta so "show tool log" can filter the
       // tool panel to exactly this answer's runs (older messages fall back to chatId).
       sse({ type: "done", meta: { mode, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: toolRunIds, outputTokens: norm.usage.outputTokens, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview }, warnings: norm.warnings } });
-      return res.end();
+      return endStream();
     }
-    workStop();   // aborted mid-tool-round / max_rounds — never leave the heartbeat ticking
-    if (aborted) { await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "interrupted", rounds: roundsUsed, tools: toolCount }); }
+    workStop();   // stopped mid-tool-round / max_rounds — never leave the heartbeat ticking
+    if (aborted) { sse({ type: "stopped" }); await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "interrupted", rounds: roundsUsed, tools: toolCount }); }
     else { sse({ type: "error", error: "I used too many tool steps without finishing — try rephrasing." }); await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "max_rounds", rounds: roundsUsed, tools: toolCount }); }
   } catch (e) {
     workStop();
     sse({ type: "error", error: "Server error: " + e.message });
     await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, status: "error", error: String(e.message).slice(0, 200) });
   }
-  res.end();
+  endStream();
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1352,6 +1487,8 @@ const server = http.createServer(async (req, res) => {
     const path = decodeURIComponent(u.pathname);
 
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
+    if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
+    if (path === "/chat/attach" && req.method === "GET") return handleChatAttach(req, res, u);
     if (path === "/memory" || path.startsWith("/memory/")) return handleMemory(req, res, u);
     if (path === "/toolruns" && req.method === "GET") return handleToolRuns(req, res);
     if (path === "/tool-confirm" && req.method === "POST") return handleToolConfirm(req, res);

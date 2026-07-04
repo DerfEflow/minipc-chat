@@ -74,7 +74,7 @@ function summarizeLeft(id) {
   fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
 }
 function newChat() { if (busy) return; const prev = curId; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); closeSidebar(); input.focus(); if (prev) summarizeLeft(prev); }
-function switchChat(id) { if (busy) return; const prev = curId; curId = id; save(); renderAll(); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); }
+function switchChat(id) { if (busy) return; const prev = curId; curId = id; save(); renderAll(); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); }
 function deleteChat(id) { chats = chats.filter((c) => c.id !== id); if (curId === id) curId = (chats[0] && chats[0].id) || null; if (!curId) { newChat(); return; } save(); renderAll(); }
 function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = prompt("Rename chat", c.title); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); } }
 
@@ -212,7 +212,22 @@ async function loadModels() {
 // ---------- agent loop over SSE ----------
 function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send"; }
 
-async function streamReply(c) {
+// ---- durable live turn (PWA suspend/resume) ----
+// The server buffers every /chat turn as a JOB ({type:"job"} is the first SSE event) and keeps
+// generating even if this socket dies (phone switched apps). We track the live turn here; when the
+// stream drops mid-answer we reattach via GET /chat/attach?job=<id>&from=<eventIndex> and catch up
+// — mid-stream into the same bubble, or straight to the finished answer. Stop is now a server call.
+const LS_LIVEJOB = "dominion.livejob";
+let liveJob = null;        // { jobId, eventIndex, chatId } — the in-flight turn
+let liveSession = null;    // UI + parser state for the in-flight turn (null after finalize/reload)
+let readerActive = false;  // an SSE reader (original or reattach) is currently consuming
+let reattachTimer = null, reattachTries = 0;
+const persistLiveJob = () => { try { if (liveJob) localStorage.setItem(LS_LIVEJOB, JSON.stringify(liveJob)); } catch {} };
+const clearLiveJob = () => { liveJob = null; try { localStorage.removeItem(LS_LIVEJOB); } catch {} };
+
+// One in-progress AI bubble + all per-turn parser state. Used by BOTH the original /chat stream
+// and any /chat/attach reattach — the same session keeps accumulating into the same bubble.
+function newSession(c) {
   document.querySelector(".err")?.remove();
   empty.style.display = "none";
   const row = document.createElement("div"); row.className = "turn";
@@ -220,11 +235,134 @@ async function streamReply(c) {
   const tools = document.createElement("div"); tools.className = "tools";
   const live = document.createElement("div"); live.className = "bubble think cursor"; live.textContent = "Dominion AI is working…";
   inner.append(tools, live); row.appendChild(inner); wrap.appendChild(row); scroll();
-  const warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "Dominion AI is working… (first reply can take ~20s)"; scroll(); } }, 6000);
+  const st = { c, inner, tools, live, chips: [], raw: "", ctxEl: null, ctxItems: null, doneMeta: null,
+               mentorCritique: null, done: false, stopped: false, gone: false, errMsg: "", warm: 0 };
+  st.warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "Dominion AI is working… (first reply can take ~20s)"; scroll(); } }, 6000);
+  return st;
+}
 
+// THE event dispatcher — every SSE event (original stream AND reattach replay/tail) goes through
+// here exactly once. Replayed token deltas re-concatenate into st.raw, so a from=0 replay after an
+// app reload reconstitutes the partial text.
+function processEvent(st, ev) {
+  const { inner, tools, live, chips } = st;
+  if (ev.type === "job") {
+    liveJob = { jobId: ev.id, eventIndex: 0, chatId: st.c.id }; persistLiveJob();
+  } else if (ev.type === "route") {
+    // Model/mode intentionally NOT shown — the in-progress bubble just says "Dominion AI is working".
+  } else if (ev.type === "context") {
+    // F4: keep the per-item detail the server sends (it was previously discarded).
+    st.ctxItems = { memory: ev.items || [], artifacts: ev.artifactItems || [], chats: ev.chatItems || [] };
+    if (!st.ctxEl) { st.ctxEl = document.createElement("div"); st.ctxEl.className = "ctx"; inner.insertBefore(st.ctxEl, tools); }
+    const bits = [];
+    if (ev.memory) bits.push("🧠 " + ev.memory + " memor" + (ev.memory === 1 ? "y" : "ies"));
+    if (ev.artifacts) bits.push("📄 " + ev.artifacts + " artifact" + (ev.artifacts === 1 ? "" : "s"));
+    if (ev.chats) bits.push("💬 " + ev.chats + " past chat" + (ev.chats === 1 ? "" : "s"));
+    st.ctxEl.textContent = bits.join(" · ");
+    scroll();
+  } else if (ev.type === "mentor_full") {
+    st.mentorCritique = ev.critique || null;
+  } else if (ev.type === "done") {
+    st.done = true; st.doneMeta = ev.meta || null;
+  } else if (ev.type === "stopped") {
+    st.stopped = true;   // explicit /chat/stop — finalize keeps the partial, marked interrupted
+  } else if (ev.type === "gone") {
+    st.gone = true;      // the job expired server-side — say so honestly, never a silent retry
+  } else if (ev.type === "artifact") {
+    const note = document.createElement("div"); note.className = "ctx"; note.style.cursor = "pointer";
+    note.textContent = "📄 saved artifact: " + ev.title + " (tap to open)";
+    note.onclick = () => { openArtifacts(); openArtifact(ev.id); };
+    inner.insertBefore(note, tools); scroll();
+  } else if (ev.type === "mentor") {
+    const note = document.createElement("div"); note.className = "ctx";
+    note.textContent = "🎓 mentor: " + ev.score + "/10" + (ev.priority && ev.priority !== "none" ? " · revise " + ev.priority : "") + (ev.findings ? " · " + ev.findings + " finding(s)" : "");
+    inner.insertBefore(note, tools); scroll();
+  } else if (ev.type === "tool") {
+    if (ev.status === "run") {
+      const chip = document.createElement("div"); chip.className = "tool" + (ev.gated ? " gated" : "");
+      chip.innerHTML = '<span class="sp"></span>'; const lab = document.createElement("span"); lab.textContent = (ev.gated ? "🔒 " : "🔧 ") + ev.name + "…"; chip.appendChild(lab);
+      if (ev.cls) { const cb = document.createElement("span"); cb.className = "cls"; cb.textContent = ev.cls.replace(/_/g, " "); chip.appendChild(cb); }
+      chip._runId = ev.runId; chip._name = ev.name; chip._lab = lab; tools.appendChild(chip); chips.push(chip); scroll();
+    } else {
+      const chip = [...chips].reverse().find((x) => (ev.runId ? x._runId === ev.runId : x._name === ev.name) && !x._done);
+      if (chip) {
+        chip._done = true; const sp = chip.querySelector(".sp"); if (sp) sp.remove();
+        if (ev.status === "done") { chip.classList.add("done"); chip._lab.textContent = "✓ " + ev.name; }
+        else if (ev.status === "failed") { chip.classList.add("failed"); chip._lab.textContent = "✗ " + ev.name; }
+        else if (ev.status === "blocked") { chip.classList.add("blocked"); chip._lab.textContent = "⛔ " + ev.name + " — blocked"; }
+        else if (ev.status === "cancelled") { chip.classList.add("cancelled"); chip._lab.textContent = "⃠ " + ev.name + " — skipped"; }
+      }
+    }
+  } else if (ev.type === "tool_confirm") {
+    const box = document.createElement("div"); box.className = "confirm";
+    const q = document.createElement("div"); q.className = "cq"; q.textContent = "Run " + ev.name + " (" + String(ev.cls || "").replace(/_/g, " ") + ")?" + (ev.preview ? "  " + ev.preview : "");
+    const btns = document.createElement("div"); btns.className = "cbtns";
+    const yes = document.createElement("button"); yes.className = "yes"; yes.textContent = "Approve";
+    const no = document.createElement("button"); no.textContent = "Deny";
+    const decide = (approved) => { yes.disabled = no.disabled = true; box.remove(); fetch("/tool-confirm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runId: ev.runId, approved }) }).catch(() => {}); };
+    yes.onclick = () => decide(true); no.onclick = () => decide(false);
+    btns.append(yes, no); box.append(q, btns); tools.appendChild(box); scroll();
+  } else if (ev.type === "working") {
+    // Server heartbeat while the model grinds — keeps the bubble alive instead of dead air.
+    // Never names models; phases: reading context / thinking / writing / running tools.
+    if (!stripThink(st.raw)) { clearTimeout(st.warm); live.textContent = "Dominion AI is working — " + (ev.phase || "thinking") + "… " + (ev.elapsed != null ? ev.elapsed + "s" : ""); scroll(); }
+  } else if (ev.type === "token") {
+    st.raw += ev.delta || ""; const shown = stripThink(st.raw); live.classList.toggle("think", !shown); live.textContent = shown || "Dominion AI is working…"; scroll();
+  } else if (ev.type === "error") {
+    st.errMsg = "Chat failed: " + (ev.error || "server error") + " — tap send to retry.";
+  }
+}
+
+// Shared SSE reader: parses the stream, dispatches each event once, and keeps liveJob.eventIndex
+// exact (it's the resume cursor for /chat/attach?from=). localStorage writes are throttled — the
+// in-memory index is what mid-session reattaches use; a reload always replays from 0.
+async function readSse(res, st) {
+  const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split("\n"); buf = lines.pop() || "";
+    for (const line of lines) {
+      const s = line.trim(); if (!s.startsWith("data:")) continue;
+      let ev; try { ev = JSON.parse(s.slice(5).trim()); } catch { continue; }
+      processEvent(st, ev);
+      if (liveJob && liveJob.jobId) {
+        liveJob.eventIndex++;
+        if (ev.type !== "token" || liveJob.eventIndex % 25 === 0) persistLiveJob();
+      }
+    }
+  }
+}
+
+// The single end-of-turn: persist the message (full or honestly-interrupted partial), clear the
+// live-job cursor, restore the composer, and show any error/critique. Used by every path.
+function finalizeSession(st) {
+  clearTimeout(st.warm);
+  if (reattachTimer) { clearTimeout(reattachTimer); reattachTimer = null; }
+  reattachTries = 0;
+  const c = st.c, final = stripThink(st.raw);
+  if (st.done) {
+    const msg = { role: "assistant", content: final || "(no response)" };
+    if (st.doneMeta) { msg.meta = st.doneMeta; if (st.ctxItems) msg.meta.contextItems = st.ctxItems; if (st.doneMeta.mode) c.lastMode = st.doneMeta.mode; }
+    c.messages.push(msg); c.updatedAt = Date.now(); save();
+  } else if (final) {
+    c.messages.push({ role: "assistant", content: final, meta: { interrupted: true } }); c.updatedAt = Date.now(); save();
+  }
+  clearLiveJob(); liveSession = null;
+  setBusy(false); aborter = null; renderAll();
+  if (st.errMsg) showErr(st.errMsg);
+  if (st.mentorCritique) {   // Mentor mode: show the critique card under the fresh answer
+    const card = document.createElement("div"); card.className = "critique";
+    renderCritiqueCard(card, st.mentorCritique, (c.messages.filter((m) => m.role === "user").slice(-1)[0] || {}).content || "", final);
+    wrap.appendChild(card); scroll();
+  }
+}
+
+async function streamReply(c) {
+  const st = liveSession = newSession(c);
   setBusy(true); aborter = new AbortController();
-  let raw = ""; let errMsg = ""; let routeEl = null; let ctxEl = null; const chips = [];
-  let doneMeta = null, mentorCritique = null, ctxItems = null;
+  let netErr = "";
+  readerActive = true;
   try {
     const res = await fetch("/chat", {
       method: "POST", headers: { "content-type": "application/json" }, signal: aborter.signal,
@@ -239,93 +377,73 @@ async function streamReply(c) {
       }),
     });
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
-    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
-    for (;;) {
-      const { value, done } = await reader.read(); if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split("\n"); buf = lines.pop() || "";
-      for (const line of lines) {
-        const s = line.trim(); if (!s.startsWith("data:")) continue;
-        let ev; try { ev = JSON.parse(s.slice(5).trim()); } catch { continue; }
-        if (ev.type === "route") {
-          // Model/mode intentionally NOT shown — the in-progress bubble just says "Dominion AI is working".
-        } else if (ev.type === "context") {
-          // F4: keep the per-item detail the server sends (it was previously discarded).
-          ctxItems = { memory: ev.items || [], artifacts: ev.artifactItems || [], chats: ev.chatItems || [] };
-          if (!ctxEl) { ctxEl = document.createElement("div"); ctxEl.className = "ctx"; inner.insertBefore(ctxEl, tools); }
-          const bits = [];
-          if (ev.memory) bits.push("🧠 " + ev.memory + " memor" + (ev.memory === 1 ? "y" : "ies"));
-          if (ev.artifacts) bits.push("📄 " + ev.artifacts + " artifact" + (ev.artifacts === 1 ? "" : "s"));
-          if (ev.chats) bits.push("💬 " + ev.chats + " past chat" + (ev.chats === 1 ? "" : "s"));
-          ctxEl.textContent = bits.join(" · ");
-          scroll();
-        } else if (ev.type === "mentor_full") {
-          mentorCritique = ev.critique || null;
-        } else if (ev.type === "done") {
-          doneMeta = ev.meta || null;
-        } else if (ev.type === "artifact") {
-          const note = document.createElement("div"); note.className = "ctx"; note.style.cursor = "pointer";
-          note.textContent = "📄 saved artifact: " + ev.title + " (tap to open)";
-          note.onclick = () => { openArtifacts(); openArtifact(ev.id); };
-          inner.insertBefore(note, tools); scroll();
-        } else if (ev.type === "mentor") {
-          const note = document.createElement("div"); note.className = "ctx";
-          note.textContent = "🎓 mentor: " + ev.score + "/10" + (ev.priority && ev.priority !== "none" ? " · revise " + ev.priority : "") + (ev.findings ? " · " + ev.findings + " finding(s)" : "");
-          inner.insertBefore(note, tools); scroll();
-        } else if (ev.type === "tool") {
-          if (ev.status === "run") {
-            const chip = document.createElement("div"); chip.className = "tool" + (ev.gated ? " gated" : "");
-            chip.innerHTML = '<span class="sp"></span>'; const lab = document.createElement("span"); lab.textContent = (ev.gated ? "🔒 " : "🔧 ") + ev.name + "…"; chip.appendChild(lab);
-            if (ev.cls) { const cb = document.createElement("span"); cb.className = "cls"; cb.textContent = ev.cls.replace(/_/g, " "); chip.appendChild(cb); }
-            chip._runId = ev.runId; chip._name = ev.name; chip._lab = lab; tools.appendChild(chip); chips.push(chip); scroll();
-          } else {
-            const chip = [...chips].reverse().find((x) => (ev.runId ? x._runId === ev.runId : x._name === ev.name) && !x._done);
-            if (chip) {
-              chip._done = true; const sp = chip.querySelector(".sp"); if (sp) sp.remove();
-              if (ev.status === "done") { chip.classList.add("done"); chip._lab.textContent = "✓ " + ev.name; }
-              else if (ev.status === "failed") { chip.classList.add("failed"); chip._lab.textContent = "✗ " + ev.name; }
-              else if (ev.status === "blocked") { chip.classList.add("blocked"); chip._lab.textContent = "⛔ " + ev.name + " — blocked"; }
-              else if (ev.status === "cancelled") { chip.classList.add("cancelled"); chip._lab.textContent = "⃠ " + ev.name + " — skipped"; }
-            }
-          }
-        } else if (ev.type === "tool_confirm") {
-          const box = document.createElement("div"); box.className = "confirm";
-          const q = document.createElement("div"); q.className = "cq"; q.textContent = "Run " + ev.name + " (" + String(ev.cls || "").replace(/_/g, " ") + ")?" + (ev.preview ? "  " + ev.preview : "");
-          const btns = document.createElement("div"); btns.className = "cbtns";
-          const yes = document.createElement("button"); yes.className = "yes"; yes.textContent = "Approve";
-          const no = document.createElement("button"); no.textContent = "Deny";
-          const decide = (approved) => { yes.disabled = no.disabled = true; box.remove(); fetch("/tool-confirm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runId: ev.runId, approved }) }).catch(() => {}); };
-          yes.onclick = () => decide(true); no.onclick = () => decide(false);
-          btns.append(yes, no); box.append(q, btns); tools.appendChild(box); scroll();
-        } else if (ev.type === "working") {
-          // Server heartbeat while the model grinds — keeps the bubble alive instead of dead air.
-          // Never names models; phases: reading context / thinking / writing / running tools.
-          if (!stripThink(raw)) { clearTimeout(warm); live.textContent = "Dominion AI is working — " + (ev.phase || "thinking") + "… " + (ev.elapsed != null ? ev.elapsed + "s" : ""); scroll(); }
-        } else if (ev.type === "token") { raw += ev.delta || ""; const shown = stripThink(raw); live.classList.toggle("think", !shown); live.textContent = shown || "Dominion AI is working…"; scroll(); }
-        else if (ev.type === "error") { throw new Error(ev.error || "server error"); }
-      }
-    }
-    clearTimeout(warm);
-    const final = stripThink(raw) || "(no response)";
-    const msg = { role: "assistant", content: final };
-    if (doneMeta) { msg.meta = doneMeta; if (ctxItems) msg.meta.contextItems = ctxItems; if (doneMeta.mode) c.lastMode = doneMeta.mode; }
-    c.messages.push(msg); c.updatedAt = Date.now(); save();
+    await readSse(res, st);
   } catch (e) {
-    clearTimeout(warm);
-    if (e.name === "AbortError") { const partial = stripThink(raw); if (partial) { c.messages.push({ role: "assistant", content: partial, meta: { interrupted: true } }); save(); } }
-    else { errMsg = "Chat failed: " + (e.message || "network error") + " — tap send to retry."; }
-  } finally {
-    setBusy(false); aborter = null; renderAll(); if (errMsg) showErr(errMsg);
-    if (mentorCritique) {   // Mentor mode: show the critique card under the fresh answer
-      const card = document.createElement("div"); card.className = "critique";
-      renderCritiqueCard(card, mentorCritique, (c.messages.filter((m) => m.role === "user").slice(-1)[0] || {}).content || "", stripThink(raw));
-      wrap.appendChild(card); scroll();
-    }
+    if (e.name === "AbortError") st.stopped = true;   // legacy local stop (no jobId had arrived yet)
+    else netErr = e.message || "network error";
+  } finally { readerActive = false; }
+  if (!st.done && !st.stopped && !st.gone && !st.errMsg && liveJob && liveJob.jobId) {
+    // The stream died mid-turn but the job survives server-side (phone suspended, wifi blip):
+    // do NOT render the retry/error state — reattach and catch up (backoff + on next visible).
+    scheduleReattach();
+    return;
   }
+  if (!st.done && !st.stopped && !st.gone && !st.errMsg) st.errMsg = "Chat failed: " + (netErr || "connection lost") + " — tap send to retry.";
+  finalizeSession(st);
+}
+
+// ---- reattach: resume the live turn after a suspend/reload ----
+const REATTACH_DELAYS = [1000, 3000, 10000];
+function scheduleReattach(immediate) {
+  if (!liveJob || !liveJob.jobId) return;
+  clearTimeout(reattachTimer);
+  reattachTimer = setTimeout(attemptReattach, immediate ? 0 : REATTACH_DELAYS[Math.min(reattachTries, REATTACH_DELAYS.length - 1)]);
+}
+async function attemptReattach() {
+  if (readerActive || !liveJob || !liveJob.jobId) return;
+  if (liveJob.chatId !== curId) return;   // reattach targets the chat on screen; boot/visible re-checks
+  let st = liveSession;
+  if (!st) {
+    // The app was reloaded: rebuild the streaming bubble and replay from 0 — the partial text is
+    // reconstituted from the replayed token deltas.
+    const c = cur(); if (!c) return;
+    st = liveSession = newSession(c);
+    liveJob.eventIndex = 0;
+  }
+  setBusy(true);
+  reattachTries++;
+  readerActive = true;
+  try {
+    const r = await fetch("/chat/attach?job=" + encodeURIComponent(liveJob.jobId) + "&from=" + (liveJob.eventIndex || 0), { cache: "no-store" });
+    if (!r.ok || !r.body) throw new Error("HTTP " + r.status);
+    await readSse(r, st);
+  } catch {} finally { readerActive = false; }
+  if (st.done || st.stopped) return finalizeSession(st);
+  if (st.gone) { st.errMsg = "That answer expired on the server — ask again."; return finalizeSession(st); }
+  if (st.errMsg) return finalizeSession(st);
+  // Died again mid-tail — keep trying (1s/3s/10s… and on next visible); give up only after a while.
+  if (reattachTries >= 8) { st.errMsg = "Lost the server mid-answer and couldn't reattach — tap send to retry."; return finalizeSession(st); }
+  scheduleReattach();
+}
+// Called on boot, visibilitychange→visible, pageshow, and chat switch: if a live job exists for the
+// chat on screen and no reader is consuming it, reattach immediately.
+function maybeReattach() {
+  if (readerActive) return;
+  if (!liveJob) { try { const j = JSON.parse(localStorage.getItem(LS_LIVEJOB) || "null"); if (j && j.jobId) liveJob = j; } catch {} }
+  if (!liveJob || liveJob.chatId !== curId) return;
+  scheduleReattach(true);
 }
 
 function send() {
-  if (busy) { if (aborter) aborter.abort(); return; }
+  if (busy) {
+    // Stop = a server-side call now (generation no longer dies with the socket). Falls back to the
+    // old local abort if the job id hasn't arrived yet or the POST can't get through.
+    if (liveJob && liveJob.jobId) {
+      fetch("/chat/stop", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jobId: liveJob.jobId }) })
+        .catch(() => { if (aborter) aborter.abort(); });
+    } else if (aborter) aborter.abort();
+    return;
+  }
   const text = input.value.trim(); if (!text) return;
   const c = cur(); if (!c) return;
   input.value = ""; autosize();
@@ -912,6 +1030,10 @@ iaddbtn.addEventListener("click", addImprove);
 document.querySelectorAll(".itab").forEach((el) => el.addEventListener("click", () => setITab(el.dataset.tab)));
 personaSel.addEventListener("change", () => { personaCustom.hidden = personaSel.value !== "custom"; });
 tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.value; });
+// Durable-turn resume: coming back to the app (or reloading it) reattaches to an in-flight answer.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) maybeReattach(); });
+window.addEventListener("pageshow", () => maybeReattach());
 
 load(); renderAll(); loadModels(); autosize();
+maybeReattach();   // an answer may still be generating server-side from before this (re)load
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
