@@ -50,11 +50,15 @@ function parseEnvFile(p) {
 const localEnv = parseEnvFile(join(HERE, ".env"));
 const bridgeEnv = parseEnvFile("C:\\command-deck\\bridge\\.env");
 const cfgGet = (k, d = "") => process.env[k] ?? localEnv[k] ?? bridgeEnv[k] ?? d;
+// The bridge poller's localhost poke listener (see command-deck bridge/poller.mjs) — must match
+// its BRIDGE_POKE_PORT. Used by /bridge/poke (deck app → tailnet → here) and by the forge tools.
+const BRIDGE_POKE_PORT = Number(cfgGet("BRIDGE_POKE_PORT", "8188")) || 8188;
 const CTX = {
   baseUrl: String(cfgGet("COMMAND_DECK_URL", "https://command-deck-sigma.vercel.app")).replace(/\/$/, ""),
   syncKey: cfgGet("SYNC_SECRET", ""),
   runPassword: cfgGet("RUN_PASSWORD", ""),
   sandboxDir: cfgGet("SANDBOX_DIR", "C:\\minipc-chat\\sandbox"),
+  bridgePokePort: Number(cfgGet("BRIDGE_POKE_PORT", "8188")) || 8188,
 };
 
 // Embeddings for hybrid retrieval (Phase 2 "vector search"). Uses Ollama /api/embed with a small
@@ -1487,6 +1491,19 @@ const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, "http://localhost");
     const path = decodeURIComponent(u.pathname);
+
+    // Instant-wake for the Command Deck bridge: the deck app (in Fred's browser, on the tailnet)
+    // POSTs here after a change, and we forward to the poller's localhost poke listener so it
+    // polls NOW instead of on its slow idle cycle. No body, no auth — a poke only triggers a poll.
+    if (path === "/bridge/poke" && req.method === "POST") {
+      req.resume();
+      const fwd = http.request({ hostname: "127.0.0.1", port: BRIDGE_POKE_PORT, path: "/poke", method: "POST", timeout: 2000 }, (r2) => r2.resume());
+      fwd.on("error", () => {});
+      fwd.on("timeout", () => fwd.destroy());
+      fwd.end();
+      res.writeHead(204);
+      return res.end();
+    }
 
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);

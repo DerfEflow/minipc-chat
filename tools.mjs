@@ -47,6 +47,18 @@ function request(method, url, headers = {}, body = null, signal = null) {
 }
 const parse = (t) => { try { return JSON.parse(t); } catch { return null; } };
 
+// ---- bridge poke (instant wake) ----
+// The bridge poller idles on a slow poll (transfer allowance!) and exposes a localhost poke
+// listener; after we queue work for it in the cloud, poke it so it acts now. Fire-and-forget.
+function pokeBridge(ctx) {
+  try {
+    const r = http.request({ hostname: "127.0.0.1", port: ctx.bridgePokePort || 8188, path: "/poke", method: "POST", timeout: 2000 }, (resp) => resp.resume());
+    r.on("error", () => {});
+    r.on("timeout", () => r.destroy());
+    r.end();
+  } catch {}
+}
+
 // ---- Command Deck (cloud /api/agent) ----
 async function agent(ctx, action, extra = {}, signal = null) {
   if (!ctx.syncKey) return { error: "no SYNC_SECRET configured on the server" };
@@ -62,6 +74,7 @@ async function forgeRead(ctx, op, path = "", query = "", signal = null) {
   if (r.aborted) return ABORTED;
   const rd = (parse(r.text) || {}).read;
   if (!rd) return "Couldn't queue the read: " + ((parse(r.text) || {}).error || `HTTP ${r.status}`);
+  pokeBridge(ctx); // wake the poller so the read is fulfilled within seconds, not on its idle cycle
   const deadline = Date.now() + 40000;
   while (Date.now() < deadline) {
     if (signal && signal.aborted) return ABORTED;   // C5: stop polling the bridge on client stop
@@ -313,7 +326,7 @@ export async function runTool(name, args, ctx, signal = null) {
         const r = await request("POST", ctx.baseUrl + "/api/jobs", { "x-sync-key": ctx.syncKey }, { repo: args.repo, title: args.title, instructions: args.instructions, pin: ctx.runPassword }, signal);
         if (r.aborted) return ABORTED;
         const d = parse(r.text) || {};
-        if (r.status === 200 && d.job) return `Queued work order "${d.job.title}" (id ${d.job.id.slice(0, 8)}). It runs on the mini-PC, snapshots first, and is rollback-able from the Forge.`;
+        if (r.status === 200 && d.job) { pokeBridge(ctx); return `Queued work order "${d.job.title}" (id ${d.job.id.slice(0, 8)}). It runs on the mini-PC, snapshots first, and is rollback-able from the Forge.`; }
         if (d.code === "bad_pin" || d.code === "pin_required") return "The run-password was wrong — ask Fred to check it.";
         return "Couldn't queue the work order: " + (d.error || `HTTP ${r.status}`);
       }
