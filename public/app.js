@@ -372,6 +372,12 @@ function finalizeSession(st) {
     c.messages.push(msg); c.updatedAt = Date.now(); save();
   } else if (final) {
     c.messages.push({ role: "assistant", content: final, meta: { interrupted: true } }); c.updatedAt = Date.now(); save();
+  } else if (st.errMsg) {
+    // Nothing ever came back (e.g. "Failed to fetch") — the composer was already cleared when the
+    // turn was sent, so "tap send to retry" would otherwise hit an empty box and do nothing. Pull
+    // the unanswered question back out of history and into the composer so retry actually works.
+    const last = c.messages[c.messages.length - 1];
+    if (last && last.role === "user") { c.messages.pop(); input.value = last.content; autosize(); }
   }
   clearLiveJob(); liveSession = null;
   setBusy(false); aborter = null; renderAll();
@@ -1065,3 +1071,26 @@ window.addEventListener("pageshow", () => maybeReattach());
 load(); renderAll(); loadModels(); autosize();
 maybeReattach();   // an answer may still be generating server-side from before this (re)load
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+
+// ---- update watcher ----
+// This tab can stay open for days; the service worker only refreshes cache on a NEW page load,
+// so a long-lived tab silently keeps running whatever JS it loaded first — any later deploy (or
+// crash-restart) never reaches it. Poll the server's build id and reload once it changes. Never
+// yank the page out from under an in-flight answer: defer until the turn finishes.
+let lastBuild = null, pendingReload = false;
+async function doReload() {
+  try { const keys = await caches.keys(); await Promise.all(keys.map((k) => caches.delete(k))); } catch {}
+  location.reload();
+}
+async function checkVersion() {
+  try {
+    const r = await fetch("/api/version", { cache: "no-store" });
+    if (!r.ok) return;
+    const { build } = await r.json();
+    if (lastBuild === null) { lastBuild = build; return; }
+    if (build !== lastBuild) { if (busy) pendingReload = true; else doReload(); }
+  } catch {}
+}
+setInterval(() => { if (pendingReload && !busy) doReload(); else checkVersion(); }, 90000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVersion(); });
+checkVersion();

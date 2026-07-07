@@ -36,6 +36,9 @@ const PORT = Number(process.env.PORT || 8088);
 const OLLAMA = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
 const ou = new URL(OLLAMA);
 const PUBLIC = join(HERE, "public");
+// Bumped every process start (deploy or crash-restart) so the client can detect it's running
+// stale code from a long-lived tab and reload — see /api/version below.
+const BUILD_ID = String(Date.now());
 
 // ---- config (env -> local .env -> the bridge's shared .env) ----
 function parseEnvFile(p) {
@@ -1652,6 +1655,11 @@ const server = http.createServer(async (req, res) => {
       fwd.end();
       res.writeHead(204);
       return res.end();
+    }
+
+    if (path === "/api/version" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({ build: BUILD_ID }));
     }
 
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
