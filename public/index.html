@@ -59,6 +59,11 @@
   .ghost{background:transparent;border:1px solid var(--line);border-radius:9px;padding:6px 10px;color:var(--muted);cursor:pointer}
   .icon{background:transparent;border:none;color:var(--sand);font-size:22px;line-height:1;padding:4px 8px;cursor:pointer;border-radius:8px}
   .icon:active{background:rgba(255,255,255,.08)}
+  /* "via OpenRouter" spend indicator — a small copper pill; visible only when a cloud model is picked */
+  #cloudbadge{font-size:11px;font-weight:600;letter-spacing:.2px;color:#fff1e0;white-space:nowrap;
+    padding:3px 9px;border-radius:999px;border:1px solid var(--line);
+    background:linear-gradient(145deg,rgba(200,118,47,.85),rgba(122,63,18,.85));
+    box-shadow:0 0 10px -2px rgba(200,118,47,.7), inset 0 1px 0 rgba(255,255,255,.18);}
 
   /* ---- sidebar ---- */
   #overlay{position:fixed;inset:0;background:rgba(0,0,12,.55);backdrop-filter:blur(2px);z-index:8;opacity:0;pointer-events:none;transition:opacity .18s}
@@ -274,6 +279,7 @@
       <option value="mentor">Mentor</option>
       <option value="as_fred">As Fred</option>
     </select>
+    <span id="cloudbadge" title="A paid cloud model is selected — answers route through OpenRouter and bill your key. Change it in Settings." hidden>&#9729; via OpenRouter</span>
     <button id="artifacts" class="icon" title="Artifacts" aria-label="Artifacts">&#128196;</button>
     <button id="improve" class="icon" title="Mentor &amp; improvement" aria-label="Mentor and improvement">&#127891;</button>
     <button id="persona" class="icon" title="Persona Forge (become an expert in me)" aria-label="Persona Forge">&#129516;</button>
@@ -301,8 +307,22 @@
   <div id="smodal" class="modal" hidden>
     <div class="sheet">
       <div class="sheet-h">Settings <button id="sclose" class="icon" aria-label="Close">&times;</button></div>
-      <label class="frow">Model (Auto = the router picks 8B vs 30B per request)
-        <select id="model"><option value="auto">Auto (router picks)</option></select>
+      <label class="frow">Model &mdash; Local Qwen is free &amp; private; cloud models bill your OpenRouter key
+        <select id="model" aria-label="Model">
+          <optgroup label="Local (free &middot; private)" id="model-local-group">
+            <option value="local">Local Qwen (free)</option>
+          </optgroup>
+          <optgroup label="Cloud &middot; via OpenRouter (paid)">
+            <option value="anthropic/claude-haiku-4.5">Claude Haiku 4.5</option>
+            <option value="openai/gpt-4o">GPT-4o</option>
+            <option value="google/gemini-2.5-flash">Gemini 2.5 Flash</option>
+            <option value="meta-llama/llama-4-maverick">Llama 4 Maverick</option>
+            <option value="meta-llama/llama-3.1-70b-instruct">Llama 3.1 70B</option>
+            <option value="z-ai/glm-5.2">GLM 5.2</option>
+            <option value="moonshotai/kimi-k2.6">Kimi K2.6</option>
+            <option value="qwen/qwen3-235b-a22b-2507">Qwen3 235B</option>
+          </optgroup>
+        </select>
       </label>
       <label class="frow">Persona / style
         <select id="persona-sel">
@@ -419,6 +439,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=26"></script>
+  <script src="/app.js?v=27"></script>
 </body>
 </html>

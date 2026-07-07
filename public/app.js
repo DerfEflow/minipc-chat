@@ -3,7 +3,7 @@
 // drives the Phase-1 router (Auto = the server's light model classifies + picks 8B vs 30B).
 const $ = (id) => document.getElementById(id);
 const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"),
-      modelSel = $("model"), modeSel = $("mode"), empty = $("empty"),
+      modelSel = $("model"), modeSel = $("mode"), cloudBadge = $("cloudbadge"), empty = $("empty"),
       sidebar = $("sidebar"), overlay = $("overlay"), menuBtn = $("menu"), newBtn = $("newchat"), chatlist = $("chatlist"),
       settingsBtn = $("settings"), smodal = $("smodal"), sclose = $("sclose"), ssave = $("ssave"),
       personaSel = $("persona-sel"), personaCustom = $("persona-custom"), tempInput = $("temp"), tempVal = $("temp-val"),
@@ -63,7 +63,7 @@ function load() {
 const cur = () => chats.find((c) => c.id === curId);
 const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); return (u ? u.content : "New chat").replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
 const resolvePersona = () => settings.persona === "custom" ? (settings.personaCustom || "") : (PRESETS[settings.persona] || "");
-const forcedModel = () => { const v = modelSel ? modelSel.value : "auto"; return v && v !== "auto" ? v : ""; };
+const forcedModel = () => { const v = modelSel ? modelSel.value : "local"; return (v && v !== "auto" && v !== "local") ? v : ""; };
 
 // ---------- chats ----------
 // Leaving a substantial chat triggers a server-side episodic summary (fire-and-forget; the server
@@ -82,8 +82,19 @@ function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) retu
 const openSidebar = () => { sidebar.classList.add("open"); overlay.classList.add("show"); };
 const closeSidebar = () => { sidebar.classList.remove("open"); overlay.classList.remove("show"); };
 const MODE_LABEL = { fast: "Fast", normal: "Normal", deep_think: "Deep", long_context: "Long", draft: "Draft", tool: "Tool", mentor: "Mentor" };
-// Friendly tier labels — raw model names never surface anywhere in the UI (Fred's lock).
-const MODEL_TIER_LABEL = { "qwen3:8b": "Fast", "qwen3:30b-a3b": "Deep" };
+// Friendly tier labels — raw LOCAL model names never surface anywhere in the UI (Fred's lock).
+// Cloud (OpenRouter) models DO surface by name on purpose: Fred chose one and is spending on it.
+const MODEL_TIER_LABEL = {
+  "qwen3:8b": "Fast", "qwen3:30b-a3b": "Deep", local: "Local Qwen",
+  "anthropic/claude-haiku-4.5": "Claude Haiku 4.5", "openai/gpt-4o": "GPT-4o",
+  "google/gemini-2.5-flash": "Gemini 2.5 Flash", "meta-llama/llama-4-maverick": "Llama 4 Maverick",
+  "meta-llama/llama-3.1-70b-instruct": "Llama 3.1 70B", "z-ai/glm-5.2": "GLM 5.2",
+  "moonshotai/kimi-k2.6": "Kimi K2.6", "qwen/qwen3-235b-a22b-2507": "Qwen3 235B",
+};
+// A model id is "cloud" when it carries a provider prefix (contains "/"); local ids never do.
+const isCloudModel = (v) => typeof v === "string" && v.includes("/");
+// Toggle the header "via OpenRouter" spend indicator to match the current selection.
+function updateCloudBadge() { if (cloudBadge) cloudBadge.hidden = !isCloudModel(modelSel ? modelSel.value : ""); }
 const relTime = (ts) => { const d = Date.now() - (ts || 0); const m = Math.round(d / 60000); if (m < 60) return m + "m"; const h = Math.round(m / 60); if (h < 24) return h + "h"; return Math.round(h / 24) + "d"; };
 function renderSidebar() {
   chatlist.innerHTML = "";
@@ -197,16 +208,30 @@ function autosize() { input.style.height = "auto"; input.style.height = Math.min
 function showErr(t) { document.querySelector(".err")?.remove(); const e = document.createElement("div"); e.className = "err"; e.textContent = t; wrap.appendChild(e); scroll(); }
 
 // ---------- models (advanced override; the router picks by default) ----------
+// The cloud (OpenRouter) options are STATIC in index.html and must survive this refresh — we only
+// rebuild the LOCAL optgroup from Ollama's live list, leaving "Local Qwen (free)" as the default
+// (server auto-routes 8B vs 30B) plus each local model as an advanced tier override (Fred's lock:
+// only friendly tier labels, never raw names). The saved selection can be a cloud id not in Ollama.
 async function loadModels() {
   if (!modelSel) return;
+  const saved = localStorage.getItem(LS_MODEL);
+  const localGroup = document.getElementById("model-local-group");
   try {
-    const r = await fetch("/ollama/v1/models", { cache: "no-store" }); if (!r.ok) return;
-    const ids = ((await r.json()).data || []).map((m) => m.id || m.name).filter(Boolean);
-    modelSel.innerHTML = "<option value='auto'>Auto (recommended)</option>";
-    for (const id of ids) { const o = document.createElement("option"); o.value = id; o.textContent = MODEL_TIER_LABEL[id] || id.replace(/:.*$/, ""); modelSel.appendChild(o); }
-    const saved = localStorage.getItem(LS_MODEL);
-    modelSel.value = (saved && (saved === "auto" || ids.includes(saved))) ? saved : "auto";
+    const r = await fetch("/ollama/v1/models", { cache: "no-store" });
+    if (r.ok && localGroup) {
+      const ids = ((await r.json()).data || []).map((m) => m.id || m.name).filter(Boolean);
+      localGroup.innerHTML = "<option value='local'>Local Qwen (free)</option>";
+      for (const id of ids) {
+        const o = document.createElement("option");
+        o.value = id; o.textContent = (MODEL_TIER_LABEL[id] || id.replace(/:.*$/, "")) + " (local)";
+        localGroup.appendChild(o);
+      }
+    }
   } catch {}
+  // Restore the saved pick if it's still a valid option (cloud ids are always present); else Local.
+  const valid = saved && Array.from(modelSel.options).some((o) => o.value === saved);
+  modelSel.value = (saved === "auto") ? "local" : (valid ? saved : "local");
+  updateCloudBadge();
 }
 
 // ---------- agent loop over SSE ----------
@@ -484,6 +509,7 @@ function saveSettingsUI() {
   if (confirmToolsBox) settings.confirmTools = confirmToolsBox.checked;
   if (privacySel) settings.privacy = privacySel.value;
   if (modelSel) try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {}
+  updateCloudBadge();
   saveSettings(); closeSettings();
 }
 
@@ -998,6 +1024,8 @@ overlay.addEventListener("click", closeSidebar);
 newBtn.addEventListener("click", newChat);
 if (chatSearch) chatSearch.addEventListener("input", () => { chatQuery = chatSearch.value || ""; renderSidebar(); });
 if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODE, modeSel.value); } catch {} });
+// Model pick persists immediately (matches Mode) and flips the "via OpenRouter" spend indicator live.
+if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateCloudBadge(); });
 settingsBtn.addEventListener("click", openSettings);
 sclose.addEventListener("click", closeSettings);
 ssave.addEventListener("click", saveSettingsUI);
