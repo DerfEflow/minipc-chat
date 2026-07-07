@@ -14,6 +14,7 @@
  *   COMMAND_DECK_URL the live Command Deck (default the prod alias).
  */
 import http from "node:http";
+import https from "node:https";
 import { readFile, appendFile, mkdir } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import { join, normalize, extname } from "node:path";
@@ -221,6 +222,103 @@ const PROVIDERS = {
 };
 const MODEL_FOR = (tier) => (PROVIDERS[tier] || PROVIDERS.light).modelName;
 const PROVIDER_FOR_MODEL = (m) => Object.values(PROVIDERS).find((p) => p.modelName === m) || PROVIDERS.main;
+
+// ---- OpenRouter (optional premium cloud models) ----------------------------------------------
+// The local Qwen path is the free default and is NEVER touched by this. When the user explicitly
+// picks a cloud model in the UI, /chat routes that ONE turn to OpenRouter's OpenAI-compatible
+// endpoint instead of Ollama. Everything upstream (persona, memory/retrieval, context assembly,
+// the durable-job SSE) is unchanged — only the final model call swaps providers. Cloud models get
+// NO local tools (they can't reach this box's hands) and NO think-tag stripping is needed.
+// The key is read at runtime from env / .env / the shared bridge .env — never inlined or logged.
+const OPENROUTER_KEY = cfgGet("OPENROUTER_API_KEY", "");
+const OPENROUTER_URL = cfgGet("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions");
+const OPENROUTER_REFERER = cfgGet("OPENROUTER_REFERER", "https://nucbox-k8-plus.tailf9be8f.ts.net");
+// Allow-list: exactly the IDs the UI offers (LIVE-verified against OpenRouter's catalog). A forced
+// model is treated as "cloud" ONLY if it appears here — an unknown id can never silently egress.
+const OPENROUTER_MODELS = new Set([
+  "anthropic/claude-haiku-4.5",
+  "openai/gpt-4o",
+  "google/gemini-2.5-flash",
+  "meta-llama/llama-4-maverick",
+  "meta-llama/llama-3.1-70b-instruct",
+  "z-ai/glm-5.2",
+  "moonshotai/kimi-k2.6",
+  "qwen/qwen3-235b-a22b-2507",
+]);
+const isOpenRouterModel = (m) => typeof m === "string" && OPENROUTER_MODELS.has(m);
+
+// Stream a chat completion from OpenRouter (OpenAI-compatible SSE). onDelta(text) fires per token
+// chunk so the caller can push {type:"token"} events through the SAME job buffer the local path
+// uses. Resolves { ok, content, usage, error }. Aborts cleanly via opts.signal. On ANY failure
+// (no key, HTTP error, network/timeout, bad SSE) it resolves ok:false with a user-safe message —
+// it NEVER throws, so the local path and the rest of the server keep working. The key is only ever
+// placed in the Authorization header; it is never written to a log line or an SSE event.
+function openrouterChatStream(model, messages, opts = {}, onDelta) {
+  return new Promise((resolve) => {
+    if (!OPENROUTER_KEY) return resolve({ ok: false, error: "No OpenRouter key configured on the server. Add OPENROUTER_API_KEY to the box's .env to use cloud models. Local Qwen still works." });
+    if (opts.signal && opts.signal.aborted) return resolve({ ok: false, aborted: true, error: "stopped" });
+    let u; try { u = new URL(OPENROUTER_URL); } catch { return resolve({ ok: false, error: "OpenRouter endpoint is misconfigured." }); }
+    // OpenAI chat format: drop tool-only fields, keep role+content. Our history is already {role,content}.
+    const msgs = messages.map((m) => ({ role: m.role, content: typeof m.content === "string" ? m.content : String(m.content ?? "") }));
+    const payload = { model, messages: msgs, stream: true };
+    if (typeof opts.temperature === "number") payload.temperature = opts.temperature;
+    if (typeof opts.num_predict === "number") payload.max_tokens = opts.num_predict;
+    payload.usage = { include: true };   // OpenRouter returns a usage row in the final SSE chunk
+    const data = JSON.stringify(payload);
+    const headers = {
+      authorization: "Bearer " + OPENROUTER_KEY,
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(data),
+      "http-referer": OPENROUTER_REFERER,
+      "x-title": "Dominion AI",
+    };
+    const mod = u.protocol === "https:" ? https : http;
+    let content = "", usage = null, buf = "", settled = false;
+    const done = (r) => { if (settled) return; settled = true; resolve(r); };
+    const req = mod.request(
+      { method: "POST", hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80), path: u.pathname + u.search, headers, timeout: 180000 },
+      (resp) => {
+        if (resp.statusCode && resp.statusCode >= 400) {
+          let errBuf = ""; resp.on("data", (d) => (errBuf += d));
+          resp.on("end", () => {
+            let msg = "OpenRouter returned HTTP " + resp.statusCode;
+            try { const j = JSON.parse(errBuf); if (j && j.error && j.error.message) msg = "OpenRouter: " + j.error.message; } catch {}
+            done({ ok: false, status: resp.statusCode, error: msg });
+          });
+          return;
+        }
+        resp.setEncoding("utf8");
+        resp.on("data", (chunk) => {
+          buf += chunk;
+          let idx;
+          while ((idx = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 1);
+            if (!line || line.startsWith(":")) continue;           // blank / SSE comment (OpenRouter keep-alives)
+            if (!line.startsWith("data:")) continue;
+            const payloadStr = line.slice(5).trim();
+            if (payloadStr === "[DONE]") continue;
+            try {
+              const j = JSON.parse(payloadStr);
+              const delta = j.choices && j.choices[0] && j.choices[0].delta;
+              if (delta && typeof delta.content === "string" && delta.content) {
+                content += delta.content;
+                try { onDelta && onDelta(delta.content); } catch {}
+              }
+              if (j.usage) usage = j.usage;
+            } catch {}                                              // partial/keepalive line — wait for more
+          }
+        });
+        resp.on("end", () => done({ ok: true, content, usage }));
+        resp.on("error", (e) => done({ ok: false, error: "OpenRouter stream error: " + String(e.message) }));
+      }
+    );
+    if (opts.signal) opts.signal.addEventListener("abort", () => { try { req.destroy(); } catch {} done({ ok: false, aborted: true, error: "stopped" }); }, { once: true });
+    req.on("error", (e) => done({ ok: false, error: "Couldn't reach OpenRouter: " + String(e.message) + ". Local Qwen still works." }));
+    req.on("timeout", () => { try { req.destroy(); } catch {} done({ ok: false, error: "OpenRouter timed out. Try again or use Local Qwen." }); });
+    req.write(data); req.end();
+  });
+}
 
 // Normalized response shape (spec NormalizedModelResponse, FULL) — one place that translates an
 // Ollama reply into the provider-agnostic object. extras carries the spec's quality block
@@ -1174,7 +1272,11 @@ async function handleChat(req, res) {
   const personaStyle = typeof input.persona === "string" ? input.persona.slice(0, 2000) : "";
   const userTemp = (typeof input.temperature === "number" && input.temperature >= 0 && input.temperature <= 2) ? input.temperature : undefined;
   const reqMode = typeof input.mode === "string" ? input.mode : "auto";
-  const forced = (typeof input.model === "string" && input.model && input.model !== "auto") ? input.model : "";
+  const forced = (typeof input.model === "string" && input.model && input.model !== "auto" && input.model !== "local") ? input.model : "";
+  // Cloud override: the user explicitly picked a premium OpenRouter model for THIS turn. When set,
+  // we keep all upstream context assembly (persona, memory, retrieval) but skip the local router's
+  // model pick + local tools, and stream the answer from OpenRouter instead of Ollama.
+  const cloudModel = isOpenRouterModel(forced) ? forced : "";
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
   job.chatId = chatId;
@@ -1189,7 +1291,14 @@ async function handleChat(req, res) {
   let routeConfidence = 0.95;
   // D1/D3: the needs_* block, produced for BOTH the auto route and explicit mode picks.
   let needs = { tools: true, memory: true, retrieval: true, mentorReview: wantsReview(lastUserText) };
-  if (reqMode !== "auto" && MODES[reqMode]) {
+  if (cloudModel) {
+    // Cloud turn: never run the local light classifier (it picks a LOCAL tier and burns a warm-up).
+    // Honor an explicitly chosen mode for its prompt fragment/temperature; otherwise "normal".
+    // Cloud models have no access to this box's tools, so tools are always off; keep memory+retrieval.
+    mode = (reqMode !== "auto" && MODES[reqMode] && reqMode !== "tool") ? reqMode : "normal";
+    tier = MODES[mode].tier; reason = "cloud model (via OpenRouter)";
+    needs = { tools: false, memory: true, retrieval: mode !== "fast", mentorReview: false };
+  } else if (reqMode !== "auto" && MODES[reqMode]) {
     mode = reqMode; tier = MODES[mode].tier; reason = "you chose " + mode.replace("_", " ");
     needs.retrieval = mode !== "fast";
     needs.tools = mode !== "fast" || /\b(deck|forge|file|sandbox|remember|artifact|project|capture|run|search|export|save|write|python|scrape)\b/i.test(lastUserText);
@@ -1221,6 +1330,7 @@ async function handleChat(req, res) {
   // thinking STAYS ON — think:false makes the 30B narrate its plan as the visible answer, and
   // generation is cheap on this MoE (~80 tok/s); the prefill, not the thinking, is the cost.
   if (mode === "as_fred") { attachTools = false; }
+  if (cloudModel) { attachTools = false; }   // cloud models cannot reach this box's tools
   opts.noTools = !attachTools;
   // D1: the full routing decision surfaces immediately (spec routing JSON shape)...
   sse({ type: "route", model, mode, route: routeOf(tier, mode), reason, confidence: routeConfidence,
@@ -1297,6 +1407,45 @@ async function handleChat(req, res) {
   reqCtx.artifactTriggers = (id, sig) => { try { return evalArtifactTriggers(id, sig || {}); } catch { return null; } };
 
   try {
+    // ---- Cloud path (OpenRouter): one streamed turn, no local tools, no local flywheel review ----
+    if (cloudModel) {
+      roundsUsed = 1;
+      working("writing");
+      let streamed = false;
+      const or = await openrouterChatStream(cloudModel, messages, { temperature: opts.temperature, num_predict: 4096, signal: ac.signal },
+        (delta) => { if (aborted) return; if (!streamed) { streamed = true; workStop(); } sse({ type: "token", delta }); });
+      workStop();
+      if (aborted) { sse({ type: "stopped" }); await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: "openrouter", status: "interrupted", rounds: 1 }); return endStream(); }
+      if (!or.ok) {
+        // OpenRouter failed — surface a clear error; the local path is untouched and still works.
+        sse({ type: "error", error: or.error || "The cloud model didn't respond. Try again, or switch back to Local Qwen." });
+        await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: "openrouter", status: "error", error: String(or.error || "").slice(0, 200) });
+        return endStream();
+      }
+      const answer = (or.content || "").trim() || "(no response)";
+      // If nothing streamed (some providers buffer), deliver the whole answer now so the UI isn't blank.
+      if (!streamed && answer) { const size = 28; for (let i = 0; i < answer.length && !aborted; i += size) { sse({ type: "token", delta: answer.slice(i, i + size) }); if (i + size < answer.length) await sleep(6); } }
+      if (aborted) { sse({ type: "stopped" }); return endStream(); }
+      // Draft mode still auto-saves a versioned artifact (parity with the local path).
+      if (mode === "draft" && answer.trim().length > 400) {
+        try {
+          const art = artifacts.create({ title: deriveTitle(answer, lastUser), type: "markdown", content: answer, model: cloudModel, sourceChatId: chatId,
+            promptSummary: lastUser ? String(lastUser.content).slice(0, 200) : "", sourceToolRunIds: [], sourceContextRefs: ctxInfo.used.map((c) => c.citationLabel) });
+          if (art.item) { artifactCreatedThisTurn = true; sse({ type: "artifact", id: art.item.id, title: art.item.title, action: "saved" }); }
+        } catch {}
+      }
+      const citations = extractCitations(answer);
+      const quality = computeQuality({ answer, routeConfidence, toolFailed: false, retrievalCount: ctxInfo.used.length, citations });
+      const outTok = (or.usage && (or.usage.completion_tokens ?? or.usage.output_tokens)) || estTokens(answer.length);
+      const inTok = (or.usage && (or.usage.prompt_tokens ?? or.usage.input_tokens)) || null;
+      const costUsd = or.usage && typeof or.usage.cost === "number" ? or.usage.cost : null;
+      console.log(`[dominion-ai] usage ${cloudModel}/${mode} (openrouter) out=${outTok} tools=0 conf=${quality.confidence}`);
+      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: "openrouter", privacyRisk, status: "completed", rounds: 1, tools: 0, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
+      try { chatlog.record(chatId, history, answer); } catch {}
+      sse({ type: "done", meta: { mode, provider: "openrouter", memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: 0, runIds: [], outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
+      return endStream();
+    }
+
     let last = null;
     for (let round = 0; round < MAX_ROUNDS && !aborted; round++) {
       roundsUsed = round + 1;
