@@ -37,15 +37,45 @@ export const CATEGORIES = [
   "Open & Trainable",
 ];
 
+// Per-model routing fields (optional; normalized by finalizeModels below):
+//   provider  — "openrouter" (default) | "openai" | "deepseek". Where the call actually goes.
+//   directId  — the model id on that provider's NATIVE API (defaults to `id` for openrouter).
+//   toolCapable — true = "doing" bench (gets this box's tools); false = "chatting" bench (chat only).
+//                 Defaults from category via TOOL_CAPABLE_CATEGORIES; set explicitly to override.
+// Direct hookups (Fred): OpenAI + DeepSeek go straight to their own APIs — no OpenRouter middleman,
+// so there's no question about where the calls go. Everything else rides OpenRouter. Claude stays
+// out entirely (Fred uses it through its own app).
+export const TOOL_CAPABLE_CATEGORIES = new Set([
+  "Frontier / Flagship", "Reasoning & Math", "Coding", "Science & Technical",
+  "Web / Research", "Vision / Multimodal", "Open & Trainable",
+]);
+
 // paramsB: total parameters in billions for sorting (MoE = total, not active). null = undisclosed.
 export const MODELS = [
   // ---- Frontier / Flagship ------------------------------------------------------------------
+  // OpenAI GPT-5.6 family — DIRECT to OpenAI (provider:"openai"). Sol=agentic flagship, Terra=mid,
+  // Luna=lightest/cheapest (price-implied tiering; ~1M context each). Fred picks per turn.
+  { id: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-sol",
+    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000,
+    specialty: "Agentic/terminal-coding flagship — the top 'doing' model" },
+  { id: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-terra",
+    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 15.00, ctx: 1050000,
+    specialty: "Mid-tier GPT-5.6 — strong general reasoning at half Sol's cost" },
+  { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-luna",
+    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 6.00, ctx: 1050000,
+    specialty: "Lightest/cheapest GPT-5.6 — fast conversational tier" },
+  { id: "openai/gpt-5.5", name: "GPT-5.5", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.5",
+    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000,
+    specialty: "Prior frontier flagship — reliable heavy knowledge work" },
+  { id: "openai/gpt-4o", name: "GPT-4o", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-4o",
+    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 10.00, ctx: 128000,
+    specialty: "Mature multimodal generalist; dependable, older generation" },
   { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", origin: "Moonshot AI (Beijing)",
     category: "Frontier / Flagship", params: "1T (MoE·32B active)", paramsB: 1000, inCost: 0.66, outCost: 3.41, ctx: 262144,
     specialty: "Agentic tool-use heavyweight; cult favorite for doing things" },
-  { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", origin: "DeepSeek (China)",
+  { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-pro",
     category: "Frontier / Flagship", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.43, outCost: 0.87, ctx: 1000000,
-    specialty: "Near-frontier reasoning + code at ~1/30th flagship price" },
+    specialty: "Near-frontier reasoning + code at ~1/30th flagship price (direct to DeepSeek)" },
   { id: "minimax/minimax-m2.5", name: "MiniMax M2.5", origin: "MiniMax (Shanghai)",
     category: "Frontier / Flagship", params: "456B (MoE)", paramsB: 456, inCost: 0.12, outCost: 0.48, ctx: 204000,
     specialty: "Cheap capable all-rounder for high-volume work" },
@@ -69,9 +99,9 @@ export const MODELS = [
   { id: "qwen/qwen3-8b", name: "Qwen3 8B", origin: "Alibaba",
     category: "Reasoning & Math", params: "8B", paramsB: 8, inCost: 0.05, outCost: 0.40, ctx: 128000,
     specialty: "Tiny thinking-mode model; cheap step-by-step math (Apache 2.0)" },
-  { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", origin: "DeepSeek (China)",
+  { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-flash",
     category: "Reasoning & Math", params: "undisclosed (MoE)", paramsB: null, inCost: 0.05, outCost: 0.24, ctx: 1000000,
-    specialty: "Cheapest strong reasoning/math+code engine (MIT)" },
+    specialty: "Cheapest strong reasoning/math+code engine — direct to DeepSeek" },
 
   // ---- Coding -------------------------------------------------------------------------------
   { id: "qwen/qwen3-coder", name: "Qwen3 Coder", origin: "Alibaba",
@@ -125,12 +155,9 @@ export const MODELS = [
   { id: "thedrummer/cydonia-24b-v4.1", name: "Cydonia 24B v4.1", origin: "TheDrummer (community)",
     category: "Uncensored / Blunt", params: "24B", paramsB: 24, inCost: 0.30, outCost: 0.50, ctx: 131072,
     specialty: "Characterful, unfiltered; sharp dialogue with no hand-wringing" },
-  { id: "cognitivecomputations/dolphin-mistral-24b-venice-edition:free", name: "Dolphin Venice 24B", origin: "Cognitive Computations (Eric Hartford)",
+  { id: "cognitivecomputations/dolphin-mistral-24b-venice-edition:free", name: "Dolphin Mistral 24B", origin: "Cognitive Computations (Eric Hartford)",
     category: "Uncensored / Blunt", params: "24B", paramsB: 24, inCost: 0, outCost: 0, ctx: 32768,
-    specialty: "The classic de-censored finetune — FREE to experiment" },
-  { id: "venice/uncensored", name: "Venice Uncensored 24B", origin: "Venice / Dolphin",
-    category: "Uncensored / Blunt", params: "24B", paramsB: 24, inCost: 0, outCost: 0, ctx: 32768,
-    specialty: "Near-zero refusals — FREE best no-cost pick" },
+    specialty: "The classic de-censored Dolphin finetune — FREE to experiment" },
 
   // ---- Vision / Multimodal ------------------------------------------------------------------
   { id: "minimax/minimax-m3", name: "MiniMax M3", origin: "MiniMax (Shanghai)",
@@ -160,11 +187,33 @@ export const MODELS = [
     specialty: "Cheapest warm conversational base — ideal to fine-tune your own (Apache 2.0)" },
 ];
 
+// ---- normalization --------------------------------------------------------------------------
+
+// Fill routing defaults so every consumer can trust these fields exist:
+//   provider defaults to "openrouter"; directId defaults to the OpenRouter slug (`id`);
+//   toolCapable defaults from the model's category (doing bench vs chatting bench).
+function finalize(m) {
+  const provider = m.provider || "openrouter";
+  const directId = m.directId || m.id;
+  const toolCapable = typeof m.toolCapable === "boolean" ? m.toolCapable : TOOL_CAPABLE_CATEGORIES.has(m.category);
+  return { ...m, provider, directId, toolCapable };
+}
+// Mutate in place so MODELS (exported) carries the normalized fields everywhere.
+for (let i = 0; i < MODELS.length; i++) MODELS[i] = finalize(MODELS[i]);
+
 // ---- helpers --------------------------------------------------------------------------------
 
-// The security allow-list: exactly the ids above. An id not in here can never be sent to OpenRouter.
+// The security allow-list: exactly the ids above. An id not in here can never be sent to a provider.
 export const MODEL_IDS = new Set(MODELS.map((m) => m.id));
 export const isCatalogModel = (id) => typeof id === "string" && MODEL_IDS.has(id);
+
+// Look up the full normalized model record by its UI-facing id (or null).
+const BY_ID = new Map(MODELS.map((m) => [m.id, m]));
+export const modelById = (id) => BY_ID.get(id) || null;
+// The provider a model routes to ("openrouter" | "openai" | "deepseek"), or "" if unknown.
+export const providerOf = (id) => { const m = BY_ID.get(id); return m ? m.provider : ""; };
+// Whether a model is allowed to use this box's tools (doing bench).
+export const isToolCapable = (id) => { const m = BY_ID.get(id); return !!(m && m.toolCapable); };
 
 // Cheap fast model for internal utility calls (chat titles, short summaries) so they never block.
 export const UTILITY_MODEL = "mistralai/mistral-nemo";

@@ -208,10 +208,12 @@ function autosize() { input.style.height = "auto"; input.style.height = Math.min
 function showErr(t) { document.querySelector(".err")?.remove(); const e = document.createElement("div"); e.className = "err"; e.textContent = t; wrap.appendChild(e); scroll(); }
 
 // ---------- models (advanced override; the router picks by default) ----------
-// The cloud (OpenRouter) options are STATIC in index.html and must survive this refresh — we only
-// rebuild the LOCAL optgroup from Ollama's live list, leaving "Local Qwen (free)" as the default
-// (server auto-routes 8B vs 30B) plus each local model as an advanced tier override (Fred's lock:
-// only friendly tier labels, never raw names). The saved selection can be a cloud id not in Ollama.
+// The LOCAL optgroup is rebuilt from Ollama's live list. The CLOUD groups are rebuilt from the
+// server's live catalog (/api/models) — categorized, priced, with a bench tag (🔧 = can drive your
+// tools, 💬 = chat-only) and dimmed when that provider has no key configured. If either fetch fails
+// the static options in index.html survive as a fallback. Fred's lock: local raw names never surface.
+function fmtCtxShort(n) { if (!n) return ""; return n >= 1e6 ? (n % 1e6 ? (n / 1e6).toFixed(1) : n / 1e6) + "M" : Math.round(n / 1e3) + "K"; }
+function fmtPriceShort(m) { return (!m.inCost && !m.outCost) ? "Free" : `$${m.inCost}/${m.outCost}`; }
 async function loadModels() {
   if (!modelSel) return;
   const saved = localStorage.getItem(LS_MODEL);
@@ -228,9 +230,36 @@ async function loadModels() {
       }
     }
   } catch {}
-  // Restore the saved pick if it's still a valid option (cloud ids are always present); else Local.
-  const valid = saved && Array.from(modelSel.options).some((o) => o.value === saved);
-  modelSel.value = (saved === "auto") ? "local" : (valid ? saved : "local");
+  // Cloud groups from the live catalog. Only rebuild if the fetch succeeds — otherwise leave the
+  // static index.html options intact so a picked cloud id never vanishes.
+  try {
+    const r = await fetch("/api/models", { cache: "no-store" });
+    if (r.ok) {
+      const cat = await r.json();
+      const avail = cat.available || {};
+      // Drop every existing cloud optgroup (keep the local one) before rebuilding.
+      Array.from(modelSel.querySelectorAll("optgroup")).forEach((g) => { if (g.id !== "model-local-group") g.remove(); });
+      for (const grp of (cat.groups || [])) {
+        if (!grp.models || !grp.models.length) continue;
+        const og = document.createElement("optgroup");
+        og.label = grp.category;
+        for (const m of grp.models) {
+          const o = document.createElement("option");
+          o.value = m.id;
+          const bench = m.toolCapable ? "🔧" : "💬"; // 🔧 doing / 💬 chatting
+          const bits = [m.name, fmtPriceShort(m), fmtCtxShort(m.ctx)].filter(Boolean);
+          o.textContent = `${bench} ${bits.join(" · ")}`;
+          const provOk = m.provider === "openrouter" ? avail.openrouter : m.provider === "openai" ? avail.openai : m.provider === "deepseek" ? avail.deepseek : true;
+          if (provOk === false) { o.disabled = true; o.textContent += " — key needed"; }
+          og.appendChild(o);
+        }
+        modelSel.appendChild(og);
+      }
+    }
+  } catch {}
+  // Restore the saved pick if it's still a valid, enabled option; else Local.
+  const opt = saved && Array.from(modelSel.options).find((o) => o.value === saved);
+  modelSel.value = (saved === "auto" || !opt || opt.disabled) ? "local" : saved;
   updateCloudBadge();
 }
 

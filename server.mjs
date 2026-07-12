@@ -30,6 +30,7 @@ import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./ro
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, catalogPayload } from "./models.catalog.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -236,19 +237,23 @@ const PROVIDER_FOR_MODEL = (m) => Object.values(PROVIDERS).find((p) => p.modelNa
 const OPENROUTER_KEY = cfgGet("OPENROUTER_API_KEY", "");
 const OPENROUTER_URL = cfgGet("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions");
 const OPENROUTER_REFERER = cfgGet("OPENROUTER_REFERER", "https://nucbox-k8-plus.tailf9be8f.ts.net");
-// Allow-list: exactly the IDs the UI offers (LIVE-verified against OpenRouter's catalog). A forced
-// model is treated as "cloud" ONLY if it appears here — an unknown id can never silently egress.
-const OPENROUTER_MODELS = new Set([
-  "anthropic/claude-haiku-4.5",
-  "openai/gpt-4o",
-  "google/gemini-2.5-flash",
-  "meta-llama/llama-4-maverick",
-  "meta-llama/llama-3.1-70b-instruct",
-  "z-ai/glm-5.2",
-  "moonshotai/kimi-k2.6",
-  "qwen/qwen3-235b-a22b-2507",
-]);
-const isOpenRouterModel = (m) => typeof m === "string" && OPENROUTER_MODELS.has(m);
+// Direct-provider keys (Fred's request: OpenAI + DeepSeek go straight to their own APIs so there's
+// no question about where the calls route). Wallet names take precedence; generic names are fallbacks.
+const OPENAI_KEY = cfgGet("OPEN_AI_DOMINION_UI_APIKEY", cfgGet("OPENAI_API_KEY", ""));
+const DEEPSEEK_KEY = cfgGet("DEEPSEEK_AI_DOMINION_UI_APIKEY", cfgGet("DEEPSEEK_API_KEY", ""));
+// One endpoint config per provider. All three speak the OpenAI-compatible chat-completions format,
+// so a single streamer serves them — only base URL, key, and a couple of headers differ.
+const PROVIDER_CFG = {
+  openrouter: { url: OPENROUTER_URL, key: () => OPENROUTER_KEY, label: "OpenRouter",
+    extraHeaders: { "http-referer": OPENROUTER_REFERER, "x-title": "Dominion AI" }, wantUsage: true },
+  openai:     { url: cfgGet("OPENAI_URL", "https://api.openai.com/v1/chat/completions"), key: () => OPENAI_KEY, label: "OpenAI (direct)", extraHeaders: {}, wantUsage: false },
+  deepseek:   { url: cfgGet("DEEPSEEK_URL", "https://api.deepseek.com/chat/completions"), key: () => DEEPSEEK_KEY, label: "DeepSeek (direct)", extraHeaders: {}, wantUsage: false },
+};
+// Allow-list = exactly the catalog ids (the single source of truth). A forced model is treated as
+// "cloud" ONLY if it's in the catalog — an unknown id can never silently egress.
+const isCloudModel = (m) => typeof m === "string" && CATALOG_IDS.has(m);
+// Back-compat alias (older call sites): kept so existing references keep working.
+const isOpenRouterModel = isCloudModel;
 
 // Stream a chat completion from OpenRouter (OpenAI-compatible SSE). onDelta(text) fires per token
 // chunk so the caller can push {type:"token"} events through the SAME job buffer the local path
@@ -256,25 +261,34 @@ const isOpenRouterModel = (m) => typeof m === "string" && OPENROUTER_MODELS.has(
 // (no key, HTTP error, network/timeout, bad SSE) it resolves ok:false with a user-safe message —
 // it NEVER throws, so the local path and the rest of the server keep working. The key is only ever
 // placed in the Authorization header; it is never written to a log line or an SSE event.
-function openrouterChatStream(model, messages, opts = {}, onDelta) {
+function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
   return new Promise((resolve) => {
-    if (!OPENROUTER_KEY) return resolve({ ok: false, error: "No OpenRouter key configured on the server. Add OPENROUTER_API_KEY to the box's .env to use cloud models. Local Qwen still works." });
+    // Resolve the model's provider + native id from the catalog (single source of truth).
+    const rec = modelById(catalogId);
+    const provider = (rec && rec.provider) || "openrouter";
+    const directId = (rec && rec.directId) || catalogId;
+    const cfg = PROVIDER_CFG[provider] || PROVIDER_CFG.openrouter;
+    const KEY = cfg.key();
+    if (!KEY) return resolve({ ok: false, error: `No ${cfg.label} key configured on the server. Add the key to the box's .env to use this model. Local Qwen still works.` });
     if (opts.signal && opts.signal.aborted) return resolve({ ok: false, aborted: true, error: "stopped" });
-    let u; try { u = new URL(OPENROUTER_URL); } catch { return resolve({ ok: false, error: "OpenRouter endpoint is misconfigured." }); }
+    let u; try { u = new URL(cfg.url); } catch { return resolve({ ok: false, error: `${cfg.label} endpoint is misconfigured.` }); }
     // OpenAI chat format: drop tool-only fields, keep role+content. Our history is already {role,content}.
     const msgs = messages.map((m) => ({ role: m.role, content: typeof m.content === "string" ? m.content : String(m.content ?? "") }));
-    const payload = { model, messages: msgs, stream: true };
+    const payload = { model: directId, messages: msgs, stream: true };
     if (typeof opts.temperature === "number") payload.temperature = opts.temperature;
     if (typeof opts.num_predict === "number") payload.max_tokens = opts.num_predict;
-    payload.usage = { include: true };   // OpenRouter returns a usage row in the final SSE chunk
+    // Ask for a usage row in the final SSE chunk. OpenRouter uses {usage:{include:true}}; native
+    // OpenAI/DeepSeek use stream_options.include_usage. Set whichever this provider understands.
+    if (cfg.wantUsage) payload.usage = { include: true };
+    else payload.stream_options = { include_usage: true };
     const data = JSON.stringify(payload);
     const headers = {
-      authorization: "Bearer " + OPENROUTER_KEY,
+      authorization: "Bearer " + KEY,
       "content-type": "application/json",
       "content-length": Buffer.byteLength(data),
-      "http-referer": OPENROUTER_REFERER,
-      "x-title": "Dominion AI",
+      ...cfg.extraHeaders,
     };
+    const providerLabel = cfg.label;
     const mod = u.protocol === "https:" ? https : http;
     let content = "", usage = null, buf = "", settled = false;
     const done = (r) => { if (settled) return; settled = true; resolve(r); };
@@ -284,8 +298,8 @@ function openrouterChatStream(model, messages, opts = {}, onDelta) {
         if (resp.statusCode && resp.statusCode >= 400) {
           let errBuf = ""; resp.on("data", (d) => (errBuf += d));
           resp.on("end", () => {
-            let msg = "OpenRouter returned HTTP " + resp.statusCode;
-            try { const j = JSON.parse(errBuf); if (j && j.error && j.error.message) msg = "OpenRouter: " + j.error.message; } catch {}
+            let msg = providerLabel + " returned HTTP " + resp.statusCode;
+            try { const j = JSON.parse(errBuf); if (j && j.error && j.error.message) msg = providerLabel + ": " + j.error.message; } catch {}
             done({ ok: false, status: resp.statusCode, error: msg });
           });
           return;
@@ -313,12 +327,12 @@ function openrouterChatStream(model, messages, opts = {}, onDelta) {
           }
         });
         resp.on("end", () => done({ ok: true, content, usage }));
-        resp.on("error", (e) => done({ ok: false, error: "OpenRouter stream error: " + String(e.message) }));
+        resp.on("error", (e) => done({ ok: false, error: providerLabel + " stream error: " + String(e.message) }));
       }
     );
     if (opts.signal) opts.signal.addEventListener("abort", () => { try { req.destroy(); } catch {} done({ ok: false, aborted: true, error: "stopped" }); }, { once: true });
-    req.on("error", (e) => done({ ok: false, error: "Couldn't reach OpenRouter: " + String(e.message) + ". Local Qwen still works." }));
-    req.on("timeout", () => { try { req.destroy(); } catch {} done({ ok: false, error: "OpenRouter timed out. Try again or use Local Qwen." }); });
+    req.on("error", (e) => done({ ok: false, error: "Couldn't reach " + providerLabel + ": " + String(e.message) + ". Local Qwen still works." }));
+    req.on("timeout", () => { try { req.destroy(); } catch {} done({ ok: false, error: providerLabel + " timed out. Try again or use Local Qwen." }); });
     req.write(data); req.end();
   });
 }
@@ -1410,19 +1424,21 @@ async function handleChat(req, res) {
   reqCtx.artifactTriggers = (id, sig) => { try { return evalArtifactTriggers(id, sig || {}); } catch { return null; } };
 
   try {
-    // ---- Cloud path (OpenRouter): one streamed turn, no local tools, no local flywheel review ----
+    // ---- Cloud path (OpenRouter / OpenAI-direct / DeepSeek-direct): one streamed turn, no local
+    // tools yet (Phase B adds the cloud tool loop), no local flywheel review. ----
     if (cloudModel) {
       roundsUsed = 1;
+      const cloudProvider = providerOf(cloudModel) || "openrouter";
       working("writing");
       let streamed = false;
-      const or = await openrouterChatStream(cloudModel, messages, { temperature: opts.temperature, num_predict: 4096, signal: ac.signal },
+      const or = await cloudChatStream(cloudModel, messages, { temperature: opts.temperature, num_predict: 4096, signal: ac.signal },
         (delta) => { if (aborted) return; if (!streamed) { streamed = true; workStop(); } sse({ type: "token", delta }); });
       workStop();
-      if (aborted) { sse({ type: "stopped" }); await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: "openrouter", status: "interrupted", rounds: 1 }); return endStream(); }
+      if (aborted) { sse({ type: "stopped" }); await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "interrupted", rounds: 1 }); return endStream(); }
       if (!or.ok) {
         // OpenRouter failed — surface a clear error; the local path is untouched and still works.
         sse({ type: "error", error: or.error || "The cloud model didn't respond. Try again, or switch back to Local Qwen." });
-        await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: "openrouter", status: "error", error: String(or.error || "").slice(0, 200) });
+        await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "error", error: String(or.error || "").slice(0, 200) });
         return endStream();
       }
       const answer = (or.content || "").trim() || "(no response)";
@@ -1442,10 +1458,10 @@ async function handleChat(req, res) {
       const outTok = (or.usage && (or.usage.completion_tokens ?? or.usage.output_tokens)) || estTokens(answer.length);
       const inTok = (or.usage && (or.usage.prompt_tokens ?? or.usage.input_tokens)) || null;
       const costUsd = or.usage && typeof or.usage.cost === "number" ? or.usage.cost : null;
-      console.log(`[dominion-ai] usage ${cloudModel}/${mode} (openrouter) out=${outTok} tools=0 conf=${quality.confidence}`);
-      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: "openrouter", privacyRisk, status: "completed", rounds: 1, tools: 0, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
+      console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=0 conf=${quality.confidence}`);
+      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: 1, tools: 0, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
       try { chatlog.record(chatId, history, answer); } catch {}
-      sse({ type: "done", meta: { mode, provider: "openrouter", memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: 0, runIds: [], outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
+      sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: 0, runIds: [], outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
       return endStream();
     }
 
@@ -1660,6 +1676,16 @@ const server = http.createServer(async (req, res) => {
     if (path === "/api/version" && req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify({ build: BUILD_ID }));
+    }
+
+    // The live cloud-model catalog (single source of truth). The picker fetches this and renders the
+    // categorized groups; `available` flags which providers actually have a key configured so the UI
+    // can dim models that can't be called yet. Keys are NEVER included — only booleans.
+    if (path === "/api/models" && req.method === "GET") {
+      const payload = catalogPayload();
+      payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY };
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify(payload));
     }
 
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
