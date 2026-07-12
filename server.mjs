@@ -283,7 +283,10 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     });
     const payload = { model: directId, messages: msgs, stream: true };
     if (typeof opts.temperature === "number") payload.temperature = opts.temperature;
-    if (typeof opts.num_predict === "number") payload.max_tokens = opts.num_predict;
+    // LIVE-verified 2026-07-12: native-OpenAI models reject max_tokens ("use max_completion_tokens").
+    // OpenRouter translates this itself and DeepSeek accepts max_tokens, so only openai differs.
+    // (Per the GPT-5.x token-starvation lesson: reasoning eats this budget — keep it generous.)
+    if (typeof opts.num_predict === "number") payload[provider === "openai" ? "max_completion_tokens" : "max_tokens"] = opts.num_predict;
     // Phase B: attach this box's tool schemas (already OpenAI function format) so tool-capable
     // cloud models can drive the same tools the local model uses.
     if (Array.isArray(opts.tools) && opts.tools.length) {
