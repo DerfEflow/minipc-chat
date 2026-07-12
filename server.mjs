@@ -64,6 +64,7 @@ const CTX = {
   runPassword: cfgGet("RUN_PASSWORD", ""),
   sandboxDir: cfgGet("SANDBOX_DIR", "C:\\minipc-chat\\sandbox"),
   bridgePokePort: Number(cfgGet("BRIDGE_POKE_PORT", "8188")) || 8188,
+  serpKey: cfgGet("SERP_API_KEY", ""),   // live web search (SerpApi) — web_search tool
 };
 
 // Embeddings for hybrid retrieval (Phase 2 "vector search"). Uses Ollama /api/embed with a small
@@ -272,11 +273,27 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     if (!KEY) return resolve({ ok: false, error: `No ${cfg.label} key configured on the server. Add the key to the box's .env to use this model. Local Qwen still works.` });
     if (opts.signal && opts.signal.aborted) return resolve({ ok: false, aborted: true, error: "stopped" });
     let u; try { u = new URL(cfg.url); } catch { return resolve({ ok: false, error: `${cfg.label} endpoint is misconfigured.` }); }
-    // OpenAI chat format: drop tool-only fields, keep role+content. Our history is already {role,content}.
-    const msgs = messages.map((m) => ({ role: m.role, content: typeof m.content === "string" ? m.content : String(m.content ?? "") }));
+    // OpenAI chat format. Tool-loop turns carry assistant tool_calls and tool results
+    // (tool_call_id) — preserve those fields; everything else is plain {role, content}.
+    const msgs = messages.map((m) => {
+      const o = { role: m.role, content: typeof m.content === "string" ? m.content : String(m.content ?? "") };
+      if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) o.tool_calls = m.tool_calls;
+      if (m.role === "tool" && m.tool_call_id) o.tool_call_id = m.tool_call_id;
+      return o;
+    });
     const payload = { model: directId, messages: msgs, stream: true };
     if (typeof opts.temperature === "number") payload.temperature = opts.temperature;
     if (typeof opts.num_predict === "number") payload.max_tokens = opts.num_predict;
+    // Phase B: attach this box's tool schemas (already OpenAI function format) so tool-capable
+    // cloud models can drive the same tools the local model uses.
+    if (Array.isArray(opts.tools) && opts.tools.length) {
+      payload.tools = opts.tools;
+      // LIVE-verified 2026-07-12: OpenAI's reasoning models (gpt-5.x / o-series) reject function
+      // tools on /v1/chat/completions unless reasoning_effort is "none" ("low" is also rejected).
+      // GPT-4o is unaffected. Proper fix later = their /v1/responses API; until then tool turns on
+      // the 5.6 family run without extended reasoning — tools work, thinking is dialed down.
+      if (provider === "openai" && /^(gpt-5|o\d)/.test(directId)) payload.reasoning_effort = "none";
+    }
     // Ask for a usage row in the final SSE chunk. OpenRouter uses {usage:{include:true}}; native
     // OpenAI/DeepSeek use stream_options.include_usage. Set whichever this provider understands.
     if (cfg.wantUsage) payload.usage = { include: true };
@@ -290,7 +307,10 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     };
     const providerLabel = cfg.label;
     const mod = u.protocol === "https:" ? https : http;
-    let content = "", usage = null, buf = "", settled = false;
+    let content = "", usage = null, buf = "", settled = false, finishReason = "";
+    // Streamed tool calls arrive as indexed fragments (id/name once, arguments in pieces) —
+    // accumulate per index and reassemble into full {id, type, function:{name, arguments}} objects.
+    const toolCallAcc = [];
     const done = (r) => { if (settled) return; settled = true; resolve(r); };
     const req = mod.request(
       { method: "POST", hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80), path: u.pathname + u.search, headers, timeout: 180000 },
@@ -317,16 +337,31 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
             if (payloadStr === "[DONE]") continue;
             try {
               const j = JSON.parse(payloadStr);
-              const delta = j.choices && j.choices[0] && j.choices[0].delta;
+              const choice = j.choices && j.choices[0];
+              const delta = choice && choice.delta;
               if (delta && typeof delta.content === "string" && delta.content) {
                 content += delta.content;
                 try { onDelta && onDelta(delta.content); } catch {}
               }
+              if (delta && Array.isArray(delta.tool_calls)) {
+                for (const tc of delta.tool_calls) {
+                  const i = typeof tc.index === "number" ? tc.index : 0;
+                  if (!toolCallAcc[i]) toolCallAcc[i] = { id: "", type: "function", function: { name: "", arguments: "" } };
+                  if (tc.id) toolCallAcc[i].id = tc.id;
+                  if (tc.function) {
+                    if (tc.function.name) toolCallAcc[i].function.name += tc.function.name;
+                    if (typeof tc.function.arguments === "string") toolCallAcc[i].function.arguments += tc.function.arguments;
+                  }
+                }
+              }
+              if (choice && choice.finish_reason) finishReason = choice.finish_reason;
               if (j.usage) usage = j.usage;
             } catch {}                                              // partial/keepalive line — wait for more
           }
         });
-        resp.on("end", () => done({ ok: true, content, usage }));
+        resp.on("end", () => done({ ok: true, content, usage, finishReason,
+          toolCalls: toolCallAcc.filter((c) => c && c.function && c.function.name)
+            .map((c, i) => ({ ...c, id: c.id || "call_" + i })) }));
         resp.on("error", (e) => done({ ok: false, error: providerLabel + " stream error: " + String(e.message) }));
       }
     );
@@ -626,6 +661,85 @@ function readJsonBody(req) {
   return new Promise((resolve) => {
     let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => { try { resolve(JSON.parse(b || "{}")); } catch { resolve(null); } });
   });
+}
+
+// Raw (binary) body reader for audio uploads. Hard cap keeps a runaway upload from eating RAM.
+function readRawBody(req, maxBytes = 25 * 1024 * 1024) {
+  return new Promise((resolve) => {
+    const chunks = []; let n = 0, dead = false;
+    req.on("data", (d) => { if (dead) return; n += d.length; if (n > maxBytes) { dead = true; try { req.destroy(); } catch {} resolve(null); } else chunks.push(d); });
+    req.on("end", () => { if (!dead) resolve(Buffer.concat(chunks)); });
+    req.on("error", () => { if (!dead) { dead = true; resolve(null); } });
+  });
+}
+
+// ---- Voice (Phase D): OpenAI ears + mouth, ANY picked model as the brain -------------------
+// Pipeline mode: the phone records audio -> POST /api/voice/transcribe (OpenAI STT) -> the text
+// goes through the normal /chat flow on whatever model Fred picked (tools included) -> the answer
+// can be spoken back via POST /api/voice/tts (OpenAI TTS). Voice I/O is OpenAI; the BRAIN stays
+// Fred's choice — that's the whole point of Dominion. Uses the same direct OpenAI key as chat.
+const VOICE_STT_MODEL = cfgGet("VOICE_STT_MODEL", "gpt-4o-mini-transcribe");
+const VOICE_TTS_MODEL = cfgGet("VOICE_TTS_MODEL", "gpt-4o-mini-tts");
+const VOICE_TTS_VOICE = cfgGet("VOICE_TTS_VOICE", "onyx");
+
+async function handleVoiceTranscribe(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  if (!OPENAI_KEY) return json(503, { error: "Voice needs the OpenAI key in the box's .env (OPEN_AI_DOMINION_UI_APIKEY)." });
+  const audio = await readRawBody(req);
+  if (!audio || audio.length < 200) return json(400, { error: "No audio received." });
+  const mime = String(req.headers["content-type"] || "audio/webm").split(";")[0];
+  const ext = mime.includes("mp4") ? "mp4" : mime.includes("mpeg") ? "mp3" : mime.includes("ogg") ? "ogg" : mime.includes("wav") ? "wav" : "webm";
+  // Dependency-free multipart body for OpenAI /v1/audio/transcriptions.
+  const boundary = "----dominionvoice" + randomUUID().replace(/-/g, "");
+  const part = (name, value) => `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`;
+  const head = Buffer.from(part("model", VOICE_STT_MODEL) + `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.${ext}"\r\nContent-Type: ${mime}\r\n\r\n`);
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const body = Buffer.concat([head, audio, tail]);
+  const r = await new Promise((resolve) => {
+    const rq = https.request(
+      { method: "POST", hostname: "api.openai.com", path: "/v1/audio/transcriptions",
+        headers: { authorization: "Bearer " + OPENAI_KEY, "content-type": "multipart/form-data; boundary=" + boundary, "content-length": body.length }, timeout: 60000 },
+      (resp) => { let b = ""; resp.on("data", (d) => (b += d)); resp.on("end", () => resolve({ status: resp.statusCode || 0, text: b })); }
+    );
+    rq.on("error", (e) => resolve({ status: 0, text: String(e.message) }));
+    rq.on("timeout", () => { rq.destroy(); resolve({ status: 0, text: "timeout" }); });
+    rq.write(body); rq.end();
+  });
+  if (r.status !== 200) {
+    let msg = "Transcription failed (HTTP " + r.status + ").";
+    try { const j = JSON.parse(r.text); if (j.error && j.error.message) msg = "OpenAI: " + j.error.message; } catch {}
+    console.log(`[dominion-ai] voice/transcribe FAILED ${r.status}`);
+    return json(502, { error: msg });
+  }
+  let text = "";
+  try { text = String(JSON.parse(r.text).text || "").trim(); } catch {}
+  console.log(`[dominion-ai] voice/transcribe ok · ${audio.length}b -> ${text.length} chars`);
+  return json(200, { text });
+}
+
+async function handleVoiceTts(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  if (!OPENAI_KEY) return json(503, { error: "Voice needs the OpenAI key in the box's .env (OPEN_AI_DOMINION_UI_APIKEY)." });
+  const b = await readJsonBody(req);
+  const text = b && typeof b.text === "string" ? b.text.trim().slice(0, 4000) : "";
+  if (!text) return json(400, { error: "No text to speak." });
+  const payload = JSON.stringify({ model: VOICE_TTS_MODEL, voice: (b.voice || VOICE_TTS_VOICE), input: text, response_format: "mp3" });
+  const rq = https.request(
+    { method: "POST", hostname: "api.openai.com", path: "/v1/audio/speech",
+      headers: { authorization: "Bearer " + OPENAI_KEY, "content-type": "application/json", "content-length": Buffer.byteLength(payload) }, timeout: 60000 },
+    (resp) => {
+      if ((resp.statusCode || 0) !== 200) {
+        let eb = ""; resp.on("data", (d) => (eb += d));
+        resp.on("end", () => { let msg = "TTS failed (HTTP " + resp.statusCode + ")."; try { const j = JSON.parse(eb); if (j.error && j.error.message) msg = "OpenAI: " + j.error.message; } catch {} json(502, { error: msg }); });
+        return;
+      }
+      res.writeHead(200, { "content-type": "audio/mpeg", "cache-control": "no-store" });
+      resp.pipe(res);   // stream the mp3 straight through — no buffering
+    }
+  );
+  rq.on("error", (e) => json(502, { error: "Couldn't reach OpenAI TTS: " + String(e.message) }));
+  rq.on("timeout", () => { rq.destroy(); json(502, { error: "OpenAI TTS timed out." }); });
+  rq.write(payload); rq.end();
 }
 
 // Memory API (Phase 2 inbox/approval): GET list, POST create, POST /update, POST /delete.
@@ -1311,10 +1425,14 @@ async function handleChat(req, res) {
   if (cloudModel) {
     // Cloud turn: never run the local light classifier (it picks a LOCAL tier and burns a warm-up).
     // Honor an explicitly chosen mode for its prompt fragment/temperature; otherwise "normal".
-    // Cloud models have no access to this box's tools, so tools are always off; keep memory+retrieval.
-    mode = (reqMode !== "auto" && MODES[reqMode] && reqMode !== "tool") ? reqMode : "normal";
-    tier = MODES[mode].tier; reason = "cloud model (via OpenRouter)";
-    needs = { tools: false, memory: true, retrieval: mode !== "fast", mentorReview: false };
+    // Phase B: DOING-bench models (catalog toolCapable) get this box's tools — that's the whole
+    // point of Dominion. CHATTING-bench models (creative/uncensored) stay chat-only: they fumble
+    // tool calls, and tool results (files, projects) should never egress to those endpoints.
+    const cloudTools = isToolCapable(cloudModel);
+    mode = (reqMode !== "auto" && MODES[reqMode] && (reqMode !== "tool" || cloudTools)) ? reqMode : "normal";
+    tier = MODES[mode].tier;
+    reason = "cloud model (" + (PROVIDER_CFG[providerOf(cloudModel)] || PROVIDER_CFG.openrouter).label + ")";
+    needs = { tools: cloudTools, memory: true, retrieval: mode !== "fast", mentorReview: false };
   } else if (reqMode !== "auto" && MODES[reqMode]) {
     mode = reqMode; tier = MODES[mode].tier; reason = "you chose " + mode.replace("_", " ");
     needs.retrieval = mode !== "fast";
@@ -1347,7 +1465,9 @@ async function handleChat(req, res) {
   // thinking STAYS ON — think:false makes the 30B narrate its plan as the visible answer, and
   // generation is cheap on this MoE (~80 tok/s); the prefill, not the thinking, is the cost.
   if (mode === "as_fred") { attachTools = false; }
-  if (cloudModel) { attachTools = false; }   // cloud models cannot reach this box's tools
+  // Phase B: only CHATTING-bench cloud models are barred from tools; doing-bench models keep
+  // whatever consumeNeeds decided (chat-only turns still skip the schemas to save tokens).
+  if (cloudModel && !isToolCapable(cloudModel)) { attachTools = false; }
   opts.noTools = !attachTools;
   // D1: the full routing decision surfaces immediately (spec routing JSON shape)...
   sse({ type: "route", model, mode, route: routeOf(tier, mode), reason, confidence: routeConfidence,
@@ -1424,44 +1544,154 @@ async function handleChat(req, res) {
   reqCtx.artifactTriggers = (id, sig) => { try { return evalArtifactTriggers(id, sig || {}); } catch { return null; } };
 
   try {
-    // ---- Cloud path (OpenRouter / OpenAI-direct / DeepSeek-direct): one streamed turn, no local
-    // tools yet (Phase B adds the cloud tool loop), no local flywheel review. ----
+    // ---- Cloud path (OpenRouter / OpenAI-direct / DeepSeek-direct) ----------------------------
+    // Phase B: a real agent loop. DOING-bench models get this box's tool schemas and run through
+    // the SAME machinery as the local loop — carve-outs, mode gates, confirm gates, 9-state
+    // lifecycle, honest logging. CHATTING-bench models (attachTools=false) stream one plain turn.
     if (cloudModel) {
-      roundsUsed = 1;
       const cloudProvider = providerOf(cloudModel) || "openrouter";
-      working("writing");
-      let streamed = false;
-      const or = await cloudChatStream(cloudModel, messages, { temperature: opts.temperature, num_predict: 4096, signal: ac.signal },
-        (delta) => { if (aborted) return; if (!streamed) { streamed = true; workStop(); } sse({ type: "token", delta }); });
-      workStop();
-      if (aborted) { sse({ type: "stopped" }); await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "interrupted", rounds: 1 }); return endStream(); }
-      if (!or.ok) {
-        // OpenRouter failed — surface a clear error; the local path is untouched and still works.
-        sse({ type: "error", error: or.error || "The cloud model didn't respond. Try again, or switch back to Local Qwen." });
-        await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "error", error: String(or.error || "").slice(0, 200) });
-        return endStream();
+      const cloudRec = modelById(cloudModel);
+      const cloudTools = attachTools ? toolDefs(flywheel.activeToolOverlays()) : null;
+      let inTokTotal = 0, outTokTotal = 0, costTotal = 0, sawCost = false, sawTok = false;
+      const bumpUsage = (u) => {
+        if (!u) return;
+        const it = u.prompt_tokens ?? u.input_tokens, ot = u.completion_tokens ?? u.output_tokens;
+        if (typeof it === "number") { inTokTotal += it; sawTok = true; }
+        if (typeof ot === "number") { outTokTotal += ot; sawTok = true; }
+        if (typeof u.cost === "number") { costTotal += u.cost; sawCost = true; }
+      };
+      let answer = "", streamedAny = false;
+
+      for (let round = 0; round < MAX_ROUNDS && !aborted; round++) {
+        roundsUsed = round + 1;
+        working(round === 0 ? "thinking" : "writing");
+        let streamed = false;
+        const or = await cloudChatStream(cloudModel, messages,
+          { temperature: opts.temperature, num_predict: 4096, signal: ac.signal,
+            tools: (cloudTools && round < MAX_ROUNDS - 1) ? cloudTools : null },
+          (delta) => { if (aborted) return; if (!streamed) { streamed = true; workStop(); } streamedAny = true; sse({ type: "token", delta }); });
+        workStop();
+        if (aborted) { sse({ type: "stopped" }); await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "interrupted", rounds: roundsUsed, tools: toolCount }); return endStream(); }
+        if (!or.ok) {
+          // Provider failed — surface a clear error; the local path is untouched and still works.
+          sse({ type: "error", error: or.error || "The cloud model didn't respond. Try again, or switch back to Local Qwen." });
+          await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "error", error: String(or.error || "").slice(0, 200), rounds: roundsUsed, tools: toolCount });
+          return endStream();
+        }
+        bumpUsage(or.usage);
+
+        const calls = Array.isArray(or.toolCalls) ? or.toolCalls : [];
+        if (calls.length && cloudTools && round < MAX_ROUNDS - 1) {
+          working("running tools");
+          // Record the assistant's tool-call turn, then run each call through the same gates the
+          // local loop uses (this block deliberately mirrors the local one — same lifecycle,
+          // carve-outs, confirm machinery, honest logging — with OpenAI tool_call_id plumbing).
+          messages.push({ role: "assistant", content: or.content || "", tool_calls: calls });
+          for (const c of calls) {
+            if (aborted) break;
+            const fn = c.function || {};
+            const name = fn.name || "unknown";
+            let args = fn.arguments;
+            if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = {}; } }
+            const meta = toolMeta(name);
+            const runId = newRunId();
+            const cls = effectivePermission(name, args, CTX);
+            const callStartedAt = new Date().toISOString();
+            const inPrev = meta.logsInputs ? JSON.stringify(args).slice(0, 200) : undefined;
+            const life = lifecycle();
+            life.push("proposed");
+            toolCount++;
+            toolRunIds.push(runId);
+            const toolMsg = (content) => messages.push({ role: "tool", tool_call_id: c.id, content });
+
+            // 1) Ironclad carve-out: hard-deny protected resources, even under LAX.
+            const guard = assertNotProtected(name, args);
+            if (!guard.ok) {
+              life.push("blocked", { reason: guard.reason });
+              sse({ type: "tool", name, runId, cls, status: "blocked", preview: guard.reason });
+              await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "blocked", reason: guard.reason, states: life.states, input: inPrev, chatId, model: cloudModel });
+              toolMsg(`BLOCKED: this ${guard.reason}. I cannot do that.`);
+              toolSummaries.push(name + " · blocked");
+              continue;
+            }
+
+            // 1b) Mode gate (spec allowedModes).
+            if (meta.allowedModes && !meta.allowedModes.includes(mode)) {
+              life.push("blocked", { reason: "mode " + mode + " not in allowedModes" });
+              sse({ type: "tool", name, runId, cls, status: "blocked", preview: "not allowed in " + mode + " mode" });
+              await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "blocked", reason: "mode " + mode + " not in allowedModes", states: life.states, input: inPrev, chatId, model: cloudModel });
+              toolMsg(`BLOCKED: ${name} is not allowed in ${mode} mode. Tell Fred to switch modes if this action is really needed.`);
+              toolSummaries.push(name + " · blocked (mode)");
+              continue;
+            }
+
+            // 2) Confirmation gate — identical machinery to the local loop.
+            const gate = await passConfirmGate({
+              cls, interactive: confirmTools, life,
+              ask: () => { sse({ type: "tool_confirm", name, runId, cls, preview: inPrev || "" }); return awaitConfirm(runId, 120000); },
+            });
+            if (!gate.proceed) {
+              sse({ type: "tool", name, runId, cls, status: "cancelled", preview: gate.decision });
+              await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "cancelled", decision: gate.decision, states: life.states, input: inPrev, chatId, model: cloudModel });
+              toolMsg(`The user did not approve this ${cls} action (${gate.decision}); it was not run.`);
+              toolSummaries.push(name + " · denied");
+              continue;
+            }
+
+            // 3) Run + report honestly. The abort signal reaches the tool (C5).
+            life.push("executing");
+            sse({ type: "tool", name, runId, cls, gated: WRITE_TOOLS.has(name), status: "run" });
+            const result = await runTool(name, args, reqCtx, ac.signal);
+            if (aborted) {
+              life.push("cancelled", { discarded: true, reason: String(result).startsWith("CANCELLED") ? "aborted in flight" : "finished but discarded (client stopped)" });
+              await logToolRun({ ts: callStartedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: "cancelled", states: life.states, discarded: true, confirmedByUser: gate.confirmedByUser, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model: cloudModel });
+              toolSummaries.push(name + " · cancelled");
+              break;
+            }
+            const failed = /^(Tool .+ failed|Unknown tool|Couldn't|I can read and plan|Memory isn't available|BLOCKED)/i.test(String(result));
+            life.push(failed ? "failed" : "succeeded");
+            if (failed) toolFailedThisTurn = true;
+            if ((name === "create_artifact" || name === "revise_artifact") && !failed) artifactCreatedThisTurn = true;
+            if ((name === "run_python_sandbox" || name === "forge_send") && !failed) executedCodeThisTurn = true;
+            if (name === "export_artifact" && !failed) exportedThisTurn = true;
+            sse({ type: "tool", name, runId, cls, status: failed ? "failed" : "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
+            await logToolRun({ ts: callStartedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", states: life.states, confirmedByUser: gate.confirmedByUser, autoApproved: gate.autoApproved || undefined, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model: cloudModel });
+            toolMsg(String(result).slice(0, 8000));
+            toolSummaries.push(name + " · " + (failed ? "failed" : "succeeded"));
+          }
+          continue;   // feed the tool results back for the next round
+        }
+
+        // Final answer for this turn.
+        answer = (or.content || "").trim() || "(no response)";
+        break;
       }
-      const answer = (or.content || "").trim() || "(no response)";
-      // If nothing streamed (some providers buffer), deliver the whole answer now so the UI isn't blank.
-      if (!streamed && answer) { const size = 28; for (let i = 0; i < answer.length && !aborted; i += size) { sse({ type: "token", delta: answer.slice(i, i + size) }); if (i + size < answer.length) await sleep(6); } }
+
+      if (aborted) { sse({ type: "stopped" }); return endStream(); }
+      // If nothing ever streamed (some providers buffer, or the answer landed post-tools without
+      // deltas), deliver the whole answer now so the UI isn't blank.
+      if (!streamedAny && answer) { const size = 28; for (let i = 0; i < answer.length && !aborted; i += size) { sse({ type: "token", delta: answer.slice(i, i + size) }); if (i + size < answer.length) await sleep(6); } }
       if (aborted) { sse({ type: "stopped" }); return endStream(); }
       // Draft mode still auto-saves a versioned artifact (parity with the local path).
       if (mode === "draft" && answer.trim().length > 400) {
         try {
           const art = artifacts.create({ title: deriveTitle(answer, lastUser), type: "markdown", content: answer, model: cloudModel, sourceChatId: chatId,
-            promptSummary: lastUser ? String(lastUser.content).slice(0, 200) : "", sourceToolRunIds: [], sourceContextRefs: ctxInfo.used.map((c) => c.citationLabel) });
+            promptSummary: lastUser ? String(lastUser.content).slice(0, 200) : "", sourceToolRunIds: [...toolRunIds], sourceContextRefs: ctxInfo.used.map((c) => c.citationLabel) });
           if (art.item) { artifactCreatedThisTurn = true; sse({ type: "artifact", id: art.item.id, title: art.item.title, action: "saved" }); }
         } catch {}
       }
       const citations = extractCitations(answer);
-      const quality = computeQuality({ answer, routeConfidence, toolFailed: false, retrievalCount: ctxInfo.used.length, citations });
-      const outTok = (or.usage && (or.usage.completion_tokens ?? or.usage.output_tokens)) || estTokens(answer.length);
-      const inTok = (or.usage && (or.usage.prompt_tokens ?? or.usage.input_tokens)) || null;
-      const costUsd = or.usage && typeof or.usage.cost === "number" ? or.usage.cost : null;
-      console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=0 conf=${quality.confidence}`);
-      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: 1, tools: 0, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
+      const quality = computeQuality({ answer, routeConfidence, toolFailed: toolFailedThisTurn, retrievalCount: ctxInfo.used.length, citations });
+      const outTok = sawTok ? outTokTotal : estTokens(answer.length);
+      const inTok = sawTok ? inTokTotal : null;
+      // OpenRouter reports real cost; direct providers don't — derive it from catalog prices.
+      const costUsd = sawCost ? costTotal
+        : (sawTok && cloudRec) ? +(((inTokTotal * (cloudRec.inCost || 0)) + (outTokTotal * (cloudRec.outCost || 0))) / 1e6).toFixed(6)
+        : null;
+      console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=${toolCount} rounds=${roundsUsed} conf=${quality.confidence}`);
+      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
       try { chatlog.record(chatId, history, answer); } catch {}
-      sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: 0, runIds: [], outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
+      sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
       return endStream();
     }
 
@@ -1687,6 +1917,9 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify(payload));
     }
+
+    if (path === "/api/voice/transcribe" && req.method === "POST") return handleVoiceTranscribe(req, res);
+    if (path === "/api/voice/tts" && req.method === "POST") return handleVoiceTts(req, res);
 
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);

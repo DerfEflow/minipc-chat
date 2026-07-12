@@ -201,6 +201,10 @@ export const TOOLS = [
   { category: "persona", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "add_to_persona", description: "Add a piece of Fred's OWN material to the Persona corpus (his voice-training set) — use when he shares one of his jokes, maxims, essays, stories, poems, stray thoughts, future plans, favorites, or a choice AI chat, or says 'save this as one of mine'. Not for facts to remember (use remember for those).", parameters: { type: "object", properties: { text: { type: "string", description: "The exact text in Fred's words." }, kind: { type: "string", enum: ["joke", "maxim", "essay", "story", "poem", "thought", "plan", "favorite", "chat", "other"] }, title: { type: "string" } }, required: ["text", "kind"] } } } },
   { category: "persona", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "search_persona", description: "Retrieve real examples of Fred's own writing from the Persona corpus (to match his voice or recall something he wrote). Optionally filter by kind.", parameters: { type: "object", properties: { query: { type: "string" }, kind: { type: "string", enum: ["joke", "maxim", "essay", "story", "poem", "thought", "plan", "favorite", "chat", "web", "other"] } }, required: ["query"] } } } },
   { category: "persona", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "scrape_to_persona", description: "Fetch a web page (e.g. one of Fred's own sites) and add its readable text to the Persona corpus as source material.", parameters: { type: "object", properties: { url: { type: "string" }, kind: { type: "string", description: "default 'web'" }, title: { type: "string" } }, required: ["url"] } } } },
+  // Live web access (Fred's ask: search wired into the UI so ANY model can look things up).
+  // web_search = SerpApi (SERP_API_KEY on the box); web_read fetches one page as readable text.
+  { category: "retrieval", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "web_search", description: "Search the live web (Google via SerpApi) for current information — news, prices, docs, anything after your training data. Returns the top results (title, url, snippet) plus a direct answer when Google shows one. Follow up with web_read on a promising url when you need the full page.", parameters: { type: "object", properties: { query: { type: "string", description: "The search query." }, num: { type: "number", description: "How many results (default 6, max 10)." } }, required: ["query"] } } } },
+  { category: "retrieval", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "web_read", description: "Fetch a web page and return its readable text (article/main content). Use after web_search to read a specific result in full.", parameters: { type: "object", properties: { url: { type: "string", description: "The page URL to read." } }, required: ["url"] } } } },
   // C4: the six spec formatting tools — real tools on the light model (fast, cheap), read_only.
   { category: "formatting", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "format_as_markdown", description: "Reformat text/data as clean structured markdown (headings, lists, emphasis). Runs on the fast model — use for pure reformatting instead of doing it yourself.", parameters: { type: "object", properties: { content: { type: "string", description: "The content to reformat." }, instructions: { type: "string", description: "Optional extra formatting guidance." } }, required: ["content"] } } } },
   { category: "formatting", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "format_as_json", description: "Convert text/data into well-structured JSON (validated before returning). Runs on the fast model.", parameters: { type: "object", properties: { content: { type: "string" }, instructions: { type: "string", description: "Optional shape hints, e.g. desired keys." } }, required: ["content"] } } } },
@@ -492,6 +496,32 @@ export async function runTool(name, args, ctx, signal = null) {
         if (!text || text.length < 40) return "Nothing readable came back from that page.";
         const ing = ctx.persona.ingestText({ text, kind: args.kind || "web", title: args.title || args.url, source: "scrape:" + args.url });
         return ing.error ? "Couldn't add it: " + ing.error : `Scraped ${text.length} chars into Fred's corpus (${ing.chunks} chunk${ing.chunks === 1 ? "" : "s"}).`;
+      }
+      case "web_search": {
+        if (!ctx.serpKey) return "Web search isn't configured on the server (SERP_API_KEY missing from the box's .env).";
+        const q = String(args.query || "").trim();
+        if (!q) return "Give me a search query.";
+        const num = Math.min(Math.max(Number(args.num) || 6, 1), 10);
+        const r = await request("GET", "https://serpapi.com/search.json?engine=google&num=" + num + "&q=" + encodeURIComponent(q) + "&api_key=" + encodeURIComponent(ctx.serpKey), {}, null, signal);
+        if (r.aborted) return "CANCELLED: search aborted.";
+        if (r.status !== 200) return "Search failed (HTTP " + r.status + "): " + String(r.text || "").slice(0, 200);
+        const j = parse(r.text);
+        if (!j) return "Search returned an unreadable response.";
+        const lines = [];
+        const ab = j.answer_box;
+        if (ab && (ab.answer || ab.snippet)) lines.push("DIRECT ANSWER: " + (ab.answer || ab.snippet));
+        for (const o of (j.organic_results || []).slice(0, num)) {
+          lines.push(`— ${o.title || "(untitled)"}\n  ${o.link || ""}\n  ${(o.snippet || "").slice(0, 300)}`);
+        }
+        return lines.length ? lines.join("\n\n") : "No results for that query.";
+      }
+      case "web_read": {
+        const r = await fetchUrl(String(args.url || ""));
+        if (r.error) return "Couldn't fetch that URL: " + r.error;
+        if ((r.status || 0) >= 400) return "The site returned HTTP " + r.status + ".";
+        const text = /html/i.test(r.contentType || "") || /<html/i.test(r.body || "") ? htmlToText(r.body) : String(r.body || "");
+        if (!text || text.length < 40) return "Nothing readable came back from that page.";
+        return text.slice(0, 7500);
       }
       default: return `Unknown tool: ${name}`;
     }

@@ -156,6 +156,13 @@
     background:linear-gradient(145deg,var(--copper),#7a3f12);color:#fff1e0;font-size:20px;box-shadow:0 6px 18px rgba(0,0,0,.45);}
   .send.stop{background:linear-gradient(145deg,#b23b2a,#5e1d13)}
   .send:disabled{opacity:.4}
+  /* voice: mic (tap to talk, tap again to send) + speak-answers toggle */
+  .mic{flex:none;width:44px;height:44px;border-radius:50%;border:1px solid var(--rim);cursor:pointer;
+    background:rgba(8,14,36,.45);color:var(--sand);font-size:19px;box-shadow:0 6px 18px rgba(0,0,0,.35);}
+  .mic.rec{background:linear-gradient(145deg,#b23b2a,#5e1d13);color:#fff1e0;border-color:#b23b2a;animation:recpulse 1.2s ease-in-out infinite}
+  .mic.busy{opacity:.5;pointer-events:none}
+  .mic.speakon{color:var(--copper2);border-color:var(--copper2)}
+  @keyframes recpulse{50%{box-shadow:0 0 0 8px rgba(178,59,42,.25)}}
   .err{color:#ff9a7a;font-size:13px;text-align:center;padding:6px}
   .cursor::after{content:"\258c";animation:blink 1s steps(2) infinite;color:var(--copper2)}
   @keyframes blink{50%{opacity:0}}
@@ -300,6 +307,8 @@
   <footer>
     <div class="bar">
       <textarea id="input" rows="1" placeholder="Message your assistant&#8230;" autocomplete="off"></textarea>
+      <button id="speak" class="mic" title="Speak answers aloud (off)" aria-label="Toggle spoken answers">&#128264;</button>
+      <button id="mic" class="mic" title="Tap to talk, tap again to send" aria-label="Voice input">&#127908;</button>
       <button id="send" class="send" title="Send" aria-label="Send">&#8593;</button>
     </div>
   </footer>

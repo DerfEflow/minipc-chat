@@ -399,6 +399,7 @@ function finalizeSession(st) {
     const msg = { role: "assistant", content: final || "(no response)" };
     if (st.doneMeta) { msg.meta = st.doneMeta; if (st.ctxItems) msg.meta.contextItems = st.ctxItems; if (st.doneMeta.mode) c.lastMode = st.doneMeta.mode; }
     c.messages.push(msg); c.updatedAt = Date.now(); save();
+    if (speakOn && final) speakAnswer(final);   // voice: read the finished answer aloud (toggle)
   } else if (final) {
     c.messages.push({ role: "assistant", content: final, meta: { interrupted: true } }); c.updatedAt = Date.now(); save();
   } else if (st.errMsg) {
@@ -1123,3 +1124,70 @@ async function checkVersion() {
 setInterval(() => { if (pendingReload && !busy) doReload(); else checkVersion(); }, 90000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVersion(); });
 checkVersion();
+
+// ---------- voice (Phase D): OpenAI ears + mouth, the PICKED model as the brain ----------
+// Tap mic -> record; tap again -> stop -> /api/voice/transcribe (OpenAI STT on the box) -> the
+// transcript auto-sends through the normal /chat flow (whatever model is picked, tools included).
+// The speaker toggle speaks finished answers via /api/voice/tts. Voice I/O is OpenAI; the brain
+// stays Fred's choice — that's the point of Dominion.
+const micBtn = $("mic"), speakBtn = $("speak");
+const LS_SPEAK = "dominion.speak.v1";
+let speakOn = false; try { speakOn = localStorage.getItem(LS_SPEAK) === "1"; } catch {}
+let rec = null, recChunks = [], recStream = null, ttsAudio = null;
+
+function paintSpeak() {
+  if (!speakBtn) return;
+  speakBtn.classList.toggle("speakon", speakOn);
+  speakBtn.innerHTML = speakOn ? "&#128266;" : "&#128264;";
+  speakBtn.title = "Speak answers aloud (" + (speakOn ? "on" : "off") + ")";
+}
+if (speakBtn) { paintSpeak(); speakBtn.addEventListener("click", () => {
+  speakOn = !speakOn; try { localStorage.setItem(LS_SPEAK, speakOn ? "1" : "0"); } catch {}
+  paintSpeak(); if (!speakOn && ttsAudio) { try { ttsAudio.pause(); } catch {} }
+}); }
+
+async function micTap() {
+  if (!micBtn) return;
+  if (rec && rec.state === "recording") { rec.stop(); return; }   // second tap = stop -> transcribe -> send
+  if (!navigator.mediaDevices || !window.MediaRecorder) { showErr("Voice input isn't supported in this browser."); return; }
+  try { recStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { showErr("Microphone permission denied — allow the mic for this site."); return; }
+  // Chrome/Android = webm+opus; iOS Safari = mp4. The server forwards whatever mime it gets.
+  const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus"
+    : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
+  recChunks = [];
+  try { rec = new MediaRecorder(recStream, mime ? { mimeType: mime } : undefined); }
+  catch { showErr("Couldn't start the recorder."); try { recStream.getTracks().forEach((t) => t.stop()); } catch {} return; }
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+  rec.onstop = async () => {
+    try { recStream.getTracks().forEach((t) => t.stop()); } catch {}
+    micBtn.classList.remove("rec"); micBtn.classList.add("busy");
+    try {
+      const blob = new Blob(recChunks, { type: (rec && rec.mimeType) || mime || "audio/webm" });
+      if (blob.size < 1000) { showErr("Didn't catch that — recording was too short."); return; }
+      const r = await fetch("/api/voice/transcribe", { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j || !j.text) { showErr((j && j.error) || "Transcription failed — try again."); return; }
+      input.value = j.text; autosize();
+      if (!busy) send();   // straight through the normal flow: picked model, tools, the works
+    } finally { micBtn.classList.remove("busy"); rec = null; }
+  };
+  rec.start();
+  micBtn.classList.add("rec");
+}
+if (micBtn) micBtn.addEventListener("click", micTap);
+
+// Speak a finished answer. Code blocks are dropped (nobody wants JSON read aloud); UI-side cap
+// matches the server's 4000-char TTS limit.
+async function speakAnswer(text) {
+  const t = String(text || "").replace(/```[\s\S]*?```/g, " … code omitted … ").slice(0, 4000).trim();
+  if (!t) return;
+  try {
+    const r = await fetch("/api/voice/tts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: t }) });
+    if (!r.ok) return;   // silent — spoken answers are a bonus, never an error state
+    const blob = await r.blob();
+    if (ttsAudio) { try { ttsAudio.pause(); } catch {} }
+    ttsAudio = new Audio(URL.createObjectURL(blob));
+    ttsAudio.play().catch(() => {});
+  } catch {}
+}
