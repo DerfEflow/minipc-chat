@@ -1564,14 +1564,24 @@ async function handleChat(req, res) {
         if (typeof u.cost === "number") { costTotal += u.cost; sawCost = true; }
       };
       let answer = "", streamedAny = false;
+      // Cloud models are fast + cheap per round (unlike the CPU-prefill local path), so they get a
+      // deeper research budget. LIVE LESSON 2026-07-12: MiniMax burned all rounds on web searches,
+      // then answered EMPTY when tools vanished — the user saw "(no response)". Two guards below:
+      // a conclude-now nudge when the tool budget runs out, and one retry if content comes back empty.
+      const CLOUD_MAX_ROUNDS = 8;
+      let concludeNudged = false, emptyRetried = false;
 
-      for (let round = 0; round < MAX_ROUNDS && !aborted; round++) {
+      for (let round = 0; round < CLOUD_MAX_ROUNDS && !aborted; round++) {
         roundsUsed = round + 1;
+        const toolsThisRound = (cloudTools && round < CLOUD_MAX_ROUNDS - 1) ? cloudTools : null;
+        if (cloudTools && !toolsThisRound && !concludeNudged) {
+          concludeNudged = true;
+          messages.push({ role: "system", content: "Your tool budget for this turn is used up. Give the user your final answer NOW, in plain text, from the information you already gathered. Do not attempt any more tool calls." });
+        }
         working(round === 0 ? "thinking" : "writing");
         let streamed = false;
         const or = await cloudChatStream(cloudModel, messages,
-          { temperature: opts.temperature, num_predict: 4096, signal: ac.signal,
-            tools: (cloudTools && round < MAX_ROUNDS - 1) ? cloudTools : null },
+          { temperature: opts.temperature, num_predict: 4096, signal: ac.signal, tools: toolsThisRound },
           (delta) => { if (aborted) return; if (!streamed) { streamed = true; workStop(); } streamedAny = true; sse({ type: "token", delta }); });
         workStop();
         if (aborted) { sse({ type: "stopped" }); await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "interrupted", rounds: roundsUsed, tools: toolCount }); return endStream(); }
@@ -1584,7 +1594,7 @@ async function handleChat(req, res) {
         bumpUsage(or.usage);
 
         const calls = Array.isArray(or.toolCalls) ? or.toolCalls : [];
-        if (calls.length && cloudTools && round < MAX_ROUNDS - 1) {
+        if (calls.length && toolsThisRound) {
           working("running tools");
           // Record the assistant's tool-call turn, then run each call through the same gates the
           // local loop uses (this block deliberately mirrors the local one — same lifecycle,
@@ -1666,9 +1676,17 @@ async function handleChat(req, res) {
         }
 
         // Final answer for this turn.
-        answer = (or.content || "").trim() || "(no response)";
+        answer = (or.content || "").trim();
+        if (!answer && !emptyRetried && round + 1 < CLOUD_MAX_ROUNDS) {
+          // Reasoning models sometimes think without speaking (all output in the reasoning channel).
+          // One explicit retry: demand plain text. If it's empty again, report honestly below.
+          emptyRetried = true;
+          messages.push({ role: "system", content: "Your last response contained no visible text. Write your final answer to the user now as plain text." });
+          continue;
+        }
         break;
       }
+      if (!answer) answer = "(no response)";
 
       if (aborted) { sse({ type: "stopped" }); return endStream(); }
       // If nothing ever streamed (some providers buffer, or the answer landed post-tools without
