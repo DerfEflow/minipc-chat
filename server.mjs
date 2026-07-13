@@ -1576,7 +1576,7 @@ async function handleChat(req, res) {
         const toolsThisRound = (cloudTools && round < CLOUD_MAX_ROUNDS - 1) ? cloudTools : null;
         if (cloudTools && !toolsThisRound && !concludeNudged) {
           concludeNudged = true;
-          messages.push({ role: "system", content: "Your tool budget for this turn is used up. Give the user your final answer NOW, in plain text, from the information you already gathered. Do not attempt any more tool calls." });
+          messages.push({ role: "system", content: "STOP RESEARCHING. Your tool budget for this turn is used up and no more tool calls will be executed. Do NOT describe what you would search next or announce further steps. State your conclusion for the user NOW, in plain text, from the results already gathered — if the evidence is inconclusive, say so plainly and summarize what you found." });
         }
         working(round === 0 ? "thinking" : "writing");
         let streamed = false;
