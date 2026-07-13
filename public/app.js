@@ -75,7 +75,12 @@ function summarizeLeft(id) {
 }
 function newChat() { if (busy) return; const prev = curId; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); closeSidebar(); input.focus(); if (prev) summarizeLeft(prev); }
 function switchChat(id) { if (busy) return; const prev = curId; curId = id; save(); renderAll(); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); }
-function deleteChat(id) { chats = chats.filter((c) => c.id !== id); if (curId === id) curId = (chats[0] && chats[0].id) || null; if (!curId) { newChat(); return; } save(); renderAll(); }
+function deleteChat(id) {
+  // True forget: also erase the server's transcript copy + any episodic memory distilled from this
+  // chat, so cross-chat retrieval can never resurrect it (fire-and-forget; nothing breaks offline).
+  fetch("/chatlog/forget", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
+  chats = chats.filter((c) => c.id !== id); if (curId === id) curId = (chats[0] && chats[0].id) || null; if (!curId) { newChat(); return; } save(); renderAll();
+}
 function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = prompt("Rename chat", c.title); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); } }
 
 // ---------- sidebar ----------

@@ -1960,6 +1960,24 @@ const server = http.createServer(async (req, res) => {
     if (path === "/api/voice/transcribe" && req.method === "POST") return handleVoiceTranscribe(req, res);
     if (path === "/api/voice/tts" && req.method === "POST") return handleVoiceTts(req, res);
 
+    // True forget (Fred 2026-07-12): deleting a chat on the phone must erase the SERVER's copy too —
+    // the chatlog transcript AND any episodic memory distilled from it (source.referenceId = chatId).
+    // Without this, cross-chat retrieval resurrects "deleted" conversations.
+    if (path === "/chatlog/forget" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      if (!body || !body.chatId) { res.writeHead(400, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "chatId required" })); }
+      const removedChats = chatlog.remove(String(body.chatId));
+      let removedMemories = 0;
+      try {
+        for (const m of memory.list({})) {
+          if (m.source && m.source.referenceId === body.chatId) { memory.remove(m.id); removedMemories++; }
+        }
+      } catch {}
+      console.log(`[dominion-ai] /chatlog/forget ${body.chatId} -> transcript=${removedChats} memories=${removedMemories}`);
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({ forgotten: !!removedChats || removedMemories > 0, transcript: removedChats, memories: removedMemories }));
+    }
+
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
     if (path === "/chat/attach" && req.method === "GET") return handleChatAttach(req, res, u);

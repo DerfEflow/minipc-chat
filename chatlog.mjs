@@ -67,5 +67,14 @@ export function createChatLog(opts = {}) {
   const markSummarized = (id) => { const c = get(id); if (c) { c.summarized = true; persist(); } };
   const stats = () => ({ chats: chats.length });
 
-  return { record, search, get, list, markSummarized, stats };
+  // True forget (Fred 2026-07-12: deleting a chat on the phone must ALSO erase the server's copy —
+  // he deleted an As-Fred chat to wipe context, and cross-chat retrieval resurrected it anyway).
+  function remove(id) {
+    const before = chats.length;
+    chats = chats.filter((c) => c.id !== id);
+    if (chats.length !== before) persist();
+    return before - chats.length;
+  }
+
+  return { record, search, get, list, markSummarized, remove, stats };
 }
