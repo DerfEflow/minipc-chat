@@ -291,6 +291,9 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     // cloud models can drive the same tools the local model uses.
     if (Array.isArray(opts.tools) && opts.tools.length) {
       payload.tools = opts.tools;
+      // opts.toolChoice="none" = conclusion rounds: schemas stay visible (agent models get confused
+      // when tools vanish mid-conversation) but the API hard-blocks further calls.
+      if (opts.toolChoice) payload.tool_choice = opts.toolChoice;
       // LIVE-verified 2026-07-12: OpenAI's reasoning models (gpt-5.x / o-series) reject function
       // tools on /v1/chat/completions unless reasoning_effort is "none" ("low" is also rejected).
       // GPT-4o is unaffected. Proper fix later = their /v1/responses API; until then tool turns on
@@ -310,7 +313,7 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     };
     const providerLabel = cfg.label;
     const mod = u.protocol === "https:" ? https : http;
-    let content = "", usage = null, buf = "", settled = false, finishReason = "";
+    let content = "", reasoning = "", usage = null, buf = "", settled = false, finishReason = "";
     // Streamed tool calls arrive as indexed fragments (id/name once, arguments in pieces) —
     // accumulate per index and reassemble into full {id, type, function:{name, arguments}} objects.
     const toolCallAcc = [];
@@ -346,6 +349,11 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
                 content += delta.content;
                 try { onDelta && onDelta(delta.content); } catch {}
               }
+              // Reasoning channel (OpenRouter normalizes to `reasoning`; DeepSeek-style uses
+              // reasoning_content). Never streamed to the UI — kept as a last-ditch fallback when
+              // a model thinks without speaking (live MiniMax failure 2026-07-12).
+              if (delta && typeof delta.reasoning === "string") reasoning += delta.reasoning;
+              else if (delta && typeof delta.reasoning_content === "string") reasoning += delta.reasoning_content;
               if (delta && Array.isArray(delta.tool_calls)) {
                 for (const tc of delta.tool_calls) {
                   const i = typeof tc.index === "number" ? tc.index : 0;
@@ -362,7 +370,7 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
             } catch {}                                              // partial/keepalive line — wait for more
           }
         });
-        resp.on("end", () => done({ ok: true, content, usage, finishReason,
+        resp.on("end", () => done({ ok: true, content, reasoning, usage, finishReason,
           toolCalls: toolCallAcc.filter((c) => c && c.function && c.function.name)
             .map((c, i) => ({ ...c, id: c.id || "call_" + i })) }));
         resp.on("error", (e) => done({ ok: false, error: providerLabel + " stream error: " + String(e.message) }));
@@ -1569,19 +1577,25 @@ async function handleChat(req, res) {
       // then answered EMPTY when tools vanished — the user saw "(no response)". Two guards below:
       // a conclude-now nudge when the tool budget runs out, and one retry if content comes back empty.
       const CLOUD_MAX_ROUNDS = 8;
-      let concludeNudged = false, emptyRetried = false;
+      let concludeNudged = false, emptyRetried = false, lastReasoning = "";
 
       for (let round = 0; round < CLOUD_MAX_ROUNDS && !aborted; round++) {
         roundsUsed = round + 1;
-        const toolsThisRound = (cloudTools && round < CLOUD_MAX_ROUNDS - 1) ? cloudTools : null;
-        if (cloudTools && !toolsThisRound && !concludeNudged) {
+        // The last TWO rounds are conclusion rounds (room for the nudge AND one empty-retry).
+        // Schemas stay attached with tool_choice:"none" — agent models go mute when tools vanish
+        // mid-conversation (live MiniMax failure); the API-level block is what stops further calls.
+        const concludePhase = !!cloudTools && round >= CLOUD_MAX_ROUNDS - 2;
+        const toolsThisRound = (cloudTools && !concludePhase) ? cloudTools : null;
+        if (concludePhase && !concludeNudged) {
           concludeNudged = true;
-          messages.push({ role: "system", content: "STOP RESEARCHING. Your tool budget for this turn is used up and no more tool calls will be executed. Do NOT describe what you would search next or announce further steps. State your conclusion for the user NOW, in plain text, from the results already gathered — if the evidence is inconclusive, say so plainly and summarize what you found." });
+          // user-role, not system: agent-tuned models weight a trailing user instruction far higher.
+          messages.push({ role: "user", content: "[Dominion system notice — not Fred] STOP RESEARCHING. Tool calls are disabled from here on. Do NOT describe what you would search next. Write your conclusion for the user NOW in plain text from the results already gathered — if the evidence is inconclusive, say so plainly and summarize what you found." });
         }
         working(round === 0 ? "thinking" : "writing");
         let streamed = false;
         const or = await cloudChatStream(cloudModel, messages,
-          { temperature: opts.temperature, num_predict: 4096, signal: ac.signal, tools: toolsThisRound },
+          { temperature: opts.temperature, num_predict: 4096, signal: ac.signal,
+            tools: concludePhase ? cloudTools : toolsThisRound, toolChoice: concludePhase ? "none" : undefined },
           (delta) => { if (aborted) return; if (!streamed) { streamed = true; workStop(); } streamedAny = true; sse({ type: "token", delta }); });
         workStop();
         if (aborted) { sse({ type: "stopped" }); await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "interrupted", rounds: roundsUsed, tools: toolCount }); return endStream(); }
@@ -1677,15 +1691,19 @@ async function handleChat(req, res) {
 
         // Final answer for this turn.
         answer = (or.content || "").trim();
+        if (or.reasoning) lastReasoning = or.reasoning;
         if (!answer && !emptyRetried && round + 1 < CLOUD_MAX_ROUNDS) {
           // Reasoning models sometimes think without speaking (all output in the reasoning channel).
-          // One explicit retry: demand plain text. If it's empty again, report honestly below.
+          // One explicit retry: demand plain text. If it's empty again, fall back to reasoning below.
           emptyRetried = true;
-          messages.push({ role: "system", content: "Your last response contained no visible text. Write your final answer to the user now as plain text." });
+          messages.push({ role: "user", content: "[Dominion system notice — not Fred] Your last response contained no visible text. Write your final answer now as plain text." });
           continue;
         }
         break;
       }
+      // Honest last resort: if the model thought without ever speaking, surface the tail of its
+      // reasoning instead of a blank — Fred gets SOMETHING true rather than "(no response)".
+      if (!answer && lastReasoning) answer = "(The model researched but never wrote a final answer. The tail of its reasoning:)\n\n…" + lastReasoning.trim().slice(-900);
       if (!answer) answer = "(no response)";
 
       if (aborted) { sse({ type: "stopped" }); return endStream(); }
