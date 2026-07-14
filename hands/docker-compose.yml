@@ -1,0 +1,25 @@
+# Dominion AI — hands node, max-access on a Linux host (Fred's end goal).
+#
+# The whole host is bind-mounted at /host and the node's roots point there, so it reaches the entire
+# machine. The carve-out guard inside the node still hard-blocks the backups drive, app/db backups,
+# customer DBs, and pg_dump/restore no matter what is mounted — that boundary is never widened.
+#
+#   HANDS_URL / HANDS_TOKEN / HANDS_NODE come from a .env file next to this compose file
+#   (copy hands/hands.env.example -> hands/.env and fill it). NEVER commit the real .env.
+#
+#   docker compose -f hands/docker-compose.yml up -d
+#
+# On the WINDOWS machines use hands/install-windows.ps1 instead (native, not this container).
+services:
+  hands:
+    build:
+      context: ..
+      dockerfile: hands/Dockerfile
+    image: dominion-hands
+    container_name: dominion-hands
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HANDS_ROOTS: /host
+    volumes:
+      - /:/host:rw

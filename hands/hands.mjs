@@ -41,8 +41,31 @@ const IS_WIN = process.platform === "win32";
 const HANDS_URL = String(process.env.HANDS_URL || "").replace(/\/$/, "");
 const HANDS_TOKEN = process.env.HANDS_TOKEN || "";
 const NODE_NAME = (process.env.HANDS_NODE || hostname() || "unnamed").toLowerCase();
-const ROOTS = String(process.env.HANDS_ROOTS || "").split(",").map((s) => s.trim()).filter(Boolean);
 const VERSION = "hands/1";
+
+// ---- roots: max-access per Fred's spec ("almost everything, with the same exceptions") --------
+// HANDS_MAX_ACCESS=1 gives the node the whole machine EXCEPT the ironclad carve-outs (D:\ backups,
+// app/db backups, customer DBs, pg_dump/restore — enforced separately below and never widened).
+// Windows: every fixed drive root that exists, minus D:\ (the backup SSD, also carve-out-blocked).
+// Linux/container: the filesystem root ("/") — in Docker that is the container's view, so what the
+// node can reach is exactly what the run mounts in (see hands/Dockerfile). Explicit HANDS_ROOTS is
+// unioned on top, so you can pin narrower roots and still add specific extra paths.
+function discoverMaxRoots() {
+  if (!IS_WIN) return ["/"];
+  const out = [];
+  for (let c = 67; c <= 90; c++) {            // C: .. Z:  (A:/B: are legacy floppies; skip)
+    const letter = String.fromCharCode(c);
+    if (letter === "D") continue;             // the backup drive — carve-out territory, never a root
+    const root = letter + ":\\";
+    try { if (existsSync(root)) out.push(root); } catch {}
+  }
+  return out;
+}
+const MAX_ACCESS = String(process.env.HANDS_MAX_ACCESS || "") === "1";
+const ROOTS = [
+  ...(MAX_ACCESS ? discoverMaxRoots() : []),
+  ...String(process.env.HANDS_ROOTS || "").split(",").map((s) => s.trim()).filter(Boolean),
+];
 
 // ---- ironclad carve-out guard — ported VERBATIM from tools.mjs (ALWAYS on, even under LAX) ----
 // Two resources the assistant must NEVER touch: (1) customer/production databases,
@@ -242,8 +265,8 @@ async function main() {
     console.error("[hands] HANDS_URL and HANDS_TOKEN are required. Refusing to start without auth (L-017).");
     process.exit(1);
   }
-  if (!ROOTS.length) log("NOTE: no HANDS_ROOTS set — fs tools will refuse until roots are configured deliberately.");
-  log(`starting  ·  roots=${ROOTS.join(", ") || "(none)"}  ·  self-protected dirs=${SELF_PROTECT.length}  ·  platform=${process.platform}`);
+  if (!ROOTS.length) log("NOTE: no HANDS_ROOTS and HANDS_MAX_ACCESS unset — fs tools will refuse until roots are configured deliberately.");
+  log(`starting  ·  access=${MAX_ACCESS ? "MAX (all drives minus carve-outs)" : "scoped"}  ·  roots=${ROOTS.join(", ") || "(none)"}  ·  self-protected dirs=${SELF_PROTECT.length}  ·  platform=${process.platform}`);
   for (;;) {
     try { await connectOnce(); }
     catch (e) { log(`disconnected: ${e && e.message}`); }

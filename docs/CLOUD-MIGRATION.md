@@ -430,4 +430,7 @@ Fred created a Thunder Compute **A100-SXM4-80GB** instance (id `0`, uuid `00ypb2
    - `DATA_DIR` = `/data` (Volume) · provider keys (`OPENROUTER_API_KEY`,
      `OPEN_AI_DOMINION_UI_APIKEY`, `DEEPSEEK_AI_DOMINION_UI_APIKEY`, `SERP_API_KEY`) ·
      `OPENROUTER_REFERER` = the Railway URL · `WATCHDOG_ENABLED=0`
+   - `HANDS_TOKEN` = the shared hands secret (same value on every hands node) — enables `/hands/*`.
+   - `GITHUB_TOKEN` = `DOMI_AI_MAX_ACCESS_GITHUB_API` (the max-access token Fred minted 2026-07-14;
+     lives in Railway env, never the laptop wallet, since the container cannot read `~/.app-secrets.env`).
 3. **Phase 5 cutover:** custom domain, retire the mini-PC.

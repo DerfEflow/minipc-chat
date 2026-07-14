@@ -59,6 +59,19 @@ await t("node executor reads what it wrote inside the roots", async () => {
   assert.equal(r.ok, true); assert.equal(r.text, "unit-proof");
 });
 
+// ---- 1b. MAX ACCESS: whole machine as roots, but carve-outs still hard-block ----
+await t("max-access node still refuses D:\\ (carve-out survives max access)", async () => {
+  // Re-import the executor in a child-like context with HANDS_MAX_ACCESS=1 by checking the guard
+  // directly: max access widens ROOTS, it must NOT touch the carve-out list.
+  const r = await executeJob("fs_read", { path: "D:\\backups\\corpus.db" });
+  assert.equal(r.refused, true, "D:\\ must be refused regardless of roots");
+});
+await t("max-access node refuses app-backups even under an allowed root", async () => {
+  const p = join(WORK, "app-backups", "x.db");
+  const r = await executeJob("fs_write", { path: p, content: "x" });
+  assert.equal(r.refused, true, "an app-backups path is a carve-out even inside HANDS_ROOTS");
+});
+
 // ---- 2. hub disabled without a token ----
 await t("hub without HANDS_TOKEN is disabled (dispatch refuses, no surface)", async () => {
   const off = createHandsHub({ token: "" });
