@@ -158,26 +158,23 @@
     if (activity) activity.textContent = busy ? "Processing directive" : "All systems nominal";
   }
 
-  let contextTimer = 0;
+  // syncContext() writes into the context-status label, which lives inside document.body — the
+  // very subtree the MutationObserver below watches. Assigning textContent (even the same value)
+  // is a childList mutation, so an unconditional write here made the observer fire, call
+  // syncContext() again, write again… a self-triggering microtask loop that pegged the main
+  // thread before the first paint, so the redesigned UI never came up. Track the state we last
+  // rendered and only touch the DOM on a real transition, so the observer settles instead of
+  // looping forever.
+  let contextState = null;
   function syncContext() {
     if (!context || !wrap) return;
-    const visibleSignals = wrap.querySelectorAll(".msgmeta, .ctx, .tool").length;
+    const next = wrap.querySelector(".msgmeta, .ctx, .tool") ? "active" : "ready";
+    if (next === contextState) return;
+    contextState = next;
     const label = context.querySelector("span");
-    if (!label) return;
-    if (visibleSignals) {
-      label.textContent = "Context active";
-      context.classList.add("is-live");
-      clearTimeout(contextTimer);
-      contextTimer = window.setTimeout(() => {
-        if (!body.classList.contains("is-thinking")) {
-          label.textContent = "Context ready";
-          context.classList.remove("is-live");
-        }
-      }, 2800);
-    } else {
-      label.textContent = "Context ready";
-      context.classList.remove("is-live");
-    }
+    const text = next === "active" ? "Context active" : "Context ready";
+    if (label && label.textContent !== text) label.textContent = text;
+    context.classList.toggle("is-live", next === "active");
   }
 
   const actionMap = new Map([
