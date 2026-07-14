@@ -31,6 +31,7 @@ import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
 import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, catalogPayload } from "./models.catalog.mjs";
+import { createHandsHub } from "./hands/hub.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -621,6 +622,10 @@ const CONFIRM_TOOLS_ENV = String(cfgGet("CONFIRM_TOOLS", "0")) === "1";
 // Phase 5: mentor bridge + improvement flywheel. Mentor defaults LOCAL (no egress); external is
 // opt-in via MENTOR_PROVIDER=external + MENTOR_API_KEY + MENTOR_MODEL. Auto-review default OFF (LAX).
 // (Placed after MAIN_MODEL so the const is initialized before createMentor reads it.)
+// ---- the hands hub (Phase 1, MCP hands): nodes on Fred's machines dial OUT and hold an SSE
+// stream; we dispatch tool jobs down it. No HANDS_TOKEN -> the entire surface answers 503.
+const handsHub = createHandsHub({ token: cfgGet("HANDS_TOKEN", ""), log: (m) => console.log("[dominion-ai] " + m) });
+
 const FLYWHEEL_DIR = cfgGet("FLYWHEEL_DIR", dataPath("flywheel"));
 const flywheel = createFlywheel({ dir: FLYWHEEL_DIR });
 const mentor = createMentor({
@@ -2208,6 +2213,12 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ forgotten: !!removedChats || removedMemories > 0, transcript: removedChats, memories: removedMemories }));
     }
 
+    // The hands hub (Phase 1, MCP hands). Bearer-authed; 503 when HANDS_TOKEN is unset.
+    if (path === "/hands/stream" && req.method === "GET") return handsHub.handleStream(req, res, u);
+    if (path === "/hands/result" && req.method === "POST") return handsHub.handleResult(req, res, await readJsonBody(req));
+    if (path === "/hands/run" && req.method === "POST") return handsHub.handleRun(req, res, await readJsonBody(req));
+    if (path === "/hands/nodes" && req.method === "GET") return handsHub.handleNodes(req, res);
+
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
     if (path === "/chat/attach" && req.method === "GET") return handleChatAttach(req, res, u);
@@ -2246,6 +2257,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`[dominion-ai] listening ${HOST}:${PORT}  ->  Ollama light=${OLLAMA_LIGHT_URL}${SPLIT_TIERS ? "  heavy=" + OLLAMA_HEAVY_URL : ""}${OLLAMA_KEY ? "  (bearer)" : ""}  ·  data=${DATA_DIR}`);
   console.log(`[dominion-ai] tools: deck/forge/sandbox  ·  sync=${CTX.syncKey ? "set" : "MISSING"}  ·  run-password=${CTX.runPassword ? "set" : "unset"}  ·  sandbox=${CTX.sandboxDir}`);
+  console.log(`[dominion-ai] hands: ${handsHub.enabled ? "ENABLED (dial-out hub at /hands/*, bearer-authed)" : "disabled (HANDS_TOKEN unset — /hands/* answers 503)"}`);
   console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  needs_* consumed (retrieval skip + tool-def gating)  ·  post-retrieval long-context re-check  ·  usage log=${LOG_DIR}`);
   const ms = memory.stats();
   console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  gating=${ms.gating}${ms.gatedLax ? " (" + ms.gatedLax + " lax-auto-approved)" : ""}${ms.unverified ? " · " + ms.unverified + " unverified mentor claim(s) pending" : ""}  ·  scope-filtered retrieval  ·  vectors=${EMBED_MODEL} (${ms.embedded} embedded)  ·  dir=${MEMORY_DIR}`);
