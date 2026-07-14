@@ -4,255 +4,14 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
 <title>Dominion AI</title>
-<meta name="theme-color" content="#000023" />
+<meta name="theme-color" content="#020817" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Dominion AI" />
 <link rel="manifest" href="/manifest.webmanifest" />
 <link rel="apple-touch-icon" href="/icon-180.png" />
 <link rel="icon" href="/icon-192.png" />
-<style>
-  :root{
-    --navy:#000023; --navy2:#0a1230; --copper:#c8762f; --copper2:#e8b07c;
-    --sand:#e9dcc6; --muted:#8b93a7; --line:rgba(184,115,51,.28);
-    --user:rgba(184,115,51,.22); --ai:rgba(255,255,255,.05); --glow:rgba(80,150,255,.45);
-    /* panes = 5% glass, 1px neon green rims (Fred spec 2026-07-01) */
-    --panel:rgba(7,12,34,.05);
-    --glass:rgba(9,15,40,.05);
-    --rim:rgba(57,255,20,.9);
-    --rimglow:0 0 9px -2px rgba(57,255,20,.55);
-  }
-  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  html,body{margin:0;height:100%}
-  body{
-    background:#000018;
-    color:var(--sand); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
-    display:flex; flex-direction:column; height:100dvh; overflow:hidden;
-  }
-
-  /* ---- photoreal circuit-board background video + frosted glass ---- */
-  /* crystal clear: whole frame visible (no crop/zoom), fixed in place, nothing on top of it */
-  #bgvideo{
-    position:fixed; inset:0; width:100%; height:100%; object-fit:contain;
-    z-index:-3; pointer-events:none; background:#000018;
-  }
-  /* overlay retired per Fred (2026-07-01): NOTHING obstructs the footage — no tint, no blur */
-  #bgglass{display:none}
-  @media(prefers-reduced-motion:reduce){ #bgvideo{display:none} }
-  /* header = a detached glass slab floating above the footage */
-  header{
-    flex:none; display:flex; align-items:center; gap:8px;
-    margin:calc(env(safe-area-inset-top) + 10px) 10px 4px;
-    padding:8px 12px; border-radius:18px;
-    background:var(--glass); border:1px solid var(--rim);
-    -webkit-backdrop-filter:blur(8px) saturate(1.2); backdrop-filter:blur(8px) saturate(1.2);
-    z-index:5;
-    box-shadow:0 24px 46px -14px rgba(0,0,0,.9), var(--rimglow), inset 0 1px 0 rgba(255,255,255,.16);
-  }
-  .dot{width:18px;height:18px;border-radius:50%;flex:none;
-    background:radial-gradient(circle at 35% 30%, #fff 0%, var(--copper2) 25%, var(--copper) 60%, #7a3f12 100%);
-    box-shadow:0 0 12px var(--glow), 0 0 5px rgba(200,118,47,.7);}
-  header .title{font-weight:600;letter-spacing:.3px}
-  header .spacer{flex:1}
-  select,button{font:inherit;color:var(--sand)}
-  select{background:var(--navy2); border:1px solid var(--line); border-radius:9px; padding:6px 8px; max-width:38vw;}
-  .ghost{background:transparent;border:1px solid var(--line);border-radius:9px;padding:6px 10px;color:var(--muted);cursor:pointer}
-  .icon{background:transparent;border:none;color:var(--sand);font-size:22px;line-height:1;padding:4px 8px;cursor:pointer;border-radius:8px}
-  .icon:active{background:rgba(255,255,255,.08)}
-  /* "via OpenRouter" spend indicator — a small copper pill; visible only when a cloud model is picked */
-  #cloudbadge{font-size:11px;font-weight:600;letter-spacing:.2px;color:#fff1e0;white-space:nowrap;
-    padding:3px 9px;border-radius:999px;border:1px solid var(--line);
-    background:linear-gradient(145deg,rgba(200,118,47,.85),rgba(122,63,18,.85));
-    box-shadow:0 0 10px -2px rgba(200,118,47,.7), inset 0 1px 0 rgba(255,255,255,.18);}
-
-  /* ---- sidebar ---- */
-  #overlay{position:fixed;inset:0;background:rgba(0,0,12,.55);backdrop-filter:blur(2px);z-index:8;opacity:0;pointer-events:none;transition:opacity .18s}
-  #overlay.show{opacity:1;pointer-events:auto}
-  #sidebar{
-    position:fixed;top:0;left:0;height:100dvh;width:min(82vw,300px);z-index:9;display:flex;flex-direction:column;
-    background:var(--panel);border-right:1px solid var(--rim);box-shadow:6px 0 26px rgba(0,0,0,.5);
-    -webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);
-    transform:translateX(-102%);transition:transform .2s ease;padding-top:env(safe-area-inset-top);
-  }
-  #sidebar.open{transform:none}
-  .sb-head{display:flex;align-items:center;gap:8px;padding:14px 12px 10px;border-bottom:1px solid var(--line)}
-  .sb-head .h{font-weight:700;letter-spacing:.4px;color:var(--copper2);flex:1}
-  .sb-new{background:linear-gradient(145deg,var(--copper),#7a3f12);border:none;border-radius:9px;padding:7px 11px;color:#fff1e0;cursor:pointer;font-size:14px}
-  #chatlist{flex:1;overflow-y:auto;padding:8px}
-  .ci{display:flex;align-items:center;gap:6px;padding:9px 10px;border-radius:10px;cursor:pointer;border:1px solid transparent}
-  .ci:hover{background:rgba(255,255,255,.04)}
-  .ci.active{background:rgba(184,115,51,.16);border-color:var(--line)}
-  .ci .ttl{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14.5px}
-  .ci .x{opacity:.45;font-size:15px;padding:0 4px}
-  .ci .x:hover{opacity:1;color:#ff9a7a}
-  .sb-foot{padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line);color:var(--muted);font-size:12px}
-  .sb-search{padding:8px 10px 0}
-  .sb-search input{width:100%;background:var(--navy2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;color:var(--sand);font:inherit;font-size:14px;outline:none}
-  .sb-search input::placeholder{color:var(--muted)}
-  .ci .meta{font-size:10.5px;color:var(--muted);white-space:nowrap}
-  .msgmeta{font-size:10.5px;color:var(--muted);opacity:.7;padding:0 6px 2px}
-
-  main{flex:1; overflow-y:auto; padding:14px 12px 6px; -webkit-overflow-scrolling:touch}
-  .wrap{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:6px}
-  .turn{display:flex;flex-direction:column}
-  .msg{display:flex}
-  .msg.me{justify-content:flex-end}
-  .bubble{max-width:92%;padding:12px 15px;border-radius:16px;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;
-    font-size:17.5px;line-height:1.5;font-weight:600;color:#fff;
-    text-shadow:0 1px 3px rgba(0,0,10,.8);
-    -webkit-backdrop-filter:blur(6px) saturate(1.2); backdrop-filter:blur(6px) saturate(1.2);
-    box-shadow:0 18px 36px -12px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.12);}
-  .me .bubble{background:rgba(184,115,51,.05);border:1px solid var(--rim);color:#fff;border-bottom-right-radius:5px;
-    box-shadow:0 18px 36px -12px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.14), var(--rimglow);}
-  .ai .bubble{background:var(--glass);border:1px solid var(--rim);border-bottom-left-radius:5px;
-    box-shadow:0 18px 36px -12px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.12), var(--rimglow);}
-  .ai .bubble.think{color:var(--muted);font-style:italic}
-  .acts{display:flex;gap:12px;padding:3px 6px 8px;flex-wrap:wrap} /* per-message controls wrap at phone width, never overflow */
-  .acts.me{justify-content:flex-end}
-  .act{background:none;border:none;color:var(--muted);font-size:12px;cursor:pointer;padding:1px 2px;opacity:.65}
-  .act:hover{opacity:1;color:var(--copper2)}
-  .route{font-size:11px;color:var(--muted);opacity:.75;padding:1px 4px 3px}
-  /* small text that sits directly on the footage needs a shadow to stay legible */
-  .route,.msgmeta,.ctx,.act{text-shadow:0 1px 2px rgba(0,0,12,.75)}
-
-  /* phone layout: the one-row header overflows at phone width and wraps raggedly ("off-kilter").
-     Break it into two deliberate rows: brand row, then mode + panel buttons. */
-  @media(max-width:560px){
-    header{flex-wrap:wrap;gap:5px;row-gap:8px}
-    header .spacer{flex-basis:100%;height:0}
-    #mode{flex:1;max-width:none;min-width:0}
-    .icon{font-size:19px;padding:4px 4px}
-  }
-  .tools{display:flex;flex-direction:column;gap:4px;margin:0 0 6px}
-  .tool{font-size:12.5px;color:var(--copper2);opacity:.92;display:flex;align-items:center;gap:6px}
-  .tool .sp{width:8px;height:8px;border-radius:50%;background:var(--copper2);box-shadow:0 0 8px var(--glow);animation:pulse 1s infinite}
-  .tool.done .sp{background:#5fae6b;animation:none;box-shadow:none}
-  .tool.gated{color:#e8b07c}
-  @keyframes pulse{50%{opacity:.3}}
-  .empty{margin:12vh auto 0;text-align:center;color:var(--muted);max-width:340px;
-    padding:30px 26px;border-radius:22px;border:1px solid var(--rim);
-    background:var(--glass);
-    -webkit-backdrop-filter:blur(8px) saturate(1.2); backdrop-filter:blur(8px) saturate(1.2);
-    box-shadow:0 30px 64px -18px rgba(0,0,0,.9), inset 0 1px 0 rgba(255,255,255,.14), var(--rimglow);}
-  .empty .dot{margin:0 auto 14px;width:52px;height:52px}
-  .empty .brand{margin:0;font-size:32px;font-weight:800;letter-spacing:.5px;color:var(--copper2);text-shadow:0 0 18px var(--glow)}
-  .empty .byline{margin:8px 0 0;font-size:15px;letter-spacing:.4px;color:var(--sand);opacity:.85}
-  .empty .hint{margin:14px 0 0;font-size:13px;opacity:.7}
-  /* composer = its own floating glass slab, detached from the bottom edge */
-  footer{
-    flex:none; margin:4px 10px calc(10px + env(safe-area-inset-bottom));
-    padding:8px 10px; border-radius:20px;
-    background:var(--glass); border:1px solid var(--rim);
-    -webkit-backdrop-filter:blur(8px) saturate(1.2); backdrop-filter:blur(8px) saturate(1.2);
-    box-shadow:0 24px 46px -14px rgba(0,0,0,.9), var(--rimglow), inset 0 1px 0 rgba(255,255,255,.14);
-  }
-  .bar{max-width:760px;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
-  textarea{
-    flex:1;resize:none;max-height:40vh;min-height:44px;padding:11px 13px;border-radius:14px;
-    background:rgba(8,14,36,.35);border:1px solid var(--rim);color:var(--sand);outline:none;font:inherit;
-  }
-  textarea::placeholder{color:var(--muted)}
-  .send{flex:none;width:44px;height:44px;border-radius:50%;border:none;cursor:pointer;
-    background:linear-gradient(145deg,var(--copper),#7a3f12);color:#fff1e0;font-size:20px;box-shadow:0 6px 18px rgba(0,0,0,.45);}
-  .send.stop{background:linear-gradient(145deg,#b23b2a,#5e1d13)}
-  .send:disabled{opacity:.4}
-  /* voice: mic (tap to talk, tap again to send) + speak-answers toggle */
-  .mic{flex:none;width:44px;height:44px;border-radius:50%;border:1px solid var(--rim);cursor:pointer;
-    background:rgba(8,14,36,.45);color:var(--sand);font-size:19px;box-shadow:0 6px 18px rgba(0,0,0,.35);}
-  .mic.rec{background:linear-gradient(145deg,#b23b2a,#5e1d13);color:#fff1e0;border-color:#b23b2a;animation:recpulse 1.2s ease-in-out infinite}
-  .mic.busy{opacity:.5;pointer-events:none}
-  .mic.speakon{color:var(--copper2);border-color:var(--copper2)}
-  @keyframes recpulse{50%{box-shadow:0 0 0 8px rgba(178,59,42,.25)}}
-  .err{color:#ff9a7a;font-size:13px;text-align:center;padding:6px}
-  .cursor::after{content:"\258c";animation:blink 1s steps(2) infinite;color:var(--copper2)}
-  @keyframes blink{50%{opacity:0}}
-
-  /* ---- settings sheet ---- */
-  .modal{position:fixed;inset:0;z-index:12;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,12,.5);backdrop-filter:blur(3px)}
-  .modal[hidden]{display:none}
-  .sheet{width:min(560px,96vw);background:var(--panel);border:1px solid var(--rim);border-radius:16px 16px 0 0;
-    -webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);
-    box-shadow:0 -20px 60px -20px rgba(0,0,0,.9), var(--rimglow);
-    padding:16px 16px calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:14px}
-  @media(min-width:600px){.modal{align-items:center}.sheet{border-radius:16px}}
-  .sheet-h{display:flex;align-items:center;font-weight:700;color:var(--copper2)}
-  .sheet-h .icon{margin-left:auto}
-  .frow{display:flex;flex-direction:column;gap:6px;font-size:14px;color:var(--muted)}
-  .frow select,.sheet textarea{background:var(--navy2);border:1px solid var(--line);border-radius:9px;padding:8px;color:var(--sand);font:inherit}
-  .sheet textarea{min-height:70px;resize:vertical}
-  input[type=range]{accent-color:var(--copper);width:100%}
-
-  /* ---- memory panel ---- */
-  .ctx{font-size:11px;color:#7fa7ff;opacity:.85;padding:0 4px 4px}
-  .mstats{font-size:12px;color:var(--muted);font-weight:400;margin-left:8px;flex:1}
-  .mrow-add{display:flex;gap:8px;align-items:flex-end}
-  .mrow-add textarea{flex:1;min-height:44px;background:var(--navy2);border:1px solid var(--line);border-radius:9px;padding:8px;color:var(--sand);font:inherit;resize:vertical}
-  .mfilter{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--muted)}
-  .mlist{max-height:46vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
-  .mlist .none{color:var(--muted);font-size:13px;text-align:center;padding:16px}
-  .mitem{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--navy2);display:flex;flex-direction:column;gap:6px}
-  .mitem .mtop{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
-  .mbadge{border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:10.5px;color:var(--copper2);text-transform:capitalize}
-  .mbadge.pending{color:#e8b07c}
-  .mbadge.rejected,.mbadge.archived{opacity:.55}
-  .mitem .mc{font-size:14px;color:var(--sand);white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere}
-  .mitem .macts{display:flex;gap:12px;flex-wrap:wrap}
-  .mitem .macts .act{font-size:11.5px;opacity:.7}
-  .mitem .pinned{color:#e8b07c}
-
-  /* ---- tool activity + permission classes ---- */
-  .tool .cls{font-size:9.5px;border:1px solid var(--line);border-radius:5px;padding:0 4px;opacity:.7;text-transform:uppercase;letter-spacing:.3px}
-  .tool.blocked{color:#ff9a7a}.tool.failed{color:#ff9a7a}.tool.cancelled{color:var(--muted)}
-  .confirm{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin:4px 0 6px;background:rgba(184,115,51,.10);font-size:13px;display:flex;flex-direction:column;gap:6px}
-  .confirm .cq{color:var(--copper2)}
-  .confirm .cbtns{display:flex;gap:8px}
-  .confirm button{border:1px solid var(--line);border-radius:8px;padding:4px 12px;cursor:pointer;font-size:13px;background:var(--navy2);color:var(--sand)}
-  .confirm button.yes{background:linear-gradient(145deg,var(--copper),#7a3f12);color:#fff1e0;border:none}
-  .tritem{border:1px solid var(--line);border-radius:9px;padding:7px 9px;background:var(--navy2);display:flex;flex-direction:column;gap:3px}
-  .tritem .trtop{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);flex-wrap:wrap}
-  .tritem .trname{color:var(--sand);font-weight:600;font-size:13px}
-  .tritem .trprev{font-size:12px;color:var(--muted);white-space:pre-wrap;word-break:break-word}
-  .tbadge{border:1px solid var(--line);border-radius:5px;padding:0 5px;font-size:10px}
-  .tbadge.dangerous{color:#ff9a7a}.tbadge.safe_local_write{color:#e8b07c}.tbadge.read_only{color:#7fa7ff}
-  .tbadge.succeeded{color:#5fae6b}.tbadge.failed,.tbadge.blocked{color:#ff9a7a}.tbadge.cancelled{color:var(--muted)}
-  .toggle{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--muted)}
-
-  /* ---- artifacts ---- */
-  .aitem{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--navy2);cursor:pointer;display:flex;flex-direction:column;gap:4px}
-  .aitem .atop{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
-  .aitem .atitle{color:var(--sand);font-size:14px;font-weight:600}
-  .back{cursor:pointer;color:var(--copper2);font-size:13px;align-self:flex-start;background:none;border:none;padding:2px 0}
-  .arow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;color:var(--muted)}
-  .arow select{padding:4px 6px}
-  .acontent{white-space:pre-wrap;word-break:break-word;font-size:13px;background:var(--navy2);border:1px solid var(--line);border-radius:9px;padding:10px;max-height:36vh;overflow:auto}
-  .areview{white-space:pre-wrap;font-size:12.5px;color:var(--copper2);border-left:2px solid var(--line);padding:6px 10px;max-height:24vh;overflow:auto}
-  .adiff{white-space:pre;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:#05091c;border:1px solid var(--line);border-radius:8px;padding:8px;max-height:32vh;overflow:auto;line-height:1.35}
-  .adiff .add{color:#5fae6b}.adiff .del{color:#ff9a7a}
-  .abadge{border:1px solid var(--line);border-radius:5px;padding:0 5px;font-size:10px;text-transform:capitalize}
-  .abadge.final{color:#5fae6b}.abadge.reviewed{color:#7fa7ff}.abadge.draft{color:#e8b07c}.abadge.archived{opacity:.55}
-
-  /* ---- mentor & improvement ---- */
-  .itabs{display:flex;gap:6px;margin-bottom:8px}
-  .itab{flex:1;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--navy2);color:var(--muted);cursor:pointer;font-size:13px;text-align:center}
-  .itab.on{color:var(--copper2);border-color:var(--copper)}
-  .critique{border:1px solid var(--line);border-radius:10px;padding:10px;background:rgba(57,130,255,.06);display:flex;flex-direction:column;gap:7px;font-size:13px;margin:4px 0 8px}
-  .critique .crhead{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--sand)}
-  .scorepill{border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:12px;color:var(--copper2)}
-  .crsec{font-size:12.5px;color:var(--muted)}
-  .crsec b{color:var(--sand);font-weight:600}
-  .cand{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted);padding:2px 0;border-top:1px solid var(--line)}
-  .cand button{font-size:11px;border:1px solid var(--line);border-radius:6px;background:var(--navy2);color:var(--copper2);padding:1px 7px;cursor:pointer}
-  .cand button:disabled{opacity:.5}
-
-  /* ---- persona forge ---- */
-  .prow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .prow input[type=text],.prow input[type=url]{flex:1;min-width:120px;background:var(--navy2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;color:var(--sand);font:inherit;font-size:14px;outline:none}
-  .prow select{padding:7px 8px}
-  .pprofile{font-size:13px;color:var(--sand);border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:rgba(57,130,255,.06);white-space:pre-wrap;max-height:34vh;overflow:auto}
-  .pprofile .none{color:var(--muted);text-align:center;padding:8px}
-  .pmsg{font-size:12px;color:var(--copper2);margin-left:auto}
-  .pkind-badge{border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:10.5px;color:var(--copper2);text-transform:capitalize}
-</style>
+<link rel="stylesheet" href="/dominion-ui.css?v=28" />
 </head>
 <body>
   <video id="bgvideo" autoplay muted loop playsinline preload="auto" poster="/icon-512.png">
@@ -260,89 +19,228 @@
   </video>
   <div id="bgglass" aria-hidden="true"></div>
   <div id="overlay"></div>
+
+  <svg class="svg-sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-menu" viewBox="0 0 24 24">
+      <path d="M4 6.5h12.5M4 12h16M4 17.5h9.5"/>
+      <path d="M18.5 4.5v4M15.5 6.5h6"/>
+    </symbol>
+    <symbol id="i-new" viewBox="0 0 24 24">
+      <path d="M5 5h10l4 4v10H5z"/>
+      <path d="M15 5v4h4M12 11v6M9 14h6"/>
+    </symbol>
+    <symbol id="i-core" viewBox="0 0 24 24">
+      <rect x="6" y="6" width="12" height="12" rx="2"/>
+      <path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>
+      <circle cx="12" cy="12" r="2.25"/>
+    </symbol>
+    <symbol id="i-model" viewBox="0 0 24 24">
+      <path d="M4 5h5v5H4zM15 3h5v5h-5zM15 16h5v5h-5z"/>
+      <path d="M9 7.5h2.5c2.5 0 3.5-1.5 3.5-2M9 7.5h2.5c2.5 0 3.5 2.5 3.5 11"/>
+    </symbol>
+    <symbol id="i-mode" viewBox="0 0 24 24">
+      <path d="M3 12h4l2-6 4 12 2-6h6"/>
+      <path d="M5 4.5h14M5 19.5h14" opacity=".45"/>
+    </symbol>
+    <symbol id="i-artifact" viewBox="0 0 24 24">
+      <path d="M7 4h9l3 3v12H7z"/>
+      <path d="M16 4v4h4M4 7v13h11M10 12h6M10 15h6"/>
+    </symbol>
+    <symbol id="i-mentor" viewBox="0 0 24 24">
+      <path d="M12 3l7 4-7 4-7-4z"/>
+      <path d="M7 9.5v5l5 3 5-3v-5M19 7v7"/>
+      <circle cx="19" cy="16.5" r="1.5"/>
+    </symbol>
+    <symbol id="i-persona" viewBox="0 0 24 24">
+      <path d="M8.5 8.5a4.5 4.5 0 019 0c0 5-2.5 8.5-5.5 11"/>
+      <path d="M6 11c.25-4.5 2.5-7 6-7M8 14c.3-2.8 1.5-4.5 4-4.5 2.2 0 3.2 1.7 3 4.2M10.5 17.5c.8-1.5 1.2-3 1.2-5"/>
+    </symbol>
+    <symbol id="i-memory" viewBox="0 0 24 24">
+      <path d="M5 6.5C5 4.6 8.1 3 12 3s7 1.6 7 3.5-3.1 3.5-7 3.5-7-1.6-7-3.5z"/>
+      <path d="M5 6.5V12c0 1.9 3.1 3.5 7 3.5s7-1.6 7-3.5V6.5M5 12v5.5c0 1.9 3.1 3.5 7 3.5s7-1.6 7-3.5V12"/>
+    </symbol>
+    <symbol id="i-tools" viewBox="0 0 24 24">
+      <path d="M14.5 5.5a4 4 0 01-5 5L4 16l4 4 5.5-5.5a4 4 0 005-5l-2.5 2.5-2-2z"/>
+      <circle cx="7.5" cy="16.5" r=".8"/>
+    </symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="3.25"/>
+      <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/>
+    </symbol>
+    <symbol id="i-speaker" viewBox="0 0 24 24">
+      <path d="M4 10v4h4l5 4V6L8 10z"/>
+      <path d="M16 9a4 4 0 010 6M18.5 6.5a7.5 7.5 0 010 11"/>
+    </symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24">
+      <rect x="8.5" y="3" width="7" height="12" rx="3.5"/>
+      <path d="M5.5 11.5a6.5 6.5 0 0013 0M12 18v3M8.5 21h7"/>
+    </symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h3"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4l11-11-4-4L4 16zM13.5 6.5l4 4"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 4h12l2 2v14H5z"/><path d="M8 4v6h8V4M8 20v-6h8v6"/></symbol>
+    <symbol id="i-critique" viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 3z"/><path d="M8 9h8M8 13h5"/></symbol>
+    <symbol id="i-inspect" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5M8 10.5h5M10.5 8v5"/></symbol>
+    <symbol id="i-lesson" viewBox="0 0 24 24"><path d="M9 18h6M10 21h4"/><path d="M8.5 15.5C6.9 14.4 6 12.6 6 10.5a6 6 0 0112 0c0 2.1-.9 3.9-2.5 5"/></symbol>
+    <symbol id="i-eval" viewBox="0 0 24 24"><path d="M7 3h10v5l3 10a2 2 0 01-2 3H6a2 2 0 01-2-3L7 8z"/><path d="M8 13h8M9 17h6"/></symbol>
+    <symbol id="i-continue" viewBox="0 0 24 24"><path d="M5 6l9 6-9 6zM17 6v12"/></symbol>
+    <symbol id="i-regenerate" viewBox="0 0 24 24"><path d="M19 8V4l-2 2a8 8 0 10.5 11.5"/><path d="M19 4h-4"/></symbol>
+    <symbol id="i-delete" viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-network" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 11l10-4M7 13l10 4"/></symbol>
+    <symbol id="i-context" viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="M8 9h8M8 12h5M8 15h7"/></symbol>
+    <symbol id="i-route" viewBox="0 0 24 24"><path d="M4 12h7M13 12h7M11 12l3-3M11 12l3 3"/><circle cx="4" cy="12" r="1.5"/><circle cx="20" cy="12" r="1.5"/></symbol>
+  </svg>
+
   <aside id="sidebar">
     <div class="sb-head">
-      <span class="h">Chats</span>
-      <button id="newchat" class="sb-new">+ New</button>
+      <span class="h">Conversation Archive</span>
+      <button id="newchat" class="sb-new">
+        <svg class="glyph"><use href="#i-new"></use></svg><span>New</span>
+      </button>
     </div>
-    <div class="sb-search"><input id="chatsearch" type="search" placeholder="Search chats&#8230;" autocomplete="off" /></div>
+    <div class="sb-search">
+      <svg class="field-glyph"><use href="#i-search"></use></svg>
+      <input id="chatsearch" type="search" placeholder="Search conversations…" autocomplete="off" />
+    </div>
     <div id="chatlist"></div>
-    <div class="sb-foot">Dominion AI &middot; by Frederick Wolfe</div>
+    <div class="sb-foot">Dominion AI <span>·</span> by Frederick Wolfe</div>
   </aside>
 
-  <header>
-    <button id="menu" class="icon" title="Chats" aria-label="Chats">&#9776;</button>
-    <span class="dot" aria-hidden="true"></span>
-    <span class="title">Dominion AI</span>
-    <span class="spacer"></span>
-    <select id="mode" aria-label="Mode" title="Mode">
-      <option value="auto">Auto</option>
-      <option value="fast">Fast</option>
-      <option value="normal">Normal</option>
-      <option value="deep_think">Deep Think</option>
-      <option value="long_context">Long Context</option>
-      <option value="draft">Draft</option>
-      <option value="tool">Tool</option>
-      <option value="mentor">Mentor</option>
-      <option value="as_fred">As Fred</option>
-    </select>
-    <span id="cloudbadge" title="A paid cloud model is selected — answers route through OpenRouter and bill your key. Change it in Settings." hidden>&#9729; via OpenRouter</span>
-    <button id="artifacts" class="icon" title="Artifacts" aria-label="Artifacts">&#128196;</button>
-    <button id="improve" class="icon" title="Mentor &amp; improvement" aria-label="Mentor and improvement">&#127891;</button>
-    <button id="persona" class="icon" title="Persona Forge (become an expert in me)" aria-label="Persona Forge">&#129516;</button>
-    <button id="memory" class="icon" title="Memory" aria-label="Memory">&#129504;</button>
-    <button id="tools" class="icon" title="Tool activity" aria-label="Tool activity">&#128295;</button>
-    <button id="settings" class="icon" title="Settings" aria-label="Settings">&#9881;</button>
+  <header id="commandbar">
+    <div class="brand-cluster">
+      <button id="menu" class="icon command-icon" title="Conversation archive" aria-label="Conversation archive">
+        <svg class="glyph"><use href="#i-menu"></use></svg>
+      </button>
+      <span class="brand-core" aria-hidden="true">
+        <svg class="glyph"><use href="#i-core"></use></svg>
+        <i></i>
+      </span>
+      <div class="brand-copy">
+        <span class="title">Dominion AI</span>
+        <span id="activity-status" class="brand-status" aria-live="polite">System ready</span>
+      </div>
+    </div>
+
+    <div class="command-controls">
+      <label class="command-select model-select">
+        <svg class="glyph control-glyph"><use href="#i-model"></use></svg>
+        <span class="control-copy"><small>Model</small>
+          <select id="model" aria-label="Model">
+            <optgroup label="Local (free · private)" id="model-local-group">
+              <option value="local">Local Qwen (free)</option>
+            </optgroup>
+            <optgroup label="Cloud · via OpenRouter (paid)">
+              <option value="anthropic/claude-haiku-4.5">Claude Haiku 4.5</option>
+              <option value="openai/gpt-4o">GPT-4o</option>
+              <option value="google/gemini-2.5-flash">Gemini 2.5 Flash</option>
+              <option value="meta-llama/llama-4-maverick">Llama 4 Maverick</option>
+              <option value="meta-llama/llama-3.1-70b-instruct">Llama 3.1 70B</option>
+              <option value="z-ai/glm-5.2">GLM 5.2</option>
+              <option value="moonshotai/kimi-k2.6">Kimi K2.6</option>
+              <option value="qwen/qwen3-235b-a22b-2507">Qwen3 235B</option>
+            </optgroup>
+          </select>
+        </span>
+      </label>
+
+      <label class="command-select mode-select">
+        <svg class="glyph control-glyph"><use href="#i-mode"></use></svg>
+        <span class="control-copy"><small>Operating mode</small>
+          <select id="mode" aria-label="Mode" title="Operating mode">
+            <option value="auto">Auto</option>
+            <option value="fast">Fast</option>
+            <option value="normal">Normal</option>
+            <option value="deep_think">Deep Think</option>
+            <option value="long_context">Long Context</option>
+            <option value="draft">Draft</option>
+            <option value="tool">Tool</option>
+            <option value="mentor">Mentor</option>
+            <option value="as_fred">As Fred</option>
+          </select>
+        </span>
+      </label>
+    </div>
+
+    <div class="system-readout">
+      <span id="connection-status" class="readout" aria-live="polite">
+        <svg class="glyph"><use href="#i-network"></use></svg><span>Online</span>
+      </span>
+      <span id="context-status" class="readout">
+        <svg class="glyph"><use href="#i-context"></use></svg><span>Context ready</span>
+      </span>
+      <span id="cloudbadge" class="readout cloud-readout" title="A paid cloud model is selected and will bill the configured provider key." hidden>
+        <svg class="glyph"><use href="#i-route"></use></svg><span>Cloud route</span>
+      </span>
+    </div>
+
+    <nav class="command-actions" aria-label="Dominion panels">
+      <button id="artifacts" class="icon command-icon" title="Artifacts" aria-label="Artifacts">
+        <svg class="glyph"><use href="#i-artifact"></use></svg>
+      </button>
+      <button id="improve" class="icon command-icon" title="Mentor and improvement" aria-label="Mentor and improvement">
+        <svg class="glyph"><use href="#i-mentor"></use></svg>
+      </button>
+      <button id="persona" class="icon command-icon" title="Persona Forge" aria-label="Persona Forge">
+        <svg class="glyph"><use href="#i-persona"></use></svg>
+      </button>
+      <button id="memory" class="icon command-icon" title="Memory" aria-label="Memory">
+        <svg class="glyph"><use href="#i-memory"></use></svg>
+      </button>
+      <button id="tools" class="icon command-icon" title="Tool activity" aria-label="Tool activity">
+        <svg class="glyph"><use href="#i-tools"></use></svg>
+      </button>
+      <button id="settings" class="icon command-icon" title="Settings" aria-label="Settings">
+        <svg class="glyph"><use href="#i-settings"></use></svg>
+      </button>
+    </nav>
   </header>
 
-  <main id="main"><div class="wrap" id="wrap">
-    <div class="empty" id="empty">
-      <span class="dot" aria-hidden="true"></span>
-      <p class="brand">Dominion AI</p>
-      <p class="byline">by Frederick Wolfe</p>
-      <p class="hint">Ask me anything &mdash; I can also read your Command Deck, capture notes, read your files, and queue work.</p>
-    </div>
-  </div></main>
+  <section id="neural-glass" class="neural-glass">
+    <div class="glass-reflection" aria-hidden="true"></div>
+    <div class="glass-scan" aria-hidden="true"></div>
 
-  <footer>
-    <div class="bar">
-      <textarea id="input" rows="1" placeholder="Message your assistant&#8230;" autocomplete="off"></textarea>
-      <button id="speak" class="mic" title="Speak answers aloud (off)" aria-label="Toggle spoken answers">&#128264;</button>
-      <button id="mic" class="mic" title="Tap to talk, tap again to send" aria-label="Voice input">&#127908;</button>
-      <button id="send" class="send" title="Send" aria-label="Send">&#8593;</button>
-    </div>
-  </footer>
+    <main id="main">
+      <div class="wrap" id="wrap">
+        <div class="empty" id="empty">
+          <span class="empty-core" aria-hidden="true">
+            <svg class="glyph"><use href="#i-core"></use></svg>
+          </span>
+          <p class="brand">Dominion AI</p>
+          <p class="byline">by Frederick Wolfe</p>
+          <p class="hint">A private intelligence surface with memory, tools, artifacts, and routed models.</p>
+        </div>
+      </div>
+    </main>
+
+    <footer>
+      <div class="composer-label"><span>Command channel</span><i></i></div>
+      <div class="bar">
+        <textarea id="input" rows="1" placeholder="Give Dominion a directive…" autocomplete="off"></textarea>
+        <button id="speak" class="mic" title="Speak answers aloud (off)" aria-label="Toggle spoken answers">
+          <svg class="glyph"><use href="#i-speaker"></use></svg>
+        </button>
+        <button id="mic" class="mic" title="Tap to talk, tap again to send" aria-label="Voice input">
+          <svg class="glyph"><use href="#i-mic"></use></svg>
+        </button>
+        <button id="send" class="send" title="Send" aria-label="Send">↑</button>
+      </div>
+    </footer>
+  </section>
 
   <div id="smodal" class="modal" hidden>
     <div class="sheet">
-      <div class="sheet-h">Settings <button id="sclose" class="icon" aria-label="Close">&times;</button></div>
-      <label class="frow">Model &mdash; Local Qwen is free &amp; private; cloud models bill your OpenRouter key
-        <select id="model" aria-label="Model">
-          <optgroup label="Local (free &middot; private)" id="model-local-group">
-            <option value="local">Local Qwen (free)</option>
-          </optgroup>
-          <optgroup label="Cloud &middot; via OpenRouter (paid)">
-            <option value="anthropic/claude-haiku-4.5">Claude Haiku 4.5</option>
-            <option value="openai/gpt-4o">GPT-4o</option>
-            <option value="google/gemini-2.5-flash">Gemini 2.5 Flash</option>
-            <option value="meta-llama/llama-4-maverick">Llama 4 Maverick</option>
-            <option value="meta-llama/llama-3.1-70b-instruct">Llama 3.1 70B</option>
-            <option value="z-ai/glm-5.2">GLM 5.2</option>
-            <option value="moonshotai/kimi-k2.6">Kimi K2.6</option>
-            <option value="qwen/qwen3-235b-a22b-2507">Qwen3 235B</option>
-          </optgroup>
-        </select>
-      </label>
+      <div class="sheet-h">System Settings <button id="sclose" class="icon close-icon" aria-label="Close"><svg class="glyph"><use href="#i-close"></use></svg></button></div>
       <label class="frow">Persona / style
         <select id="persona-sel">
           <option value="default">Default assistant</option>
           <option value="concise">Concise</option>
           <option value="brainstorm">Brainstorm partner</option>
           <option value="code">Coding helper</option>
-          <option value="custom">Custom&#8230;</option>
+          <option value="custom">Custom…</option>
         </select>
       </label>
-      <textarea id="persona-custom" placeholder="Custom persona / system style&#8230;" hidden></textarea>
+      <textarea id="persona-custom" placeholder="Custom persona / system style…" hidden></textarea>
       <label class="frow">Creativity (temperature): <span id="temp-val">0.7</span>
         <input id="temp" type="range" min="0" max="1.2" step="0.1" value="0.7" />
       </label>
@@ -354,15 +252,15 @@
           <option value="approved_external">Approved — send as-is</option>
         </select>
       </label>
-      <button id="ssave" class="sb-new">Save</button>
+      <button id="ssave" class="sb-new">Save settings</button>
     </div>
   </div>
 
   <div id="mmodal" class="modal" hidden>
     <div class="sheet">
-      <div class="sheet-h">Memory <span id="mstats" class="mstats"></span> <button id="mclose" class="icon" aria-label="Close">&times;</button></div>
+      <div class="sheet-h">Memory <span id="mstats" class="mstats"></span> <button id="mclose" class="icon close-icon" aria-label="Close"><svg class="glyph"><use href="#i-close"></use></svg></button></div>
       <div class="mrow-add">
-        <textarea id="madd" rows="1" placeholder="Add a durable fact or preference&#8230;"></textarea>
+        <textarea id="madd" rows="1" placeholder="Add a durable fact or preference…"></textarea>
         <button id="msave" class="sb-new">Add</button>
       </div>
       <div class="mfilter">Show
@@ -380,14 +278,14 @@
 
   <div id="tmodal" class="modal" hidden>
     <div class="sheet">
-      <div class="sheet-h">Tool activity <span id="tstats" class="mstats"></span> <button id="tclose" class="icon" aria-label="Close">&times;</button></div>
+      <div class="sheet-h">Tool Activity <span id="tstats" class="mstats"></span> <button id="tclose" class="icon close-icon" aria-label="Close"><svg class="glyph"><use href="#i-close"></use></svg></button></div>
       <div id="tlist" class="mlist"></div>
     </div>
   </div>
 
   <div id="amodal" class="modal" hidden>
     <div class="sheet">
-      <div class="sheet-h" id="ahead">Artifacts <span id="astats" class="mstats"></span> <button id="aclose" class="icon" aria-label="Close">&times;</button></div>
+      <div class="sheet-h" id="ahead">Artifacts <span id="astats" class="mstats"></span> <button id="aclose" class="icon close-icon" aria-label="Close"><svg class="glyph"><use href="#i-close"></use></svg></button></div>
       <div id="alist" class="mlist"></div>
       <div id="adetail" hidden></div>
     </div>
@@ -395,7 +293,7 @@
 
   <div id="imodal" class="modal" hidden>
     <div class="sheet">
-      <div class="sheet-h">Mentor &amp; Improvement <span id="istats" class="mstats"></span> <button id="iclose" class="icon" aria-label="Close">&times;</button></div>
+      <div class="sheet-h">Mentor &amp; Improvement <span id="istats" class="mstats"></span> <button id="iclose" class="icon close-icon" aria-label="Close"><svg class="glyph"><use href="#i-close"></use></svg></button></div>
       <div class="itabs">
         <div class="itab on" data-tab="ledger">Failures</div>
         <div class="itab" data-tab="evals">Evals</div>
@@ -413,10 +311,10 @@
 
   <div id="pmodal" class="modal" hidden>
     <div class="sheet">
-      <div class="sheet-h">Persona Forge <span id="pstats" class="mstats"></span> <button id="pclose" class="icon" aria-label="Close">&times;</button></div>
+      <div class="sheet-h">Persona Forge <span id="pstats" class="mstats"></span> <button id="pclose" class="icon close-icon" aria-label="Close"><svg class="glyph"><use href="#i-close"></use></svg></button></div>
       <div id="pprofile" class="pprofile"></div>
       <div class="mrow-add">
-        <textarea id="padd" rows="2" placeholder="Paste your own writing — a joke, maxim, essay, poem, stray thought, plan, favorite, or an AI chat&#8230;"></textarea>
+        <textarea id="padd" rows="2" placeholder="Paste your own writing — a joke, maxim, essay, poem, stray thought, plan, favorite, or an AI chat…"></textarea>
       </div>
       <div class="prow">
         <select id="pkind">
@@ -435,7 +333,7 @@
         <button id="paddbtn" class="sb-new">Add</button>
       </div>
       <div class="prow">
-        <input id="purl" type="url" placeholder="https://your-site.com/page to scrape&#8230;" autocomplete="off" />
+        <input id="purl" type="url" placeholder="https://your-site.com/page to scrape…" autocomplete="off" />
         <button id="pscrape" class="ghost">Scrape</button>
         <button id="pscan" class="ghost" title="Ingest files dropped in the mini-PC inbox folder">Scan inbox</button>
         <button id="pdistill" class="sb-new" title="Analyze the corpus and (re)build Fred's voice profile">Refresh profile</button>
@@ -448,6 +346,7 @@
     </div>
   </div>
 
-  <script src="/app.js?v=27"></script>
+  <script src="/app.js?v=28"></script>
+  <script src="/dominion-ui.js?v=28"></script>
 </body>
 </html>

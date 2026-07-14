@@ -1,0 +1,58 @@
+:root{
+  --void:#010306;
+  --abyss:#030812;
+  --navy:#06111d;
+  --navy-2:#0a1b2d;
+  --ink:#eef8ff;
+  --ink-soft:#c6d6e2;
+  --muted:#71879a;
+  --copper:#b96b32;
+  --copper-hot:#ffc18a;
+  --copper-deep:#3d1d0f;
+  --energy:#76ff68;
+  --energy-hot:#ddffd8;
+  --cyan:#83ddff;
+  --blue:#3ca7ff;
+  --danger:#ff7569;
+  --success:#7cff8e;
+  --glass:rgba(2,12,21,.34);
+  --glass-heavy:rgba(2,10,19,.72);
+  --glass-line:rgba(157,218,255,.28);
+  --glass-hot:rgba(225,247,255,.72);
+  --glare-x:62%;
+  --glare-y:18%;
+  --tilt-x:0deg;
+  --tilt-y:0deg;
+  --signal-x:50%;
+  --eff-angle:355deg;
+  --frame-shadow:0 25px 65px rgba(0,0,0,.68),0 5px 18px rgba(0,0,0,.55);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{width:100%;height:100%;margin:0}
+html{background:#000}
+body{position:relative;isolation:isolate;overflow:hidden;display:grid;grid-template-columns:minmax(215px,255px) minmax(0,1fr) minmax(190px,225px);grid-template-rows:94px minmax(0,1fr) 58px;grid-template-areas:"header header header" "sidebar main telemetry" "footer footer footer";gap:9px;padding:10px;color:var(--ink);background:transparent;font:400 15px/1.48 "Bahnschrift","Segoe UI Variable","Aptos",system-ui,sans-serif;letter-spacing:.01em}
+body::before{content:"";position:fixed;inset:0;z-index:1;pointer-events:none;background:radial-gradient(ellipse at 63% 51%,transparent 0 22%,rgba(0,5,8,.08) 46%,rgba(0,2,5,.64) 100%),linear-gradient(180deg,rgba(0,2,6,.22),transparent 20% 75%,rgba(0,1,4,.55))}
+body::after{content:"";position:fixed;inset:0;z-index:2;pointer-events:none;opacity:.22;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='130' height='130' viewBox='0 0 130 130'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.92' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.12'/%3E%3C/svg%3E");mix-blend-mode:soft-light}
+#bgvideo{position:fixed;inset:0;z-index:0;width:100%;height:100%;object-fit:cover;object-position:center;background:#000;pointer-events:none;filter:contrast(1.2) saturate(1.28) brightness(.82)}
+#bgglass{display:block;position:fixed;inset:0;z-index:1;pointer-events:none;opacity:.62;background:radial-gradient(circle at 64% 54%,rgba(172,255,160,.34) 0 1%,rgba(88,255,104,.19) 4%,rgba(35,204,89,.05) 19%,transparent 34%),repeating-linear-gradient(90deg,transparent 0 61px,rgba(67,215,255,.045) 62px,transparent 63px 126px),repeating-linear-gradient(0deg,transparent 0 71px,rgba(90,255,124,.035) 72px,transparent 73px 142px),linear-gradient(110deg,transparent 0 46%,rgba(66,189,255,.06) 46.2%,transparent 46.5% 58%,rgba(107,255,93,.075) 58.2%,transparent 58.5%);mix-blend-mode:screen;animation:circuit-drift 18s linear infinite}
+body.video-fallback #bgglass{opacity:1;background-color:#02070b}
+.svg-sprite{position:absolute;width:0;height:0;overflow:hidden}
+.glyph{display:block;width:1.18em;height:1.18em;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+button,select,textarea,input{font:inherit}button,select{color:inherit}button{touch-action:manipulation}select,textarea,input{outline:0}
+select:focus-visible,textarea:focus-visible,input:focus-visible,button:focus-visible{outline:1px solid rgba(128,235,255,.88);outline-offset:2px}
+#commandbar,#sidebar,.neural-glass,.telemetry-rail,.console-footer,.sheet{border:1px solid rgba(139,205,244,.26);background:linear-gradient(180deg,rgba(255,255,255,.075),transparent 9%),linear-gradient(125deg,rgba(7,20,32,.82),rgba(1,8,15,.62) 52%,rgba(7,19,30,.78));box-shadow:var(--frame-shadow),inset 0 1px 0 rgba(239,251,255,.19),inset 0 -1px 0 rgba(0,0,0,.92),inset 1px 0 0 rgba(121,192,236,.08);backdrop-filter:blur(8px) saturate(1.35)}
+#commandbar::before,#sidebar::before,.neural-glass::before,.telemetry-rail::before,.console-footer::before,.sheet::before{content:"";position:absolute;inset:3px;z-index:0;pointer-events:none;border:1px solid rgba(215,240,255,.075);clip-path:polygon(14px 0,calc(100% - 14px) 0,100% 14px,100% calc(100% - 10px),calc(100% - 10px) 100%,10px 100%,0 calc(100% - 10px),0 14px)}
+#commandbar{grid-area:header;position:relative;z-index:8;min-width:0;display:grid;grid-template-columns:minmax(250px,.9fr) minmax(390px,1.5fr) auto minmax(390px,1.4fr);align-items:stretch;gap:8px;padding:7px 10px;clip-path:polygon(14px 0,calc(100% - 14px) 0,100% 14px,100% calc(100% - 12px),calc(100% - 12px) 100%,12px 100%,0 calc(100% - 12px),0 14px);overflow:hidden}
+#commandbar::after{content:"";position:absolute;z-index:0;left:var(--signal-x);top:0;width:260px;height:2px;transform:translateX(-50%);background:linear-gradient(90deg,transparent,rgba(170,233,255,.8),#fff,rgba(106,255,93,.72),transparent);box-shadow:0 0 7px rgba(146,231,255,.8),0 0 22px rgba(66,185,255,.45);opacity:.75}
+#commandbar>*{position:relative;z-index:2}
+.brand-cluster{display:grid;grid-template-columns:44px 55px 1fr;align-items:center;gap:9px;min-width:0;padding-right:12px;border-right:1px solid rgba(120,187,226,.15)}
+#menu.command-icon{width:42px;height:54px;color:#ccecff;border-color:rgba(141,213,255,.15)}#menu.command-icon .glyph{font-size:25px}
+.brand-core{position:relative;width:52px;height:52px;display:grid;place-items:center;color:var(--energy-hot);clip-path:polygon(50% 0,88% 18%,100% 54%,78% 91%,38% 100%,5% 75%,0 34%,22% 7%);background:radial-gradient(circle at 50% 46%,rgba(201,255,193,.3),transparent 25%),linear-gradient(145deg,rgba(63,136,55,.76),rgba(7,38,20,.72));box-shadow:0 0 30px rgba(94,255,79,.26),inset 0 0 18px rgba(187,255,177,.16)}
+.brand-core::before,.brand-core::after{content:"";position:absolute;inset:5px;clip-path:inherit;border:1px solid rgba(198,255,191,.48)}.brand-core::after{inset:11px;border-color:rgba(198,255,191,.2)}.brand-core .glyph{font-size:31px;filter:drop-shadow(0 0 6px rgba(118,255,104,.75))}.brand-core i{position:absolute;width:6px;height:6px;border-radius:50%;background:#fff;box-shadow:0 0 6px #fff,0 0 18px var(--energy);animation:core-breathe 2.2s ease-in-out infinite}
+.brand-copy{display:flex;flex-direction:column;min-width:0;line-height:1.05}.brand-copy .title{font-size:24px;font-weight:720;letter-spacing:.055em;text-transform:uppercase;white-space:nowrap;text-shadow:0 0 14px rgba(205,240,255,.16)}.brand-status{margin-top:6px;color:var(--energy);font:600 9px/1 "Bahnschrift",sans-serif;letter-spacing:.1em;text-transform:uppercase}.brand-motto{margin-top:5px;color:#91a9bb;font-size:8px;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
+.command-controls{display:grid;grid-template-columns:minmax(210px,1.2fr) minmax(180px,1fr);gap:8px;min-width:0}
+.command-select{position:relative;display:flex;align-items:center;gap:10px;min-width:0;padding:8px 31px 8px 12px;border:1px solid rgba(141,206,246,.22);clip-path:polygon(8px 0,100% 0,100% calc(100% - 9px),calc(100% - 9px) 100%,0 100%,0 8px);background:linear-gradient(180deg,rgba(255,255,255,.055),transparent 33%),rgba(1,9,17,.56);box-shadow:inset 0 1px 0 rgba(255,255,255,.09),inset 0 -1px 0 rgba(0,0,0,.8),0 0 22px rgba(52,165,233,.04);transition:.2s ease}
+.command-select::after{content:"";position:absolute;right:12px;top:48%;width:7px;height:7px;border-right:1.5px solid #b9eaff;border-bottom:1.5px solid #b9eaff;transform:translateY(-50%) rotate(45deg)}.command-select:hover,.command-select:focus-within{border-color:rgba(138,229,255,.52);box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 0 24px rgba(50,184,255,.12)}
+.control-glyph{flex:none;font-size:27px;color:#bceaff;filter:drop-shadow(0 0 6px rgba(65,187,255,.32))}.model-select .control-glyph{color:var(--copper-hot);filter:drop-shadow(0 0 6px rgba(255,157,80,.3))}.control-copy{display:flex;flex-direction:column;min-width:0;line-height:1}.control-copy small{margin-bottom:7px;color:#7f94a5;font-size:9px;font-weight:650;letter-spacing:.14em;text-transform:uppercase}.command-select select{width:100%;min-width:0;padding:0;border:0;background:transparent;color:var(--energy);font-size:15px;font-weight:600;appearance:none;cursor:pointer;text-overflow:ellipsis}.command-select option,.command-select optgroup{background:#06111c;color:#eef8ff}
+.system-readout{display:grid;grid-template-columns:repeat(3,minmax(74px,1fr));align-items:stretch;gap:5px}.readout{position:relative;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;min-width:0;padding:6px;border-left:1px solid rgba(128,193,231,.13);color:#8fa6b8;font-size:8px;letter-spacing:.08em;text-align:center;text-transform:uppercase}.readout .glyph{font-size:17px;color:#a8cadf}.readout.is-live,.cloud-readout{color:#bcffc2}.readout.is-live .glyph{color:var(--energy);filter:drop-shadow(0 0 5px rgba(118,255,104,.55))}.cloud-readout{color:#e9b581}.cloud-readout .glyph{color:var(--copper-hot)}
+.command-actions{display:grid;grid-template-columns:repeat(6,minmax(52px,1fr));gap:3px;align-items:stretch}.icon{display:grid;place-items:center;border:0;background:transparent;cursor:pointer}.command-icon{position:relative;min-width:0;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:5px;border:1px solid rgba(153,211,245,.12);color:#c6d9e8;background:linear-gradient(180deg,rgba(255,255,255,.025),rgba(1,8,15,.22));clip-path:polygon(7px 0,100% 0,100% calc(100% - 7px),calc(100% - 7px) 100%,0 100%,0 7px);transition:transform .15s ease,color .15s ease,border-color .15s ease,box-shadow .15s ease,background .15s ease}.command-icon::before{content:"";position:absolute;inset:2px;background:radial-gradient(circle at 50% 20%,rgba(255,255,255,.17),transparent 48%);opacity:.24}.command-actions .command-icon .glyph{font-size:28px;color:var(--copper-hot);filter:drop-shadow(0 0 5px rgba(255,163,91,.25))}.command-label{font-size:8px;font-weight:650;letter-spacing:.065em;text-transform:uppercase;white-space:nowrap}.command-icon:hover{transform:translateY(-2px);color:#fff;border-color:rgba(139,231,255,.45);background:rgba(31,114,155,.12);box-shadow:0 0 20px rgba(57,187,255,.12),inset 0 1px 0 rgba(255,255,255,.1)}.command-icon:hover .glyph{color:var(--energy-hot);filter:drop-shadow(0 0 7px rgba(118,255,104,.65))}.command-icon:active{transform:translateY(1px) scale(.98);box-shadow:inset 0 3px 7px rgba(0,0,0,.55)}
