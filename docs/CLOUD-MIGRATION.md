@@ -3,8 +3,8 @@
 Source-of-truth for moving Dominion off the mini-PC + Tailscale bridge and onto
 cloud infrastructure. Written to survive session/environment moves — pick up here.
 
-Status: **code complete for Phases 1, 3 & 4; Phase 2 (GPU stand-up) pending Fred's Thunder Compute
-setup; deploy (cutover) pending.** See §14 build log.
+Status: **code complete for Phases 1, 3 & 4; Phase 2 GPU node STOOD UP + verified live on Thunder
+Compute; only the Railway deploy + env wiring remain (needs the Railway service).** See §14 build log.
 
 ---
 
@@ -354,10 +354,49 @@ byte-for-byte until cutover.
   `GPT-4o · ≈ $0.01–0.03`, heavy-cold `≈ $0.06–0.25 incl. cold start · ~165s`, light = free, empty →
   hidden (§6).
 
+### 2026-07-14 (later) — Phase 2 GPU node LIVE on Thunder Compute
+
+Fred created a Thunder Compute **A100-SXM4-80GB** instance (id `0`, uuid `00ypb2gl`, IP
+`198.145.126.210:31656`, 64GB RAM, 100GB disk). Stood it up and verified end-to-end:
+
+- **Ollama** installed + running on the A100 (models dir `~/.ollama` = on the persistent disk).
+  Pulled all four: `deepseek-r1:32b` (heavy, verified **35 tok/s** on the A100), `qwen3:30b-a3b`,
+  `qwen3:8b` (light), `nomic-embed-text` (embed). GPU confirmed: `library=CUDA … A100-SXM4-80GB`.
+- **Caddy** bearer-auth gateway on `:8080` → reverse-proxies `127.0.0.1:11434`, rewriting the
+  upstream `Host` to `127.0.0.1:11434` (Ollama 403s a non-localhost Host — the cross-origin guard).
+- **Public HTTPS** via `tnr ports forward` (API `PATCH /instances/0/ports {"add_ports":[8080]}`):
+  **`https://00ypb2gl-8080.thundercompute.net`** (Thunder terminates TLS via Cloudflare). Verified:
+  unauth → 401, `Bearer <token>` → 200 (`/api/version`, `/api/tags`, real `/api/chat` generation).
+- Secrets in the wallet: `DOMINION_OLLAMA_URL`, `DOMINION_OLLAMA_KEY` (the gateway bearer),
+  `THUHNDER_COMPUTE_A100_API_KEY` (Thunder REST at `https://api.thundercompute.com:8443`).
+
+**Thunder realities that revise the plan:**
+- **No start/stop API (resolves the §13 open item honestly).** Thunder bills per-minute while
+  RUNNING; the only "off" is DELETE + snapshot-restore (restore is slow and may hand back a new
+  uuid → new public URL). So **true per-turn on-demand (§5) is NOT viable on Thunder** — the
+  `ensureHeavyWarm` lifecycle hook stays inert (`GPU_*` start/stop URLs unset). Cost control =
+  keep it running while in use, **delete when done for long stretches**, restore from a snapshot.
+- **One A100 serves BOTH tiers.** 80GB holds qwen3:30b-a3b + qwen3:8b + nomic and can load
+  deepseek-r1:32b too, so `OLLAMA_LIGHT_URL == OLLAMA_HEAVY_URL` (single endpoint, `SPLIT_TIERS`
+  off). New `GPU_ALWAYS_ON=1` flag makes the cost chip read "included" (a flat-hourly box has ~zero
+  marginal per-turn cost) instead of a misleading GPU-seconds price.
+- **No systemd, no cron** on the k8s container. Ollama + Caddy run as detached (`setsid`) processes
+  via `~/start-dominion.sh`; they do NOT survive a box restart automatically. After any
+  restart/snapshot-restore, re-run `~/start-dominion.sh` over SSH. **Snapshot the instance** to
+  preserve the installed models + binaries + scripts.
+
 **Remaining to finish the migration:**
-1. **Phase 2:** stand up Thunder Compute (Ollama in Docker + Caddy + bearer; pull `deepseek-r1:32b`,
-   `gemma3`, `nomic-embed-text`); set the `GPU_*` envs. *(pause point — needs Fred's account/keys)*
-2. **Phase 1 deploy:** create the Railway service (Docker build), attach a Volume at `/data`, set the
-   env matrix (§10), deploy cloud-models-only first to prove the interface with the bridge gone.
-3. **Phase 3 wire + tune:** set `OLLAMA_LIGHT_URL`/`OLLAMA_HEAVY_URL`/`OLLAMA_KEY`, pick LIGHT/MAIN.
-4. **Phase 5 cutover:** custom domain, retire the mini-PC.
+1. **Phase 1 deploy (needs Fred / a Railway account token):** create the Railway service (Docker
+   build), attach a Volume at `/data`, set the env matrix below, deploy. This proves the interface
+   with the bridge gone AND wires the GPU in one shot (the node is already live).
+2. **Railway env matrix for this deployment:**
+   - `OLLAMA_URL` = `https://00ypb2gl-8080.thundercompute.net`  (both tiers on the one A100)
+   - `OLLAMA_KEY` = `DOMINION_OLLAMA_KEY` (wallet)
+   - `LIGHT_MODEL` = `qwen3:8b` · `MAIN_MODEL` = `qwen3:30b-a3b`  (parity, zero regression;
+     `deepseek-r1:32b` is pulled and ready — flip `MAIN_MODEL` to it to trial R1 as the brain, with
+     the §10 caveat that R1 fights the strict-JSON internal passes)
+   - `EMBED_MODEL` = `nomic-embed-text` · `GPU_ALWAYS_ON` = `1`
+   - `DATA_DIR` = `/data` (Volume) · provider keys (`OPENROUTER_API_KEY`,
+     `OPEN_AI_DOMINION_UI_APIKEY`, `DEEPSEEK_AI_DOMINION_UI_APIKEY`, `SERP_API_KEY`) ·
+     `OPENROUTER_REFERER` = the Railway URL · `WATCHDOG_ENABLED=0`
+3. **Phase 5 cutover:** custom domain, retire the mini-PC.

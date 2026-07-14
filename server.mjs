@@ -269,6 +269,10 @@ const GPU_WARMUP_MS = Number(cfgGet("GPU_WARMUP_MS", "90000")) || 90000;
 const GPU_HOURLY_USD = Number(cfgGet("GPU_HOURLY_USD", "1.90")) || 1.90;
 const GPU_THROUGHPUT = Number(cfgGet("GPU_THROUGHPUT_TOKS", "40")) || 40;   // R1-32B ≈ 30-50 tok/s
 const GPU_MANAGED = !!GPU_START_URL;   // are we actually driving start/stop, or is the box external?
+// Thunder Compute (and any flat-hourly box) has NO start/stop — it bills per minute while RUNNING,
+// so a heavy turn has ~zero MARGINAL cost (you already pay the hourly). Set GPU_ALWAYS_ON=1 for that
+// deployment so the cost chip reads "included" instead of a misleading per-turn GPU-seconds price.
+const GPU_ALWAYS_ON = String(cfgGet("GPU_ALWAYS_ON", "")) === "1";
 const gpuState = { warm: false, lastUseAt: 0, starting: null, stopTimer: null };
 
 function gpuHttp(url, method) {
@@ -865,9 +869,10 @@ function estimatePreflight(input = {}) {
   }
   // Local light tier = self-hosted always-on → effectively free; no confirm.
   const heavy = MODES[mode] && MODES[mode].tier === "main";
-  if (!heavy) {
-    return { backend: "gpu-light", tier: "light", mode, tokensIn, outRange, warm: true, free: true,
-      estCost: "included (always-on tier)", estCostUsd: [0, 0], estLatency: "a few seconds", confirm: false };
+  if (!heavy || GPU_ALWAYS_ON) {
+    // Light tier, OR a flat-hourly always-on box where the marginal per-turn cost is ~zero.
+    return { backend: heavy ? "gpu-heavy" : "gpu-light", tier: heavy ? "heavy" : "light", mode, tokensIn, outRange,
+      warm: true, free: true, estCost: "included (always-on GPU)", estCostUsd: [0, 0], estLatency: "a few seconds", confirm: false };
   }
   // Heavy tier = on-demand GPU → a TIME cost, not a token price: seconds ≈ out/throughput; $ ≈ sec × ($/hr÷3600).
   const warm = gpuState.warm && (Date.now() - gpuState.lastUseAt) < GPU_IDLE_MS;
