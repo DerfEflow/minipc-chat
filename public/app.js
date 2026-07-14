@@ -17,7 +17,8 @@ const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"
       personaBtn = $("persona"), pmodal = $("pmodal"), pclose = $("pclose"), pstats = $("pstats"),
       padd = $("padd"), pkind = $("pkind"), ptitle = $("ptitle"), paddbtn = $("paddbtn"),
       purl = $("purl"), pscrape = $("pscrape"), pscan = $("pscan"), pdistill = $("pdistill"),
-      pprofile = $("pprofile"), pfilterKind = $("pfilter-kind"), pmsg = $("pmsg"), plist = $("plist");
+      pprofile = $("pprofile"), pfilterKind = $("pfilter-kind"), pmsg = $("pmsg"), plist = $("plist"),
+      costChip = $("cost-chip");
 
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
       LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
@@ -269,7 +270,7 @@ async function loadModels() {
 }
 
 // ---------- agent loop over SSE ----------
-function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send"; }
+function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send"; if (on && typeof hideCostChip === "function") hideCostChip(); }
 
 // ---- durable live turn (PWA suspend/resume) ----
 // The server buffers every /chat turn as a JOB ({type:"job"} is the first SSE event) and keeps
@@ -512,7 +513,7 @@ function send() {
   }
   const text = input.value.trim(); if (!text) return;
   const c = cur(); if (!c) return;
-  input.value = ""; autosize();
+  input.value = ""; autosize(); hideCostChip();
   c.messages.push({ role: "user", content: text });
   if (c.title === "New chat") c.title = titleFrom(c.messages);
   c.updatedAt = Date.now(); save(); renderAll();
@@ -1054,8 +1055,46 @@ async function addImprove() {
   iadd.value = ""; loadImprove();
 }
 
+// ---------- pre-send cost estimate chip (docs/CLOUD-MIGRATION.md §6) ----------
+// A live, deterministic preflight (/estimate — no model call): what THIS turn costs before you send.
+// Debounced on typing; superseded-by-newer-keystroke guard; hides while empty or streaming.
+let estTimer = null, estSeq = 0;
+function scheduleEstimate() { if (estTimer) clearTimeout(estTimer); estTimer = setTimeout(updateEstimate, 350); }
+function hideCostChip() { if (costChip) costChip.hidden = true; }
+async function updateEstimate() {
+  if (!costChip) return;
+  const text = input.value.trim();
+  if (!text || busy) { hideCostChip(); return; }
+  const c = cur();
+  const history = c ? c.messages.map((m) => ({ role: m.role, content: m.content })) : [];
+  history.push({ role: "user", content: text });
+  const payload = { messages: history, mode: modeSel ? modeSel.value : "auto", model: forcedModel() || "auto" };
+  const seq = ++estSeq;
+  costChip.className = "cost-chip cc-loading"; costChip.textContent = "estimating…"; costChip.hidden = false;
+  let est;
+  try {
+    const r = await fetch("/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    est = await r.json();
+  } catch { if (seq === estSeq) hideCostChip(); return; }
+  if (seq !== estSeq) return;                       // a newer keystroke already superseded this
+  if (busy || !input.value.trim()) { hideCostChip(); return; }
+  renderCostChip(est);
+}
+function renderCostChip(est) {
+  if (!costChip || !est || !est.backend) { hideCostChip(); return; }
+  let cls = "cost-chip", label = est.estCost || "";
+  if (est.backend === "cloud") { cls += est.free ? " cc-free" : " cc-cloud"; label = (est.model ? est.model + " · " : "") + (est.estCost || ""); }
+  else if (est.backend === "gpu-heavy") { cls += " cc-heavy" + (est.warm ? "" : " cc-cold"); label = "Heavy GPU · " + (est.estCost || ""); }
+  else { cls += " cc-free"; label = est.estCost || "included"; }   // gpu-light (always-on)
+  costChip.className = cls;
+  const lat = est.estLatency && est.estLatency !== "a few seconds" ? ` <span class="cc-lat">${escapeHtml(est.estLatency)}</span>` : "";
+  costChip.innerHTML = `<span class="cc-dot"></span><span class="cc-cost">${escapeHtml(label)}</span>${lat}`;
+  costChip.hidden = false;
+}
+
 // ---------- wire up ----------
 input.addEventListener("input", autosize);
+input.addEventListener("input", scheduleEstimate);
 // Desktop (mouse) sends on Enter; phone/touch lets Enter insert a newline (use the send button).
 const enterSends = !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && enterSends) { e.preventDefault(); send(); } });
@@ -1064,9 +1103,9 @@ menuBtn.addEventListener("click", () => (sidebar.classList.contains("open") ? cl
 overlay.addEventListener("click", closeSidebar);
 newBtn.addEventListener("click", newChat);
 if (chatSearch) chatSearch.addEventListener("input", () => { chatQuery = chatSearch.value || ""; renderSidebar(); });
-if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODE, modeSel.value); } catch {} });
+if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODE, modeSel.value); } catch {} updateEstimate(); });
 // Model pick persists immediately (matches Mode) and flips the "via OpenRouter" spend indicator live.
-if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateCloudBadge(); });
+if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateCloudBadge(); updateEstimate(); });
 settingsBtn.addEventListener("click", openSettings);
 sclose.addEventListener("click", closeSettings);
 ssave.addEventListener("click", saveSettingsUI);

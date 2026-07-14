@@ -3,7 +3,8 @@
 Source-of-truth for moving Dominion off the mini-PC + Tailscale bridge and onto
 cloud infrastructure. Written to survive session/environment moves — pick up here.
 
-Status: **planning complete, Phase 1 not yet started.**
+Status: **code complete for Phases 1, 3 & 4; Phase 2 (GPU stand-up) pending Fred's Thunder Compute
+setup; deploy (cutover) pending.** See §14 build log.
 
 ---
 
@@ -305,7 +306,58 @@ Decide during Phase 3 tuning.
 
 ## 13. Open items to confirm before/while building
 
-- Exact heavy-tier idle window before auto-stop (cost vs latency trade).
-- Whether internal `MAIN_MODEL` JSON passes use R1 or a non-reasoning 32B (§10 tuning note).
-- Thunder Compute start/stop API shape for the lifecycle hook.
-- Custom domain choice for the final cutover.
+- Exact heavy-tier idle window before auto-stop (cost vs latency trade). **Default shipped:** 5 min
+  (`GPU_IDLE_MS=300000`), env-tunable.
+- Whether internal `MAIN_MODEL` JSON passes use R1 or a non-reasoning 32B (§10 tuning note). **Still
+  open** — decide during Phase 3 tuning; wire via `MAIN_MODEL` env once the box is up.
+- Thunder Compute start/stop API shape for the lifecycle hook. **Resolved structurally:** the hook is
+  provider-agnostic and env-driven (`GPU_START_URL`/`GPU_STOP_URL`/`GPU_STATUS_URL`/`GPU_API_KEY`), so
+  Thunder's exact endpoints plug in with zero code. Confirm the URLs/token once the CLI + API key are
+  in hand.
+- Custom domain choice for the final cutover. **Still open.**
+
+---
+
+## 14. Build log
+
+### 2026-07-14 — Phases 1, 3, 4 code complete (branch `claude/dominion-ai-ui-deployment-adit94`)
+
+All changes are surgical and **backward-compatible with single-box mode** (every new `OLLAMA_*` /
+`GPU_*` / `DATA_DIR` var falls back to today's behavior when unset), so the mini-PC keeps running
+byte-for-byte until cutover.
+
+**Phase 1 — cloud-ready packaging & bind:**
+- `server.mjs`: bind `HOST` (`0.0.0.0` default) + injected `PORT` (§8.1).
+- `package.json` (ESM, `engines.node >=24`, `start`), `Dockerfile` (**node:24-slim** — persona.mjs
+  needs the built-in `node:sqlite`, stable in Node 24), `.dockerignore`, `railway.json`
+  (Dockerfile builder + `/api/version` healthcheck) (§8.3).
+- One `DATA_DIR` base for all server-side state (memory/chatlog/artifacts/corpus/flywheel/logs):
+  Windows → `C:\minipc-chat`, Linux/Railway → `/data` (the Volume). Each specific `*_DIR` env still
+  wins. Collapses §7's 8-var matrix to one var (§7, §8.4). Watchdog auto-off on Linux (§8.5).
+
+**Phase 3 — the two seams repointed (code; inert until the GPU exists):**
+- Per-model Ollama endpoint: `OLLAMA_LIGHT_URL` / `OLLAMA_HEAVY_URL` / `OLLAMA_KEY`. `ollamaChat()`,
+  `embedText()`, and the `/ollama` `proxy()` now pick `http`/`https` by URL protocol, use the right
+  default port, inject `Authorization: Bearer $OLLAMA_KEY`, and route by model (MAIN_MODEL / heavy
+  tags → heavy tier; everything else → always-on light tier) (§5, §8.2).
+
+**Phase 2 hook — on-demand heavy GPU lifecycle (provider-agnostic):**
+- `ensureHeavyWarm()` + idle auto-stop, env-driven (`GPU_START_URL` / `GPU_STOP_URL` /
+  `GPU_STATUS_URL` / `GPU_API_KEY` / `GPU_IDLE_MS` / `GPU_WARMUP_MS`). No-op when unconfigured. Wired
+  into the local generation path: heavy turns warm the box (with a "spinning up the reasoning engine"
+  heartbeat) before the first token (§5, §8.6). **Needs Fred's Thunder API key/URLs to go live.**
+
+**Phase 4 — cost visibility:**
+- `POST /estimate` preflight (deterministic: heuristic route + `estTokens` + catalog price for cloud,
+  GPU-seconds for the heavy box; no model call). Live composer cost chip in the PWA (green =
+  free/always-on, brass = paid cloud, amber-pulse = cold on-demand GPU). Verified in-browser: cloud
+  `GPT-4o · ≈ $0.01–0.03`, heavy-cold `≈ $0.06–0.25 incl. cold start · ~165s`, light = free, empty →
+  hidden (§6).
+
+**Remaining to finish the migration:**
+1. **Phase 2:** stand up Thunder Compute (Ollama in Docker + Caddy + bearer; pull `deepseek-r1:32b`,
+   `gemma3`, `nomic-embed-text`); set the `GPU_*` envs. *(pause point — needs Fred's account/keys)*
+2. **Phase 1 deploy:** create the Railway service (Docker build), attach a Volume at `/data`, set the
+   env matrix (§10), deploy cloud-models-only first to prove the interface with the bridge gone.
+3. **Phase 3 wire + tune:** set `OLLAMA_LIGHT_URL`/`OLLAMA_HEAVY_URL`/`OLLAMA_KEY`, pick LIGHT/MAIN.
+4. **Phase 5 cutover:** custom domain, retire the mini-PC.
