@@ -96,9 +96,14 @@ per-phase verification, and snapshots/rollback (Fred's build protocol).
   TruAgent-scoped only.
 - GitHub: `gh auth setup-git` then `git push` (wallet `GITHUB_TOKEN` is 403 for push).
 
-## 7. Open questions (non-blocking)
+## 7. Open questions — RESOLVED by Fred 2026-07-14 (see ACCESS-AND-PRIVACY-DESIGN §7)
 
-- Trusted-mode roster: add Anthropic direct to the catalog?
-- MCP transport: dial-out (recommended) vs Tailscale reach-in.
-- Private brain: mini-PC Qwen enough, or add an on-demand local GPU later?
-- ZDR agreement with Anthropic/OpenAI to close the short retention window?
+- Trusted-mode roster: **Anthropic direct added.** Trusted = OpenAI direct + Anthropic direct + local.
+- MCP transport: **dial-out.** Tailscale survives for exactly two uses: Railway reaches the mini-PC
+  Qwen over the tailnet, and update/deploy access. The hands do not ride the tailnet.
+- Private brain: **mini-PC Qwen for now**; on-demand local GPU stays an optional later upgrade.
+- UI: **the dominion-cinematic baseline is blessed**, including this branch's `public/` diffs
+  (paint fix + cost chip). Frozen from this baseline forward.
+- Still open: ZDR agreement with Anthropic/OpenAI to close the short retention window.
+- GitHub tokens, wallet PAT replacement, and the Railway service: Fred is working these (L-004,
+  L-010); they gate Phase 3, never Phase 1.

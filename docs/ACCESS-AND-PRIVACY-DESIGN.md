@@ -146,18 +146,25 @@ regulated.
 
 ---
 
-## 7. Open questions for Fred (non-blocking; build can start)
+## 7. Decisions and remaining questions
 
-- **Trusted mode roster:** Trusted = OpenAI direct + local today (DeepSeek excluded on jurisdiction,
-  OpenRouter excluded as a middleman). Add **Anthropic direct** to the catalog so it is available in
-  Trusted/Normal? It is currently absent by choice (Fred uses Claude via its own app), but it is the
-  strictest-retention provider, so it is a natural fit for Trusted mode.
-- **MCP transport:** machine dials out to the cloud (simpler, safer), or cloud reaches in via
-  Tailscale? Recommend dial-out.
-- **Private brain:** mini-PC Qwen (free, modest) is the default. Upgrade to an on-demand local GPU
-  later for stronger private reasoning, or is the mini-PC enough?
+**Decided by Fred 2026-07-14 (do not re-litigate):**
+
+- **MCP transport = dial-out.** Each machine's hands node dials OUT to the cloud orchestrator over
+  an authenticated channel. No inbound ports on Fred's PCs, and the hands do not ride the tailnet.
+- **Tailscale survives, scoped to two uses only:** the Railway container joins the tailnet to reach
+  the mini-PC Qwen (Ollama binds the tailnet interface, ledger L-016), and update/deploy access to
+  the boxes. Nothing else.
+- **Trusted roster includes Anthropic direct.** Anthropic joins the catalog; Trusted = OpenAI
+  direct + Anthropic direct + local.
+- **Private brain = mini-PC Qwen** for now. An on-demand local GPU stays an optional later upgrade.
+- **UI baseline = the dominion-cinematic version**, including the branch's paint fix and cost chip.
+  Frozen from this baseline forward.
+
+**Still open (non-blocking):**
+
 - **ZDR:** pursue a Zero Data Retention agreement with Anthropic/OpenAI to close even the short
   retention window?
 
-**Decided (do not re-litigate):** three modes Normal/Trusted/Private; default Normal; no
+**Decided earlier (do not re-litigate):** three modes Normal/Trusted/Private; default Normal; no
 auto-detection; no re-routing or override (refuse, do not substitute).

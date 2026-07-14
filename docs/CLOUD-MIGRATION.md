@@ -3,8 +3,13 @@
 Source-of-truth for moving Dominion off the mini-PC + Tailscale bridge and onto
 cloud infrastructure. Written to survive session/environment moves — pick up here.
 
-Status: **code complete for Phases 1, 3 & 4; Phase 2 GPU node STOOD UP + verified live on Thunder
-Compute; only the Railway deploy + env wiring remain (needs the Railway service).** See §14 build log.
+Status: **code complete for Phases 1, 3 & 4. The Thunder Compute GPU was stood up, verified, then
+REJECTED ON COST and deleted (2026-07-14): no start/stop API means paying to idle. The brain is
+provider APIs for Normal/Trusted plus the mini-PC Qwen for Private mode. §4b/§5 and the GPU parts
+of §14 are kept as a rebuild recipe only. Superseding decisions (Fred, 2026-07-14): Tailscale IS
+allowed in the AI project, scoped narrowly to reaching the mini-PC Qwen and to update/deploy access;
+hands move via dial-out MCP tool servers per `ACCESS-AND-PRIVACY-DESIGN.md`; the dominion-cinematic
+UI is the blessed baseline. See §14 build log.**
 
 ---
 
@@ -14,9 +19,10 @@ Compute; only the Railway deploy + env wiring remain (needs the Railway service)
   an always-on public host.
 - **Railway is the horse.** `server.mjs` + the PWA run on Railway with a public HTTPS URL. This is
   where the "brain" always lives: routing, tools, memory, artifacts, the agent loop.
-- **Bring your own GPU model.** A cloud GPU runs models of Fred's choice, plugged into the existing
-  `OLLAMA_URL` seam. No Tailscale anywhere in the AI project (Fred still uses Tailscale for his
-  personal PCs — that stays separate).
+- **Bring your own GPU model.** *(SUPERSEDED 2026-07-14: the paid cloud GPU was rejected on cost.
+  The `OLLAMA_URL` seam survives and points at the mini-PC Qwen over the tailnet instead. Tailscale
+  is allowed in the AI project for exactly two things: reaching the mini-PC Qwen, and update/deploy
+  access. Nothing else rides the tailnet; the hands use dial-out MCP tool servers.)*
 - **Keep the logic identical.** No rewrite of `server.mjs` behavior. We only change *where things
   bind/connect* and *how state is persisted*.
 - **Cost-aware from day one.** Heavy GPU is on-demand, never always-on. Light/router/memory traffic
@@ -241,7 +247,9 @@ Volume ships faster for ~$1.
 ## 9. Security & transport
 
 - **HTTPS + bearer token** between Railway ↔ GPU. Caddy terminates TLS and checks the token;
-  Ollama stays private behind it. **No Tailscale in the AI project.**
+  Ollama stays private behind it. *(SUPERSEDED 2026-07-14: no cloud GPU. Railway reaches the
+  mini-PC Qwen over the tailnet — the container joins with an auth key, Ollama binds the tailnet
+  interface, per ledger L-016. Tailscale is scoped to Qwen access + updates only.)*
 - All secrets are Railway env vars (the config reads `process.env` first, so no `.env` file needed;
   the Windows `.env`/bridge `.env` reads simply no-op).
 
@@ -293,13 +301,19 @@ Decide during Phase 3 tuning.
 
 ## 12. Settled decisions (log)
 
-- Host: **Thunder Compute** for inference now; revisit for training.
-- Transport: **HTTPS + bearer**; Tailscale stays out of the AI project.
-- Models: **`deepseek-r1:32b`** (heavy) + **`gemma3`** (light) + **`nomic-embed-text`** (embed).
+*(Entries struck below were superseded on 2026-07-14; the replacements are in
+`ACCESS-AND-PRIVACY-DESIGN.md` and `BUILD-HANDOFF.md`.)*
+
+- ~~Host: **Thunder Compute** for inference now~~ → **no paid GPU; provider APIs + mini-PC Qwen.**
+- ~~Transport: **HTTPS + bearer**; Tailscale stays out of the AI project~~ → **Tailscale allowed,
+  scoped to Qwen access + updates only; hands via dial-out MCP tool servers.**
+- ~~Models: `deepseek-r1:32b` (heavy) + `gemma3` (light)~~ → **provider APIs for Normal/Trusted;
+  `qwen3:8b`/`qwen3:30b-a3b` on the mini-PC for Private.**
 - Storage: **Railway Volume now → Supabase when training-data assembly starts.**
-- GPU: **heavy on-demand, light cheap-always-on; batch heavy work.**
 - Cost UX: **pre-send `/estimate` chip + running spend.**
-- MCP / forge tools: **ship inert now; MCP phase later.**
+- Hands: **MCP tool server per machine, dial-out, carve-outs verbatim (Phase 1 of the build plan).**
+- UI: **the dominion-cinematic version is the blessed baseline (Fred, 2026-07-14).** The frozen-UI
+  rule now reads: frozen at this baseline; any further `public/` diff needs Fred's explicit call.
 - Ultimate goal: **train a model** — keep the corpus capturable + queryable.
 
 ---
@@ -354,7 +368,24 @@ byte-for-byte until cutover.
   `GPT-4o · ≈ $0.01–0.03`, heavy-cold `≈ $0.06–0.25 incl. cold start · ~165s`, light = free, empty →
   hidden (§6).
 
-### 2026-07-14 (later) — Phase 2 GPU node LIVE on Thunder Compute
+### 2026-07-14 (final) — Thunder GPU DELETED; decisions locked; Phase 1 (MCP hands) begun
+
+Fred consolidated all sessions into one Claude Code session and locked the following:
+
+1. **No paid GPU.** The Thunder A100 was deleted the same day it went live (no start/stop API,
+   ~$1,370/mo to idle at $1.90/hr). The section below survives as a rebuild recipe only. Wallet
+   leftovers `DOMINION_OLLAMA_URL` / `DOMINION_OLLAMA_KEY` / `THUHNDER_COMPUTE_A100_API_KEY` are
+   dead and can be removed.
+2. **Tailscale is allowed, narrowly.** Exactly two uses: the Railway container reaches the mini-PC
+   Qwen over the tailnet (Ollama binds the tailnet interface, ledger L-016 RESOLVED), and
+   update/deploy access to the boxes. The hands do NOT ride the tailnet.
+3. **Hands = MCP tool server per machine, dial-out** (`ACCESS-AND-PRIVACY-DESIGN.md` §2). Phase 1
+   builds the mini-PC node; the laptop node is Phase 4.
+4. **Anthropic direct joins the catalog** and the Trusted-mode roster (Fred, 2026-07-14).
+5. **UI baseline blessed.** The dominion-cinematic version, including this branch's `public/`
+   changes (the paint fix and the cost chip), is the UI Fred chose. Frozen from here.
+
+### 2026-07-14 (later) — Phase 2 GPU node LIVE on Thunder Compute *(historical; deleted same day, kept as rebuild recipe)*
 
 Fred created a Thunder Compute **A100-SXM4-80GB** instance (id `0`, uuid `00ypb2gl`, IP
 `198.145.126.210:31656`, 64GB RAM, 100GB disk). Stood it up and verified end-to-end:
