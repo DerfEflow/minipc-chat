@@ -54,39 +54,36 @@ joins when it is on.
 
 ---
 
-## 3. Privacy: the honest rule and the Max Privacy toggle
+## 3. Privacy: three explicit modes, user-controlled (DECIDED)
 
-**The hard truth:** if a cloud model *reads* something, that content is *sent to that provider*.
-There is no cloud-side trick that lets a cloud brain read sensitive data without transmitting it.
-So the only real guarantee of "not sent" is to keep the **brain local** for those turns.
+**Fred sets the mode. There is NO auto-detection of sensitivity and NO ability for the system to
+re-route or override his choice.** The mode is a hard allow-list of which brains may be called;
+within that allow-list, whatever model Fred picks is used exactly, never substituted.
 
-### Provider trust tiers
+The hard truth that makes the modes meaningful: if a cloud model *reads* something, that content is
+*sent to that provider*. So "keep it off the cloud" can only mean "use a local brain." The modes make
+that a deliberate, visible switch instead of a guess.
 
-| Tier | Backend | Privacy posture |
+| Mode | Brains allowed | Use |
 |---|---|---|
-| **Private** | Local model (mini-PC Qwen now; optional on-demand local GPU later) | Nothing leaves the box. Absolute. |
-| **Trusted cloud** | **Anthropic** / **OpenAI** direct API | No training on your data by default; short retention then deleted (Anthropic 7 days, OpenAI up to 30); Zero Data Retention available. Strong, not absolute (see §4). |
-| **Convenience** | DeepSeek, OpenRouter | Non-sensitive only. Different jurisdiction / middleman that can log. |
+| **Normal** (default) | All providers: OpenRouter, DeepSeek, OpenAI direct, plus local | Everyday work. Cheapest, most powerful, the full model picker. |
+| **Trusted** | Direct no-train providers (OpenAI direct; optionally Anthropic direct) **plus local**. **No OpenRouter, no DeepSeek.** | Work you want in the cloud but only with providers that do not train on your data and retain briefly / offer ZDR (see §4). |
+| **Private** | **Local model ONLY** (mini-PC Qwen; optional on-demand local GPU) | Sensitive work. Nothing leaves your hardware. Zero cloud calls. |
 
-### Controls (build these)
+**Rules (hard requirements):**
+- **Default = Normal.**
+- **No auto-detection.** The system never inspects content to guess a privacy level.
+- **No re-routing, no override.** The mode filters the selectable models, and the server *also*
+  enforces the allow-list. If a picked model is not allowed in the current mode, the system
+  **refuses** with a clear message (e.g. "Private mode allows local models only") rather than
+  silently substituting. Fred's explicit pick within the allowed set is honored exactly.
+- The mode is a **visible switch** in the UI (beside Model / Mode), persisted like the model pick.
+- Redaction/scrubbing of outbound payloads is deliberately **NOT** part of this: it would be the
+  system altering what Fred chose to send. If ever wanted, it is a separate opt-in toggle, off by
+  default. The three modes are the whole privacy control.
 
-1. **Max Privacy toggle** (global switch + per-session override). ON = the brain is **locked to the
-   local model** for the whole session; cloud providers are simply not called; nothing in context
-   leaves Fred's hardware. This is where a local model earns its keep: as the *private brain for
-   sensitive work*, not an always-on box for everything.
-2. **Auto-sensitivity routing** (works even with the toggle OFF). The router already sniffs for
-   secrets/PII (`PRIVACY_RE` / `privacyRiskOf`). Extend it so a tool result or prompt that trips the
-   sensitive-content or carve-out-category detector **auto-routes that turn to the local brain** (or
-   redacts before any cloud call). Sensitive reads never silently egress.
-3. **Redaction pass on cloud-bound payloads.** `mentor.mjs` already redacts email/phone/api-key/jwt/
-   secret before external calls. Generalize it into a single egress filter every cloud call passes
-   through.
-4. **Provider allow-list per privacy level.** Content that is sensitive-but-cloud-acceptable is
-   restricted to the **trusted-cloud** tier (Anthropic/OpenAI direct), never DeepSeek/OpenRouter.
-
-Net effect: **Max Privacy ON = local only.** Max Privacy OFF = cloud for normal work, but flagged
-content still auto-stays local or is redacted, and only trusted-direct providers ever see anything
-borderline.
+Net effect: the privacy level is always exactly what Fred selected, with zero surprises. Normal =
+everything; Trusted = only no-train direct providers or local; Private = local only.
 
 ---
 
@@ -118,9 +115,10 @@ regulated.
 
 ```
    Phone PWA ─HTTPS─▶ Railway: server.mjs + PWA  (brain orchestrator, always-on)
-                          │  ├─ normal turns ─────▶ Provider APIs (Anthropic/OpenAI direct = trusted;
-                          │  │                        OpenRouter/DeepSeek = convenience)
-                          │  ├─ Max Privacy / flagged ─▶ LOCAL model (mini-PC Qwen; optional GPU)
+                          │  privacy mode (Fred's pick) gates the callable brains:
+                          │  ├─ Normal ──▶ any provider (OpenRouter / DeepSeek / OpenAI direct) + local
+                          │  ├─ Trusted ─▶ OpenAI direct (opt. Anthropic direct) + local ONLY
+                          │  ├─ Private ─▶ LOCAL model ONLY (mini-PC Qwen; optional GPU)
                           │  └─ online projects ──▶ GitHub / Railway / Vercel / Supabase (direct API)
                           │
                           └─ tool calls ─▶ MCP tool server(s)   ── mini-PC (always-on hands)
@@ -140,21 +138,26 @@ regulated.
 
 1. **MCP tool server (mini-PC)** mirroring `tools.mjs` + carve-outs; the cloud orchestrator connects
    over an authenticated dial-out channel. Prove the cloud-brain to local-hands loop.
-2. **Privacy layer:** Max Privacy toggle + auto-sensitivity router + provider trust tiers + the
-   single egress redaction filter.
+2. **Privacy layer:** the three modes (Normal / Trusted / Private), Normal default, as a UI switch +
+   server-side allow-list enforcement. No auto-detection, no re-routing, refuse-not-substitute.
 3. **Railway orchestrator wiring** + take the phone off the `tailscale serve` bridge.
 4. **Laptop MCP server** (adds F:\ + `C:\Users\rjfla` reach when the laptop is on).
 5. **Optional:** on-demand local GPU for a stronger private brain (spin-up / delete, kill-switch).
 
 ---
 
-## 7. Open questions for Fred
+## 7. Open questions for Fred (non-blocking; build can start)
 
+- **Trusted mode roster:** Trusted = OpenAI direct + local today (DeepSeek excluded on jurisdiction,
+  OpenRouter excluded as a middleman). Add **Anthropic direct** to the catalog so it is available in
+  Trusted/Normal? It is currently absent by choice (Fred uses Claude via its own app), but it is the
+  strictest-retention provider, so it is a natural fit for Trusted mode.
 - **MCP transport:** machine dials out to the cloud (simpler, safer), or cloud reaches in via
   Tailscale? Recommend dial-out.
-- **Private brain:** mini-PC Qwen (free, modest) is the default now. Upgrade to an on-demand local
-  GPU later for stronger private reasoning, or is the mini-PC enough?
+- **Private brain:** mini-PC Qwen (free, modest) is the default. Upgrade to an on-demand local GPU
+  later for stronger private reasoning, or is the mini-PC enough?
 - **ZDR:** pursue a Zero Data Retention agreement with Anthropic/OpenAI to close even the short
   retention window?
-- **Default posture:** Max Privacy OFF with auto-sensitivity routing on (convenient + safe), or Max
-  Privacy ON by default (maximally private, cloud only when Fred flips it off)?
+
+**Decided (do not re-litigate):** three modes Normal/Trusted/Private; default Normal; no
+auto-detection; no re-routing or override (refuse, do not substitute).
