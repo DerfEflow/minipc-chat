@@ -4,6 +4,7 @@
   const root = document.documentElement;
   const body = document.body;
   const pane = document.getElementById("neural-glass");
+  const reflection = pane?.querySelector(".glass-reflection");
   const commandbar = document.getElementById("commandbar");
   const send = document.getElementById("send");
   const speak = document.getElementById("speak");
@@ -180,6 +181,7 @@
       root.style.setProperty("--tilt-x", ((x - .5) * .42).toFixed(3) + "deg");
       root.style.setProperty("--tilt-y", ((.5 - y) * .34).toFixed(3) + "deg");
       root.style.setProperty("--signal-x", (x * 100).toFixed(2) + "%");
+      if (reflection) reflection.style.transform = `translateX(${((x - .5) * 140).toFixed(1)}px) rotate(15deg)`;
     };
     window.addEventListener("pointermove", (event) => {
       pending = event;
@@ -188,6 +190,7 @@
     pane.addEventListener("pointerleave", () => {
       root.style.setProperty("--tilt-x", "0deg");
       root.style.setProperty("--tilt-y", "0deg");
+      if (reflection) reflection.style.transform = "translateX(0) rotate(15deg)";
     });
   }
 
@@ -215,6 +218,7 @@
   });
   observer.observe(document.body, { childList: true, subtree: true });
 
+  if (reflection) reflection.style.transform = "translateX(0) rotate(15deg)";
   syncConnection();
   syncBusy();
   syncContext();
