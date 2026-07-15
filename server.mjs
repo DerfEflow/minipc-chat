@@ -32,6 +32,7 @@ import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
 import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, catalogPayload } from "./models.catalog.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
+import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -383,6 +384,9 @@ const OPENROUTER_REFERER = cfgGet("OPENROUTER_REFERER", "https://nucbox-k8-plus.
 // no question about where the calls route). Wallet names take precedence; generic names are fallbacks.
 const OPENAI_KEY = cfgGet("OPEN_AI_DOMINION_UI_APIKEY", cfgGet("OPENAI_API_KEY", ""));
 const DEEPSEEK_KEY = cfgGet("DEEPSEEK_AI_DOMINION_UI_APIKEY", cfgGet("DEEPSEEK_API_KEY", ""));
+// Anthropic direct (added 2026-07-14 for Trusted mode). Reached via Anthropic's OpenAI-compatible
+// endpoint so the existing streamer serves it. Bearer auth with the Anthropic key.
+const ANTHROPIC_KEY = cfgGet("ANTHROPIC_API_KEY", cfgGet("CLAUDE_ANTHROPIC_KEY", ""));
 // One endpoint config per provider. All three speak the OpenAI-compatible chat-completions format,
 // so a single streamer serves them — only base URL, key, and a couple of headers differ.
 const PROVIDER_CFG = {
@@ -390,6 +394,7 @@ const PROVIDER_CFG = {
     extraHeaders: { "http-referer": OPENROUTER_REFERER, "x-title": "Dominion AI" }, wantUsage: true },
   openai:     { url: cfgGet("OPENAI_URL", "https://api.openai.com/v1/chat/completions"), key: () => OPENAI_KEY, label: "OpenAI (direct)", extraHeaders: {}, wantUsage: false },
   deepseek:   { url: cfgGet("DEEPSEEK_URL", "https://api.deepseek.com/chat/completions"), key: () => DEEPSEEK_KEY, label: "DeepSeek (direct)", extraHeaders: {}, wantUsage: false },
+  anthropic:  { url: cfgGet("ANTHROPIC_URL", "https://api.anthropic.com/v1/chat/completions"), key: () => ANTHROPIC_KEY, label: "Anthropic (direct)", extraHeaders: {}, wantUsage: false },
 };
 // Allow-list = exactly the catalog ids (the single source of truth). A forced model is treated as
 // "cloud" ONLY if it's in the catalog — an unknown id can never silently egress.
@@ -861,6 +866,16 @@ function estimatePreflight(input = {}) {
   const tokensIn = estTokens(totalInputChars) + 900;
 
   const cloud = isCloudModel(forced) ? forced : "";
+  // Phase 2: if the picked cloud model is disallowed by the current privacy mode, the composer chip
+  // says so up front (Send is refused server-side too). Mirrors the handleChat gate, display-side.
+  if (cloud) {
+    const gate = modeAllows(input.privacyMode, cloud);
+    if (!gate.allowed) {
+      return { backend: "blocked", blocked: "privacy_mode", mode: normalizeMode(input.privacyMode),
+        model: (modelById(cloud) || {}).name || cloud, estCost: "blocked", estLatency: "—",
+        confirm: false, message: gate.reason };
+    }
+  }
   if (cloud) {
     const rec = modelById(cloud) || {};
     const inCost = Number(rec.inCost) || 0, outCost = Number(rec.outCost) || 0;
@@ -1637,6 +1652,18 @@ async function handleChat(req, res) {
   // we keep all upstream context assembly (persona, memory, retrieval) but skip the local router's
   // model pick + local tools, and stream the answer from OpenRouter instead of Ollama.
   const cloudModel = isOpenRouterModel(forced) ? forced : "";
+  // Phase 2 privacy gate: Fred's mode is a hard allow-list. If he picked a cloud model the current
+  // mode disallows, REFUSE this turn with a clear message — never silently substitute a local model.
+  // Local picks and auto-routing (which only ever picks local tiers) pass through untouched.
+  const privacyMode = normalizeMode(input.privacyMode);
+  if (cloudModel) {
+    const gate = modeAllows(privacyMode, cloudModel);
+    if (!gate.allowed) {
+      sse({ type: "error", code: "privacy_mode_block", mode: privacyMode, model: cloudModel, message: gate.reason });
+      sse({ type: "stopped", reason: "privacy_mode_block" });
+      return endStream();
+    }
+  }
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
   job.chatId = chatId;
@@ -2179,7 +2206,10 @@ const server = http.createServer(async (req, res) => {
     // can dim models that can't be called yet. Keys are NEVER included — only booleans.
     if (path === "/api/models" && req.method === "GET") {
       const payload = catalogPayload();
-      payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY };
+      payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY };
+      // Phase 2: tell the UI the privacy modes + which providers each mode permits, so the picker can
+      // filter and the switch can render. The server ALSO enforces (privacy.mjs) — this is display only.
+      payload.privacy = { modes: PRIVACY_MODES, default: DEFAULT_PRIVACY_MODE, trustedProviders: [...TRUSTED_PROVIDERS] };
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify(payload));
     }
@@ -2258,6 +2288,7 @@ server.listen(PORT, HOST, () => {
   console.log(`[dominion-ai] listening ${HOST}:${PORT}  ->  Ollama light=${OLLAMA_LIGHT_URL}${SPLIT_TIERS ? "  heavy=" + OLLAMA_HEAVY_URL : ""}${OLLAMA_KEY ? "  (bearer)" : ""}  ·  data=${DATA_DIR}`);
   console.log(`[dominion-ai] tools: deck/forge/sandbox  ·  sync=${CTX.syncKey ? "set" : "MISSING"}  ·  run-password=${CTX.runPassword ? "set" : "unset"}  ·  sandbox=${CTX.sandboxDir}`);
   console.log(`[dominion-ai] hands: ${handsHub.enabled ? "ENABLED (dial-out hub at /hands/*, bearer-authed)" : "disabled (HANDS_TOKEN unset — /hands/* answers 503)"}`);
+  console.log(`[dominion-ai] privacy: modes ${PRIVACY_MODES.join("/")} (default ${DEFAULT_PRIVACY_MODE})  ·  trusted providers: local+${[...TRUSTED_PROVIDERS].join("+")}  ·  refuse-not-substitute  ·  providers keyed: openrouter=${!!OPENROUTER_KEY} openai=${!!OPENAI_KEY} deepseek=${!!DEEPSEEK_KEY} anthropic=${!!ANTHROPIC_KEY}`);
   console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  needs_* consumed (retrieval skip + tool-def gating)  ·  post-retrieval long-context re-check  ·  usage log=${LOG_DIR}`);
   const ms = memory.stats();
   console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  gating=${ms.gating}${ms.gatedLax ? " (" + ms.gatedLax + " lax-auto-approved)" : ""}${ms.unverified ? " · " + ms.unverified + " unverified mentor claim(s) pending" : ""}  ·  scope-filtered retrieval  ·  vectors=${EMBED_MODEL} (${ms.embedded} embedded)  ·  dir=${MEMORY_DIR}`);

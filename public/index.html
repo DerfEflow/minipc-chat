@@ -160,6 +160,17 @@
           </select>
         </span>
       </label>
+
+      <label class="command-select privacy-mode-select">
+        <svg class="glyph control-glyph"><use href="#i-network"></use></svg>
+        <span class="control-copy"><small>Privacy</small>
+          <select id="privacy-mode" aria-label="Privacy mode" title="Which brains may be called. A disallowed pick is refused, never substituted.">
+            <option value="normal">Normal · all providers</option>
+            <option value="trusted">Trusted · OpenAI/Anthropic + local</option>
+            <option value="private">Private · local only</option>
+          </select>
+        </span>
+      </label>
     </div>
 
     <div class="system-readout">

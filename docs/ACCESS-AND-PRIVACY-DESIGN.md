@@ -4,8 +4,12 @@ Companion to `CLOUD-MIGRATION.md`. This is the design for keeping Dominion's nea
 Fred's machines and online projects AFTER the brain moves to the cloud, plus a **Max Privacy** mode
 that guarantees sensitive data can be kept off cloud providers.
 
-Status: **design (pre-build).** The build is high blast radius (credentials + near-total access +
-production), so it runs through the full build discipline with a numbered SOW when Fred says go.
+Status: **Phase 1 (MCP hands) and Phase 2 (privacy modes) BUILT on branch
+`claude/dominion-ai-ui-deployment-adit94`, 2026-07-14.** §2 hands = `hands/` (node + hub, dial-out,
+carve-outs verbatim, max-access). §3 privacy = `privacy.mjs` (the allow-list), enforced in
+`server.mjs` `handleChat`/`/estimate` (refuse-not-substitute) and surfaced as the Privacy switch in
+the cinematic UI. Anthropic direct is in the catalog + Trusted roster (live-verified). Remaining:
+Phase 3 Railway deploy + the Qwen-over-tailnet reach (waits on Fred's Tailscale key).
 
 ---
 
