@@ -33,6 +33,8 @@ import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSON
 import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, catalogPayload } from "./models.catalog.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
+import { createCloudBackup } from "./cloudbackup.mjs";
+import { createInboxIngest } from "./inboxingest.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -630,6 +632,30 @@ const CONFIRM_TOOLS_ENV = String(cfgGet("CONFIRM_TOOLS", "0")) === "1";
 // ---- the hands hub (Phase 1, MCP hands): nodes on Fred's machines dial OUT and hold an SSE
 // stream; we dispatch tool jobs down it. No HANDS_TOKEN -> the entire surface answers 503.
 const handsHub = createHandsHub({ token: cfgGet("HANDS_TOKEN", ""), log: (m) => console.log("[dominion-ai] " + m) });
+
+// ---- cloud corpus backup (Phase 3, ledger L-003): periodic VACUUM INTO snapshots on the volume +
+// an off-box push through the hands node so the corpus is never down to one copy after cutover.
+const cloudBackup = createCloudBackup({
+  persona,
+  dispatch: (node, tool, args) => handsHub.dispatch(node, tool, args, { timeoutMs: 120000 }),
+  cfg: {
+    localDir: cfgGet("CLOUD_BACKUP_LOCAL_DIR", dataPath("corpus-backups")),
+    node: cfgGet("CLOUD_BACKUP_NODE", ""),
+    remoteDir: cfgGet("CLOUD_BACKUP_DIR", ""),
+    chunkBytes: Number(cfgGet("CLOUD_BACKUP_CHUNK_BYTES", "4000000")) || 4000000,
+  },
+  log: (m) => console.log("[dominion-ai] " + m),
+});
+
+// ---- remote inbox ingest (Phase 3, ledger L-009): reach Fred's on-box E:\DominionCorpus\inbox
+// through the hands node so his file-dump workflow keeps working after the brain moves to the cloud.
+const inboxIngest = createInboxIngest({
+  persona,
+  dispatch: (node, tool, args) => handsHub.dispatch(node, tool, args, { timeoutMs: 60000 }),
+  cfg: { node: cfgGet("CLOUD_INGEST_NODE", ""), dir: cfgGet("CLOUD_INGEST_DIR", "E:\\DominionCorpus\\inbox") },
+  htmlToText,
+  log: (m) => console.log("[dominion-ai] " + m),
+});
 
 const FLYWHEEL_DIR = cfgGet("FLYWHEEL_DIR", dataPath("flywheel"));
 const flywheel = createFlywheel({ dir: FLYWHEEL_DIR });
@@ -1522,6 +1548,10 @@ async function handlePersona(req, res, u) {
     }
     if (p === "/persona/scan") { return json(200, startScan()); }
     if (p === "/persona/backup") { return json(200, persona.backupTo(body.dir)); }
+    // Phase 3 (L-003): run a full cloud backup now (local snapshot + off-box push via the hands node).
+    if (p === "/persona/backup-now") { return json(200, await cloudBackup.runOnce()); }
+    // Phase 3 (L-009): pull Fred's on-box inbox through the hands node and ingest it.
+    if (p === "/persona/ingest-remote-inbox") { return json(200, await inboxIngest.ingestRemoteInbox({ kind: body.kind || "other" })); }
     if (p === "/persona/scrape") {
       const r = await fetchUrl(String(body.url || ""));
       if (r.error) return json(400, { error: "Couldn't fetch that URL: " + r.error });
@@ -2303,6 +2333,14 @@ server.listen(PORT, HOST, () => {
   // Backfill embeddings for pre-vector memories in the background (no-op if the embed model is absent).
   memory.backfillEmbeddings(100).then((n) => { if (n) console.log(`[dominion-ai] memory: backfilled ${n} embedding(s)`); }).catch(() => {});
   embedLoop();   // continuous persona embedder: drains new chunks at a gentle pace, forever
+  // Cloud corpus backup (L-003): default ON in the cloud (Linux) where the volume is the only copy;
+  // default OFF on the mini-PC (it already backs up to E:). CLOUD_BACKUP_ENABLED overrides either way.
+  const backupDefault = process.platform === "win32" ? "0" : "1";
+  if (String(cfgGet("CLOUD_BACKUP_ENABLED", backupDefault)) !== "0") {
+    const bms = Number(cfgGet("CLOUD_BACKUP_INTERVAL_MS", "86400000")) || 86400000;   // daily
+    const r = cloudBackup.start(bms);
+    console.log(`[dominion-ai] cloud-backup: ON  ·  every ${Math.round(r.intervalMs / 3600000 * 10) / 10}h  ·  off-box ${cloudBackup.configured ? "configured" : "UNCONFIGURED (local volume snapshots only until CLOUD_BACKUP_NODE+DIR set)"}`);
+  }
   // Warm the persona vector cache in the background so the FIRST As-Fred query doesn't pay the
   // full 14k-vector SQLite load inside an interactive request.
   setTimeout(() => { try { const n = persona.warmCache(); console.log(`[dominion-ai] persona: vec cache warmed (${n} vector(s) in RAM)`); } catch (e) { console.log("[dominion-ai] persona: vec cache warm failed: " + (e && e.message)); } }, 1500);

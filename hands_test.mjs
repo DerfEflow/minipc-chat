@@ -72,6 +72,22 @@ await t("max-access node refuses app-backups even under an allowed root", async 
   assert.equal(r.refused, true, "an app-backups path is a carve-out even inside HANDS_ROOTS");
 });
 
+// ---- 1c. fs_append: chunked transfer (truncate first chunk, then append) ----
+await t("fs_append streams a file in chunks (truncate then append)", async () => {
+  const p = join(WORK, "chunked.bin");
+  const parts = ["AAAA", "BBBB", "CCCC"].map((s) => Buffer.from(s).toString("base64"));
+  let r = await executeJob("fs_append", { path: p, content: parts[0], truncate: true });
+  assert.equal(r.ok, true);
+  for (let i = 1; i < parts.length; i++) r = await executeJob("fs_append", { path: p, content: parts[i] });
+  assert.equal(r.ok, true);
+  const back = await executeJob("fs_read", { path: p });
+  assert.equal(back.text, "AAAABBBBCCCC", "chunks reassemble in order");
+});
+await t("fs_append still enforces the D:\\ carve-out", async () => {
+  const r = await executeJob("fs_append", { path: "D:\\backups\\x", content: "AA==" });
+  assert.equal(r.refused, true);
+});
+
 // ---- 2. hub disabled without a token ----
 await t("hub without HANDS_TOKEN is disabled (dispatch refuses, no surface)", async () => {
   const off = createHandsHub({ token: "" });

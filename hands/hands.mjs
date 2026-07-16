@@ -28,7 +28,7 @@
  *                 fs tools refuse until roots are set deliberately)
  *   HANDS_PROTECT extra comma-separated paths to refuse writes under (adds to the built-ins)
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, statSync, readdirSync } from "node:fs";
 import { resolve, join, sep, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
@@ -163,6 +163,18 @@ export async function executeJob(tool, args = {}) {
         mkdirSync(dirname(resolve(args.path)), { recursive: true });
         writeFileSync(args.path, buf);
         return { ok: true, path: args.path, bytes: buf.length };
+      }
+      case "fs_append": {
+        // Chunked transfer: append a base64 chunk to a file. truncate:true starts a fresh file
+        // (first chunk), then subsequent calls append. Lets large files (e.g. the ~88MB corpus
+        // backup) cross the SSE job channel in bounded pieces instead of one giant frame.
+        const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
+        if (underAny(args.path, SELF_PROTECT)) return refuse("append under a self-protected dir (the live app / this node)");
+        const buf = Buffer.from(String(args.content || ""), args.base64 === false ? "utf8" : "base64");
+        mkdirSync(dirname(resolve(args.path)), { recursive: true });
+        if (args.truncate) writeFileSync(args.path, buf); else appendFileSync(args.path, buf);
+        let total = 0; try { total = statSync(args.path).size; } catch {}
+        return { ok: true, path: args.path, appended: buf.length, totalBytes: total };
       }
       case "fs_list": {
         const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
