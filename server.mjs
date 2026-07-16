@@ -16,7 +16,8 @@
 import http from "node:http";
 import https from "node:https";
 import { readFile, appendFile, mkdir } from "node:fs/promises";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, appendFileSync, statSync, mkdirSync } from "node:fs";
+import { timingSafeEqual, createHash } from "node:crypto";
 import { join, normalize, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -33,6 +34,7 @@ import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSON
 import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, catalogPayload } from "./models.catalog.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
+import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
 
@@ -122,6 +124,9 @@ CTX.artifacts = artifacts;
 // SQLite-backed for a massive corpus; the E: flash drive is the staging inbox + backup target.
 const PERSONA_DIR = cfgGet("PERSONA_DIR", dataPath("corpus"));
 const PERSONA_STAGING = cfgGet("PERSONA_STAGING", process.platform === "win32" ? "E:\\DominionCorpus" : dataPath("staging"));
+// Deploy step 4: if a verified corpus was uploaded (incoming.db + incoming.ok), swap it into place
+// BEFORE the store opens its handle — no open-handle corruption window. See corpusrestore.mjs.
+try { const sw = swapIncomingIfPresent(PERSONA_DIR, (m) => console.log("[dominion-ai] " + m)); if (sw.error) console.log("[dominion-ai] corpus-restore: " + sw.error); } catch (e) { console.log("[dominion-ai] corpus-restore boot hook error: " + e.message); }
 const persona = createPersonaStore({ dir: PERSONA_DIR, staging: PERSONA_STAGING, embed: embedText });
 CTX.persona = persona;
 
@@ -631,7 +636,47 @@ const CONFIRM_TOOLS_ENV = String(cfgGet("CONFIRM_TOOLS", "0")) === "1";
 // (Placed after MAIN_MODEL so the const is initialized before createMentor reads it.)
 // ---- the hands hub (Phase 1, MCP hands): nodes on Fred's machines dial OUT and hold an SSE
 // stream; we dispatch tool jobs down it. No HANDS_TOKEN -> the entire surface answers 503.
-const handsHub = createHandsHub({ token: cfgGet("HANDS_TOKEN", ""), log: (m) => console.log("[dominion-ai] " + m) });
+const HANDS_TOKEN = cfgGet("HANDS_TOKEN", "");
+const handsHub = createHandsHub({ token: HANDS_TOKEN, log: (m) => console.log("[dominion-ai] " + m) });
+
+// Bearer check for admin/hands-token-gated endpoints (constant-time over a digest — length-safe).
+const _tokDigest = HANDS_TOKEN ? createHash("sha256").update(HANDS_TOKEN).digest() : null;
+function bearerOk(req) {
+  if (!_tokDigest) return false;
+  const h = String(req.headers.authorization || "");
+  if (!h.startsWith("Bearer ")) return false;
+  try { return timingSafeEqual(createHash("sha256").update(h.slice(7)).digest(), _tokDigest); } catch { return false; }
+}
+
+// Deploy step 4 handler: chunked, hash-verified corpus upload. Ops: begin | chunk | finalize | status.
+async function handleRestoreCorpus(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(obj)); };
+  if (!HANDS_TOKEN) return json(503, { error: "restore disabled: no HANDS_TOKEN configured" });
+  if (!bearerOk(req)) return json(401, { error: "unauthorized" });
+  const body = await readJsonBody(req) || {};
+  const dir = PERSONA_DIR;
+  const incoming = (process.platform === "win32" ? dir + "\\" : dir + "/") + "incoming.db";
+  try {
+    if (body.op === "begin") { mkdirSync(dir, { recursive: true }); writeFileSync(incoming, Buffer.alloc(0)); return json(200, { ok: true, staged: incoming }); }
+    if (body.op === "chunk") {
+      if (typeof body.b64 !== "string" || !body.b64) return json(400, { error: "b64 chunk required" });
+      const buf = Buffer.from(body.b64, "base64");
+      appendFileSync(incoming, buf);
+      return json(200, { ok: true, totalBytes: statSync(incoming).size });
+    }
+    if (body.op === "finalize") {
+      const report = finalizeIncoming(dir, { sha256: body.sha256, docs: body.docs, chunks: body.chunks });
+      // The swap happens at the next boot; tell the caller whether the staged file passed every gate.
+      return json(report.ok ? 200 : 422, { ...report, note: report.ok ? "verified + staged; restart the service to swap it in" : "verification FAILED — not staged" });
+    }
+    if (body.op === "status") {
+      const cur = persona.stats();
+      let staged = null; try { if (existsSync(incoming)) staged = statSync(incoming).size; } catch {}
+      return json(200, { ok: true, corpusDocs: cur.docs, corpusChunks: cur.chunks, stagedBytes: staged });
+    }
+    return json(400, { error: "unknown op (begin|chunk|finalize|status)" });
+  } catch (e) { return json(500, { error: e.message }); }
+}
 
 // ---- cloud corpus backup (Phase 3, ledger L-003): periodic VACUUM INTO snapshots on the volume +
 // an off-box push through the hands node so the corpus is never down to one copy after cutover.
@@ -2274,6 +2319,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // The hands hub (Phase 1, MCP hands). Bearer-authed; 503 when HANDS_TOKEN is unset.
+    // Deploy step 4: corpus restore upload (bearer HANDS_TOKEN). Streams the snapshot to
+    // <corpus>/incoming.db in base64 chunks; finalize verifies (sha+integrity+counts) and stages the
+    // swap, which happens at the NEXT boot (no live-handle corruption). 503 when HANDS_TOKEN unset.
+    if (path === "/admin/restore-corpus" && req.method === "POST") return handleRestoreCorpus(req, res);
+
     if (path === "/hands/stream" && req.method === "GET") return handsHub.handleStream(req, res, u);
     if (path === "/hands/result" && req.method === "POST") return handsHub.handleResult(req, res, await readJsonBody(req));
     if (path === "/hands/run" && req.method === "POST") return handsHub.handleRun(req, res, await readJsonBody(req));
