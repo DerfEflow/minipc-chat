@@ -52,6 +52,7 @@ function applyPrivacyFilter() {
     }
   }
   if (cloudBadge) updateCloudBadge();
+  if (typeof renderModelPanel === "function") renderModelPanel();   // reflect mode changes in the panel
 }
 
 const PRESETS = {
@@ -252,6 +253,7 @@ function showErr(t) { document.querySelector(".err")?.remove(); const e = docume
 // the static options in index.html survive as a fallback. Fred's lock: local raw names never surface.
 function fmtCtxShort(n) { if (!n) return ""; return n >= 1e6 ? (n % 1e6 ? (n / 1e6).toFixed(1) : n / 1e6) + "M" : Math.round(n / 1e3) + "K"; }
 function fmtPriceShort(m) { return (!m.inCost && !m.outCost) ? "Free" : `$${m.inCost}/${m.outCost}`; }
+let catalogGroups = [];   // live /api/models groups — the source for the custom model panel
 async function loadModels() {
   if (!modelSel) return;
   const saved = localStorage.getItem(LS_MODEL);
@@ -277,6 +279,7 @@ async function loadModels() {
       const avail = cat.available || {};
       availCache = avail;
       if (cat.privacy && Array.isArray(cat.privacy.trustedProviders)) privacyCfg.trustedProviders = cat.privacy.trustedProviders;
+      catalogGroups = cat.groups || [];
       // Drop every existing cloud optgroup (keep the local one) before rebuilding.
       Array.from(modelSel.querySelectorAll("optgroup")).forEach((g) => { if (g.id !== "model-local-group") g.remove(); });
       for (const grp of (cat.groups || [])) {
@@ -303,7 +306,71 @@ async function loadModels() {
   const opt = saved && Array.from(modelSel.options).find((o) => o.value === saved);
   modelSel.value = (saved === "auto" || !opt || opt.disabled) ? "local" : saved;
   updateCloudBadge();
+  updateModelTrigger();
+  renderModelPanel();
 }
+
+// ---------- custom Model dropdown (replaces the unreadable native <select> list) ----------
+// The native <select id="model"> stays the state holder; this renders a framed, column-aligned
+// panel from the live catalog and mirrors the same key/privacy disabling the picker already computes.
+const modelTrigger = $("model-trigger"), modelPanel = $("model-panel"), modelCurrent = $("model-current");
+const provLabel = (p) => ({ openrouter: "OpenRouter", openai: "OpenAI", deepseek: "DeepSeek", anthropic: "Anthropic", local: "Local" }[p] || p);
+const findCatalogModel = (id) => { for (const g of catalogGroups) { const m = (g.models || []).find((x) => x.id === id); if (m) return m; } return null; };
+
+function updateModelTrigger() {
+  if (!modelCurrent || !modelSel) return;
+  const v = modelSel.value; let name = "Local Qwen", price = "", local = true;
+  if (v && v !== "local") {
+    const m = findCatalogModel(v);
+    if (m) { name = m.name; price = (!m.inCost && !m.outCost) ? "Free" : fmtPriceShort(m); local = false; }
+    else { const o = Array.from(modelSel.options).find((x) => x.value === v); name = o ? o.textContent.replace(/\s*\(local\)$/, "").replace(/^[🔧💬]\s*/, "") : v; }
+  }
+  modelCurrent.classList.toggle("is-local", local);
+  modelCurrent.innerHTML = escapeHtml(name) + (price ? ` <span class="mc-price">${escapeHtml(price)}</span>` : "");
+}
+
+function modelRowHtml(o, cur, mode) {
+  const disabled = o.noKey || o.blocked, sel = o.id === cur;
+  const cls = ["model-row"]; if (sel) cls.push("is-selected"); if (disabled) cls.push("is-disabled"); if (o.blocked) cls.push("is-blocked");
+  const price = o.free ? `<span class="mr-price is-free">Free</span>` : (o.price ? `<span class="mr-price">${escapeHtml(o.price)}</span>` : "");
+  const note = o.blocked ? `<span class="mr-note">blocked · ${escapeHtml(mode)}</span>` : (o.noKey ? `<span class="mr-note">key needed</span>` : "");
+  return `<div class="${cls.join(" ")}" data-value="${escapeHtml(o.id)}" ${disabled ? 'aria-disabled="true"' : 'role="option"'}${sel ? ' aria-selected="true"' : ""}>
+    <span class="mr-name"><span class="mr-bench">${o.tool ? "🔧" : "💬"}</span><span class="mr-text">${escapeHtml(o.name)}</span></span>
+    <span class="mr-meta">${escapeHtml(o.meta || "")}</span>
+    <span class="mr-tag">${price}${note}</span></div>`;
+}
+
+function renderModelPanel() {
+  if (!modelPanel || !modelSel) return;
+  const mode = privacyModeSel ? privacyModeSel.value : "normal", cur = modelSel.value;
+  let html = `<div class="model-group is-local">Local · free · private</div>`;
+  html += modelRowHtml({ id: "local", name: "Local Qwen", free: true, meta: "on-box · free · private", tool: true }, cur, mode);
+  const lg = document.getElementById("model-local-group");
+  if (lg) for (const o of lg.querySelectorAll("option")) { if (o.value === "local") continue; html += modelRowHtml({ id: o.value, name: o.textContent.replace(/\s*\(local\)$/, ""), free: true, meta: "on-box · local", tool: true }, cur, mode); }
+  for (const g of catalogGroups) {
+    if (!g.models || !g.models.length) continue;
+    html += `<div class="model-group">${escapeHtml(g.category)}</div>`;
+    for (const m of g.models) {
+      const keyed = m.provider === "openrouter" ? availCache.openrouter : m.provider === "openai" ? availCache.openai : m.provider === "deepseek" ? availCache.deepseek : m.provider === "anthropic" ? availCache.anthropic : true;
+      html += modelRowHtml({
+        id: m.id, name: m.name, tool: m.toolCapable, free: (!m.inCost && !m.outCost), price: fmtPriceShort(m),
+        meta: [(m.params && m.params !== "undisclosed") ? m.params : null, fmtCtxShort(m.ctx), provLabel(m.provider)].filter(Boolean).join(" · "),
+        noKey: keyed === false, blocked: !providerAllowedClient(mode, m.provider),
+      }, cur, mode);
+    }
+  }
+  modelPanel.innerHTML = html;
+}
+
+function openModelPanel() { renderModelPanel(); modelPanel.hidden = false; if (modelTrigger) modelTrigger.setAttribute("aria-expanded", "true"); requestAnimationFrame(() => { const s = modelPanel.querySelector(".is-selected"); if (s) s.scrollIntoView({ block: "nearest" }); }); }
+function closeModelPanel() { if (modelPanel) modelPanel.hidden = true; if (modelTrigger) modelTrigger.setAttribute("aria-expanded", "false"); }
+if (modelTrigger) modelTrigger.addEventListener("click", (e) => { e.stopPropagation(); modelPanel.hidden ? openModelPanel() : closeModelPanel(); });
+if (modelPanel) modelPanel.addEventListener("click", (e) => {
+  const row = e.target.closest(".model-row"); if (!row || row.classList.contains("is-disabled")) return;
+  modelSel.value = row.dataset.value; modelSel.dispatchEvent(new Event("change")); closeModelPanel();
+});
+document.addEventListener("click", (e) => { if (modelPanel && !modelPanel.hidden && !e.target.closest("#model-picker")) closeModelPanel(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modelPanel && !modelPanel.hidden) closeModelPanel(); });
 
 // ---------- agent loop over SSE ----------
 function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send"; if (on && typeof hideCostChip === "function") hideCostChip(); }
@@ -1147,7 +1214,7 @@ if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setIt
 // Privacy mode persists, re-filters the picker to the allowed providers, and refreshes the estimate.
 if (privacyModeSel) privacyModeSel.addEventListener("change", () => { try { localStorage.setItem(LS_PMODE, privacyModeSel.value); } catch {} applyPrivacyFilter(); updateEstimate(); });
 // Model pick persists immediately (matches Mode) and flips the "via OpenRouter" spend indicator live.
-if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateCloudBadge(); updateEstimate(); });
+if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateModelTrigger(); updateCloudBadge(); updateEstimate(); });
 settingsBtn.addEventListener("click", openSettings);
 sclose.addEventListener("click", closeSettings);
 ssave.addEventListener("click", saveSettingsUI);

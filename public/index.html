@@ -11,7 +11,7 @@
 <link rel="manifest" href="/manifest.webmanifest" />
 <link rel="apple-touch-icon" href="/icon-180.png" />
 <link rel="icon" href="/icon-192.png" />
-<link rel="stylesheet" href="/dominion-ui.css?v=29" />
+<link rel="stylesheet" href="/dominion-ui.css?v=30" />
 </head>
 <body>
   <video id="bgvideo" autoplay muted loop playsinline preload="auto" poster="/icon-512.png">
@@ -118,31 +118,26 @@
       </span>
       <div class="brand-copy">
         <span class="title">Dominion AI</span>
+        <span class="brand-motto">Master · Strategize · Transcend</span>
         <span id="activity-status" class="brand-status" aria-live="polite">System ready</span>
       </div>
     </div>
 
     <div class="command-controls">
-      <label class="command-select model-select">
+      <div class="command-select model-select" id="model-picker">
         <svg class="glyph control-glyph"><use href="#i-model"></use></svg>
-        <span class="control-copy"><small>Model</small>
-          <select id="model" aria-label="Model">
-            <optgroup label="Local (free · private)" id="model-local-group">
-              <option value="local">Local Qwen (free)</option>
-            </optgroup>
-            <optgroup label="Cloud · via OpenRouter (paid)">
-              <option value="anthropic/claude-haiku-4.5">Claude Haiku 4.5</option>
-              <option value="openai/gpt-4o">GPT-4o</option>
-              <option value="google/gemini-2.5-flash">Gemini 2.5 Flash</option>
-              <option value="meta-llama/llama-4-maverick">Llama 4 Maverick</option>
-              <option value="meta-llama/llama-3.1-70b-instruct">Llama 3.1 70B</option>
-              <option value="z-ai/glm-5.2">GLM 5.2</option>
-              <option value="moonshotai/kimi-k2.6">Kimi K2.6</option>
-              <option value="qwen/qwen3-235b-a22b-2507">Qwen3 235B</option>
-            </optgroup>
-          </select>
-        </span>
-      </label>
+        <button type="button" class="control-copy model-trigger" id="model-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="Model">
+          <small>Model</small>
+          <span class="model-current" id="model-current">Local Qwen</span>
+        </button>
+        <!-- Hidden native select = the state holder; all model logic drives this, the panel mirrors it. -->
+        <select id="model" aria-label="Model" class="model-native" tabindex="-1" aria-hidden="true">
+          <optgroup label="Local (free · private)" id="model-local-group">
+            <option value="local">Local Qwen (free)</option>
+          </optgroup>
+        </select>
+        <div class="model-panel" id="model-panel" role="listbox" aria-label="Choose a model" hidden></div>
+      </div>
 
       <label class="command-select mode-select">
         <svg class="glyph control-glyph"><use href="#i-mode"></use></svg>
@@ -187,22 +182,22 @@
 
     <nav class="command-actions" aria-label="Dominion panels">
       <button id="artifacts" class="icon command-icon" title="Artifacts" aria-label="Artifacts">
-        <svg class="glyph"><use href="#i-artifact"></use></svg>
+        <svg class="glyph"><use href="#i-artifact"></use></svg><span class="command-label">Artifacts</span>
       </button>
       <button id="improve" class="icon command-icon" title="Mentor and improvement" aria-label="Mentor and improvement">
-        <svg class="glyph"><use href="#i-mentor"></use></svg>
+        <svg class="glyph"><use href="#i-mentor"></use></svg><span class="command-label">Mentor</span>
       </button>
       <button id="persona" class="icon command-icon" title="Persona Forge" aria-label="Persona Forge">
-        <svg class="glyph"><use href="#i-persona"></use></svg>
+        <svg class="glyph"><use href="#i-persona"></use></svg><span class="command-label">Persona</span>
       </button>
       <button id="memory" class="icon command-icon" title="Memory" aria-label="Memory">
-        <svg class="glyph"><use href="#i-memory"></use></svg>
+        <svg class="glyph"><use href="#i-memory"></use></svg><span class="command-label">Memory</span>
       </button>
       <button id="tools" class="icon command-icon" title="Tool activity" aria-label="Tool activity">
-        <svg class="glyph"><use href="#i-tools"></use></svg>
+        <svg class="glyph"><use href="#i-tools"></use></svg><span class="command-label">Tools</span>
       </button>
       <button id="settings" class="icon command-icon" title="Settings" aria-label="Settings">
-        <svg class="glyph"><use href="#i-settings"></use></svg>
+        <svg class="glyph"><use href="#i-settings"></use></svg><span class="command-label">Settings</span>
       </button>
     </nav>
   </header>
@@ -358,7 +353,7 @@
     </div>
   </div>
 
-  <script src="/app.js?v=29"></script>
-  <script src="/dominion-ui.js?v=29"></script>
+  <script src="/app.js?v=30"></script>
+  <script src="/dominion-ui.js?v=30"></script>
 </body>
 </html>
