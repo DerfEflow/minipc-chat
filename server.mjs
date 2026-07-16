@@ -31,9 +31,17 @@ import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
 import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, catalogPayload } from "./models.catalog.mjs";
+import { createHandsHub } from "./hands/hub.mjs";
+import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
+import { createCloudBackup } from "./cloudbackup.mjs";
+import { createInboxIngest } from "./inboxingest.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
+// Cloud migration (docs/CLOUD-MIGRATION.md §8.1): Railway injects PORT and needs 0.0.0.0. On the
+// mini-PC (no HOST set) we still bind 0.0.0.0, which includes 127.0.0.1 — `tailscale serve` proxies
+// to localhost either way, so single-box behavior is unchanged. Override with HOST if ever needed.
+const HOST = process.env.HOST || "0.0.0.0";
 const OLLAMA = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
 const ou = new URL(OLLAMA);
 const PUBLIC = join(HERE, "public");
@@ -55,6 +63,12 @@ function parseEnvFile(p) {
 const localEnv = parseEnvFile(join(HERE, ".env"));
 const bridgeEnv = parseEnvFile("C:\\command-deck\\bridge\\.env");
 const cfgGet = (k, d = "") => process.env[k] ?? localEnv[k] ?? bridgeEnv[k] ?? d;
+// Cloud migration (docs/CLOUD-MIGRATION.md §7): all server-side state lives under one base dir so a
+// fresh cloud deploy needs ONE env var (or none). On Windows it's the mini-PC's C:\minipc-chat; on
+// Linux/Railway it defaults to the persistent Volume mount at /data. Each specific *_DIR env still
+// wins when set (back-compat), so nothing about the box changes.
+const DATA_DIR = cfgGet("DATA_DIR", process.platform === "win32" ? "C:\\minipc-chat" : "/data");
+const dataPath = (sub) => (process.platform === "win32" ? DATA_DIR + "\\" + sub : DATA_DIR + "/" + sub);
 // The bridge poller's localhost poke listener (see command-deck bridge/poller.mjs) — must match
 // its BRIDGE_POKE_PORT. Used by /bridge/poke (deck app → tailnet → here) and by the forge tools.
 const BRIDGE_POKE_PORT = Number(cfgGet("BRIDGE_POKE_PORT", "8188")) || 8188;
@@ -62,7 +76,7 @@ const CTX = {
   baseUrl: String(cfgGet("COMMAND_DECK_URL", "https://command-deck-sigma.vercel.app")).replace(/\/$/, ""),
   syncKey: cfgGet("SYNC_SECRET", ""),
   runPassword: cfgGet("RUN_PASSWORD", ""),
-  sandboxDir: cfgGet("SANDBOX_DIR", "C:\\minipc-chat\\sandbox"),
+  sandboxDir: cfgGet("SANDBOX_DIR", dataPath("sandbox")),
   bridgePokePort: Number(cfgGet("BRIDGE_POKE_PORT", "8188")) || 8188,
   serpKey: cfgGet("SERP_API_KEY", ""),   // live web search (SerpApi) — web_search tool
 };
@@ -74,9 +88,10 @@ const EMBED_MODEL = cfgGet("EMBED_MODEL", "nomic-embed-text");
 function embedText(text) {
   return new Promise((resolve) => {
     const body = JSON.stringify({ model: EMBED_MODEL, input: String(text || "").slice(0, 2000) });
-    const r = http.request(
-      { protocol: ou.protocol, hostname: ou.hostname, port: ou.port || 80, path: "/api/embed", method: "POST",
-        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) }, timeout: 20000 },
+    // Embeddings run on the always-on light tier (endpointForModel → ouLight for the embed model).
+    const { mod, opts } = ollamaReq(endpointForModel(EMBED_MODEL), "/api/embed", "POST", { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+    const r = mod.request(
+      { ...opts, timeout: 20000 },
       (resp) => { let buf = ""; resp.on("data", (d) => (buf += d)); resp.on("end", () => { try { const j = JSON.parse(buf); resolve((j.embeddings && j.embeddings[0]) || null); } catch { resolve(null); } }); }
     );
     r.on("error", () => resolve(null));
@@ -88,25 +103,25 @@ function embedText(text) {
 // Phase 2: governed memory store with the three-tier gating matrix (B1). MEMORY_GATING=lax|spec:
 // lax (default) auto-approves the approval tier but records gatedAs; spec lands it pending.
 // Legacy MEMORY_AUTO_APPROVE=0 still flips to spec mode. The never-save list blocks in BOTH modes.
-const MEMORY_DIR = cfgGet("MEMORY_DIR", "C:\\minipc-chat\\memory");
+const MEMORY_DIR = cfgGet("MEMORY_DIR", dataPath("memory"));
 const MEMORY_GATING = String(cfgGet("MEMORY_GATING", String(cfgGet("MEMORY_AUTO_APPROVE", "1")) === "0" ? "spec" : "lax")).toLowerCase() === "spec" ? "spec" : "lax";
 const memory = createMemoryStore({ dir: MEMORY_DIR, gating: MEMORY_GATING, embed: embedText });
 CTX.memory = memory;
 
 // Server-side rolling chat transcripts (retrieval index for search_chats + episodic summaries).
-const chatlog = createChatLog({ dir: cfgGet("CHATLOG_DIR", "C:\\minipc-chat\\chatlog") });
+const chatlog = createChatLog({ dir: cfgGet("CHATLOG_DIR", dataPath("chatlog")) });
 CTX.chatlog = chatlog;
 
 // Phase 4: artifact studio. Generated documents become versioned, editable artifacts.
-const ARTIFACT_DIR = cfgGet("ARTIFACT_DIR", "C:\\minipc-chat\\artifacts");
+const ARTIFACT_DIR = cfgGet("ARTIFACT_DIR", dataPath("artifacts"));
 const artifacts = createArtifactStore({ dir: ARTIFACT_DIR });
 CTX.artifacts = artifacts;
 
 // Persona Forge: Fred's own corpus (jokes/maxims/essays/stories/poems/thoughts/plans/favorites/chats/
 // web) + a distilled Fred Profile, for the "As Fred" mode. Retrieval-conditioned voice, not fine-tuning.
 // SQLite-backed for a massive corpus; the E: flash drive is the staging inbox + backup target.
-const PERSONA_DIR = cfgGet("PERSONA_DIR", "C:\\minipc-chat\\corpus");
-const PERSONA_STAGING = cfgGet("PERSONA_STAGING", "E:\\DominionCorpus");
+const PERSONA_DIR = cfgGet("PERSONA_DIR", dataPath("corpus"));
+const PERSONA_STAGING = cfgGet("PERSONA_STAGING", process.platform === "win32" ? "E:\\DominionCorpus" : dataPath("staging"));
 const persona = createPersonaStore({ dir: PERSONA_DIR, staging: PERSONA_STAGING, embed: embedText });
 CTX.persona = persona;
 
@@ -161,17 +176,22 @@ const TYPES = {
 
 // ---- /ollama/* reverse proxy (streams straight through) ----
 function proxy(req, res, upstreamPath) {
-  const headers = { ...req.headers, host: ou.host };
+  // /ollama/* is the client's direct passthrough — the model picker's /api/tags + /v1/models list.
+  // Route it to the always-on light tier (the heavy GPU is on-demand and may be cold). §5.
+  const target = ouLight;
+  const isHttps = target.protocol === "https:";
+  const headers = { ...req.headers, host: target.host };
   delete headers["accept-encoding"]; // keep SSE/stream un-gzipped so it flows token-by-token
   // Ollama 403s any request carrying a browser Origin/Referer (its cross-origin guard).
   // The phone is a real browser and sends them; strip so Ollama sees a clean local request.
   delete headers.origin;
   delete headers.referer;
-  const opts = { protocol: ou.protocol, hostname: ou.hostname, port: ou.port || 80, path: upstreamPath, method: req.method, headers };
-  const up = http.request(opts, (ur) => { res.writeHead(ur.statusCode || 502, ur.headers); ur.pipe(res); });
+  if (OLLAMA_KEY) headers["authorization"] = "Bearer " + OLLAMA_KEY;   // gateway bearer (cloud tier)
+  const opts = { protocol: target.protocol, hostname: target.hostname, port: target.port || (isHttps ? 443 : 80), path: upstreamPath, method: req.method, headers };
+  const up = (isHttps ? https : http).request(opts, (ur) => { res.writeHead(ur.statusCode || 502, ur.headers); ur.pipe(res); });
   up.on("error", (e) => {
     if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: "Can't reach Ollama on the mini-PC: " + e.message }));
+    res.end(JSON.stringify({ error: "Can't reach the Ollama tier: " + e.message }));
   });
   req.pipe(up);
 }
@@ -200,6 +220,130 @@ const stripThink = (t) => String(t || "").replace(/<think>[\s\S]*?<\/think>/g, "
 // with the capability fields the router cares about. qwen3:8b = fast light worker; qwen3:30b-a3b = heavy reasoning.
 const LIGHT_MODEL = cfgGet("LIGHT_MODEL", "qwen3:8b");
 const MAIN_MODEL = cfgGet("MAIN_MODEL", "qwen3:30b-a3b");
+
+// ==== Cloud-migration seam (docs/CLOUD-MIGRATION.md §5/§8.2): per-model Ollama endpoint ====
+// One box today: OLLAMA_URL serves both tiers, so light+heavy share one endpoint and nothing
+// changes. Splitting across cloud GPU hosts: set OLLAMA_LIGHT_URL (cheap always-on tier: the
+// router/memory/internal traffic + embeddings) and OLLAMA_HEAVY_URL (on-demand reasoning tier).
+// OLLAMA_KEY = bearer token for the Caddy gateway fronting Ollama (Ollama has no auth of its own).
+// Any unset var falls back to OLLAMA_URL, so single-box mode is byte-for-byte unchanged.
+const safeUrl = (s) => { try { return new URL(s); } catch { return null; } };
+const OLLAMA_LIGHT_URL = cfgGet("OLLAMA_LIGHT_URL", OLLAMA);
+const OLLAMA_HEAVY_URL = cfgGet("OLLAMA_HEAVY_URL", OLLAMA_LIGHT_URL);
+const OLLAMA_KEY = cfgGet("OLLAMA_KEY", "");
+const ouLight = safeUrl(OLLAMA_LIGHT_URL) || ou;
+const ouHeavy = safeUrl(OLLAMA_HEAVY_URL) || ouLight;
+const SPLIT_TIERS = OLLAMA_HEAVY_URL !== OLLAMA_LIGHT_URL;   // are light/heavy on different hosts?
+// A model belongs on the heavy tier when it's the configured MAIN_MODEL or carries a heavy tag
+// (32B/70B/405B or a DeepSeek-R1 reasoning distill). Everything else — the light worker, the
+// embedding model, classifiers — rides the always-on light tier.
+const HEAVY_MODEL_RE = /(?::(?:3\db|4\db|7\db|\d{3}b))|deepseek-?r1|(?:^|[^a-z0-9])r1(?:[^a-z0-9]|$)/i;
+const isHeavyModel = (m) => { const s = String(m || ""); return s === MAIN_MODEL || HEAVY_MODEL_RE.test(s); };
+const endpointForModel = (m) => (isHeavyModel(m) ? ouHeavy : ouLight);
+// Build {mod, opts} for an Ollama call: pick http vs https by protocol, the right default port,
+// and inject the bearer token when OLLAMA_KEY is set. Used by ollamaChat(), embedText(), proxy().
+function ollamaReq(urlObj, path, method, headers = {}) {
+  const isHttps = urlObj.protocol === "https:";
+  const h = { ...headers };
+  if (OLLAMA_KEY) h["authorization"] = "Bearer " + OLLAMA_KEY;
+  return { mod: isHttps ? https : http,
+    opts: { protocol: urlObj.protocol, hostname: urlObj.hostname, port: urlObj.port || (isHttps ? 443 : 80), path, method, headers: h } };
+}
+
+// ==== On-demand heavy GPU lifecycle (docs/CLOUD-MIGRATION.md §5, §8.6, §13) ====
+// Never pay for an always-on 80GB card: the heavy tier is spun up per heavy turn, kept warm briefly,
+// then stopped. This hook is PROVIDER-AGNOSTIC and env-driven so the exact Thunder Compute start/stop
+// API (open item §13) plugs in with zero more code:
+//   GPU_START_URL   POST endpoint that boots/wakes the heavy box     (optional)
+//   GPU_STOP_URL    POST endpoint that stops it                       (optional)
+//   GPU_STATUS_URL  GET endpoint returning readiness JSON             (optional)
+//   GPU_API_KEY     bearer token for the above
+//   GPU_IDLE_MS     idle window before auto-stop        (default 300000 = 5 min)
+//   GPU_WARMUP_MS   assumed cold-start when status can't be polled    (default 90000)
+//   GPU_HOURLY_USD  $/hr for the heavy card (cost estimate)           (default 1.90)
+//   GPU_THROUGHPUT_TOKS  heavy tok/s for the time estimate            (default 40)
+// With none set (Phase 1, or a manually always-on box), it no-ops and tracks warmth heuristically
+// from recent heavy usage, so /estimate can still show a sensible cold-vs-warm cost.
+const GPU_START_URL = cfgGet("GPU_START_URL", "");
+const GPU_STOP_URL = cfgGet("GPU_STOP_URL", "");
+const GPU_STATUS_URL = cfgGet("GPU_STATUS_URL", "");
+const GPU_API_KEY = cfgGet("GPU_API_KEY", "");
+const GPU_IDLE_MS = Number(cfgGet("GPU_IDLE_MS", "300000")) || 300000;
+const GPU_WARMUP_MS = Number(cfgGet("GPU_WARMUP_MS", "90000")) || 90000;
+const GPU_HOURLY_USD = Number(cfgGet("GPU_HOURLY_USD", "1.90")) || 1.90;
+const GPU_THROUGHPUT = Number(cfgGet("GPU_THROUGHPUT_TOKS", "40")) || 40;   // R1-32B ≈ 30-50 tok/s
+const GPU_MANAGED = !!GPU_START_URL;   // are we actually driving start/stop, or is the box external?
+// Thunder Compute (and any flat-hourly box) has NO start/stop — it bills per minute while RUNNING,
+// so a heavy turn has ~zero MARGINAL cost (you already pay the hourly). Set GPU_ALWAYS_ON=1 for that
+// deployment so the cost chip reads "included" instead of a misleading per-turn GPU-seconds price.
+const GPU_ALWAYS_ON = String(cfgGet("GPU_ALWAYS_ON", "")) === "1";
+const gpuState = { warm: false, lastUseAt: 0, starting: null, stopTimer: null };
+
+function gpuHttp(url, method) {
+  return new Promise((resolve) => {
+    let u; try { u = new URL(url); } catch { return resolve({ ok: false }); }
+    const isHttps = u.protocol === "https:";
+    const headers = {};
+    if (GPU_API_KEY) headers["authorization"] = "Bearer " + GPU_API_KEY;
+    const r = (isHttps ? https : http).request(
+      { protocol: u.protocol, hostname: u.hostname, port: u.port || (isHttps ? 443 : 80), path: u.pathname + u.search, method, headers, timeout: 15000 },
+      (resp) => { let b = ""; resp.on("data", (d) => (b += d)); resp.on("end", () => { let j = null; try { j = JSON.parse(b); } catch {} resolve({ ok: (resp.statusCode || 500) < 400, status: resp.statusCode, json: j }); }); }
+    );
+    r.on("error", () => resolve({ ok: false }));
+    r.on("timeout", () => { r.destroy(); resolve({ ok: false }); });
+    r.end();
+  });
+}
+
+// Is the heavy box ready? Prefer a real status poll; else use the warmth heuristic (recent heavy use).
+async function gpuIsWarm() {
+  if (GPU_STATUS_URL) {
+    const s = await gpuHttp(GPU_STATUS_URL, "GET");
+    if (s.ok && s.json) { const j = s.json; return !!(j.ready ?? j.warm ?? j.running ?? (j.state === "running")); }
+  }
+  return gpuState.warm && (Date.now() - gpuState.lastUseAt) < GPU_IDLE_MS;
+}
+
+// Mark heavy activity + (re)arm the idle auto-stop.
+function gpuTouch() {
+  gpuState.lastUseAt = Date.now();
+  gpuState.warm = true;
+  if (gpuState.stopTimer) clearTimeout(gpuState.stopTimer);
+  if (GPU_STOP_URL) {
+    gpuState.stopTimer = setTimeout(async () => {
+      if (Date.now() - gpuState.lastUseAt >= GPU_IDLE_MS - 500) {
+        await gpuHttp(GPU_STOP_URL, "POST");
+        gpuState.warm = false;
+        console.log("[dominion-ai] heavy GPU: idle -> stop requested");
+      }
+    }, GPU_IDLE_MS);
+    if (gpuState.stopTimer.unref) gpuState.stopTimer.unref();
+  }
+}
+
+// Ensure the heavy box is up before a heavy generation. Idempotent + coalesces concurrent callers.
+// Returns { warm, waitedMs }. No-op (instant warm:true) when no start URL is configured — we never
+// block a turn on infra we can't control.
+async function ensureHeavyWarm() {
+  gpuTouch();
+  if (!GPU_MANAGED) { gpuState.warm = true; return { warm: true, waitedMs: 0, managed: false }; }
+  if (await gpuIsWarm()) { gpuState.warm = true; return { warm: true, waitedMs: 0 }; }
+  if (!gpuState.starting) {
+    const t0 = Date.now();
+    gpuState.starting = (async () => {
+      await gpuHttp(GPU_START_URL, "POST");
+      const deadline = Date.now() + Math.max(GPU_WARMUP_MS * 3, 120000);
+      if (GPU_STATUS_URL) { while (Date.now() < deadline) { if (await gpuIsWarm()) break; await sleep(3000); } }
+      else { await sleep(GPU_WARMUP_MS); }
+      gpuState.warm = true;
+      return Date.now() - t0;
+    })();
+    gpuState.starting.catch(() => {}).finally(() => { gpuState.starting = null; });
+  }
+  const pending = gpuState.starting || Promise.resolve(0);
+  const waitedMs = await pending;
+  return { warm: true, waitedMs };
+}
 // Full spec ModelProvider fields. maxContextTokens is the HONEST Ollama-served window (40960).
 //
 // D4 — YaRN, the honest closure (spec 19/428/1841, audit item 11): the spec claims "YaRN enabled
@@ -242,6 +386,9 @@ const OPENROUTER_REFERER = cfgGet("OPENROUTER_REFERER", "https://nucbox-k8-plus.
 // no question about where the calls route). Wallet names take precedence; generic names are fallbacks.
 const OPENAI_KEY = cfgGet("OPEN_AI_DOMINION_UI_APIKEY", cfgGet("OPENAI_API_KEY", ""));
 const DEEPSEEK_KEY = cfgGet("DEEPSEEK_AI_DOMINION_UI_APIKEY", cfgGet("DEEPSEEK_API_KEY", ""));
+// Anthropic direct (added 2026-07-14 for Trusted mode). Reached via Anthropic's OpenAI-compatible
+// endpoint so the existing streamer serves it. Bearer auth with the Anthropic key.
+const ANTHROPIC_KEY = cfgGet("ANTHROPIC_API_KEY", cfgGet("CLAUDE_ANTHROPIC_KEY", ""));
 // One endpoint config per provider. All three speak the OpenAI-compatible chat-completions format,
 // so a single streamer serves them — only base URL, key, and a couple of headers differ.
 const PROVIDER_CFG = {
@@ -249,6 +396,7 @@ const PROVIDER_CFG = {
     extraHeaders: { "http-referer": OPENROUTER_REFERER, "x-title": "Dominion AI" }, wantUsage: true },
   openai:     { url: cfgGet("OPENAI_URL", "https://api.openai.com/v1/chat/completions"), key: () => OPENAI_KEY, label: "OpenAI (direct)", extraHeaders: {}, wantUsage: false },
   deepseek:   { url: cfgGet("DEEPSEEK_URL", "https://api.deepseek.com/chat/completions"), key: () => DEEPSEEK_KEY, label: "DeepSeek (direct)", extraHeaders: {}, wantUsage: false },
+  anthropic:  { url: cfgGet("ANTHROPIC_URL", "https://api.anthropic.com/v1/chat/completions"), key: () => ANTHROPIC_KEY, label: "Anthropic (direct)", extraHeaders: {}, wantUsage: false },
 };
 // Allow-list = exactly the catalog ids (the single source of truth). A forced model is treated as
 // "cloud" ONLY if it's in the catalog — an unknown id can never silently egress.
@@ -429,7 +577,9 @@ const RANK_MODE = ["fast", "normal", "draft", "deep_think", "long_context"];
 const MODE_RANK = { fast: 0, normal: 1, draft: 2, deep_think: 3, long_context: 4 };
 
 // Basic model-usage logging (Phase 1 deliverable) — one JSONL line per run, including interrupted ones.
-const LOG_DIR = cfgGet("LOG_DIR", join(HERE, "logs"));
+// On Windows keep logs beside the code (unchanged); on Linux/Railway put them on the Volume so
+// usage.jsonl / toolruns.jsonl survive redeploys (they feed the cost self-calibration + audit).
+const LOG_DIR = cfgGet("LOG_DIR", process.platform === "win32" ? join(HERE, "logs") : dataPath("logs"));
 let logDirReady = false;
 async function logUsage(entry) {
   try {
@@ -479,7 +629,35 @@ const CONFIRM_TOOLS_ENV = String(cfgGet("CONFIRM_TOOLS", "0")) === "1";
 // Phase 5: mentor bridge + improvement flywheel. Mentor defaults LOCAL (no egress); external is
 // opt-in via MENTOR_PROVIDER=external + MENTOR_API_KEY + MENTOR_MODEL. Auto-review default OFF (LAX).
 // (Placed after MAIN_MODEL so the const is initialized before createMentor reads it.)
-const FLYWHEEL_DIR = cfgGet("FLYWHEEL_DIR", "C:\\minipc-chat\\flywheel");
+// ---- the hands hub (Phase 1, MCP hands): nodes on Fred's machines dial OUT and hold an SSE
+// stream; we dispatch tool jobs down it. No HANDS_TOKEN -> the entire surface answers 503.
+const handsHub = createHandsHub({ token: cfgGet("HANDS_TOKEN", ""), log: (m) => console.log("[dominion-ai] " + m) });
+
+// ---- cloud corpus backup (Phase 3, ledger L-003): periodic VACUUM INTO snapshots on the volume +
+// an off-box push through the hands node so the corpus is never down to one copy after cutover.
+const cloudBackup = createCloudBackup({
+  persona,
+  dispatch: (node, tool, args) => handsHub.dispatch(node, tool, args, { timeoutMs: 120000 }),
+  cfg: {
+    localDir: cfgGet("CLOUD_BACKUP_LOCAL_DIR", dataPath("corpus-backups")),
+    node: cfgGet("CLOUD_BACKUP_NODE", ""),
+    remoteDir: cfgGet("CLOUD_BACKUP_DIR", ""),
+    chunkBytes: Number(cfgGet("CLOUD_BACKUP_CHUNK_BYTES", "4000000")) || 4000000,
+  },
+  log: (m) => console.log("[dominion-ai] " + m),
+});
+
+// ---- remote inbox ingest (Phase 3, ledger L-009): reach Fred's on-box E:\DominionCorpus\inbox
+// through the hands node so his file-dump workflow keeps working after the brain moves to the cloud.
+const inboxIngest = createInboxIngest({
+  persona,
+  dispatch: (node, tool, args) => handsHub.dispatch(node, tool, args, { timeoutMs: 60000 }),
+  cfg: { node: cfgGet("CLOUD_INGEST_NODE", ""), dir: cfgGet("CLOUD_INGEST_DIR", "E:\\DominionCorpus\\inbox") },
+  htmlToText,
+  log: (m) => console.log("[dominion-ai] " + m),
+});
+
+const FLYWHEEL_DIR = cfgGet("FLYWHEEL_DIR", dataPath("flywheel"));
 const flywheel = createFlywheel({ dir: FLYWHEEL_DIR });
 const mentor = createMentor({
   localChat: (m, msgs, o) => ollamaChat(m, msgs, o),
@@ -558,9 +736,11 @@ async function ollamaChat(model, messages, opts = {}) {
     if (typeof opts.num_predict === "number") options.num_predict = opts.num_predict;
     if (Object.keys(options).length) payload.options = options;
     const body = JSON.stringify(payload);
-    const r = http.request(
-      { protocol: ou.protocol, hostname: ou.hostname, port: ou.port || 80, path: "/api/chat", method: "POST",
-        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) }, timeout: 180000 },
+    // Per-model endpoint: MAIN_MODEL / heavy tags → on-demand heavy tier; else always-on light tier.
+    // http vs https + bearer are handled by ollamaReq. Single-box mode: both resolve to OLLAMA_URL.
+    const { mod, opts } = ollamaReq(endpointForModel(model), "/api/chat", "POST", { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+    const r = mod.request(
+      { ...opts, timeout: 180000 },
       (resp) => { let buf = ""; resp.on("data", (d) => (buf += d)); resp.on("end", () => { try { resolve(JSON.parse(buf)); } catch { resolve(null); } }); }
     );
     if (opts.signal) opts.signal.addEventListener("abort", () => { try { r.destroy(); } catch {} resolve(null); }, { once: true });
@@ -683,6 +863,74 @@ function readJsonBody(req) {
   return new Promise((resolve) => {
     let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => { try { resolve(JSON.parse(b || "{}")); } catch { resolve(null); } });
   });
+}
+
+// ==== Pre-send cost estimate (docs/CLOUD-MIGRATION.md §6) ====
+// Runs ONLY the deterministic bits — heuristic route + estTokens + catalog price / GPU-seconds — with
+// NO model call, so the composer can show a live cost chip and turn Send into a confirm for heavy
+// turns. usage.jsonl carries ground-truth per-turn cost afterward, which can self-calibrate this.
+const round4 = (n) => Math.round(n * 10000) / 10000;
+const fmtUsd = (n) => (n <= 0 ? "$0.00" : n < 0.01 ? "$" + n.toFixed(3) : "$" + n.toFixed(2));
+const fmtCostRange = (lo, hi) => (Math.abs(hi - lo) < 0.005 ? "≈ " + fmtUsd((lo + hi) / 2) : "≈ " + fmtUsd(lo) + "–" + fmtUsd(hi));
+// Output-length bands per mode (rough — the only fuzzy variable; §6 keys them off the router mode).
+const OUT_BAND = { fast: [80, 220], normal: [300, 800], draft: [1200, 3000], deep_think: [1200, 3000], long_context: [1500, 3500] };
+function estimatePreflight(input = {}) {
+  const history = Array.isArray(input.messages) ? input.messages : [];
+  const forced = (typeof input.model === "string" && input.model && input.model !== "auto" && input.model !== "local") ? input.model : "";
+  const reqMode = typeof input.mode === "string" ? input.mode : "auto";
+  const lastUser = [...history].reverse().find((m) => m && m.role === "user");
+  const lastUserText = lastUser ? String(lastUser.content || "") : "";
+  const totalInputChars = history.reduce((n, m) => n + (m && typeof m.content === "string" ? m.content.length : 0), 0);
+  // Deterministic route ONLY (no light-model classifier call): explicit mode wins, else the heuristic.
+  let mode;
+  if (reqMode && reqMode !== "auto" && MODES[reqMode]) mode = reqMode;
+  else mode = RANK_MODE[heuristicRoute(lastUserText, totalInputChars).rank] || "normal";
+  const band = OUT_BAND[mode] || OUT_BAND.normal;
+  const outRange = band.slice();
+  // System prompt + retrieved memory/artifacts/chats aren't in `history`; add a flat overhead so the
+  // input-token figure isn't wildly optimistic (calibratable against usage.jsonl later).
+  const tokensIn = estTokens(totalInputChars) + 900;
+
+  const cloud = isCloudModel(forced) ? forced : "";
+  // Phase 2: if the picked cloud model is disallowed by the current privacy mode, the composer chip
+  // says so up front (Send is refused server-side too). Mirrors the handleChat gate, display-side.
+  if (cloud) {
+    const gate = modeAllows(input.privacyMode, cloud);
+    if (!gate.allowed) {
+      return { backend: "blocked", blocked: "privacy_mode", mode: normalizeMode(input.privacyMode),
+        model: (modelById(cloud) || {}).name || cloud, estCost: "blocked", estLatency: "—",
+        confirm: false, message: gate.reason };
+    }
+  }
+  if (cloud) {
+    const rec = modelById(cloud) || {};
+    const inCost = Number(rec.inCost) || 0, outCost = Number(rec.outCost) || 0;
+    const lo = tokensIn / 1e6 * inCost + band[0] / 1e6 * outCost;
+    const hi = tokensIn / 1e6 * inCost + band[1] / 1e6 * outCost;
+    const free = inCost === 0 && outCost === 0;
+    return { backend: "cloud", provider: rec.provider || providerOf(cloud) || "openrouter", model: rec.name || cloud,
+      tier: mode, mode, tokensIn, outRange, warm: true, free,
+      estCost: free ? "Free" : fmtCostRange(lo, hi), estCostUsd: [round4(lo), round4(hi)], estLatency: "a few seconds",
+      confirm: false };
+  }
+  // Local light tier = self-hosted always-on → effectively free; no confirm.
+  const heavy = MODES[mode] && MODES[mode].tier === "main";
+  if (!heavy || GPU_ALWAYS_ON) {
+    // Light tier, OR a flat-hourly always-on box where the marginal per-turn cost is ~zero.
+    return { backend: heavy ? "gpu-heavy" : "gpu-light", tier: heavy ? "heavy" : "light", mode, tokensIn, outRange,
+      warm: true, free: true, estCost: "included (always-on GPU)", estCostUsd: [0, 0], estLatency: "a few seconds", confirm: false };
+  }
+  // Heavy tier = on-demand GPU → a TIME cost, not a token price: seconds ≈ out/throughput; $ ≈ sec × ($/hr÷3600).
+  const warm = gpuState.warm && (Date.now() - gpuState.lastUseAt) < GPU_IDLE_MS;
+  const perSec = GPU_HOURLY_USD / 3600;
+  const coldSec = warm ? 0 : GPU_WARMUP_MS / 1000;
+  const genSecHi = band[1] / GPU_THROUGHPUT;
+  const lo = (band[0] / GPU_THROUGHPUT + coldSec) * perSec;
+  const hi = (genSecHi + coldSec + GPU_IDLE_MS / 1000) * perSec;   // worst case: hold the box the full idle window
+  return { backend: "gpu-heavy", tier: "heavy", mode, tokensIn, outRange, warm, free: false, managed: GPU_MANAGED,
+    estCost: fmtCostRange(lo, hi) + (warm ? "" : " incl. cold start"), estCostUsd: [round4(lo), round4(hi)],
+    estLatency: warm ? `~${Math.round(genSecHi)}s` : `~${Math.round(coldSec + genSecHi)}s (spinning up GPU)`,
+    confirm: !warm && GPU_MANAGED };   // only gate Send when a cold on-demand box would actually spin up
 }
 
 // Raw (binary) body reader for audio uploads. Hard cap keeps a runaway upload from eating RAM.
@@ -1300,6 +1548,10 @@ async function handlePersona(req, res, u) {
     }
     if (p === "/persona/scan") { return json(200, startScan()); }
     if (p === "/persona/backup") { return json(200, persona.backupTo(body.dir)); }
+    // Phase 3 (L-003): run a full cloud backup now (local snapshot + off-box push via the hands node).
+    if (p === "/persona/backup-now") { return json(200, await cloudBackup.runOnce()); }
+    // Phase 3 (L-009): pull Fred's on-box inbox through the hands node and ingest it.
+    if (p === "/persona/ingest-remote-inbox") { return json(200, await inboxIngest.ingestRemoteInbox({ kind: body.kind || "other" })); }
     if (p === "/persona/scrape") {
       const r = await fetchUrl(String(body.url || ""));
       if (r.error) return json(400, { error: "Couldn't fetch that URL: " + r.error });
@@ -1430,6 +1682,18 @@ async function handleChat(req, res) {
   // we keep all upstream context assembly (persona, memory, retrieval) but skip the local router's
   // model pick + local tools, and stream the answer from OpenRouter instead of Ollama.
   const cloudModel = isOpenRouterModel(forced) ? forced : "";
+  // Phase 2 privacy gate: Fred's mode is a hard allow-list. If he picked a cloud model the current
+  // mode disallows, REFUSE this turn with a clear message — never silently substitute a local model.
+  // Local picks and auto-routing (which only ever picks local tiers) pass through untouched.
+  const privacyMode = normalizeMode(input.privacyMode);
+  if (cloudModel) {
+    const gate = modeAllows(privacyMode, cloudModel);
+    if (!gate.allowed) {
+      sse({ type: "error", code: "privacy_mode_block", mode: privacyMode, model: cloudModel, message: gate.reason });
+      sse({ type: "stopped", reason: "privacy_mode_block" });
+      return endStream();
+    }
+  }
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
   job.chatId = chatId;
@@ -1745,6 +2009,15 @@ async function handleChat(req, res) {
       return endStream();
     }
 
+    // Cloud migration §5/§8.6: when the heavy tier is a separate on-demand GPU, make sure it's warm
+    // before the first token. No-op in single-box mode and when GPU_START_URL is unset (instant).
+    if (SPLIT_TIERS && isHeavyModel(model) && !aborted) {
+      working("spinning up the reasoning engine");
+      const w = await ensureHeavyWarm();
+      workStop();
+      if (w.waitedMs > 1500) console.log(`[dominion-ai] heavy GPU warmed in ${Math.round(w.waitedMs / 1000)}s`);
+    }
+
     let last = null;
     for (let round = 0; round < MAX_ROUNDS && !aborted; round++) {
       roundsUsed = round + 1;
@@ -1963,9 +2236,20 @@ const server = http.createServer(async (req, res) => {
     // can dim models that can't be called yet. Keys are NEVER included — only booleans.
     if (path === "/api/models" && req.method === "GET") {
       const payload = catalogPayload();
-      payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY };
+      payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY };
+      // Phase 2: tell the UI the privacy modes + which providers each mode permits, so the picker can
+      // filter and the switch can render. The server ALSO enforces (privacy.mjs) — this is display only.
+      payload.privacy = { modes: PRIVACY_MODES, default: DEFAULT_PRIVACY_MODE, trustedProviders: [...TRUSTED_PROVIDERS] };
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify(payload));
+    }
+
+    // Pre-send cost estimate (§6): deterministic preflight, no model call. The composer chip polls this.
+    if (path === "/estimate" && req.method === "POST") {
+      const body = await readJsonBody(req) || {};
+      const est = estimatePreflight(body);
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify(est));
     }
 
     if (path === "/api/voice/transcribe" && req.method === "POST") return handleVoiceTranscribe(req, res);
@@ -1988,6 +2272,12 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify({ forgotten: !!removedChats || removedMemories > 0, transcript: removedChats, memories: removedMemories }));
     }
+
+    // The hands hub (Phase 1, MCP hands). Bearer-authed; 503 when HANDS_TOKEN is unset.
+    if (path === "/hands/stream" && req.method === "GET") return handsHub.handleStream(req, res, u);
+    if (path === "/hands/result" && req.method === "POST") return handsHub.handleResult(req, res, await readJsonBody(req));
+    if (path === "/hands/run" && req.method === "POST") return handsHub.handleRun(req, res, await readJsonBody(req));
+    if (path === "/hands/nodes" && req.method === "GET") return handsHub.handleNodes(req, res);
 
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
@@ -2024,9 +2314,11 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`[dominion-ai] http://127.0.0.1:${PORT}  ->  Ollama ${OLLAMA}`);
+server.listen(PORT, HOST, () => {
+  console.log(`[dominion-ai] listening ${HOST}:${PORT}  ->  Ollama light=${OLLAMA_LIGHT_URL}${SPLIT_TIERS ? "  heavy=" + OLLAMA_HEAVY_URL : ""}${OLLAMA_KEY ? "  (bearer)" : ""}  ·  data=${DATA_DIR}`);
   console.log(`[dominion-ai] tools: deck/forge/sandbox  ·  sync=${CTX.syncKey ? "set" : "MISSING"}  ·  run-password=${CTX.runPassword ? "set" : "unset"}  ·  sandbox=${CTX.sandboxDir}`);
+  console.log(`[dominion-ai] hands: ${handsHub.enabled ? "ENABLED (dial-out hub at /hands/*, bearer-authed)" : "disabled (HANDS_TOKEN unset — /hands/* answers 503)"}`);
+  console.log(`[dominion-ai] privacy: modes ${PRIVACY_MODES.join("/")} (default ${DEFAULT_PRIVACY_MODE})  ·  trusted providers: local+${[...TRUSTED_PROVIDERS].join("+")}  ·  refuse-not-substitute  ·  providers keyed: openrouter=${!!OPENROUTER_KEY} openai=${!!OPENAI_KEY} deepseek=${!!DEEPSEEK_KEY} anthropic=${!!ANTHROPIC_KEY}`);
   console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  needs_* consumed (retrieval skip + tool-def gating)  ·  post-retrieval long-context re-check  ·  usage log=${LOG_DIR}`);
   const ms = memory.stats();
   console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  gating=${ms.gating}${ms.gatedLax ? " (" + ms.gatedLax + " lax-auto-approved)" : ""}${ms.unverified ? " · " + ms.unverified + " unverified mentor claim(s) pending" : ""}  ·  scope-filtered retrieval  ·  vectors=${EMBED_MODEL} (${ms.embedded} embedded)  ·  dir=${MEMORY_DIR}`);
@@ -2041,13 +2333,23 @@ server.listen(PORT, "127.0.0.1", () => {
   // Backfill embeddings for pre-vector memories in the background (no-op if the embed model is absent).
   memory.backfillEmbeddings(100).then((n) => { if (n) console.log(`[dominion-ai] memory: backfilled ${n} embedding(s)`); }).catch(() => {});
   embedLoop();   // continuous persona embedder: drains new chunks at a gentle pace, forever
+  // Cloud corpus backup (L-003): default ON in the cloud (Linux) where the volume is the only copy;
+  // default OFF on the mini-PC (it already backs up to E:). CLOUD_BACKUP_ENABLED overrides either way.
+  const backupDefault = process.platform === "win32" ? "0" : "1";
+  if (String(cfgGet("CLOUD_BACKUP_ENABLED", backupDefault)) !== "0") {
+    const bms = Number(cfgGet("CLOUD_BACKUP_INTERVAL_MS", "86400000")) || 86400000;   // daily
+    const r = cloudBackup.start(bms);
+    console.log(`[dominion-ai] cloud-backup: ON  ·  every ${Math.round(r.intervalMs / 3600000 * 10) / 10}h  ·  off-box ${cloudBackup.configured ? "configured" : "UNCONFIGURED (local volume snapshots only until CLOUD_BACKUP_NODE+DIR set)"}`);
+  }
   // Warm the persona vector cache in the background so the FIRST As-Fred query doesn't pay the
   // full 14k-vector SQLite load inside an interactive request.
   setTimeout(() => { try { const n = persona.warmCache(); console.log(`[dominion-ai] persona: vec cache warmed (${n} vector(s) in RAM)`); } catch (e) { console.log("[dominion-ai] persona: vec cache warm failed: " + (e && e.message)); } }, 1500);
-  console.log("[dominion-ai] front this with: tailscale serve --bg " + PORT);
-  if (String(cfgGet("WATCHDOG_ENABLED", "1")) !== "0") {
+  // The watchdog self-heals the mini-PC (PowerShell: restarts tailscale/serve/the chat task), so it
+  // only makes sense on Windows. On Linux/Railway the platform owns process supervision → default OFF.
+  const watchdogDefault = process.platform === "win32" ? "1" : "0";
+  if (String(cfgGet("WATCHDOG_ENABLED", watchdogDefault)) !== "0") {
     const wms = Number(cfgGet("WATCHDOG_INTERVAL_MS", "180000")) || 180000;
-    startWatchdog({ logDir: LOG_DIR, ollamaUrl: OLLAMA, intervalMs: wms });
+    startWatchdog({ logDir: LOG_DIR, ollamaUrl: OLLAMA_LIGHT_URL, intervalMs: wms });
     console.log(`[dominion-ai] watchdog: ON  ·  heartbeat + poller self-heal every ${Math.round(wms / 1000)}s  ·  log=logs/watchdog.jsonl`);
   }
 });

@@ -3,7 +3,7 @@
 // drives the Phase-1 router (Auto = the server's light model classifies + picks 8B vs 30B).
 const $ = (id) => document.getElementById(id);
 const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"),
-      modelSel = $("model"), modeSel = $("mode"), cloudBadge = $("cloudbadge"), empty = $("empty"),
+      modelSel = $("model"), modeSel = $("mode"), privacyModeSel = $("privacy-mode"), cloudBadge = $("cloudbadge"), empty = $("empty"),
       sidebar = $("sidebar"), overlay = $("overlay"), menuBtn = $("menu"), newBtn = $("newchat"), chatlist = $("chatlist"),
       settingsBtn = $("settings"), smodal = $("smodal"), sclose = $("sclose"), ssave = $("ssave"),
       personaSel = $("persona-sel"), personaCustom = $("persona-custom"), tempInput = $("temp"), tempVal = $("temp-val"),
@@ -17,10 +17,42 @@ const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"
       personaBtn = $("persona"), pmodal = $("pmodal"), pclose = $("pclose"), pstats = $("pstats"),
       padd = $("padd"), pkind = $("pkind"), ptitle = $("ptitle"), paddbtn = $("paddbtn"),
       purl = $("purl"), pscrape = $("pscrape"), pscan = $("pscan"), pdistill = $("pdistill"),
-      pprofile = $("pprofile"), pfilterKind = $("pfilter-kind"), pmsg = $("pmsg"), plist = $("plist");
+      pprofile = $("pprofile"), pfilterKind = $("pfilter-kind"), pmsg = $("pmsg"), plist = $("plist"),
+      costChip = $("cost-chip");
 
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
-      LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1";
+      LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1",
+      LS_PMODE = "dominion.privacy-mode.v1";
+
+// ---- Phase 2 privacy modes (Fred's hard allow-list; the SERVER enforces, this mirrors it) ----
+// normal = all providers + local · trusted = OpenAI/Anthropic direct + local · private = local only.
+let privacyCfg = { trustedProviders: ["openai", "anthropic"] };   // filled from /api/models .privacy
+let availCache = {};                                              // provider -> has-key, from /api/models
+const providerAllowedClient = (mode, provider) => {
+  if (provider === "local" || !provider) return true;
+  if (mode === "normal") return true;
+  if (mode === "private") return false;
+  return privacyCfg.trustedProviders.includes(provider);   // trusted
+};
+// Disable (never remove) model options the current privacy mode disallows, with an honest suffix.
+// We do NOT auto-switch the selection — Fred's pick is honored or refused, never silently swapped.
+function applyPrivacyFilter() {
+  if (!modelSel) return;
+  const mode = privacyModeSel ? privacyModeSel.value : "normal";
+  for (const og of modelSel.querySelectorAll("optgroup")) {
+    const isLocal = og.id === "model-local-group";
+    for (const o of og.querySelectorAll("option")) {
+      const provider = isLocal || o.value === "local" ? "local" : (o.dataset.provider || "openrouter");
+      const modeOk = providerAllowedClient(mode, provider);
+      // strip any prior mode suffix, then re-annotate
+      o.textContent = o.textContent.replace(/ — (blocked in .*|key needed)$/,"");
+      if (!modeOk) { o.disabled = true; o.textContent += " — blocked in " + mode; }
+      else if (o.dataset.noKey === "1") { o.disabled = true; o.textContent += " — key needed"; }
+      else o.disabled = false;
+    }
+  }
+  if (cloudBadge) updateCloudBadge();
+}
 
 const PRESETS = {
   default: "",
@@ -59,6 +91,7 @@ function load() {
   if (!curId) newChat();
   try { const s = JSON.parse(localStorage.getItem(LS_SET) || "null"); if (s && typeof s === "object") settings = { ...settings, ...s }; } catch {}
   try { const m = localStorage.getItem(LS_MODE); if (m && modeSel) modeSel.value = m; } catch {}
+  try { const p = localStorage.getItem(LS_PMODE); if (p && privacyModeSel) privacyModeSel.value = p; } catch {}
 }
 const cur = () => chats.find((c) => c.id === curId);
 const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); return (u ? u.content : "New chat").replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
@@ -242,6 +275,8 @@ async function loadModels() {
     if (r.ok) {
       const cat = await r.json();
       const avail = cat.available || {};
+      availCache = avail;
+      if (cat.privacy && Array.isArray(cat.privacy.trustedProviders)) privacyCfg.trustedProviders = cat.privacy.trustedProviders;
       // Drop every existing cloud optgroup (keep the local one) before rebuilding.
       Array.from(modelSel.querySelectorAll("optgroup")).forEach((g) => { if (g.id !== "model-local-group") g.remove(); });
       for (const grp of (cat.groups || [])) {
@@ -251,15 +286,17 @@ async function loadModels() {
         for (const m of grp.models) {
           const o = document.createElement("option");
           o.value = m.id;
+          o.dataset.provider = m.provider || "openrouter";
           const bench = m.toolCapable ? "🔧" : "💬"; // 🔧 doing / 💬 chatting
           const bits = [m.name, fmtPriceShort(m), fmtCtxShort(m.ctx)].filter(Boolean);
           o.textContent = `${bench} ${bits.join(" · ")}`;
-          const provOk = m.provider === "openrouter" ? avail.openrouter : m.provider === "openai" ? avail.openai : m.provider === "deepseek" ? avail.deepseek : true;
-          if (provOk === false) { o.disabled = true; o.textContent += " — key needed"; }
+          const provOk = m.provider === "openrouter" ? avail.openrouter : m.provider === "openai" ? avail.openai : m.provider === "deepseek" ? avail.deepseek : m.provider === "anthropic" ? avail.anthropic : true;
+          if (provOk === false) o.dataset.noKey = "1";   // key-vs-privacy annotation applied by applyPrivacyFilter
           og.appendChild(o);
         }
         modelSel.appendChild(og);
       }
+      applyPrivacyFilter();   // annotate/disable per current privacy mode + key availability
     }
   } catch {}
   // Restore the saved pick if it's still a valid, enabled option; else Local.
@@ -269,7 +306,7 @@ async function loadModels() {
 }
 
 // ---------- agent loop over SSE ----------
-function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send"; }
+function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send"; if (on && typeof hideCostChip === "function") hideCostChip(); }
 
 // ---- durable live turn (PWA suspend/resume) ----
 // The server buffers every /chat turn as a JOB ({type:"job"} is the first SSE event) and keeps
@@ -368,7 +405,9 @@ function processEvent(st, ev) {
   } else if (ev.type === "token") {
     st.raw += ev.delta || ""; const shown = stripThink(st.raw); live.classList.toggle("think", !shown); live.textContent = shown || "Dominion AI is working…"; scroll();
   } else if (ev.type === "error") {
-    st.errMsg = "Chat failed: " + (ev.error || "server error") + " — tap send to retry.";
+    st.errMsg = ev.code === "privacy_mode_block"
+      ? (ev.message || "Blocked by privacy mode.")
+      : "Chat failed: " + (ev.error || "server error") + " — tap send to retry.";
   }
 }
 
@@ -436,6 +475,7 @@ async function streamReply(c) {
         messages: c.messages.map((m) => ({ role: m.role, content: m.content })),
         mode: modeSel ? modeSel.value : "auto",
         model: forcedModel() || "auto",
+        privacyMode: privacyModeSel ? privacyModeSel.value : "normal",
         persona: resolvePersona(),
         temperature: settings.temperature,
         confirmTools: !!settings.confirmTools,
@@ -512,7 +552,7 @@ function send() {
   }
   const text = input.value.trim(); if (!text) return;
   const c = cur(); if (!c) return;
-  input.value = ""; autosize();
+  input.value = ""; autosize(); hideCostChip();
   c.messages.push({ role: "user", content: text });
   if (c.title === "New chat") c.title = titleFrom(c.messages);
   c.updatedAt = Date.now(); save(); renderAll();
@@ -1054,8 +1094,47 @@ async function addImprove() {
   iadd.value = ""; loadImprove();
 }
 
+// ---------- pre-send cost estimate chip (docs/CLOUD-MIGRATION.md §6) ----------
+// A live, deterministic preflight (/estimate — no model call): what THIS turn costs before you send.
+// Debounced on typing; superseded-by-newer-keystroke guard; hides while empty or streaming.
+let estTimer = null, estSeq = 0;
+function scheduleEstimate() { if (estTimer) clearTimeout(estTimer); estTimer = setTimeout(updateEstimate, 350); }
+function hideCostChip() { if (costChip) costChip.hidden = true; }
+async function updateEstimate() {
+  if (!costChip) return;
+  const text = input.value.trim();
+  if (!text || busy) { hideCostChip(); return; }
+  const c = cur();
+  const history = c ? c.messages.map((m) => ({ role: m.role, content: m.content })) : [];
+  history.push({ role: "user", content: text });
+  const payload = { messages: history, mode: modeSel ? modeSel.value : "auto", model: forcedModel() || "auto", privacyMode: privacyModeSel ? privacyModeSel.value : "normal" };
+  const seq = ++estSeq;
+  costChip.className = "cost-chip cc-loading"; costChip.textContent = "estimating…"; costChip.hidden = false;
+  let est;
+  try {
+    const r = await fetch("/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    est = await r.json();
+  } catch { if (seq === estSeq) hideCostChip(); return; }
+  if (seq !== estSeq) return;                       // a newer keystroke already superseded this
+  if (busy || !input.value.trim()) { hideCostChip(); return; }
+  renderCostChip(est);
+}
+function renderCostChip(est) {
+  if (!costChip || !est || !est.backend) { hideCostChip(); return; }
+  let cls = "cost-chip", label = est.estCost || "";
+  if (est.backend === "cloud") { cls += est.free ? " cc-free" : " cc-cloud"; label = (est.model ? est.model + " · " : "") + (est.estCost || ""); }
+  else if (est.backend === "gpu-heavy") { cls += " cc-heavy" + (est.warm ? "" : " cc-cold"); label = "Heavy GPU · " + (est.estCost || ""); }
+  else if (est.backend === "blocked") { cls += " cc-cold"; label = "Blocked · " + (privacyModeSel ? privacyModeSel.value : "") + " mode"; }
+  else { cls += " cc-free"; label = est.estCost || "included"; }   // gpu-light (always-on)
+  costChip.className = cls;
+  const lat = est.estLatency && est.estLatency !== "a few seconds" ? ` <span class="cc-lat">${escapeHtml(est.estLatency)}</span>` : "";
+  costChip.innerHTML = `<span class="cc-dot"></span><span class="cc-cost">${escapeHtml(label)}</span>${lat}`;
+  costChip.hidden = false;
+}
+
 // ---------- wire up ----------
 input.addEventListener("input", autosize);
+input.addEventListener("input", scheduleEstimate);
 // Desktop (mouse) sends on Enter; phone/touch lets Enter insert a newline (use the send button).
 const enterSends = !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && enterSends) { e.preventDefault(); send(); } });
@@ -1064,9 +1143,11 @@ menuBtn.addEventListener("click", () => (sidebar.classList.contains("open") ? cl
 overlay.addEventListener("click", closeSidebar);
 newBtn.addEventListener("click", newChat);
 if (chatSearch) chatSearch.addEventListener("input", () => { chatQuery = chatSearch.value || ""; renderSidebar(); });
-if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODE, modeSel.value); } catch {} });
+if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODE, modeSel.value); } catch {} updateEstimate(); });
+// Privacy mode persists, re-filters the picker to the allowed providers, and refreshes the estimate.
+if (privacyModeSel) privacyModeSel.addEventListener("change", () => { try { localStorage.setItem(LS_PMODE, privacyModeSel.value); } catch {} applyPrivacyFilter(); updateEstimate(); });
 // Model pick persists immediately (matches Mode) and flips the "via OpenRouter" spend indicator live.
-if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateCloudBadge(); });
+if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateCloudBadge(); updateEstimate(); });
 settingsBtn.addEventListener("click", openSettings);
 sclose.addEventListener("click", closeSettings);
 ssave.addEventListener("click", saveSettingsUI);

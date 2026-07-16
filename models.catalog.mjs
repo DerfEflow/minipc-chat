@@ -10,9 +10,9 @@
  * within each category (undisclosed-parameter models sort to the bottom of their group). Every row
  * shows: name · params · $/M in-out · context · specialty.
  *
- * The big three Fred already pays for directly (Anthropic Claude, Google Gemini, OpenAI GPT) are
- * deliberately ABSENT — he uses those through their own apps. Grok (xAI), Perplexity, and the open
- * Gemma/Llama models are fair game.
+ * OpenAI GPT is present as a direct provider; Anthropic Claude was ADDED 2026-07-14 as a direct
+ * provider for Trusted mode (strictest retention). Google Gemini stays absent (Fred uses it via its
+ * own app). Grok (xAI), Perplexity, and the open Gemma/Llama models are fair game.
  *
  * Prices are USD per 1M tokens (input / output) and DRIFT — re-pull https://openrouter.ai/api/v1/models
  * to refresh. `params` is a display string; `paramsB` is billions for sorting (null = undisclosed).
@@ -73,6 +73,18 @@ export const MODELS = [
   { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", origin: "Moonshot AI (Beijing)",
     category: "Frontier / Flagship", params: "1T (MoE·32B active)", paramsB: 1000, inCost: 0.66, outCost: 3.41, ctx: 262144,
     specialty: "Agentic tool-use heavyweight; cult favorite for doing things" },
+  // Anthropic Claude — DIRECT to Anthropic (provider:"anthropic"), added 2026-07-14 for Trusted mode
+  // (strictest retention; ZDR-eligible). Reached via Anthropic's OpenAI-compatible endpoint so the
+  // existing OpenAI-shaped streamer serves them unchanged. directId = the native Anthropic model id.
+  { id: "anthropic/claude-opus-4-8", name: "Claude Opus 4.8", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-opus-4-8",
+    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 25.00, ctx: 200000,
+    specialty: "Anthropic flagship — top-tier reasoning + agentic 'doing'; strictest data retention" },
+  { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-sonnet-5",
+    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 200000,
+    specialty: "Balanced Claude — strong general work at mid cost; no-train direct provider" },
+  { id: "anthropic/claude-haiku-4-5", name: "Claude Haiku 4.5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-haiku-4-5-20251001",
+    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 5.00, ctx: 200000,
+    specialty: "Fast, cheap Claude — quick turns kept off training data (direct)" },
   { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-pro",
     category: "Frontier / Flagship", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.43, outCost: 0.87, ctx: 1000000,
     specialty: "Near-frontier reasoning + code at ~1/30th flagship price (direct to DeepSeek)" },

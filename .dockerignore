@@ -1,0 +1,29 @@
+# Keep the build context lean and the image free of local/mini-PC-only cruft.
+.git
+.gitignore
+node_modules
+*.log
+chat.log
+.env
+.env.*
+logs/
+backups/
+.DS_Store
+.vercel
+
+# Local state dirs (if a dev ever ran the server from inside the repo tree)
+sandbox/
+corpus/
+memory/
+artifacts/
+flywheel/
+chatlog/
+staging/
+
+# Tests aren't needed in the runtime image
+*_test.mjs
+
+# Windows-only setup/self-heal scripts (the watchdog is off on Linux)
+selfheal.ps1
+setup-minipc-chat.ps1
+setup-openssh.ps1
