@@ -11,12 +11,16 @@
 <link rel="manifest" href="/manifest.webmanifest" />
 <link rel="apple-touch-icon" href="/icon-180.png" />
 <link rel="icon" href="/icon-192.png" />
-<link rel="stylesheet" href="/dominion-ui.css?v=30" />
+<link rel="stylesheet" href="/dominion-ui.css?v=37" />
 </head>
 <body>
   <video id="bgvideo" autoplay muted loop playsinline preload="auto" poster="/icon-512.png">
     <source src="/circuit-bg.mp4" type="video/mp4" />
   </video>
+  <div id="rendered-scene" aria-hidden="true">
+    <div class="scene-energize"></div>
+    <div class="scene-caustic"></div>
+  </div>
   <div id="bgglass" aria-hidden="true"></div>
   <div id="overlay"></div>
 
@@ -209,12 +213,29 @@
     <main id="main">
       <div class="wrap" id="wrap">
         <div class="empty" id="empty">
-          <span class="empty-core" aria-hidden="true">
-            <svg class="glyph"><use href="#i-core"></use></svg>
-          </span>
-          <p class="brand">Dominion AI</p>
-          <p class="byline">by Frederick Wolfe</p>
-          <p class="hint">A private intelligence surface with memory, tools, artifacts, and routed models.</p>
+          <div class="empty-intro">
+            <span class="hero-kicker"><i></i> Dominion Prime Intelligence</span>
+            <span class="empty-core" aria-hidden="true">
+              <svg class="glyph"><use href="#i-core"></use></svg>
+            </span>
+            <p class="brand">Dominion AI</p>
+            <p class="byline">by Frederick Wolfe</p>
+            <p class="hint">A private strategic intelligence console engineered for command, memory, creation, and decisive action.</p>
+            <div class="hero-actions" aria-hidden="true">
+              <span><b>01</b> Strategic reasoning</span>
+              <span><b>02</b> Governed memory</span>
+              <span><b>03</b> Tool command</span>
+            </div>
+          </div>
+          <div class="hero-readout" aria-hidden="true">
+            <div class="hero-readout-head"><span>Core synchronization</span><b>ONLINE</b></div>
+            <div class="hero-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <dl>
+              <div><dt>Reasoning lattice</dt><dd>Ready</dd></div>
+              <div><dt>Memory matrix</dt><dd>Linked</dd></div>
+              <div><dt>Command authority</dt><dd>Verified</dd></div>
+            </dl>
+          </div>
         </div>
       </div>
     </main>
@@ -354,6 +375,6 @@
   </div>
 
   <script src="/app.js?v=30"></script>
-  <script src="/dominion-ui.js?v=30"></script>
+  <script src="/dominion-ui.js?v=33"></script>
 </body>
 </html>

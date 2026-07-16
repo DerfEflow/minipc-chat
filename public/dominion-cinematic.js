@@ -94,8 +94,8 @@
         </div>`);
     }
 
-    const hint = document.querySelector("#empty .hint");
-    if (hint) hint.textContent = "A private strategic intelligence console with memory, tools, artifacts, and routed models.";
+    // The richer v31 empty-state copy is authored in index.html so it paints immediately and
+    // stays available when this enhancement layer is disabled. Do not flatten it at runtime.
   }
 
   buildCinematicShell();
@@ -284,6 +284,8 @@
       root.style.setProperty("--tilt-x", ((x - .5) * .34).toFixed(3) + "deg");
       root.style.setProperty("--tilt-y", ((.5 - y) * .27).toFixed(3) + "deg");
       root.style.setProperty("--signal-x", (x * 100).toFixed(2) + "%");
+      root.style.setProperty("--scene-shift-x", ((.5 - x) * 7).toFixed(2) + "px");
+      root.style.setProperty("--scene-shift-y", ((.5 - y) * 5).toFixed(2) + "px");
       if (reflection) reflection.style.transform = `translateX(${((x - .5) * 230).toFixed(1)}px) rotate(17deg)`;
     };
     window.addEventListener("pointermove", (event) => {
@@ -293,6 +295,8 @@
     pane.addEventListener("pointerleave", () => {
       root.style.setProperty("--tilt-x", "0deg");
       root.style.setProperty("--tilt-y", "0deg");
+      root.style.setProperty("--scene-shift-x", "0px");
+      root.style.setProperty("--scene-shift-y", "0px");
       if (reflection) reflection.style.transform = "translateX(0) rotate(17deg)";
     });
   }
