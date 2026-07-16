@@ -42,6 +42,15 @@ const HANDS_URL = String(process.env.HANDS_URL || "").replace(/\/$/, "");
 const HANDS_TOKEN = process.env.HANDS_TOKEN || "";
 const NODE_NAME = (process.env.HANDS_NODE || hostname() || "unnamed").toLowerCase();
 const VERSION = "hands/1";
+// Optional Cloudflare Access service token — when the orchestrator sits behind Access, the node
+// presents these so its dial-out passes the Access layer; HANDS_TOKEN still authorizes at the app.
+const CF_ID = process.env.HANDS_CF_CLIENT_ID || "";
+const CF_SECRET = process.env.HANDS_CF_CLIENT_SECRET || "";
+const authHeaders = (extra = {}) => {
+  const h = { authorization: "Bearer " + HANDS_TOKEN, ...extra };
+  if (CF_ID && CF_SECRET) { h["cf-access-client-id"] = CF_ID; h["cf-access-client-secret"] = CF_SECRET; }
+  return h;
+};
 
 // ---- roots: max-access per Fred's spec ("almost everything, with the same exceptions") --------
 // HANDS_MAX_ACCESS=1 gives the node the whole machine EXCEPT the ironclad carve-outs (D:\ backups,
@@ -224,7 +233,7 @@ async function postResult(jobId, result) {
   try {
     const r = await fetch(HANDS_URL + "/hands/result", {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: "Bearer " + HANDS_TOKEN },
+      headers: authHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ node: NODE_NAME, jobId, result }),
     });
     if (!r.ok) log(`result POST for ${jobId} -> HTTP ${r.status}`);
@@ -246,7 +255,7 @@ async function connectOnce() {
   const lapse = setInterval(() => { if (Date.now() - lastBeat > HEARTBEAT_LAPSE_MS) { log("heartbeat lapsed — recycling the stream"); ac.abort(); } }, 5000);
   try {
     const r = await fetch(HANDS_URL + "/hands/stream?node=" + encodeURIComponent(NODE_NAME), {
-      headers: { authorization: "Bearer " + HANDS_TOKEN, accept: "text/event-stream" },
+      headers: authHeaders({ accept: "text/event-stream" }),
       signal: ac.signal,
     });
     if (!r.ok) throw new Error("hub refused the stream: HTTP " + r.status);

@@ -16,6 +16,8 @@ param(
   [string]$NodeName = $env:COMPUTERNAME.ToLower(),
   [string]$Roots = "",              # optional explicit roots; blank + MaxAccess=on -> all drives minus carve-outs
   [switch]$MaxAccess = $true,       # Fred's default: max access minus the ironclad carve-outs
+  [string]$CfClientId = "",         # Cloudflare Access service-token id (when the cloud is behind Access)
+  [string]$CfClientSecret = "",     # Cloudflare Access service-token secret
   [string]$TaskName = "Dominion Hands",
   [switch]$Uninstall
 )
@@ -41,6 +43,8 @@ if (-not $node) { throw "node not found on PATH. Install Node 24+ first." }
 [Environment]::SetEnvironmentVariable("HANDS_NODE",  $NodeName,   "Machine")
 if ($MaxAccess) { [Environment]::SetEnvironmentVariable("HANDS_MAX_ACCESS", "1", "Machine") }
 if ($Roots)     { [Environment]::SetEnvironmentVariable("HANDS_ROOTS", $Roots, "Machine") }
+if ($CfClientId)     { [Environment]::SetEnvironmentVariable("HANDS_CF_CLIENT_ID", $CfClientId, "Machine") }
+if ($CfClientSecret) { [Environment]::SetEnvironmentVariable("HANDS_CF_CLIENT_SECRET", $CfClientSecret, "Machine") }
 
 $action  = New-ScheduledTaskAction -Execute $node -Argument "`"$nodeScript`""
 $trigger = New-ScheduledTaskTrigger -AtStartup
