@@ -4,16 +4,27 @@ Everything the final Railway deploy needs, so it's one clean session once the tw
 prerequisites are done. Written 2026-07-15. Companion to `CLOUD-MIGRATION.md` and
 `ACCESS-AND-PRIVACY-DESIGN.md`.
 
-## The two human prerequisites (only these gate the deploy)
+## The two human prerequisites — BOTH DONE (2026-07-15)
 
-1. **Enable Cloudflare Zero Trust once.** dash.cloudflare.com → Zero Trust → pick a team name,
-   accept the free plan. (The API confirmed Access is "not enabled" on the account; this one-time
-   onboarding can't be done by API.) `dominion.tools` is already a Cloudflare zone (active).
-2. **Mint a Tailscale auth key** (reusable + ephemeral), Tailscale admin → Settings → Keys. Needed
-   only to reach the mini-PC Qwen over the tailnet (Private-mode brain); the app deploys and runs
-   without it (cloud providers work; Qwen just shows offline until it's wired).
+1. **Cloudflare Zero Trust enabled.** ✅ Team `domi-ai`. Access apps then pre-built by API (below).
+2. **Tailscale auth key minted.** ✅ In the wallet as `TAILSCALE_AUTH_KEY` (reusable, `tskey-au…`).
 
 Subdomain chosen: **`app.dominion.tools`** (bare `dominion.tools` left for a landing page).
+
+## Cloudflare Access — PRE-BUILT (2026-07-15), so auth guards the URL the instant the CNAME lands
+
+Account `d78b53b020856d24423b39a5577c45f2`, zone `dominion.tools` (active). Two self-hosted apps:
+
+| App | Domain | Policy |
+|---|---|---|
+| Dominion AI (`fe745dc5-4981-4be8-b310-77b70bd883d5`) | `app.dominion.tools` | **allow** email = `fredwolfe@gmail.com` only (one-time PIN) |
+| Dominion healthcheck (`243f7cec-f64a-411e-8bf6-8ab1c47bc0af`) | `app.dominion.tools/api/version` | **bypass** (public, for Railway's healthcheck) |
+
+**Ingress rule that must hold (abort-5 / L-017):** the ONLY public path to the app must be
+`app.dominion.tools` (Access-gated). At deploy, REMOVE the auto-generated `*.up.railway.app` domain
+(it is NOT behind Access) and use only the custom domain — otherwise the corpus sits on an
+unauthenticated URL. Restore the corpus ONLY after the railway.app domain is gone and an
+unauthenticated curl to `app.dominion.tools` returns 403.
 
 ## Railway resources already provisioned (2026-07-15, no billing yet)
 
