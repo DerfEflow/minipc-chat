@@ -299,6 +299,11 @@ export function createPersonaStore(opts = {}) {
     CREATE INDEX IF NOT EXISTS idx_chunks_unembedded ON chunks(id) WHERE vec IS NULL;
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
   `);
+  // Multi-tenant persona exclusion (SOW): a doc/chunk is 'shared' (default) or 'owner_only'. Non-owner
+  // retrieval, quoting, and listing exclude owner_only. Additive migration (safe on the live corpus).
+  const hasCol = (table, col) => { try { return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col); } catch { return false; } };
+  if (!hasCol("docs", "visibility")) db.exec("ALTER TABLE docs ADD COLUMN visibility TEXT DEFAULT 'shared'");
+  if (!hasCol("chunks", "visibility")) db.exec("ALTER TABLE chunks ADD COLUMN visibility TEXT DEFAULT 'shared'");
   let fts = true;
   try { db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='chunks', content_rowid='rowid')"); }
   catch { fts = false; }   // FTS5 missing from the sqlite build -> lexical falls back to a scan
@@ -468,7 +473,7 @@ export function createPersonaStore(opts = {}) {
   // Hybrid retrieval at scale: FTS5 bm25 candidates (lexical) ∪ top-cosine candidates (semantic,
   // via the RAM vec cache) -> re-rank the union with 0.45*lex + 0.55*cos. Degrades gracefully:
   // no FTS -> bounded scan; no embedder/vectors -> pure lexical.
-  async function retrieve(query, { limit = 6, kind = "", minScore = 0.08, voiceOnly = false } = {}) {
+  async function retrieve(query, { limit = 6, kind = "", minScore = 0.08, voiceOnly = false, sharedOnly = false } = {}) {
     const q = tokenize(query);
     let qvec = null;
     if (embed && query) { try { const v = await embed(String(query).slice(0, 2000)); if (Array.isArray(v) && v.length) qvec = new Float32Array(v); } catch {} }
@@ -504,6 +509,15 @@ export function createPersonaStore(opts = {}) {
         const extra = (kind ? " AND kind = ?" : "") + (voiceOnly ? ` AND kind NOT IN ${nonVoiceSql}` : "");
         const rows = db.prepare(`SELECT id, kind, title, text FROM chunks WHERE id IN (${ids.map(() => "?").join(",")})` + extra).all(...(kind ? [...ids, kind] : ids));
         for (const r of rows) candidates.set(r.id, r);
+      }
+    }
+    // Non-owner exclusion: drop any candidate chunk whose doc is owner_only (Fred's excluded subjects).
+    // One small query over the assembled candidate set covers the FTS, lexical, AND vector paths.
+    if (sharedOnly && candidates.size) {
+      const ids = [...candidates.keys()];
+      for (let i = 0; i < ids.length; i += 300) {
+        const slice = ids.slice(i, i + 300);
+        try { for (const r of db.prepare(`SELECT id FROM chunks WHERE visibility='owner_only' AND id IN (${slice.map(() => "?").join(",")})`).all(...slice)) candidates.delete(r.id); } catch {}
       }
     }
     if (!candidates.size) return [];
@@ -593,7 +607,7 @@ export function createPersonaStore(opts = {}) {
   function warmCache() { return ensureVecCache().size; }
 
   // The block injected into "As Fred" prompts: the rendered profile + retrieved exemplars.
-  async function personaBlock(query, { exemplars = 4 } = {}) {   // 4×400 chars: prefill is the latency bottleneck on the CPU box
+  async function personaBlock(query, { exemplars = 4, sharedOnly = false } = {}) {   // 4×400 chars: prefill is the latency bottleneck on the CPU box
     const profile = getProfile();
     const parts = [];
     // Render LIVE from facets (not the stored systemBlock) so hard-coded voice laws in
@@ -601,19 +615,55 @@ export function createPersonaStore(opts = {}) {
     if (profile && profile.facets && Object.keys(profile.facets).length) {
       parts.push(renderFacets(profile.facets) + (profile.facets.summary ? "\n- In short: " + profile.facets.summary : ""));
     } else if (profile && profile.systemBlock) parts.push(profile.systemBlock);
-    const ex = await retrieve(query || "", { limit: exemplars, voiceOnly: true });   // never quote reference material as Fred's voice
+    // sharedOnly (non-owners): exclude Fred's owner_only subjects from the quoted exemplars.
+    const ex = await retrieve(query || "", { limit: exemplars, voiceOnly: true, sharedOnly });   // never quote reference material as Fred's voice
     if (ex.length) parts.push("Real excerpts of Fred's own writing, retrieved for THIS question. They carry two things: his voice (echo the rhythm and word-choice; don't quote verbatim unless asked) and his BELIEFS — if these excerpts answer or bear on the question, Fred's position in them IS the answer; never substitute a generic or contrary position for his stated one:\n" + ex.map((e) => `— [${e.kind}] ${e.text.slice(0, 400)}`).join("\n\n"));
     return { block: parts.join("\n\n"), exemplars: ex, hasProfile: !!profile };
   }
 
-  function list({ kind = "", q = "", limit = 200 } = {}) {
-    let sql = "SELECT id, kind, title, source, tags, nchunks, length(text) AS chars, createdAt FROM docs";
+  function list({ kind = "", q = "", limit = 200, sharedOnly = false } = {}) {
+    let sql = "SELECT id, kind, title, source, tags, nchunks, length(text) AS chars, createdAt, visibility FROM docs";
     const where = [], args = [];
     if (kind) { where.push("kind = ?"); args.push(kind); }
     if (q) { where.push("(title LIKE ? OR text LIKE ?)"); args.push("%" + q + "%", "%" + q + "%"); }
+    if (sharedOnly) where.push("(visibility IS NULL OR visibility = 'shared')");   // non-owners: hide owner_only titles too
     if (where.length) sql += " WHERE " + where.join(" AND ");
     sql += " ORDER BY createdAt DESC LIMIT ?"; args.push(Math.min(limit, 500));
-    return db.prepare(sql).all(...args).map((d) => ({ id: d.id, kind: d.kind, title: d.title, source: d.source, tags: JSON.parse(d.tags || "[]"), chars: d.chars, chunks: d.nchunks, createdAt: d.createdAt }));
+    return db.prepare(sql).all(...args).map((d) => ({ id: d.id, kind: d.kind, title: d.title, source: d.source, tags: JSON.parse(d.tags || "[]"), chars: d.chars, chunks: d.nchunks, createdAt: d.createdAt, visibility: d.visibility || "shared" }));
+  }
+  // Owner controls: mark a doc (and its chunks) shared|owner_only. owner_only = never quoted/shown to others.
+  function setVisibility(docId, visibility) {
+    const v = visibility === "owner_only" ? "owner_only" : "shared";
+    const a = db.prepare("UPDATE docs SET visibility=? WHERE id=?").run(v, docId);
+    db.prepare("UPDATE chunks SET visibility=? WHERE docId=?").run(v, docId);
+    return { ok: !!a.changes, visibility: v };
+  }
+  // The three excluded subjects (Fred, 2026-07-16). A prefilter of trigger words narrows which docs
+  // get the (slower) local-model read; anything a word hits is classified. Euphemism-safe: the model
+  // decides, the words only widen the net.
+  const EXCLUDE_SUBJECTS = [
+    { key: "sexual_confession", label: "the author's own sexual sin or confession", words: /\b(lust|sexual|sin|confess|adulter|porn|impure|temptation|fornicat|masturbat)\b/i },
+    { key: "negative_about_kids", label: "anything negative the author said about his own children/kids", words: /\b(son|daughter|kid|child|children|boy|girl)\b/i },
+    { key: "financial_hardship", label: "the author's personal financial hardship", words: /\b(broke|debt|bankrupt|afford|money|financ|bills?|poverty|paycheck|foreclos|evict|struggl)\b/i },
+  ];
+  // Owner-triggered sensitivity scan. `classify(text)` MUST run on the LOCAL model (this content never
+  // egresses). Returns {match:boolean}. Conservative: on error/uncertain the caller marks owner_only.
+  async function scanSensitivity({ classify, onProgress } = {}) {
+    if (typeof classify !== "function") return { error: "no local classifier provided" };
+    const docs = db.prepare("SELECT id, kind, title, text FROM docs").all();
+    let scanned = 0, flagged = 0;
+    for (const d of docs) {
+      scanned++;
+      const blob = (d.title || "") + "\n" + (d.text || "");
+      const hit = EXCLUDE_SUBJECTS.filter((s) => s.words.test(blob));
+      if (!hit.length) { if (onProgress) onProgress({ scanned, total: docs.length, flagged }); continue; }
+      let match = false;
+      try { const r = await classify(blob.slice(0, 6000), hit.map((h) => h.label)); match = !!(r && r.match); }
+      catch { match = true; }   // conservative: if the read fails, exclude
+      if (match) { setVisibility(d.id, "owner_only"); flagged++; }
+      if (onProgress) onProgress({ scanned, total: docs.length, flagged });
+    }
+    return { scanned, flagged };
   }
   function getDoc(id) { return stmt.docById.get(id) || null; }
   function removeDoc(id) {
@@ -685,7 +735,7 @@ export function createPersonaStore(opts = {}) {
 
   const migrated = migrateFromJson();
 
-  return { ingestText, scanInbox, retrieve, sampleForProfile, statVocab, buildBatches, personaBlock, getProfile, setProfile, list, getDoc, removeDoc, reprocessChats, embedPending, backfillEmbeddings: embedPending, warmCache, backupTo, stats, KINDS, dir, inbox, stagingInbox, staging, migrated, fts };
+  return { ingestText, scanInbox, retrieve, sampleForProfile, statVocab, buildBatches, personaBlock, getProfile, setProfile, list, getDoc, removeDoc, setVisibility, scanSensitivity, EXCLUDE_SUBJECTS, reprocessChats, embedPending, backfillEmbeddings: embedPending, warmCache, backupTo, stats, KINDS, dir, inbox, stagingInbox, staging, migrated, fts };
 }
 
 // Render the structured facets into a system-prompt block (fallback when no pre-rendered systemBlock).

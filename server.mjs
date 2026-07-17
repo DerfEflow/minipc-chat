@@ -1855,7 +1855,7 @@ async function handleChat(req, res) {
   let personaInfo = null;
   if (mode === "as_fred") {
     try {
-      personaInfo = await persona.personaBlock(lastUserText, { exemplars: 6 });
+      personaInfo = await persona.personaBlock(lastUserText, { exemplars: 6, sharedOnly: !T.isOwner });
       if (personaInfo.block) messages.push({ role: "system", content: personaInfo.block });
       sse({ type: "persona", hasProfile: personaInfo.hasProfile, exemplars: personaInfo.exemplars.length });
     } catch {}
