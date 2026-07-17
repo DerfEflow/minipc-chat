@@ -30,6 +30,21 @@ conversation quietly trains the shared logic.
 - Owner keeps full corpus access (raw text, exemplars, search). Persona WRITE (`add_to_persona`,
   `scrape_to_persona`, Forge write UI) is owner-only.
 
+### Persona — subject exclusions (Fred, 2026-07-16)
+- Quoting Fred to other users is FINE by default ("surprisingly transparent") EXCEPT documents that
+  touch any of these three subjects, which are owner-only and never quoted, retrieved, or listed for
+  non-owners: `[user-stated]`
+  1. Fred's own sexual-sin confessions.
+  2. Anything negative Fred has said about his children.
+  3. Mentions of personal financial hardship.
+- **A doc's visibility** = `shared` (default) or `owner_only`. Set owner_only by: (a) the subject
+  scan below, (b) a subjects blocklist (these three, owner-editable), (c) manual per-doc marking.
+- **The subject scan runs on the LOCAL model ONLY.** Classifying this content means reading it, so it
+  MUST NOT egress to any cloud provider. Use `ollamaChat` (mini-PC Qwen). Conservative: when the
+  classifier is unsure, mark owner_only (exclude). Fred reviews the flagged set and can release any.
+- Non-owner retrieval (As-Fred exemplars), the titles/summary panel, and any quoting exclude
+  `owner_only` docs entirely. Owner sees and quotes everything, unchanged.
+
 ### Models
 - **No user but Fred may use the local model.** The picker hides it and the server refuses it for
   non-owners. `[user-stated]`
