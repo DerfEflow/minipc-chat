@@ -1,0 +1,77 @@
+/*
+ * Dominion AI — per-user stores + the role-based tool wall (SOW items 3, 5, 6).
+ *
+ * Each non-owner user gets their OWN stores under /data/users/<uid>/, lazily created and cached, so
+ * no user can see another's chats, memory, or artifacts. The OWNER short-circuits to the app's
+ * existing global stores, so Fred's path is byte-for-byte unchanged.
+ *
+ * The tool wall: capabilities come from the CALLER's role. The owner gets everything (his machines,
+ * deck, persona-write). Non-owners get a safe set with NO reach into Fred's machines, command deck,
+ * or persona corpus. Their own machine access (Forge) arrives later as an explicitly own-node tool.
+ */
+import { createMemoryStore } from "./memory.mjs";
+import { createArtifactStore } from "./artifacts.mjs";
+import { createChatLog } from "./chatlog.mjs";
+import { createFlywheel } from "./flywheel.mjs";
+import { join } from "node:path";
+
+// Tools a non-owner may call. Everything here is safe: web, their own artifacts/memory/sandbox,
+// documents, formatting, review, retrieval, and READ-only persona. Deliberately ABSENT: forge_read,
+// forge_send, deck_* (Fred's machines + command deck), add_to_persona, scrape_to_persona (corpus write).
+export const SAFE_TOOLS = new Set([
+  "web_search", "web_read",
+  "format_as_markdown", "format_as_json", "format_as_checklist", "format_as_table", "format_as_report", "format_as_scope",
+  "create_artifact", "revise_artifact", "list_artifacts", "read_artifact", "export_artifact",
+  "create_docx", "create_pdf", "create_spreadsheet", "search_artifacts", "compare_artifacts",
+  "remember", "recall_memory", "update_memory", "save_lesson", "request_review",
+  "search_chats", "retrieve_context_pack",
+  "search_persona",                 // READ Fred's corpus; write tools are owner-only
+  "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox",
+]);
+
+// Owner = all tools (null sentinel = no filter). Non-owner = SAFE_TOOLS (+ their own Forge later).
+export function allowedToolNames(role) { return role === "owner" ? null : SAFE_TOOLS; }
+export function toolAllowedFor(role, name) { return role === "owner" || SAFE_TOOLS.has(name); }
+
+// Filter a list of tool defs to what a role may see/call. Owner passes through unchanged.
+export function filterToolDefs(defs, role) {
+  if (role === "owner") return defs;
+  return (defs || []).filter((d) => SAFE_TOOLS.has(d && d.function && d.function.name));
+}
+
+export function createTenantStores({ baseDir, uid, embed }) {
+  const root = join(baseDir, "users", uid);
+  const memory = createMemoryStore({ dir: join(root, "memory"), gating: "lax", embed });
+  const chatlog = createChatLog({ dir: join(root, "chatlog") });
+  const artifacts = createArtifactStore({ dir: join(root, "artifacts") });
+  const flywheel = createFlywheel({ dir: join(root, "flywheel") });
+  const sandboxDir = join(root, "sandbox");
+  return { root, memory, chatlog, artifacts, flywheel, sandboxDir };
+}
+
+// A resolver caches per-user store bundles and returns a tenant view for a request.
+//   globals  = { memory, chatlog, artifacts, flywheel, sandboxDir, ctx, persona }  (the owner's)
+//   users    = the tenancy users store (identify())
+export function createTenantResolver({ baseDir, embed, globals, users }) {
+  const cache = new Map();   // uid -> stores bundle
+  function storesFor(id) {
+    if (!cache.has(id.uid)) cache.set(id.uid, createTenantStores({ baseDir, uid: id.uid, embed }));
+    return cache.get(id.uid);
+  }
+  function resolve(req) {
+    const id = users.identify(req);
+    if (id.role === "owner") {
+      return { ...id, memory: globals.memory, chatlog: globals.chatlog, artifacts: globals.artifacts,
+        flywheel: globals.flywheel, sandboxDir: globals.sandboxDir, persona: globals.persona, ctxBase: globals.ctx };
+    }
+    const s = id.role === "anon" ? null : storesFor(id);
+    // Non-owner ctx: their stores + their sandbox + the SHARED persona (read-only) + owner secrets
+    // are NOT copied (no deck/forge creds), so those tools are inert for them even before the filter.
+    const ctxBase = s ? { sandboxDir: s.sandboxDir, memory: s.memory, artifacts: s.artifacts,
+      chatlog: s.chatlog, flywheel: s.flywheel, persona: globals.persona, serpKey: globals.ctx.serpKey,
+      lightChat: globals.ctx.lightChat, exportGated: globals.ctx.exportGated } : null;
+    return s ? { ...id, memory: s.memory, chatlog: s.chatlog, artifacts: s.artifacts, flywheel: s.flywheel,
+      sandboxDir: s.sandboxDir, persona: globals.persona, ctxBase } : { ...id, ctxBase: null };
+  }
+  return { resolve, storesFor, cache };
+}
