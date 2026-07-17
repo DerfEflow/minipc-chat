@@ -33,6 +33,7 @@ import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
 import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, outLimitFor, defaultModelFor, catalogPayload } from "./models.catalog.mjs";
 import { screenContent } from "./safety.mjs";
+import { wolfeLogic, tierFor, normalizeTier } from "./wolfe-logic.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
@@ -773,7 +774,7 @@ const reviewEngine = createReviewEngine({
 // C4: the formatting tools run on the LIGHT model through this hook (fast + cheap by design).
 CTX.lightChat = (messages, o = {}) => ollamaChat(LIGHT_MODEL, messages, { noTools: true, ...o });
 
-function systemPrompt(persona, modeFrag) {
+function systemPrompt(persona, modeFrag, wolfeTier = "ember") {
   let s = [
     "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is " + new Date().toISOString().slice(0, 10) + ".",
     "You run on his always-on mini-PC and you have real tools (hands). Use them when they help —",
@@ -783,18 +784,11 @@ function systemPrompt(persona, modeFrag) {
     "Real code/file changes go through forge_send. The sandbox is your private scratch space for drafts/notes.",
     "When you finish a tool action, briefly confirm what you actually did.",
   ].join(" ");
-  // WOLFE LOGIC (always on) — the reasoning discipline that sets Dominion apart from a generic
-  // assistant. Baked into EVERY answer for every user (the baseline). Forge Mode, when built, turns
-  // this up to its full deliberate form and unlocks the build tools. Named + explained in onboarding.
-  s += "\n\nWOLFE LOGIC (always on) — how you reason and answer, on every turn:\n" + [
-    "1. Reason from first principles and evidence. Give the actual logic, not vibes or vague consensus.",
-    "2. Verify, do not guess. If you are not certain a fact, number, name, or claim is right, say so plainly rather than inventing one. Flagging uncertainty beats sounding confident and being wrong.",
-    "3. Match care to stakes. Weigh how costly and how reversible being wrong would be, and spend more rigor where a mistake is expensive or hard to undo.",
-    "4. Name your assumptions. When you must assume something to proceed, state what you assumed so it can be checked.",
-    "5. Check your own answer before you give it. Ask what would make it wrong, and fix that first.",
-    "6. Substance over delivery. Answers stand on logic, facts, and sound reasoning, never on flourish or flattery. Cut filler; do not pad; do not praise the question.",
-    "7. House style: never use em dashes; never use the 'not X but Y' antithesis construction; use plain punctuation (colons, commas, semicolons, periods, parentheses).",
-  ].join("\n");
+  // WOLFE LOGIC — the reasoning core (wolfe-logic.mjs), always on. Ember is the baseline on every
+  // turn for every model; flame/furnace are the deeper passes chosen per turn (As Fred, Forge Mode,
+  // hard problems). This is the front-end constraint that makes Dominion different and lets the
+  // "As Fred" voice reason the way Fred does rather than echo his phrases.
+  s += "\n\n" + wolfeLogic(wolfeTier);
   // Operating Standards — Fred's house rules for a broadly-permissioned agent. These inform the
   // model's JUDGMENT (the code carve-out is the only hard wall). Set 2026-07-12.
   s += "\n\nOPERATING STANDARDS (always in force):\n" + [
@@ -1908,7 +1902,12 @@ async function handleChat(req, res) {
   let ctxInfo;
   try { ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model }, T); }
   catch { ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" }; }
-  const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag) }];
+  // Wolfe Logic tier for this turn: Ember always (baseline), Flame/Furnace deeper. Forge Mode is the
+  // dial (ember|flame|furnace, or legacy boolean true = furnace); As Fred forces furnace so the whole
+  // motion is present; deep_think/long_context bump to flame. Every model gets at least Ember.
+  const forgeDial = input.forgeMode === true ? "furnace" : (input.forgeMode || input.wolfeTier || "");
+  const wolfeTier = tierFor({ forgeMode: forgeDial, asFred: mode === "as_fred", hardProblem: (mode === "deep_think" || mode === "long_context") });
+  const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier) }];
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
   if (ctxInfo.block) messages.push({ role: "system", content: ctxInfo.block });
