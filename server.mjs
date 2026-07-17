@@ -35,6 +35,8 @@ import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, provider
 import { createHandsHub } from "./hands/hub.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
+import { createUsersStore } from "./tenancy.mjs";
+import { createTenantResolver, filterToolDefs } from "./tenantstores.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
 
@@ -711,6 +713,19 @@ const mentor = createMentor({
 });
 CTX.mentor = mentor;
 CTX.flywheel = flywheel;
+
+// ---- Multi-tenant (SOW items 1-6): resolve each request to its user; the OWNER short-circuits to
+// the global stores so Fred's path is byte-for-byte unchanged. Gated by MULTI_TENANT (default OFF)
+// so single-user prod is untouched until Fred flips it on. When ON: identity from the Cloudflare
+// Access header, per-user stores, role tool wall, and the local model refused for non-owners.
+const MULTI_TENANT = String(cfgGet("MULTI_TENANT", "0")) === "1";
+const OWNER_EMAIL = cfgGet("OWNER_EMAIL", "fredwolfe@gmail.com");
+const usersStore = createUsersStore({ dir: dataPath("tenants"), ownerEmail: OWNER_EMAIL });
+const tenants = createTenantResolver({ baseDir: DATA_DIR, embed: embedText,
+  globals: { memory, chatlog, artifacts, flywheel, sandboxDir: CTX.sandboxDir, ctx: CTX, persona }, users: usersStore });
+const OWNER_T = { role: "owner", isOwner: true, uid: "owner", email: OWNER_EMAIL, status: "active",
+  memory, chatlog, artifacts, flywheel, sandboxDir: CTX.sandboxDir, persona, ctxBase: CTX };
+const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
 // Auto mentor review — DEFAULT ON per Fred's LAX call (the self-improving loop stays alive):
 // tiered + sampled + fire-and-forget, all local (zero egress). AUTO_MENTOR=0 is the cautious flip.
 const AUTO_MENTOR = String(cfgGet("AUTO_MENTOR", "1")) !== "0";
@@ -882,24 +897,29 @@ async function routeDecision(lastUser, totalInputChars) {
 // approved memory (HYBRID lexical+vector) + relevant saved artifacts + snippets from earlier
 // conversations + active retrieval-scope rules. Pending/rejected/archived memory never appears.
 // Returns everything injected (for logging + the mentor review package) and a compact block.
-async function buildContext(lastUserText, chatId, { skipRetrieval = false, mode = "", model = "" } = {}) {
+async function buildContext(lastUserText, chatId, { skipRetrieval = false, mode = "", model = "" } = {}, stores) {
+  // Multi-tenant: retrieval + past-chat search run against the CALLER's own stores (owner = globals).
+  const mem = (stores && stores.memory) || memory;
+  const arts = (stores && stores.artifacts) || artifacts;
+  const log = (stores && stores.chatlog) || chatlog;
+  const fly = (stores && stores.flywheel) || flywheel;
   // B2: the LIVE scope context — chat-scoped memories only surface in their chat, tool-scoped
   // only in tool contexts, model-scoped only on the matching model. Global always loads.
   const scopeCtx = { chatId, mode, model };
-  const pinned = memory.alwaysLoaded({ limit: 6, scopeCtx });
-  const retrieved = skipRetrieval ? [] : await memory.retrieveHybrid(lastUserText || "", { limit: 4, scopeCtx });
+  const pinned = mem.alwaysLoaded({ limit: 6, scopeCtx });
+  const retrieved = skipRetrieval ? [] : await mem.retrieveHybrid(lastUserText || "", { limit: 4, scopeCtx });
   const seen = new Set(), used = [];
   for (const c of [...pinned, ...retrieved]) { if (seen.has(c.id)) continue; seen.add(c.id); used.push(c); }
   const parts = [];
   if (used.length) parts.push("Relevant saved memory about Fred (use it when helpful; don't recite it verbatim unless asked):\n" + used.map((c) => `- (${c.title}) ${c.content}`).join("\n"));
   let artifactsUsed = [], chatsUsed = [];
   if (!skipRetrieval && lastUserText) {
-    artifactsUsed = artifacts.list({ q: lastUserText }).slice(0, 2);
+    artifactsUsed = arts.list({ q: lastUserText }).slice(0, 2);
     if (artifactsUsed.length) parts.push("Possibly relevant saved artifacts (open with read_artifact if needed):\n" + artifactsUsed.map((a) => `- [${a.id.slice(0, 8)}] ${a.title} (${a.type}, v${a.version})`).join("\n"));
-    chatsUsed = chatlog.search(lastUserText, { limit: 2, excludeId: chatId });
+    chatsUsed = log.search(lastUserText, { limit: 2, excludeId: chatId });
     if (chatsUsed.length) parts.push("From earlier conversations with Fred:\n" + chatsUsed.map((h) => `- "${h.title}": ${h.snippet.slice(0, 220)}`).join("\n"));
   }
-  const retrievalRules = flywheel.activeRules("retrieval").filter((r) => r.scope === "retrieval");
+  const retrievalRules = fly.activeRules("retrieval").filter((r) => r.scope === "retrieval");
   if (retrievalRules.length) parts.push("Retrieval guidance — follow these when deciding what to look up:\n" + retrievalRules.map((r) => "- " + r.content).join("\n"));
   return { used, artifactsUsed, chatsUsed, block: parts.join("\n\n") };
 }
@@ -1739,6 +1759,19 @@ async function handleChat(req, res) {
       return endStream();
     }
   }
+  // Multi-tenant: resolve who is asking. Owner short-circuits to the globals (path unchanged); when
+  // MULTI_TENANT is off, this is always the owner. Refuse anon / paused / locked, and refuse the
+  // local model for non-owners (owner-only; never substituted).
+  const T = resolveTenant(req);
+  if (T.role === "anon") { sse({ type: "error", code: "no_identity", message: "Sign in to use Dominion." }); sse({ type: "stopped" }); return endStream(); }
+  if (T.status === "paused" || T.status === "locked") {
+    sse({ type: "error", code: "account_" + T.status, message: T.status === "locked" ? "Account locked — top off credits to continue." : "Account paused — the monthly cap was reached. Ask Fred to reset it." });
+    sse({ type: "stopped" }); return endStream();
+  }
+  if (!T.isOwner && !cloudModel) {
+    sse({ type: "error", code: "local_owner_only", message: "The local model is owner-only. Please choose a cloud model." });
+    sse({ type: "stopped" }); return endStream();
+  }
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
   job.chatId = chatId;
@@ -1806,13 +1839,13 @@ async function handleChat(req, res) {
   console.log(`[dominion-ai] /chat route -> ${model} · ${mode} (${reason}) · tools=${attachTools ? "on" : "off"} retrieval=${skipRetrieval ? "skip" : "on"}`);
 
   // Per-request tool context: the base CTX plus the live chat/mode (B2 scope for memory tools).
-  const reqCtx = { ...CTX, chatId, mode, model };
+  const reqCtx = { ...(T.ctxBase || CTX), chatId, mode, model };
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
   working("reading context");   // retrieval (embed call + vec cache) can be slow on a cold box
   // Degrade, don't die: this runs BEFORE the try below, and with disconnect decoupled from abort
   // an uncaught throw here would leak the lane + leave the job unsealed. Empty context is honest.
   let ctxInfo;
-  try { ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model }); }
+  try { ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model }, T); }
   catch { ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" }; }
   const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag) }];
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
@@ -1882,7 +1915,7 @@ async function handleChat(req, res) {
     if (cloudModel) {
       const cloudProvider = providerOf(cloudModel) || "openrouter";
       const cloudRec = modelById(cloudModel);
-      const cloudTools = attachTools ? toolDefs(flywheel.activeToolOverlays()) : null;
+      const cloudTools = attachTools ? filterToolDefs(toolDefs(flywheel.activeToolOverlays()), T.role) : null;
       let inTokTotal = 0, outTokTotal = 0, costTotal = 0, sawCost = false, sawTok = false;
       const bumpUsage = (u) => {
         if (!u) return;
@@ -2049,7 +2082,7 @@ async function handleChat(req, res) {
         : null;
       console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=${toolCount} rounds=${roundsUsed} conf=${quality.confidence}`);
       await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
-      try { chatlog.record(chatId, history, answer); } catch {}
+      try { T.chatlog.record(chatId, history, answer); } catch {}
       sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
       return endStream();
     }
@@ -2236,7 +2269,7 @@ async function handleChat(req, res) {
       const norm = normalizeResponse(last, model, mode, { quality, citations, warnings, metadata: { chatId, reason, rounds: roundsUsed, tools: toolCount, privacyRisk } });
       console.log(`[dominion-ai] usage ${model}/${mode} prompt=${norm.usage.inputTokens || "?"} out=${norm.usage.outputTokens || "?"} tools=${toolCount} conf=${quality.confidence} risk=${quality.hallucinationRisk}`);
       await logUsage({ ts: startedAt, model, mode, reason, route: routeInfo, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: norm.usage.inputTokens, outputTokens: norm.usage.outputTokens, latencyMs: norm.usage.latencyMs, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview });
-      try { chatlog.record(chatId, history, answer); } catch {}
+      try { T.chatlog.record(chatId, history, answer); } catch {}
       // F1 (audit item 26): runIds travel with the message meta so "show tool log" can filter the
       // tool panel to exactly this answer's runs (older messages fall back to chatId).
       sse({ type: "done", meta: { mode, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: toolRunIds, outputTokens: norm.usage.outputTokens, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview }, warnings: norm.warnings } });
