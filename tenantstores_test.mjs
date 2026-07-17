@@ -61,15 +61,16 @@ t("all users share the SAME persona corpus (read-only), including the owner", ()
   assert.equal(A.persona, globals.persona); assert.equal(O.persona, globals.persona);
 });
 
-t("tool wall: a non-owner CANNOT reach Fred's machines / deck / persona-write", () => {
-  for (const blocked of ["forge_send", "forge_read", "deck_add_note", "deck_create_project", "add_to_persona", "scrape_to_persona"]) {
+t("tool wall: a non-owner CANNOT reach machines / deck / persona-write / persona-CONTENT", () => {
+  // search_persona returns raw corpus text -> non-owners must NOT have it (titles+summary only).
+  for (const blocked of ["forge_send", "forge_read", "deck_add_note", "deck_create_project", "add_to_persona", "scrape_to_persona", "search_persona"]) {
     assert.equal(toolAllowedFor("credit", blocked), false, blocked + " must be blocked for non-owner");
     assert.equal(SAFE_TOOLS.has(blocked), false);
   }
 });
 
 t("tool wall: a non-owner CAN use the safe tools", () => {
-  for (const ok of ["web_search", "create_artifact", "remember", "search_persona", "sandbox_write", "run_python_sandbox"]) {
+  for (const ok of ["web_search", "create_artifact", "remember", "sandbox_write", "run_python_sandbox"]) {
     assert.equal(toolAllowedFor("credit", ok), true);
   }
 });

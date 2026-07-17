@@ -20,10 +20,15 @@ conversation quietly trains the shared logic.
   is namespaced per user at `/data/users/<userId>/…`. No user sees another's anything. Owner (Fred)
   keeps his existing root data.
 
-### Persona
-- Fred's persona corpus is **shared, read-only, to ALL users** ("As Fred" works for everyone).
-  `[user-stated]` Many asked for it. Adding to / editing the persona is **owner-only** (gate
-  `add_to_persona`, `scrape_to_persona`, and the Persona Forge write UI by role).
+### Persona (REFINED 2026-07-16)
+- Non-owners get **titles + a summary of what the corpus contributes ONLY — never the actual
+  contents.** `[user-stated]` This protects Fred's private writing (the L-017 concern). Concretely:
+  - `search_persona` (returns raw text) is BLOCKED for non-owners.
+  - The "As Fred" voice for non-owners is shaped by the **distilled profile summary**, never by
+    injecting Fred's raw exemplars (no raw text reaches their prompt or the provider).
+  - A non-owner persona panel is read-only: titles + kinds + the profile summary.
+- Owner keeps full corpus access (raw text, exemplars, search). Persona WRITE (`add_to_persona`,
+  `scrape_to_persona`, Forge write UI) is owner-only.
 
 ### Models
 - **No user but Fred may use the local model.** The picker hides it and the server refuses it for

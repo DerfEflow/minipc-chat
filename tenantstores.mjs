@@ -25,7 +25,9 @@ export const SAFE_TOOLS = new Set([
   "create_docx", "create_pdf", "create_spreadsheet", "search_artifacts", "compare_artifacts",
   "remember", "recall_memory", "update_memory", "save_lesson", "request_review",
   "search_chats", "retrieve_context_pack",
-  "search_persona",                 // READ Fred's corpus; write tools are owner-only
+  // NOTE: search_persona is DELIBERATELY absent. Non-owners never read the corpus CONTENTS. They get
+  // only titles + a summary of what it contributes (via a read-only panel), and the "As Fred" voice
+  // is shaped by the distilled profile summary, never by injecting Fred's raw writing. (Fred, 2026-07-16)
   "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox",
 ]);
 
