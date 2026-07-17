@@ -43,6 +43,7 @@ import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore } from "./forge.mjs";
+import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
 
@@ -2698,6 +2699,8 @@ const server = http.createServer(async (req, res) => {
     // SaaS layer (multi-tenant). Onboarding content is served to any signed-in user; account/billing
     // are per-caller; admin is owner-only. Inert for the owner in single-tenant mode.
     if (path === "/content/tutorial" && req.method === "GET") { res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); return res.end(JSON.stringify(onboardingPayload())); }
+    // Plain clickable Setup page (account / redeem / mint / billing / forge) — no dev console needed.
+    if ((path === "/setup" || path === "/setup/") && req.method === "GET") { res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); return res.end(SETUP_HTML); }
     if (path === "/billing/return" && req.method === "GET") return handleBilling(req, res, u);
     if (path === "/webhooks/stripe" && req.method === "POST") return handleStripeWebhook(req, res);
     if (path === "/account" || path.startsWith("/account/")) return handleAccount(req, res, u);

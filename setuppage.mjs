@@ -1,0 +1,100 @@
+/*
+ * Dominion AI — plain Setup page (served at /setup). A clickable utility surface for the multi-tenant
+ * actions while the styled product UI is built elsewhere: see your account, redeem a code, (owner)
+ * mint codes and view users, top up credits, and set up your Forge node + folders. It calls the
+ * same-origin JSON endpoints with the Access cookie, so no dev console is needed. Self-contained.
+ */
+export const SETUP_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dominion AI — Setup</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  body{margin:0;font:16px/1.5 system-ui,Segoe UI,Roboto,sans-serif;background:#0b0f1a;color:#e7ecf5}
+  .wrap{max-width:720px;margin:0 auto;padding:22px 16px 60px}
+  h1{font-size:22px;margin:.2em 0;color:#cfe0ff}
+  h2{font-size:15px;text-transform:uppercase;letter-spacing:.06em;color:#8aa2c8;margin:0 0 10px}
+  .card{background:#121829;border:1px solid #223052;border-radius:14px;padding:16px 16px;margin:14px 0}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+  input,select{background:#0d1322;border:1px solid #2a3a5f;color:#e7ecf5;border-radius:9px;padding:9px 11px;font-size:15px;min-width:0}
+  input[type=text]{flex:1}
+  button{background:#1c4fd8;border:0;color:#fff;border-radius:9px;padding:10px 15px;font-size:15px;font-weight:600;cursor:pointer}
+  button.alt{background:#243252}
+  button:active{transform:translateY(1px)}
+  .kv{display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px solid #1a2540}
+  .kv b{color:#a9c2ee;font-weight:600}
+  .code{font:600 20px ui-monospace,Consolas,monospace;color:#8fe3b0;background:#0d1c14;border:1px dashed #2f5c43;border-radius:9px;padding:10px 12px;margin:8px 0;user-select:all;word-break:break-all}
+  .muted{color:#7d8cab;font-size:13px}
+  .ok{color:#8fe3b0}.err{color:#ff9a9a}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  td,th{text-align:left;padding:6px 6px;border-bottom:1px solid #1a2540}
+  .hidden{display:none}
+  a{color:#7fb0ff}
+</style></head><body><div class="wrap">
+<h1>Dominion AI — Setup</h1>
+<p class="muted">A simple control panel. Everything here also works once the full app UI is finished.</p>
+
+<div class="card"><h2>Your account</h2><div id="acct">Loading…</div>
+  <div class="row"><button class="alt" onclick="loadAcct()">Refresh</button></div></div>
+
+<div class="card" id="redeemCard"><h2>Redeem a code</h2>
+  <div class="row"><input type="text" id="code" placeholder="DOMI-XXXX-XXXX"><button onclick="redeem()">Redeem</button></div>
+  <div id="redeemMsg" class="muted"></div></div>
+
+<div class="card hidden" id="ownerCard"><h2>Owner — mint codes</h2>
+  <div class="row">
+    <button onclick="mint('invite')">Mint invite code</button>
+    <span class="muted">with</span><input type="number" id="promo" value="500" style="width:90px"><span class="muted">promo credits</span>
+  </div>
+  <div class="row"><button onclick="mint('free')">Mint free code</button><span class="muted">($20/mo, covered by you)</span></div>
+  <div id="mintOut"></div>
+  <div class="row"><button class="alt" onclick="loadUsers()">View users</button></div>
+  <div id="usersOut"></div>
+</div>
+
+<div class="card"><h2>Credits & billing</h2>
+  <div class="row">
+    <span class="muted">Top up</span>
+    <select id="topupAmt"><option value="12.5">$12.50</option><option value="25">$25</option><option value="50">$50</option><option value="100">$100</option></select>
+    <button onclick="topup()">Buy credits</button>
+  </div>
+  <div class="row"><label><input type="checkbox" id="autorc" onchange="setAuto()"> Auto-recharge when low</label></div>
+  <div id="billMsg" class="muted"></div></div>
+
+<div class="card"><h2>Forge (your machine)</h2>
+  <div id="forgeStatus" class="muted">Loading…</div>
+  <div class="row"><label><input type="checkbox" id="forgeEnable" onchange="toggleForge()"> Enable Forge</label></div>
+  <div class="row"><button onclick="getToken()">Get my node token</button><span class="muted">to install the Dominion node on your computer</span></div>
+  <div id="tokenOut"></div>
+  <div class="row"><input type="text" id="rootsIn" placeholder="C:/Users/you/projects, C:/Users/you/docs"><button onclick="saveRoots()">Save folders</button></div>
+  <div class="muted">List the folders Dominion may touch (up to 20), comma-separated. The picker with drive browsing arrives with the full UI.</div>
+  <div id="forgeMsg" class="muted"></div></div>
+
+<script>
+const j = async (m,p,b)=>{const r=await fetch(p,{method:m,headers:b?{'content-type':'application/json'}:{},body:b?JSON.stringify(b):undefined});try{return await r.json()}catch{return{status:r.status}}};
+const el = id=>document.getElementById(id);
+let ACCT={};
+async function loadAcct(){
+  ACCT = await j('GET','/account');
+  const c=[]; c.push(kv('Email',ACCT.email)); c.push(kv('Role',ACCT.role)); c.push(kv('Status',ACCT.status));
+  c.push(kv('Access',ACCT.invited?'active':'needs a code'));
+  if(ACCT.credits) c.push(kv('Credits',ACCT.credits.balance+' ('+ '$'+(ACCT.credits.usdValue||0).toFixed(2)+' value)'));
+  if(ACCT.sponsored) c.push(kv('Free plan','$'+(ACCT.sponsored.spentUsd||0).toFixed(2)+' of $'+ACCT.sponsored.capUsd+' this month'));
+  el('acct').innerHTML=c.join('');
+  el('ownerCard').classList.toggle('hidden',!ACCT.isOwner);
+  if(ACCT.credits) el('autorc').checked=!!ACCT.credits.autorecharge;
+  loadForge();
+}
+const kv=(k,v)=>'<div class="kv"><b>'+k+'</b><span>'+(v==null?'—':v)+'</span></div>';
+async function redeem(){const code=el('code').value.trim();if(!code)return;const r=await j('POST','/account/redeem',{code});el('redeemMsg').innerHTML=r.ok?'<span class=ok>Redeemed. You are now a '+r.role+' user'+(r.credits?(' with '+r.credits+' credits'):'')+'.</span>':'<span class=err>'+(r.error||'failed')+'</span>';loadAcct();}
+async function mint(type){const credits=type==='invite'?Number(el('promo').value||0):0;const r=await j('POST','/admin/codes/mint',{type,credits});if(r.codes&&r.codes[0]){el('mintOut').innerHTML='<div class=muted>'+(type==='invite'?'Invite':'Free')+' code (single use):</div><div class="code">'+r.codes[0].code+'</div><div class=muted>Give this to the person. They enter it under "Redeem a code".</div>'+el('mintOut').innerHTML;}else{el('mintOut').innerHTML='<span class=err>'+(r.error||'mint failed')+'</span>';}}
+async function loadUsers(){const r=await j('GET','/admin/users');if(!r.users)return;let h='<table><tr><th>Email</th><th>Role</th><th>Status</th><th>Credits</th></tr>';for(const u of r.users)h+='<tr><td>'+u.email+'</td><td>'+u.role+'</td><td>'+u.status+'</td><td>'+(u.credits||0)+'</td></tr>';el('usersOut').innerHTML=h+'</table>';}
+async function topup(){const usd=Number(el('topupAmt').value);const r=await j('POST','/billing/topup',{usd});if(r.url)location.href=r.url;else el('billMsg').innerHTML='<span class=err>'+(r.error||'billing not ready')+'</span>';}
+async function setAuto(){const r=await j('POST','/billing/autorecharge',{on:el('autorc').checked});el('billMsg').textContent=r.ok?'Saved.':'';}
+async function loadForge(){const s=await j('GET','/forge/status');el('forgeEnable').checked=!!s.enabled;el('forgeStatus').innerHTML=kv('Enabled',s.enabled?'yes':'no')+kv('Your node',s.nodeConnected?'<span class=ok>connected</span>':'not connected')+kv('Folders',(s.roots&&s.roots.length)?s.roots.join(', '):'none chosen');if(s.roots)el('rootsIn').value=(s.roots||[]).join(', ');}
+async function toggleForge(){await j('POST','/forge/enable',{on:el('forgeEnable').checked});loadForge();}
+async function getToken(){const r=await j('POST','/forge/token');if(r.token){el('tokenOut').innerHTML='<div class=muted>Your node token (keep it secret):</div><div class="code">'+r.token+'</div><div class=muted>Install the Dominion hands node on your computer with this token, then choose folders below.</div>';}}
+async function saveRoots(){const roots=el('rootsIn').value.split(',').map(s=>s.trim()).filter(Boolean);const r=await j('POST','/forge/roots',{roots});el('forgeMsg').innerHTML='<span class=ok>Saved '+(r.roots?r.roots.length:0)+' folder(s).'+(r.capped?' (capped at 20)':'')+'</span>';loadForge();}
+loadAcct();
+</script>
+</div></body></html>`;
