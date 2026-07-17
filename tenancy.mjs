@@ -38,6 +38,10 @@ export function createUsersStore({ dir, ownerEmail }) {
     sponsoredSpentUsd REAL NOT NULL DEFAULT 0,      -- rolling monthly spend against the cap
     capPeriod TEXT,                                 -- YYYY-MM the spend window applies to
     createdAt TEXT, updatedAt TEXT )`);
+  // Additive migrations (safe to re-run): invite gate + one-time tutorial flag.
+  for (const col of ["invited INTEGER NOT NULL DEFAULT 0", "tutorialSeen INTEGER NOT NULL DEFAULT 0"]) {
+    try { db.exec(`ALTER TABLE users ADD COLUMN ${col}`); } catch {}
+  }
   const now = () => new Date().toISOString();
   const stmt = {
     get: db.prepare("SELECT * FROM users WHERE email=?"),
@@ -45,6 +49,8 @@ export function createUsersStore({ dir, ownerEmail }) {
     setRole: db.prepare("UPDATE users SET role=?, updatedAt=? WHERE email=?"),
     setStatus: db.prepare("UPDATE users SET status=?, updatedAt=? WHERE email=?"),
     consent: db.prepare("UPDATE users SET consented=1, updatedAt=? WHERE email=?"),
+    invite: db.prepare("UPDATE users SET invited=1, updatedAt=? WHERE email=?"),
+    tutorial: db.prepare("UPDATE users SET tutorialSeen=1, updatedAt=? WHERE email=?"),
     setCap: db.prepare("UPDATE users SET sponsoredCapUsd=?, updatedAt=? WHERE email=?"),
     addSpend: db.prepare("UPDATE users SET sponsoredSpentUsd=?, capPeriod=?, updatedAt=? WHERE email=?"),
     all: db.prepare("SELECT * FROM users ORDER BY createdAt"),
@@ -69,9 +75,10 @@ export function createUsersStore({ dir, ownerEmail }) {
     const email = String((req && req.headers && req.headers[HEADER]) || "").trim().toLowerCase();
     if (!email) return { email: "", uid: "", role: "anon", status: "anon", isOwner: false };
     const row = autocreate ? ensure(email) : stmt.get.get(email);
-    if (!row) return { email, uid: userIdFor(email), role: "credit", status: "active", isOwner: email === OWNER };
+    if (!row) return { email, uid: userIdFor(email), role: "credit", status: "active", isOwner: email === OWNER, invited: email === OWNER, tutorialSeen: false };
     return { email: row.email, uid: row.uid, role: row.role, status: row.status, consented: !!row.consented,
-      isOwner: row.role === "owner", sponsoredCapUsd: row.sponsoredCapUsd, sponsoredSpentUsd: row.sponsoredSpentUsd, capPeriod: row.capPeriod };
+      isOwner: row.role === "owner", invited: row.role === "owner" || !!row.invited, tutorialSeen: !!row.tutorialSeen,
+      sponsoredCapUsd: row.sponsoredCapUsd, sponsoredSpentUsd: row.sponsoredSpentUsd, capPeriod: row.capPeriod };
   }
 
   // Roll the sponsored monthly spend into the cap; returns { over, spent, cap } after adding usd.
@@ -91,6 +98,8 @@ export function createUsersStore({ dir, ownerEmail }) {
     setRole: (email, role) => { if (!ROLES.includes(role)) return { error: "bad role" }; stmt.setRole.run(role, now(), String(email).toLowerCase()); return { ok: true }; },
     setStatus: (email, status) => { stmt.setStatus.run(status, now(), String(email).toLowerCase()); return { ok: true }; },
     markConsented: (email) => { stmt.consent.run(now(), String(email).toLowerCase()); return { ok: true }; },
+    markInvited: (email) => { stmt.invite.run(now(), String(email).toLowerCase()); return { ok: true }; },
+    markTutorialSeen: (email) => { stmt.tutorial.run(now(), String(email).toLowerCase()); return { ok: true }; },
     setSponsoredCap: (email, usd) => { stmt.setCap.run(Number(usd) || 0, now(), String(email).toLowerCase()); return { ok: true }; },
     resetSponsoredSpend: (email) => { stmt.addSpend.run(0, new Date().toISOString().slice(0, 7), now(), String(email).toLowerCase()); return { ok: true }; },
     addSponsoredSpend,

@@ -66,6 +66,8 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
     code TEXT PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unused',
     capUsd REAL, credits INTEGER NOT NULL DEFAULT 0, note TEXT,
     createdAt TEXT, redeemedBy TEXT, redeemedAt TEXT )`);
+  // Idempotency for paid Checkout sessions (return handler AND webhook may both fire).
+  db.exec(`CREATE TABLE IF NOT EXISTS paid_sessions ( id TEXT PRIMARY KEY, email TEXT, credits INTEGER, ts TEXT )`);
 
   const q = {
     get: db.prepare("SELECT * FROM credits WHERE email=?"),
@@ -81,6 +83,8 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
     codeRedeem: db.prepare("UPDATE codes SET status='redeemed', redeemedBy=?, redeemedAt=? WHERE code=?"),
     codeRevoke: db.prepare("UPDATE codes SET status='revoked' WHERE code=? AND status='unused'"),
     codeAll: db.prepare("SELECT * FROM codes ORDER BY createdAt DESC LIMIT ?"),
+    sessGet: db.prepare("SELECT id FROM paid_sessions WHERE id=?"),
+    sessIns: db.prepare("INSERT INTO paid_sessions (id,email,credits,ts) VALUES (?,?,?,?)"),
   };
 
   const lc = (e) => String(e || "").trim().toLowerCase();
@@ -102,6 +106,15 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
 
   // Grant purchased/promo credits from a USD amount (markup applied).
   function grantUsd(email, usd, reason) { return apply(email, creditsForUsd(usd), reason || `top-up $${usd}`); }
+  // Idempotent grant for a paid Checkout session (safe to call from BOTH the return handler and the
+  // webhook). Grants exactly the credits recorded on the session, once.
+  function grantSession(id, email, credits) {
+    const sid = String(id || ""); if (!sid) return { error: "no_session" };
+    if (q.sessGet.get(sid)) return { already: true, balance: balance(email) };
+    q.sessIns.run(sid, lc(email), Math.trunc(credits) || 0, now());
+    const bal = apply(email, Math.trunc(credits) || 0, `top-up session ${sid}`);
+    return { ok: true, credited: Math.trunc(credits) || 0, balance: bal };
+  }
   // Deduct a turn's token cost (USD) in credits. Returns { balance, deducted, low }.
   function chargeTurn(email, costUsd) {
     const deducted = creditsForCostUsd(costUsd);
@@ -168,6 +181,7 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
       if (row.type === "free") { users.ensure(e); users.setRole(e, "sponsored"); if (row.capUsd) users.setSponsoredCap(e, row.capUsd); }
       else { users.ensure(e); users.setRole(e, "credit"); }
       users.setStatus(e, "active");
+      if (users.markInvited) users.markInvited(e);   // redeeming any code passes the invite gate
     }
     if (row.credits > 0) grantUsd_credits(e, row.credits, `code ${row.code}`);
     return { ok: true, type: row.type, role: row.type === "free" ? "sponsored" : "credit", credits: row.credits };
@@ -176,7 +190,7 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
 
   return {
     // ledger
-    balance, canChat, grantUsd, chargeTurn, autoRecharge, apply,
+    balance, canChat, grantUsd, grantSession, chargeTurn, autoRecharge, apply,
     adminAdjust: (email, credits, reason) => apply(email, credits, reason || "admin adjust"),
     ledger: (email, limit = 50) => q.ledgerFor.all(lc(email), limit),
     account: (email) => { const r = ensure(email); return { balance: r.balance, usdValue: usdValueOfCredits(r.balance), autorecharge: !!r.autorecharge, topupUsd: r.topupUsd, hasCard: !!r.defaultPm, rechargeFails: r.rechargeFails }; },

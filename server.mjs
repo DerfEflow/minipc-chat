@@ -39,6 +39,9 @@ import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createUsersStore } from "./tenancy.mjs";
 import { createTenantResolver, filterToolDefs } from "./tenantstores.mjs";
+import { createBilling, creditsForUsd } from "./billing.mjs";
+import { createStripe } from "./stripe.mjs";
+import { onboardingPayload } from "./onboarding.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
 
@@ -750,6 +753,143 @@ const tenants = createTenantResolver({ baseDir: DATA_DIR, embed: embedText,
 const OWNER_T = { role: "owner", isOwner: true, uid: "owner", email: OWNER_EMAIL, status: "active",
   memory, chatlog, artifacts, flywheel, sandboxDir: CTX.sandboxDir, persona, ctxBase: CTX };
 const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
+// Billing (SaaS layer, SOW item 2). Stripe uses the sandbox keys; billing's auto-recharge charge is
+// wired to Stripe. Both are inert until MULTI_TENANT is on and a user is a non-owner. The app base URL
+// is used to build Checkout return links.
+const APP_BASE_URL = cfgGet("APP_BASE_URL", "https://app.dominion.tools");
+const stripe = createStripe({
+  secretKey: cfgGet("STRIPE_SECRET_KEY", cfgGet("DOMI_AI_STRIPE_SANDBOX_SECRET_KEY", "")),
+  publishableKey: cfgGet("STRIPE_PUBLISHABLE_KEY", cfgGet("DOMI_AI_STRIPE_SANDBOX_PUBLISHABLE_KEY", "")),
+  webhookSecret: cfgGet("STRIPE_WEBHOOK_SECRET", ""),
+  log: (s) => console.log("[dominion-ai] stripe: " + s),
+});
+const billing = createBilling({ dir: dataPath("billing"), users: usersStore, charge: (args) => stripe.charge(args) });
+// Shared training sink (SOW): with consent, non-owner turns append to one JSONL the owner can mine to
+// improve the shared logic. Owner turns are Fred's own and are not swept here.
+const TRAINING_SINK = join(LOG_DIR, "training-sink.jsonl");
+async function trainingSinkRecord(entry) { try { await appendFile(TRAINING_SINK, JSON.stringify(entry) + "\n"); } catch {} }
+// Meter a completed non-owner turn: credit users are charged (cost x100 credits) and auto-recharged
+// when low; sponsored users draw against Fred's monthly cap; consented turns feed the shared training
+// sink. Owner turns and single-tenant mode are never metered. Never throws (billing must not break chat).
+async function meterTurn(T, costUsd, promptText, answer) {
+  if (!MULTI_TENANT || !T || T.isOwner) return;
+  try {
+    if (T.role === "credit") {
+      const m = billing.chargeTurn(T.email, costUsd || 0);
+      if (m.low) billing.autoRecharge(T.email).catch(() => {});   // fire-and-forget; locks on repeated failure
+    } else if (T.role === "sponsored") {
+      users.addSponsoredSpend(T.email, costUsd || 0);              // pauses the account at the cap
+    }
+    if (T.consented) trainingSinkRecord({ ts: new Date().toISOString(), uid: T.uid, role: T.role, prompt: String(promptText || "").slice(0, 4000), answer: String(answer || "").slice(0, 8000) });
+  } catch {}
+}
+
+// ===================== SaaS endpoints (account / billing / admin / onboarding) =====================
+const sjson = (res, code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+
+// The caller's account view: role, status, onboarding flags, and (non-owner) their credit/sponsor state.
+async function handleAccount(req, res, u) {
+  const T = resolveTenant(req);
+  if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
+  const p = u.pathname;
+  if (req.method === "GET" && p === "/account") {
+    const out = { email: T.email, role: T.role, status: T.status, isOwner: T.isOwner, invited: !!T.invited,
+      consented: !!T.consented, tutorialSeen: !!T.tutorialSeen, multiTenant: MULTI_TENANT,
+      pricing: billing.pricing, stripeConfigured: stripe.enabled, publishableKey: stripe.publishableKey };
+    if (!T.isOwner && T.role === "credit") out.credits = billing.account(T.email);
+    if (!T.isOwner && T.role === "sponsored") out.sponsored = { capUsd: T.sponsoredCapUsd, spentUsd: T.sponsoredSpentUsd || 0 };
+    return sjson(res, 200, out);
+  }
+  const body = (await readJsonBody(req)) || {};
+  if (req.method === "POST" && p === "/account/redeem") {
+    const r = billing.redeem(String(body.code || ""), T.email);
+    return sjson(res, r.error ? 400 : 200, r);
+  }
+  if (req.method === "POST" && p === "/account/consent") { usersStore.markConsented(T.email); return sjson(res, 200, { ok: true }); }
+  if (req.method === "POST" && p === "/account/tutorial-seen") { usersStore.markTutorialSeen(T.email); return sjson(res, 200, { ok: true }); }
+  return sjson(res, 404, { error: "not found" });
+}
+
+// Credit top-ups (hosted Stripe Checkout), the return handler, and auto-recharge settings.
+async function handleBilling(req, res, u) {
+  const T = resolveTenant(req);
+  const p = u.pathname;
+  // Return from Checkout: verify, save the card, grant credits once, then bounce back to the app.
+  if (req.method === "GET" && p === "/billing/return") {
+    const id = u.searchParams.get("session_id") || "";
+    try {
+      const v = await stripe.verifySession(id);
+      if (v.ok && v.paid && v.email) {
+        if (v.customer) billing.setStripe(v.email, v.customer, v.paymentMethod);
+        billing.grantSession(id, v.email, v.credits);
+        if (usersStore.setStatus) usersStore.setStatus(v.email, "active");   // unlock if they were locked
+      }
+    } catch {}
+    res.writeHead(302, { location: APP_BASE_URL + "/?topup=done" }); return res.end();
+  }
+  if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
+  if (!T.invited && !T.isOwner) return sjson(res, 403, { error: "redeem an invite code first" });
+  const body = (await readJsonBody(req)) || {};
+  if (req.method === "POST" && p === "/billing/topup") {
+    if (!stripe.enabled) return sjson(res, 503, { error: "billing not configured" });
+    const usd = Math.max(billing.pricing.MIN_TOPUP_USD, Number(body.usd) || billing.pricing.MIN_TOPUP_USD);
+    const r = await stripe.checkout({ email: T.email, usd, credits: creditsForUsd(usd),
+      successUrl: APP_BASE_URL + "/billing/return?session_id={CHECKOUT_SESSION_ID}", cancelUrl: APP_BASE_URL + "/?topup=cancel" });
+    return sjson(res, r.error ? 400 : 200, r);
+  }
+  if (req.method === "POST" && p === "/billing/autorecharge") {
+    const r = billing.setAutorecharge(T.email, body.on !== false, body.topupUsd);
+    return sjson(res, 200, { ...r, account: billing.account(T.email) });
+  }
+  return sjson(res, 404, { error: "not found" });
+}
+
+// Stripe webhook (used only when a webhook secret is configured; otherwise the return handler grants).
+async function handleStripeWebhook(req, res) {
+  let raw = ""; for await (const c of req) raw += c;
+  const v = stripe.verifyWebhook(raw, req.headers["stripe-signature"]);
+  if (!v.ok) return sjson(res, 400, { error: v.error || "bad signature" });
+  const ev = v.event;
+  if (ev.type === "checkout.session.completed") {
+    const s = ev.data && ev.data.object || {};
+    const email = (s.metadata && s.metadata.email) || s.customer_email || "";
+    const credits = Number(s.metadata && s.metadata.credits) || 0;
+    if (email && s.id) { billing.grantSession(s.id, email, credits); if (s.customer) billing.setStripe(email, s.customer, ""); }
+  }
+  return sjson(res, 200, { received: true });
+}
+
+// Owner-only admin: users, codes (mint invite/free at will), balances.
+async function handleAdmin(req, res, u) {
+  const T = resolveTenant(req);
+  if (!T.isOwner) return sjson(res, 403, { error: "owner only" });
+  const p = u.pathname;
+  if (req.method === "GET" && p === "/admin/users") {
+    const rows = usersStore.list().map((r) => ({ email: r.email, role: r.role, status: r.status, invited: !!r.invited,
+      consented: !!r.consented, sponsoredCapUsd: r.sponsoredCapUsd, sponsoredSpentUsd: r.sponsoredSpentUsd,
+      credits: billing.balance(r.email) }));
+    return sjson(res, 200, { users: rows });
+  }
+  if (req.method === "GET" && p === "/admin/codes") return sjson(res, 200, { codes: billing.listCodes(Number(u.searchParams.get("limit")) || 200) });
+  const body = (await readJsonBody(req)) || {};
+  if (req.method === "POST" && p === "/admin/user") {
+    const email = String(body.email || "").toLowerCase(); if (!email) return sjson(res, 400, { error: "email required" });
+    usersStore.ensure(email);
+    if (body.role) usersStore.setRole(email, body.role);
+    if (body.status) usersStore.setStatus(email, body.status);
+    if (typeof body.capUsd === "number") usersStore.setSponsoredCap(email, body.capUsd);
+    if (typeof body.adjustCredits === "number") billing.adminAdjust(email, body.adjustCredits, "admin adjust");
+    return sjson(res, 200, { ok: true });
+  }
+  if (req.method === "POST" && p === "/admin/codes/mint") {
+    const count = Math.max(1, Math.min(100, Number(body.count) || 1));
+    const codes = [];
+    for (let i = 0; i < count; i++) codes.push(billing.mintCode({ type: body.type, capUsd: body.capUsd, credits: body.credits, note: body.note }));
+    return sjson(res, 200, { codes });
+  }
+  if (req.method === "POST" && p === "/admin/codes/revoke") { billing.revokeCode(String(body.code || "")); return sjson(res, 200, { ok: true }); }
+  return sjson(res, 404, { error: "not found" });
+}
 // Auto mentor review — DEFAULT ON per Fred's LAX call (the self-improving loop stays alive):
 // tiered + sampled + fire-and-forget, all local (zero egress). AUTO_MENTOR=0 is the cautious flip.
 const AUTO_MENTOR = String(cfgGet("AUTO_MENTOR", "1")) !== "0";
@@ -1116,6 +1256,11 @@ async function handleVoiceTts(req, res) {
 async function handleMemory(req, res, u) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   const path = u.pathname;
+  // Tenant isolation: a non-owner sees ONLY their own memory/chatlog. Owner resolves to the globals,
+  // so Fred's path is unchanged. (These local bindings shadow the module globals for this request.)
+  const T = resolveTenant(req);
+  if (T.role === "anon") return json(401, { error: "sign in" });
+  const memory = T.memory, chatlog = T.chatlog;
   if (req.method === "GET" && path === "/memory") {
     const items = memory.list({ status: u.searchParams.get("status") || "", type: u.searchParams.get("type") || "", q: u.searchParams.get("q") || "" });
     return json(200, { items, stats: memory.stats() });
@@ -1154,8 +1299,11 @@ async function handleMemory(req, res, u) {
 
 // Tool-run log (Phase 3 tool log UI): GET /toolruns -> recent tool runs (newest first).
 function handleToolRuns(req, res) {
+  // The in-memory tool-run tail is the OWNER's. Non-owners get an empty list (no cross-tenant leak).
+  const T = resolveTenant(req);
+  const runs = T.isOwner ? [...toolRunTail].reverse().slice(0, 100) : [];
   res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-  res.end(JSON.stringify({ runs: [...toolRunTail].reverse().slice(0, 100) }));
+  res.end(JSON.stringify({ runs }));
 }
 
 // Tool confirmation callback (Phase 3): the client POSTs {runId, approved} to approve/deny a gated tool.
@@ -1228,6 +1376,11 @@ function evalArtifactTriggers(id, sig = {}) {
 async function handleArtifacts(req, res, u) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   const p = u.pathname;
+  // Tenant isolation: a non-owner sees ONLY their own artifacts. Owner resolves to the globals.
+  const T = resolveTenant(req);
+  if (T.role === "anon") return json(401, { error: "sign in" });
+  const artifacts = T.artifacts;
+  const sweep = (id, sig) => { if (T.isOwner) { try { evalArtifactTriggers(id, sig || {}); } catch {} } };
   if (req.method === "GET" && p === "/artifacts") return json(200, { items: artifacts.list({ status: u.searchParams.get("status") || "", type: u.searchParams.get("type") || "", q: u.searchParams.get("q") || "" }), stats: artifacts.stats() });
   if (req.method === "GET" && p === "/artifacts/get") { const a = artifacts.get(u.searchParams.get("id")); return json(a ? 200 : 404, a || { error: "not found" }); }
   if (req.method === "GET" && p === "/artifacts/content") { const c = artifacts.getContent(u.searchParams.get("id"), Number(u.searchParams.get("v")) || 0); return json(c == null ? 404 : 200, { content: c || "" }); }
@@ -1236,12 +1389,12 @@ async function handleArtifacts(req, res, u) {
     const body = await readJsonBody(req); if (!body) return json(400, { error: "bad json" });
     if (p === "/artifacts") {
       const r = artifacts.create(body);
-      if (r.item) evalArtifactTriggers(r.item.id, {});   // E1: trigger sweep on creation
+      if (r.item) sweep(r.item.id, {});   // E1: trigger sweep on creation (owner only)
       return json(200, r);
     }
     if (p === "/artifacts/version") {
       const r = artifacts.addVersion(body.id, body);     // E4: body may carry per-version provenance
-      if (r.item) evalArtifactTriggers(body.id, {});     // E1: drift & co. re-checked on revision
+      if (r.item) sweep(body.id, {});     // E1: drift & co. re-checked on revision
       return json(200, r);
     }
     if (p === "/artifacts/setversion") return json(200, artifacts.setVersion(body.id, Number(body.version)));
@@ -1249,15 +1402,15 @@ async function handleArtifacts(req, res, u) {
       const wasFinal = (artifacts.get(body.id) || {}).status === "final";
       const r = artifacts.update(body.id, body);
       // E1: user marks an artifact FINAL → full trigger sweep (final_output + whatever else fires).
-      if (!wasFinal && body.status === "final" && r.item) evalArtifactTriggers(body.id, { markedFinal: true });
+      if (!wasFinal && body.status === "final" && r.item) sweep(body.id, { markedFinal: true });
       return json(200, r);
     }
     if (p === "/artifacts/delete") return json(200, artifacts.remove(body.id));
     if (p === "/artifacts/export") {
-      // E2: the single gated export path (safety checks + native generation + Forge fallback).
-      const r = await exportGated(body.id, body.format, { destination: body.destination, overrideSensitive: body.override_sensitive === true });
-      // E1: artifact exported → trigger sweep (external_send + whatever else fires).
-      if (!r.error && !r.blocked) evalArtifactTriggers(body.id, { exported: true });
+      // E2: the single gated export path (safety checks + native generation + Forge fallback), against
+      // the CALLER's artifact store so non-owners export only their own documents.
+      const r = await exportGated(body.id, body.format, { destination: body.destination, overrideSensitive: body.override_sensitive === true }, artifacts);
+      if (!r.error && !r.blocked) sweep(body.id, { exported: true });
       return json(200, r);
     }
     if (p === "/artifacts/review") {
@@ -1308,15 +1461,15 @@ async function transformArtifact(id, kind) {
 // the default LAX posture returns the warnings and proceeds — EXCEPT sensitive-data, which
 // requires an explicit override in both modes.
 const EXPORT_SAFETY_LAX = String(cfgGet("EXPORT_SAFETY", "lax")).toLowerCase() !== "spec";
-async function exportGated(id, format, { destination = "", overrideSensitive = false, confirmed = false } = {}) {
-  const a = artifacts.get(id); if (!a) return { error: "not found" };
+async function exportGated(id, format, { destination = "", overrideSensitive = false, confirmed = false } = {}, store = artifacts) {
+  const a = store.get(id); if (!a) return { error: "not found" };
   const gate = exportSafetyGate({ artifact: a, format, destination: destination || "local exports folder", overrideSensitive, lax: EXPORT_SAFETY_LAX, confirmed });
   if (!gate.ok) {
     console.log(`[dominion-ai] export BLOCKED (${gate.blocked}): "${a.title}" as ${gate.checks.format}`);
     return { blocked: gate.blocked, detected: gate.detected, error: gate.message, gate: { checks: gate.checks, warnings: gate.warnings } };
   }
   if (gate.warnings.length) console.log(`[dominion-ai] export warnings for "${a.title}": ${gate.warnings.map((w) => w.check).join(", ")} (proceeding — LAX)`);
-  let r = artifacts.exportArtifact(id, gate.checks.format);
+  let r = store.exportArtifact(id, gate.checks.format);
   if (r && r.nativeFailed && ["docx", "pdf"].includes(gate.checks.format)) {
     console.log(`[dominion-ai] native ${gate.checks.format} failed ("${r.error}") — falling back to the Forge work order`);
     r = await forgeConvertFallback(a, gate.checks.format);
@@ -1635,6 +1788,19 @@ function startDistill(opts) {
 async function handlePersona(req, res, u) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   const p = u.pathname;
+  // Non-owners NEVER read the corpus contents. They may see shared TITLES and a SUMMARY of what the
+  // corpus contributes, and nothing else. (Fred, 2026-07-16.) The owner path continues unchanged.
+  const PT = resolveTenant(req);
+  if (PT.role === "anon") return json(401, { error: "sign in" });
+  if (!PT.isOwner) {
+    if (req.method === "GET" && (p === "/persona" || p === "/persona/list")) {
+      const items = persona.list({ sharedOnly: true }).map((d) => ({ id: d.id, title: d.title, kind: d.kind }));
+      return json(200, { readOnly: true, count: items.length,
+        summary: "A private corpus of Fred's own writing shapes the assistant's voice and reasoning. The contents are not shared; only titles are visible.",
+        items: p === "/persona/list" ? items : undefined });
+    }
+    return json(403, { error: "The corpus contents are private. Titles and a summary only." });
+  }
   if (req.method === "GET" && p === "/persona") return json(200, { stats: persona.stats(), kinds: PERSONA_KINDS, profile: persona.getProfile() ? { ...persona.getProfile(), facets: undefined } : null });
   if (req.method === "GET" && p === "/persona/profile") return json(200, { profile: persona.getProfile() });
   if (req.method === "GET" && p === "/persona/list") return json(200, { items: persona.list({ kind: u.searchParams.get("kind") || "", q: u.searchParams.get("q") || "" }), stats: persona.stats() });
@@ -1804,6 +1970,17 @@ async function handleChat(req, res) {
   if (T.role === "anon") { sse({ type: "error", code: "no_identity", message: "Sign in to use Dominion." }); sse({ type: "stopped" }); return endStream(); }
   if (T.status === "paused" || T.status === "locked") {
     sse({ type: "error", code: "account_" + T.status, message: T.status === "locked" ? "Account locked — top off credits to continue." : "Account paused — the monthly cap was reached. Ask Fred to reset it." });
+    sse({ type: "stopped" }); return endStream();
+  }
+  // Invite gate: a non-owner who has not redeemed a code (invite or free) has no access yet.
+  if (!T.isOwner && !T.invited) {
+    sse({ type: "error", code: "needs_invite", message: "Enter an invite code to start using Dominion." });
+    sse({ type: "stopped" }); return endStream();
+  }
+  // Credit gate: a paid (credit) user with an empty balance must top up. Sponsored/free users are
+  // gated by their cap (status paused above), not by credits.
+  if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) {
+    sse({ type: "error", code: "needs_credits", message: "You're out of credits. Add credits to continue." });
     sse({ type: "stopped" }); return endStream();
   }
   if (!T.isOwner && !cloudModel) {
@@ -2175,6 +2352,7 @@ async function handleChat(req, res) {
       console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=${toolCount} rounds=${roundsUsed} conf=${quality.confidence}`);
       await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
       try { T.chatlog.record(chatId, history, answer); } catch {}
+      await meterTurn(T, costUsd, lastUserText, answer);   // SaaS: charge credits / draw cap / training sink (non-owner only)
       sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
       return endStream();
     }
@@ -2427,7 +2605,10 @@ const server = http.createServer(async (req, res) => {
       if (!name || name !== basename(name) || !/\.(pdf|docx|xlsx|csv|txt|md|json|html)$/i.test(name)) {
         res.writeHead(400, { "content-type": "text/plain" }); return res.end("bad export name");
       }
-      const file = join(ARTIFACT_DIR, "exports", name);
+      // Tenant-aware: serve from the CALLER's own exports dir (owner = global; non-owner = their store).
+      const T = resolveTenant(req);
+      const exportsDir = T.isOwner ? join(ARTIFACT_DIR, "exports") : join(DATA_DIR, "users", T.uid, "artifacts", "exports");
+      const file = join(exportsDir, name);
       if (!existsSync(file)) { res.writeHead(404, { "content-type": "text/plain" }); return res.end("not found"); }
       const buf = readFileSync(file);
       res.writeHead(200, {
@@ -2445,6 +2626,15 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify(est));
     }
+
+    // SaaS layer (multi-tenant). Onboarding content is served to any signed-in user; account/billing
+    // are per-caller; admin is owner-only. Inert for the owner in single-tenant mode.
+    if (path === "/content/tutorial" && req.method === "GET") { res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); return res.end(JSON.stringify(onboardingPayload())); }
+    if (path === "/billing/return" && req.method === "GET") return handleBilling(req, res, u);
+    if (path === "/webhooks/stripe" && req.method === "POST") return handleStripeWebhook(req, res);
+    if (path === "/account" || path.startsWith("/account/")) return handleAccount(req, res, u);
+    if (path.startsWith("/billing/")) return handleBilling(req, res, u);
+    if (path.startsWith("/admin/") && path !== "/admin/restore-corpus") return handleAdmin(req, res, u);
 
     if (path === "/api/voice/transcribe" && req.method === "POST") return handleVoiceTranscribe(req, res);
     if (path === "/api/voice/tts" && req.method === "POST") return handleVoiceTts(req, res);

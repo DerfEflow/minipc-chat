@@ -71,7 +71,9 @@ export function createTenantResolver({ baseDir, embed, globals, users }) {
     // are NOT copied (no deck/forge creds), so those tools are inert for them even before the filter.
     const ctxBase = s ? { sandboxDir: s.sandboxDir, memory: s.memory, artifacts: s.artifacts,
       chatlog: s.chatlog, flywheel: s.flywheel, persona: globals.persona, serpKey: globals.ctx.serpKey,
-      lightChat: globals.ctx.lightChat, exportGated: globals.ctx.exportGated } : null;
+      lightChat: globals.ctx.lightChat,
+      // Export through the CALLER's own artifact store so non-owners never touch the owner's artifacts.
+      exportGated: (id, fmt, o) => globals.ctx.exportGated(id, fmt, o, s.artifacts) } : null;
     return s ? { ...id, memory: s.memory, chatlog: s.chatlog, artifacts: s.artifacts, flywheel: s.flywheel,
       sandboxDir: s.sandboxDir, persona: globals.persona, ctxBase } : { ...id, ctxBase: null };
   }
