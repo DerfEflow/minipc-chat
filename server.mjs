@@ -2126,6 +2126,11 @@ async function handleChat(req, res) {
         needs: { tools: attachTools, memory: needs.memory, retrieval: !skipRetrieval, mentor_review: needs.mentorReview }, privacyRisk });
   console.log(`[dominion-ai] /chat route -> ${model} · ${mode} (${reason}) · tools=${attachTools ? "on" : "off"} retrieval=${skipRetrieval ? "skip" : "on"}`);
 
+  // Wolfe Logic tier for this turn (declared before reqCtx because the Forge gate below reads the dial):
+  // Ember always; Flame on deep_think/long_context; Furnace on As-Fred and Forge Mode. Forge Mode is
+  // the dial (ember|flame|furnace, or legacy boolean true = furnace).
+  const forgeDial = input.forgeMode === true ? "furnace" : (input.forgeMode || input.wolfeTier || "");
+  const wolfeTier = tierFor({ forgeMode: forgeDial, asFred: mode === "as_fred", hardProblem: (mode === "deep_think" || mode === "long_context") });
   // Per-request tool context: the base CTX plus the live chat/mode (B2 scope for memory tools).
   const reqCtx = { ...(T.ctxBase || CTX), chatId, mode, model };
   // Per-user Forge: a non-owner who has ENABLED their own Forge node AND engaged Forge Mode this turn
@@ -2147,11 +2152,6 @@ async function handleChat(req, res) {
   let ctxInfo;
   try { ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model }, T); }
   catch { ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" }; }
-  // Wolfe Logic tier for this turn: Ember always (baseline), Flame/Furnace deeper. Forge Mode is the
-  // dial (ember|flame|furnace, or legacy boolean true = furnace); As Fred forces furnace so the whole
-  // motion is present; deep_think/long_context bump to flame. Every model gets at least Ember.
-  const forgeDial = input.forgeMode === true ? "furnace" : (input.forgeMode || input.wolfeTier || "");
-  const wolfeTier = tierFor({ forgeMode: forgeDial, asFred: mode === "as_fred", hardProblem: (mode === "deep_think" || mode === "long_context") });
   const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier) }];
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
