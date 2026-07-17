@@ -71,7 +71,9 @@ function discoverMaxRoots() {
   return out;
 }
 const MAX_ACCESS = String(process.env.HANDS_MAX_ACCESS || "") === "1";
-const ROOTS = [
+// ROOTS is mutable: the owner sets it via env (HANDS_ROOTS / HANDS_MAX_ACCESS), and a per-user node
+// receives it at runtime from the folder picker via the set_roots job (bounded by carve-outs below).
+let ROOTS = [
   ...(MAX_ACCESS ? discoverMaxRoots() : []),
   ...String(process.env.HANDS_ROOTS || "").split(",").map((s) => s.trim()).filter(Boolean),
 ];
@@ -154,6 +156,29 @@ export async function executeJob(tool, args = {}) {
     switch (tool) {
       case "node_info":
         return { ok: true, node: NODE_NAME, host: hostname(), platform: process.platform, roots: ROOTS, protectedDirs: SELF_PROTECT.length, pid: process.pid, uptimeSec: Math.round(process.uptime()), version: VERSION };
+      case "set_roots": {
+        // The folder picker sets which folders this node may touch. Carve-outs and self-protect are
+        // never overridable: a protected or self-protected path is dropped, not honored.
+        const incoming = (Array.isArray(args.roots) ? args.roots : []).map((s) => String(s || "").trim()).filter(Boolean).slice(0, 40);
+        const accepted = incoming.filter((r) => assertNotProtected({ path: r }).ok && !underAny(r, SELF_PROTECT));
+        ROOTS = accepted;
+        return { ok: true, roots: ROOTS, dropped: incoming.length - accepted.length };
+      }
+      case "fs_browse": {
+        // Folder navigation for the picker: list DRIVES (no path) or immediate SUBFOLDERS of a path.
+        // Returns folder names only (no file contents), NOT gated by ROOTS so the user can choose from
+        // their whole machine, but carve-outs still hard-deny protected locations.
+        if (!args.path) return { ok: true, path: "", dirs: (IS_WIN ? discoverMaxRoots() : ["/"]).map((d) => ({ name: d, path: d })) };
+        const w = assertNotProtected({ path: args.path }); if (!w.ok) return refuse(w.reason);
+        if (!existsSync(args.path)) return { ok: false, error: "not found: " + args.path };
+        let ents = [];
+        try { ents = readdirSync(args.path, { withFileTypes: true }); } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+        const dirs = ents.filter((e) => { try { return e.isDirectory(); } catch { return false; } })
+          .map((e) => e.name).filter((n) => !n.startsWith("$")).slice(0, 500)
+          .map((n) => ({ name: n, path: join(args.path, n) }))
+          .filter((d) => assertNotProtected({ path: d.path }).ok);
+        return { ok: true, path: args.path, dirs };
+      }
       case "fs_read": {
         const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
         const max = Math.min(Number(args.maxBytes) || 2_000_000, 20_000_000);

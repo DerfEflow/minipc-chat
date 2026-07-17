@@ -38,10 +38,11 @@ import { createHandsHub } from "./hands/hub.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createUsersStore } from "./tenancy.mjs";
-import { createTenantResolver, filterToolDefs } from "./tenantstores.mjs";
+import { createTenantResolver, filterToolDefs, FORGE_TOOLS } from "./tenantstores.mjs";
 import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
+import { createForgeStore } from "./forge.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
 
@@ -653,7 +654,22 @@ const CONFIRM_TOOLS_ENV = String(cfgGet("CONFIRM_TOOLS", "0")) === "1";
 // ---- the hands hub (Phase 1, MCP hands): nodes on Fred's machines dial OUT and hold an SSE
 // stream; we dispatch tool jobs down it. No HANDS_TOKEN -> the entire surface answers 503.
 const HANDS_TOKEN = cfgGet("HANDS_TOKEN", "");
-const handsHub = createHandsHub({ token: HANDS_TOKEN, log: (m) => console.log("[dominion-ai] " + m) });
+// Per-user Forge: each non-owner who enables Forge runs their OWN node, authenticated by a per-user
+// token (forge.mjs). The hub binds that connection to their uid so a user's chat reaches ONLY their
+// own node. On connect, we push their chosen folders (allowed roots) down to the node.
+const forgeStore = createForgeStore({ dir: dataPath("forge") });
+const handsHub = createHandsHub({
+  token: HANDS_TOKEN,
+  log: (m) => console.log("[dominion-ai] " + m),
+  authNode: (t) => { try { return forgeStore.verifyToken(t); } catch { return null; } },
+  onConnect: (nodeKey) => {
+    if (typeof nodeKey === "string" && nodeKey.startsWith("user:")) {
+      const uid = nodeKey.slice(5);
+      const roots = forgeStore.getRoots(uid);
+      if (roots.length) handsHub.dispatch(nodeKey, "set_roots", { roots }, { timeoutMs: 15000 }).catch(() => {});
+    }
+  },
+});
 // Wire the model's machine tools (forge_read/write/run) to the hands hub -> the connected node,
 // replacing the RETIRED Command Deck bridge. The node is picked at call time (connections change);
 // the node itself enforces the carve-outs (D:/backups/customer-DBs). Multi-tenant later scopes this
@@ -888,6 +904,46 @@ async function handleAdmin(req, res, u) {
     return sjson(res, 200, { codes });
   }
   if (req.method === "POST" && p === "/admin/codes/revoke") { billing.revokeCode(String(body.code || "")); return sjson(res, 200, { ok: true }); }
+  return sjson(res, 404, { error: "not found" });
+}
+
+// Per-user Forge: set up the caller's OWN machine node, pick folders, enable. All scoped to the
+// caller's uid; the node the caller reaches is bound to their uid by the hub (never another user's).
+async function handleForge(req, res, u) {
+  const T = resolveTenant(req);
+  if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
+  const uid = T.uid, nodeKey = "user:" + uid, p = u.pathname;
+  const connected = () => handsHub.nodeNames().includes(nodeKey);
+  if (req.method === "GET" && p === "/forge/status") {
+    return sjson(res, 200, { ...forgeStore.status(uid), nodeConnected: connected(), isOwner: T.isOwner });
+  }
+  if (req.method === "GET" && p === "/forge/browse") {
+    if (!connected()) return sjson(res, 409, { error: "Your Dominion node is not connected. Install and start it on your computer first." });
+    const r = await handsHub.dispatch(nodeKey, "fs_browse", { path: u.searchParams.get("path") || "" }, { timeoutMs: 20000 });
+    return sjson(res, 200, r);
+  }
+  const body = (await readJsonBody(req)) || {};
+  if (req.method === "POST" && p === "/forge/enable") return sjson(res, 200, forgeStore.setEnabled(uid, body.on !== false));
+  if (req.method === "POST" && p === "/forge/token") {
+    // Mint the per-user node token and return the config the user drops into their node installer.
+    const token = forgeStore.generateToken(uid);
+    return sjson(res, 200, {
+      token,
+      config: {
+        HANDS_URL: APP_BASE_URL,
+        HANDS_TOKEN: token,
+        HANDS_NODE: "my-forge",
+        HANDS_CF_CLIENT_ID: "<ask Fred for the shared Dominion node service-token id>",
+        HANDS_CF_CLIENT_SECRET: "<ask Fred for the shared Dominion node service-token secret>",
+      },
+      note: "Run the Dominion hands installer with this token. Then use the folder picker to choose which folders Dominion may touch. Forge tools work only when you turn on Forge Mode.",
+    });
+  }
+  if (req.method === "POST" && p === "/forge/roots") {
+    const saved = forgeStore.setRoots(uid, body.roots);
+    if (connected()) await handsHub.dispatch(nodeKey, "set_roots", { roots: saved.roots }, { timeoutMs: 15000 }).catch(() => {});
+    return sjson(res, 200, saved);
+  }
   return sjson(res, 404, { error: "not found" });
 }
 // Auto mentor review — DEFAULT ON per Fred's LAX call (the self-improving loop stays alive):
@@ -2072,6 +2128,18 @@ async function handleChat(req, res) {
 
   // Per-request tool context: the base CTX plus the live chat/mode (B2 scope for memory tools).
   const reqCtx = { ...(T.ctxBase || CTX), chatId, mode, model };
+  // Per-user Forge: a non-owner who has ENABLED their own Forge node AND engaged Forge Mode this turn
+  // (flame/furnace) may reach THEIR OWN machine. Route forge_* to their node only ("user:<uid>"), and
+  // add the Forge tools to their wall for this turn. Carve-outs still hold node-side + hub-side.
+  let forgeExtra = null;
+  if (!T.isOwner) {
+    const forgeEngaged = !!forgeDial && normalizeTier(forgeDial) !== "ember";
+    const forgeOn = forgeEngaged && (() => { try { return forgeStore.status(T.uid).enabled; } catch { return false; } })();
+    if (forgeOn) {
+      forgeExtra = FORGE_TOOLS;
+      reqCtx.hands = { dispatch: (tool, args) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000 }) };
+    }
+  }
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
   working("reading context");   // retrieval (embed call + vec cache) can be slow on a cold box
   // Degrade, don't die: this runs BEFORE the try below, and with disconnect decoupled from abort
@@ -2152,7 +2220,7 @@ async function handleChat(req, res) {
     if (cloudModel) {
       const cloudProvider = providerOf(cloudModel) || "openrouter";
       const cloudRec = modelById(cloudModel);
-      const cloudTools = attachTools ? filterToolDefs(toolDefs(flywheel.activeToolOverlays()), T.role) : null;
+      const cloudTools = attachTools ? filterToolDefs(toolDefs(flywheel.activeToolOverlays()), T.role, forgeExtra) : null;
       let inTokTotal = 0, outTokTotal = 0, costTotal = 0, sawCost = false, sawTok = false;
       const bumpUsage = (u) => {
         if (!u) return;
@@ -2635,6 +2703,7 @@ const server = http.createServer(async (req, res) => {
     if (path === "/account" || path.startsWith("/account/")) return handleAccount(req, res, u);
     if (path.startsWith("/billing/")) return handleBilling(req, res, u);
     if (path.startsWith("/admin/") && path !== "/admin/restore-corpus") return handleAdmin(req, res, u);
+    if (path.startsWith("/forge/")) return handleForge(req, res, u);
 
     if (path === "/api/voice/transcribe" && req.method === "POST") return handleVoiceTranscribe(req, res);
     if (path === "/api/voice/tts" && req.method === "POST") return handleVoiceTts(req, res);

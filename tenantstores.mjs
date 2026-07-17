@@ -31,14 +31,20 @@ export const SAFE_TOOLS = new Set([
   "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox",
 ]);
 
-// Owner = all tools (null sentinel = no filter). Non-owner = SAFE_TOOLS (+ their own Forge later).
-export function allowedToolNames(role) { return role === "owner" ? null : SAFE_TOOLS; }
-export function toolAllowedFor(role, name) { return role === "owner" || SAFE_TOOLS.has(name); }
+// The machine-reach tools a non-owner gets ONLY when they have enabled their own Forge node AND
+// engaged Forge Mode this turn. They act on the user's OWN node (bound to their uid by the hub) within
+// the folders the user picked; the ironclad carve-outs still hold node-side and hub-side.
+export const FORGE_TOOLS = new Set(["forge_read", "forge_write", "forge_run", "scaffold_project"]);
 
-// Filter a list of tool defs to what a role may see/call. Owner passes through unchanged.
-export function filterToolDefs(defs, role) {
+// Owner = all tools (null sentinel = no filter). Non-owner = SAFE_TOOLS (+ FORGE_TOOLS when engaged).
+export function allowedToolNames(role) { return role === "owner" ? null : SAFE_TOOLS; }
+export function toolAllowedFor(role, name, extra = null) { return role === "owner" || SAFE_TOOLS.has(name) || !!(extra && extra.has(name)); }
+
+// Filter a list of tool defs to what a role may see/call. Owner passes through unchanged. `extra` is an
+// optional Set of extra tool names allowed for THIS turn (e.g. FORGE_TOOLS when Forge is engaged).
+export function filterToolDefs(defs, role, extra = null) {
   if (role === "owner") return defs;
-  return (defs || []).filter((d) => SAFE_TOOLS.has(d && d.function && d.function.name));
+  return (defs || []).filter((d) => { const n = d && d.function && d.function.name; return SAFE_TOOLS.has(n) || !!(extra && extra.has(n)); });
 }
 
 export function createTenantStores({ baseDir, uid, embed }) {

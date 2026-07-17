@@ -32,17 +32,27 @@ const PROTECTED_RE = [
 
 const sha = (s) => createHash("sha256").update(String(s)).digest();
 
-export function createHandsHub({ token, heartbeatMs = 20000, log = () => {} } = {}) {
+export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, authNode = null, onConnect = null } = {}) {
   const enabled = !!token;
   const tokenDigest = enabled ? sha(token) : null;
-  const nodes = new Map();   // name -> { res, connectedAt, lastSeen, jobsSent, jobsDone }
+  const nodes = new Map();   // nodeKey -> { res, connectedAt, lastSeen, jobsSent, jobsDone }  (owner: name; user: "user:<uid>")
   const jobs = new Map();    // jobId -> { node, resolve, timer, sentAt }
 
-  function authed(req) {
+  const bearer = (req) => { const h = String(req.headers.authorization || ""); return h.startsWith("Bearer ") ? h.slice(7) : ""; };
+  function authed(req) {   // the SHARED owner token (constant-time)
     if (!enabled) return false;
-    const h = String(req.headers.authorization || "");
-    if (!h.startsWith("Bearer ")) return false;
-    return timingSafeEqual(sha(h.slice(7)), tokenDigest);   // digest compare: constant-time, length-safe
+    const t = bearer(req); if (!t) return false;
+    return timingSafeEqual(sha(t), tokenDigest);
+  }
+  // Resolve the caller to a node namespace: "owner" for the shared token, "user:<uid>" for a valid
+  // per-user Forge token, or null. This is what binds each node connection to exactly one identity, so
+  // one user's chat can never reach another user's machine.
+  function nodeAuthKey(req) {
+    if (authed(req)) return "owner";
+    const t = bearer(req);
+    const uid = t && authNode ? authNode(t) : null;
+    // Lowercase to match dispatch()'s node-key normalization exactly (in prod uid is lowercase hex).
+    return uid ? "user:" + String(uid).toLowerCase() : null;
   }
   function deny(res) { res.writeHead(401, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); }
   function disabled(res) { res.writeHead(503, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "hands disabled: no HANDS_TOKEN configured" })); }
@@ -50,9 +60,17 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {} } = 
 
   function handleStream(req, res, u) {
     if (!enabled) return disabled(res);
-    if (!authed(req)) return deny(res);
-    const name = String(u.searchParams.get("node") || "").toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 64);
-    if (!name) return json(res, 400, { error: "node name required" });
+    const authKey = nodeAuthKey(req);
+    if (!authKey) return deny(res);
+    // Owner token: the node names itself via ?node=. Per-user token: the namespace is forced to the
+    // user's uid (they cannot register under an arbitrary name or another user's node).
+    let name;
+    if (authKey === "owner") {
+      name = String(u.searchParams.get("node") || "").toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 64);
+      if (!name) return json(res, 400, { error: "node name required" });
+    } else {
+      name = authKey;   // "user:<uid>"
+    }
     // One live stream per node: a reconnect replaces the old socket (the old one is dead or dying).
     const prev = nodes.get(name);
     if (prev) { try { prev.res.end(); } catch {} clearInterval(prev.beat); }
@@ -62,6 +80,7 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {} } = 
     entry.beat = setInterval(() => { try { res.write("event: hb\ndata: {}\n\n"); } catch {} }, heartbeatMs);
     nodes.set(name, entry);
     log(`hands: node "${name}" connected`);
+    try { if (typeof onConnect === "function") onConnect(name); } catch {}
     req.on("close", () => {
       clearInterval(entry.beat);
       if (nodes.get(name) === entry) nodes.delete(name);
@@ -71,10 +90,13 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {} } = 
 
   async function handleResult(req, res, body) {
     if (!enabled) return disabled(res);
-    if (!authed(req)) return deny(res);
+    const authKey = nodeAuthKey(req);
+    if (!authKey) return deny(res);
     const { jobId, result, node } = body || {};
     const j = jobs.get(jobId);
     if (!j) return json(res, 200, { ok: false, stale: true });   // deadline already fired — result discarded
+    // Isolation: a per-user token may only complete jobs dispatched to ITS OWN node.
+    if (authKey !== "owner" && j.node !== authKey) return deny(res);
     jobs.delete(jobId);
     clearTimeout(j.timer);
     const entry = nodes.get(j.node);
