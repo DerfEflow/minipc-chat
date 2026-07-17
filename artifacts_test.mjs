@@ -152,7 +152,7 @@ await t("zipBuffer: entries list back out of the central directory", () => {
 const MD_DOC = "# Project Report\n\nThe **first** deliverable shipped *early*.\n\n- item one\n- item two\n\n1. step alpha\n2. step beta\n\n```js\nconst x = 1;\n```\n";
 await t("docx: round-trips through persona.mjs docxToText", () => {
   const buf = markdownToDocx(MD_DOC, "Project Report");
-  assert.deepEqual(listZip(buf), ["[Content_Types].xml", "_rels/.rels", "word/document.xml"]);
+  assert.deepEqual(listZip(buf), ["[Content_Types].xml", "_rels/.rels", "word/_rels/document.xml.rels", "word/document.xml", "word/styles.xml"]);
   const text = docxToText(buf);
   for (const s of ["Project Report", "first", "shipped", "item one", "item two", "step alpha", "const x = 1;"]) {
     assert.ok(text.includes(s), `docx text carries "${s}"`);
@@ -173,7 +173,7 @@ await t("pdf: %PDF header, Tj text ops, xref/EOF, and multi-page pagination", ()
   const s = buf.toString("latin1");
   assert.ok(s.startsWith("%PDF-1.4"), "header");
   assert.ok(s.includes(" Tj"), "text-showing operator present");
-  assert.ok(s.includes("(Project Report)"), "title drawn");
+  assert.ok(s.includes("(Project)") && s.includes("(Report)"), "title drawn (wrapped into styled word runs)");
   assert.ok(/%%EOF\n$/.test(s), "EOF trailer");
   assert.ok(/\/Count 1/.test(s), "single page for a short doc");
   // synthetic long doc paginates

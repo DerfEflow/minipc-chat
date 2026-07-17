@@ -99,6 +99,61 @@ function fmtHands(r, okFmt) {
   if (!r.ok) return "Couldn't do that on the machine: " + (r.error || "unknown error");
   return okFmt(r);
 }
+// Render a list of relative paths as an ASCII file tree (dirs before files, alphabetical) — the way
+// Claude Code shows a scaffold. Used by scaffold_project's report.
+function renderTree(root, relPaths) {
+  const rootTree = {};
+  for (const p of relPaths) {
+    const parts = String(p).split(/[\\/]/).filter(Boolean);
+    let node = rootTree;
+    for (let i = 0; i < parts.length; i++) {
+      const isFile = i === parts.length - 1;
+      node[parts[i]] = node[parts[i]] || (isFile ? null : {});
+      if (!isFile) node = node[parts[i]];
+    }
+  }
+  const lines = [root.replace(/[\\/]+$/, "") + "/"];
+  const walk = (node, prefix) => {
+    const keys = Object.keys(node).sort((a, b) => {
+      const ad = node[a] === null ? 1 : 0, bd = node[b] === null ? 1 : 0;   // dirs first
+      return ad - bd || a.localeCompare(b);
+    });
+    keys.forEach((k, i) => {
+      const last = i === keys.length - 1;
+      lines.push(prefix + (last ? "└── " : "├── ") + k + (node[k] === null ? "" : "/"));
+      if (node[k]) walk(node[k], prefix + (last ? "    " : "│   "));
+    });
+  };
+  walk(rootTree, "");
+  return lines.join("\n");
+}
+
+// Write a whole file tree to the connected machine in one call — the "structure code as a tree" tool.
+// Each file goes through the node's fs_write (mkdir -p, allowed-roots + carve-out enforced per file).
+async function scaffoldProject(ctx, args) {
+  if (!ctx.hands) return "Scaffolding a project needs a connected Dominion hands node. Start it on the computer you want to build on.";
+  const root = String(args.root || "").trim().replace(/[\\/]+$/, "");
+  const files = Array.isArray(args.files) ? args.files : [];
+  if (!root) return "scaffold_project needs `root` (an absolute folder path on the machine).";
+  if (!files.length) return "scaffold_project needs a `files` array of { path, content }.";
+  if (files.length > 200) return `Too many files at once (${files.length}); scaffold in batches of 200 or fewer.`;
+  const written = [], issues = [];
+  let ok = 0, failed = 0, bytes = 0;
+  for (const f of files) {
+    const raw = String(f && f.path || "").trim();
+    if (!raw) { failed++; issues.push("• (a file had no path — skipped)"); continue; }
+    const isAbs = /^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith("/") || raw.startsWith("\\");
+    const rel = raw.replace(/\\/g, "/").replace(/^\/+/, "");
+    const abs = isAbs ? raw : root + "/" + rel;
+    const r = await ctx.hands.dispatch("fs_write", { path: abs, content: (f && f.content) ?? "" });
+    if (r && r.ok) { ok++; bytes += (r.bytes || 0); written.push(isAbs ? abs : rel); }
+    else { failed++; issues.push("• " + rel + ": " + (r && (r.reason || r.error) || "refused")); }
+  }
+  const tree = renderTree(root, written);
+  return `Scaffolded ${ok} file(s)${failed ? `, ${failed} failed` : ""} (${bytes} bytes) under ${root}:\n\n${tree}` +
+    (issues.length ? `\n\nIssues:\n${issues.join("\n")}` : "");
+}
+
 async function handsRead(ctx, op, path, query) {
   if (op === "list") return fmtHands(await ctx.hands.dispatch("fs_list", { path }), (r) => (r.entries || []).map((e) => `${e.type === "dir" ? "[dir] " : "      "}${e.name}${e.size != null ? "  (" + e.size + " b)" : ""}`).join("\n") || "(empty)");
   if (op === "tree") return fmtHands(await ctx.hands.dispatch("fs_tree", { path, depth: 3 }), (r) => (r.tree || []).join("\n") || "(empty)");
@@ -192,6 +247,7 @@ export const TOOLS = [
   { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "forge_read", description: "Read files on the connected machine (READ-ONLY). op: 'read' a file, 'list' a folder, 'tree' a folder tree, 'grep' (search hint). Reaches the machine through its Dominion hands node; the node enforces allowed folders + carve-outs.", parameters: { type: "object", properties: { op: { type: "string", enum: ["read", "list", "tree", "grep"] }, path: { type: "string" }, query: { type: "string" } }, required: ["op"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_write", description: "Write (create or overwrite) a file on the connected machine, in a folder the machine allows. Reaches it through the Dominion hands node (carve-outs + allowed-folders enforced). Use for real file changes as you build.", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path on that machine." }, content: { type: "string" } }, required: ["path", "content"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_run", description: "Run a shell command on the connected machine and return its output (PowerShell on Windows, sh on Linux). Reaches it through the Dominion hands node; the node enforces carve-outs and refuses destructive commands against protected dirs. Use to build, test, and inspect as you work.", parameters: { type: "object", properties: { command: { type: "string" }, timeoutMs: { type: "number", description: "Optional, default 60000, max 600000." } }, required: ["command"] } } } },
+  { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "scaffold_project", description: "Create a whole project/app as a file TREE on the connected machine in one call. Give `root` (an absolute base folder on that machine) and `files` (each { path relative to root, content }). Creates all folders and files, then returns the rendered tree. Use this when the user asks you to build an app or project — lay out the full structure at once. Reaches the machine through its Dominion hands node (allowed folders + carve-outs enforced per file).", parameters: { type: "object", properties: { root: { type: "string", description: "Absolute base folder on the machine, e.g. C:/Users/Fred/projects/my-app." }, files: { type: "array", description: "Files to create.", items: { type: "object", properties: { path: { type: "string", description: "Path relative to root (e.g. src/index.js). Absolute paths allowed but discouraged." }, content: { type: "string" } }, required: ["path", "content"] } } }, required: ["root", "files"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, allowedModes: ["fast", "normal", "deep_think", "long_context", "tool", "mentor"], def: { type: "function", function: { name: "forge_send", description: "Queue a REAL code/file work order for Claude Code on Fred's machine (the Forge). Use only for actual source/file changes or builds. repo is a named shortcut ('command-deck','cad-sandbox') or an absolute path under the allowed roots. Needs the run-password (configured on the server). The change snapshots first and is always rollback-able.", parameters: { type: "object", properties: { repo: { type: "string" }, title: { type: "string" }, instructions: { type: "string", description: "Clear, complete plain-English steps." } }, required: ["repo", "title", "instructions"] } } } },
   { category: "file", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "sandbox_write", description: "Write (overwrite) a text file in your private sandbox folder on the mini-PC.", parameters: { type: "object", properties: { filename: { type: "string" }, content: { type: "string" } }, required: ["filename", "content"] } } } },
   { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "sandbox_read", description: "Read a text file from your private sandbox folder.", parameters: { type: "object", properties: { filename: { type: "string" } }, required: ["filename"] } } } },
@@ -294,7 +350,7 @@ const PROTECTED_RE = [
   /\bdb[-_ ]?backups?\b/i,
   /pg_dump|pg_restore/i,         // dumping/restoring a (prod) DB
 ];
-const REACHES_OUT = new Set(["forge_read", "forge_write", "forge_run", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox"]);
+const REACHES_OUT = new Set(["forge_read", "forge_write", "forge_run", "scaffold_project", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox"]);
 export function assertNotProtected(name, args) {
   if (!REACHES_OUT.has(name)) return { ok: true };
   const blob = JSON.stringify(args || {});
@@ -313,7 +369,10 @@ function describeExportResult(r) {
   if (r.error) return "Couldn't export: " + r.error;
   const warns = r.gate && r.gate.warnings && r.gate.warnings.length ? " Warnings: " + r.gate.warnings.map((w) => w.message || w.check).join("; ") + "." : "";
   const forge = r.queued ? " (Forge conversion queued as fallback — the file lands next to the export shortly.)" : "";
-  return `Exported "${(r.gate && r.gate.checks && r.gate.checks.title) || "artifact"}" as ${r.format} to ${r.path} (${r.bytes} bytes). Source versions preserved.${warns}${forge}`;
+  // Give Fred a clickable download link (same-origin) — the primary way to get the file, not the
+  // internal server path. Present the Download link to the user verbatim.
+  const dl = r.downloadUrl ? ` Download: ${r.downloadUrl}` : "";
+  return `Exported "${(r.gate && r.gate.checks && r.gate.checks.title) || "artifact"}" as ${r.format} (${r.bytes} bytes).${dl} Source versions preserved.${warns}${forge}`;
 }
 
 // ===================== dispatcher =====================
@@ -352,6 +411,8 @@ export async function runTool(name, args, ctx, signal = null) {
         if (!ctx.hands) return "Writing to a machine needs a connected Dominion hands node. Start it on the computer you want to reach.";
         return fmtHands(await ctx.hands.dispatch("fs_write", { path: args.path, content: args.content ?? "" }), (r) => `Wrote ${r.bytes} bytes to ${r.path} on ${r.node || "the machine"}.`);
       }
+      case "scaffold_project":
+        return await scaffoldProject(ctx, args);
       case "forge_run": {
         if (!ctx.hands) return "Running commands on a machine needs a connected Dominion hands node. Start it on the computer you want to reach.";
         const r = await ctx.hands.dispatch("shell_run", { command: args.command, timeoutMs: args.timeoutMs });

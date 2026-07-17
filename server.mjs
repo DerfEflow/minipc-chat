@@ -18,7 +18,7 @@ import https from "node:https";
 import { readFile, appendFile, mkdir } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync, appendFileSync, statSync, mkdirSync } from "node:fs";
 import { timingSafeEqual, createHash } from "node:crypto";
-import { join, normalize, extname } from "node:path";
+import { join, normalize, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { TOOL_DEFS, toolDefs, WRITE_TOOLS, runTool, toolMeta, assertNotProtected, effectivePermission, needsConfirm, lifecycle, passConfirmGate } from "./tools.mjs";
@@ -31,7 +31,8 @@ import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./ro
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
-import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, catalogPayload } from "./models.catalog.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, outLimitFor, defaultModelFor, catalogPayload } from "./models.catalog.mjs";
+import { screenContent } from "./safety.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
@@ -179,6 +180,11 @@ const TYPES = {
   ".webmanifest": "application/manifest+json; charset=utf-8",
   ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon",
   ".mp4": "video/mp4",
+  // Generated-document downloads (the /exports route).
+  ".pdf": "application/pdf",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".csv": "text/csv; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".md": "text/markdown; charset=utf-8",
 };
 
 // ---- /ollama/* reverse proxy (streams straight through) ----
@@ -455,6 +461,10 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
       // the 5.6 family run without extended reasoning — tools work, thinking is dialed down.
       if (provider === "openai" && /^(gpt-5|o\d)/.test(directId)) payload.reasoning_effort = "none";
     }
+    // Per-model mandatory reasoning effort (catalog-declared). Kimi K3's reasoning is mandatory and
+    // only "max" is accepted — the "new required language" for that model. Skip OpenAI (handled above:
+    // its reasoning models need "none" to accept tools on chat/completions).
+    if (provider !== "openai" && rec && rec.reasoningEffort) payload.reasoning_effort = rec.reasoningEffort;
     // Ask for a usage row in the final SSE chunk. OpenRouter uses {usage:{include:true}}; native
     // OpenAI/DeepSeek use stream_options.include_usage. Set whichever this provider understands.
     if (cfg.wantUsage) payload.usage = { include: true };
@@ -783,6 +793,12 @@ function systemPrompt(persona, modeFrag) {
     "5. Secrets stay put by default. Do not print, commit, push, or transmit credentials, keys, tokens, or .env contents on your own. If Fred explicitly tells you to move or send one, do it; his instruction overrides this default.",
     "6. Leave a trail. For every material change, record what changed, where, and why, in the commit message or a short log line. Prefer small titled commits over one large sweep.",
     "7. When an action is both hard to reverse and genuinely ambiguous, pause and ask one question. Routine, reversible work proceeds without interruption.",
+  ].join("\n");
+  // Producing files + projects — how to use the native document and scaffold tools well.
+  s += "\n\nCREATING FILES & PROJECTS:\n" + [
+    "• Documents: to deliver a report, letter, doc, or data as a real file, WRITE THE FULL CONTENT first (never truncate — finish the whole thing), then call create_docx (Word), create_pdf, or create_spreadsheet (Excel/CSV). For plain formats use export_artifact with format txt/md/json. Structure the content in markdown so it lays out professionally: a clear # title, ## section headings, - bullet or 1. numbered lists, and | pipe | tables | for any tabular data (tables become real Word/PDF grids and real Excel rows with a bold header). After exporting, give Fred the Download link from the tool result verbatim.",
+    "• Length: never stop a document early to save space — produce the complete piece in the format requested. The system continues past output limits automatically, so write it in full.",
+    "• Apps / code: when asked to build an app or project, lay out the WHOLE structure at once with scaffold_project — pass a root folder and a files array (each { path relative to root, content }). It creates every folder and file and returns the file tree. Show Fred the tree. Use forge_run to install/build/test and forge_read to inspect. For single-file edits use forge_write.",
   ].join("\n");
   // Versioned prompt overlays (spec PromptVersion): active global + mode-scope prompts append here.
   for (const p of [...flywheel.activePrompts("global"), ...flywheel.activePrompts("mode")]) s += "\n\n" + p.content;
@@ -1300,6 +1316,9 @@ async function exportGated(id, format, { destination = "", overrideSensitive = f
     r = await forgeConvertFallback(a, gate.checks.format);
   }
   if (r.error) return { ...r, gate: { checks: gate.checks, warnings: gate.warnings } };
+  // Discoverability: hand back a same-origin download link + filename so the model can give Fred a
+  // clickable link and the UI can render a Download button — not just an opaque server-side path.
+  if (r.path) { r.fileName = basename(r.path); r.downloadUrl = "/exports/" + encodeURIComponent(r.fileName); }
   return { ...r, gate: { checks: gate.checks, warnings: gate.warnings } };
 }
 CTX.exportGated = exportGated;   // the tool bus goes through the same gate (bypass closed)
@@ -1759,7 +1778,7 @@ async function handleChat(req, res) {
   // Cloud override: the user explicitly picked a premium OpenRouter model for THIS turn. When set,
   // we keep all upstream context assembly (persona, memory, retrieval) but skip the local router's
   // model pick + local tools, and stream the answer from OpenRouter instead of Ollama.
-  const cloudModel = isOpenRouterModel(forced) ? forced : "";
+  let cloudModel = isOpenRouterModel(forced) ? forced : "";
   // Phase 2 privacy gate: Fred's mode is a hard allow-list. If he picked a cloud model the current
   // mode disallows, REFUSE this turn with a clear message — never silently substitute a local model.
   // Local picks and auto-routing (which only ever picks local tiers) pass through untouched.
@@ -1782,8 +1801,14 @@ async function handleChat(req, res) {
     sse({ type: "stopped" }); return endStream();
   }
   if (!T.isOwner && !cloudModel) {
-    sse({ type: "error", code: "local_owner_only", message: "The local model is owner-only. Please choose a cloud model." });
-    sse({ type: "stopped" }); return endStream();
+    // Non-owners can't use the owner-only local model. Instead of refusing, default them to the tenant
+    // default cloud model (Fred's rule: Hermes 4 70B for everyone else). Re-check the privacy gate on it.
+    cloudModel = defaultModelFor(false);
+    const gate = modeAllows(privacyMode, cloudModel);
+    if (!gate.allowed) {
+      sse({ type: "error", code: "privacy_mode_block", mode: privacyMode, model: cloudModel, message: gate.reason });
+      sse({ type: "stopped", reason: "privacy_mode_block" }); return endStream();
+    }
   }
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
@@ -1795,6 +1820,17 @@ async function handleChat(req, res) {
   // routeConfidence seeds the response quality block; needs.mentorReview is the spec's pre-answer
   // mentor signal (explicit ask / high-stakes topic) and forces the post-answer review path.
   const lastUserText = lastUser ? String(lastUser.content) : "";
+  // Hardcoded content wall (safety.mjs): refuse prohibited requests before any model runs or any
+  // token is billed. ABSOLUTE tier (minors / mass-harm how-to) applies to everyone incl. the owner;
+  // RESTRICTED tier (explicit sexual / illicit) applies to non-owners only. Owner exempt from RESTRICTED.
+  const screen = screenContent(lastUserText, { isOwner: T.isOwner });
+  if (screen.blocked) {
+    console.log(`[dominion-ai] content BLOCKED (${screen.tier}/${screen.category}) for ${T.isOwner ? "owner" : T.email || T.uid}`);
+    try { await logUsage({ ts: new Date().toISOString(), model: cloudModel || "n/a", mode: "blocked", reason: "content_wall:" + screen.category, status: "blocked_content", uid: T.uid }); } catch {}
+    sse({ type: "error", code: "content_blocked", category: screen.category, tier: screen.tier, message: screen.reason });
+    sse({ type: "stopped", reason: "content_blocked" });
+    return endStream();
+  }
   let mode, tier, reason, privacyRisk = privacyRiskOf(lastUserText);
   let routeConfidence = 0.95;
   // D1/D3: the needs_* block, produced for BOTH the auto route and explicit mode picks.
@@ -1938,11 +1974,21 @@ async function handleChat(req, res) {
         if (typeof u.cost === "number") { costTotal += u.cost; sawCost = true; }
       };
       let answer = "", streamedAny = false;
+      // Per-model, per-mode output ceiling for a single round (replaces the old hardcoded 4096 that
+      // truncated long docs on every model). This is only the CHUNK size — the continuation loop below
+      // resumes past finish_reason "length" until the whole answer is written, on ANY model.
+      const outCap = outLimitFor(cloudModel, mode);
       // Cloud models are fast + cheap per round (unlike the CPU-prefill local path), so they get a
       // deeper research budget. LIVE LESSON 2026-07-12: MiniMax burned all rounds on web searches,
       // then answered EMPTY when tools vanished — the user saw "(no response)". Two guards below:
       // a conclude-now nudge when the tool budget runs out, and one retry if content comes back empty.
       const CLOUD_MAX_ROUNDS = 8;
+      // No-truncation: how many times a single final answer may be resumed after hitting the output
+      // cap. outCap tokens x (1 + CONT_MAX) is the practical ceiling on one answer — generous enough
+      // for any report/doc Fred asks for, bounded so a runaway model can't loop forever.
+      const CONT_MAX = 16;
+      // Seamless-continuation nudge (user role: agent-tuned models weight a trailing user turn highest).
+      const CONTINUE_NUDGE = "[Dominion system notice — not Fred] Your reply was cut off at the output-length limit before it finished. Continue from the EXACT point you stopped. Do not repeat any earlier text, do not add a preface, recap, or apology, do not restate the last line — resume mid-sentence if that is where you stopped and write straight through to the natural end of the full response.";
       let concludeNudged = false, emptyRetried = false, lastReasoning = "";
 
       for (let round = 0; round < CLOUD_MAX_ROUNDS && !aborted; round++) {
@@ -1960,7 +2006,7 @@ async function handleChat(req, res) {
         working(round === 0 ? "thinking" : "writing");
         let streamed = false;
         const or = await cloudChatStream(cloudModel, messages,
-          { temperature: opts.temperature, num_predict: 4096, signal: ac.signal,
+          { temperature: opts.temperature, num_predict: outCap, signal: ac.signal,
             tools: concludePhase ? cloudTools : toolsThisRound, toolChoice: concludePhase ? "none" : undefined },
           (delta) => { if (aborted) return; if (!streamed) { streamed = true; workStop(); } streamedAny = true; sse({ type: "token", delta }); });
         workStop();
@@ -2055,9 +2101,31 @@ async function handleChat(req, res) {
           continue;   // feed the tool results back for the next round
         }
 
-        // Final answer for this turn.
-        answer = (or.content || "").trim();
+        // Final answer for this turn (no tool calls this round).
+        answer = (or.content || "");
         if (or.reasoning) lastReasoning = or.reasoning;
+        // No-truncation: if the model stopped ONLY because it hit the output cap (finish_reason
+        // "length"), resume seamlessly and keep streaming until it reaches a natural stop or the
+        // continuation budget runs out. Tools stay OFF during continuation — this is pure writing.
+        if (answer && or.finishReason === "length" && !aborted) {
+          let fr = or.finishReason, contLeft = CONT_MAX;
+          while (fr === "length" && contLeft-- > 0 && !aborted) {
+            working("writing");
+            messages.push({ role: "assistant", content: answer.slice(-6000) });   // running tail = continuity anchor (kept bounded)
+            messages.push({ role: "user", content: CONTINUE_NUDGE });
+            const cont = await cloudChatStream(cloudModel, messages,
+              { temperature: opts.temperature, num_predict: outCap, signal: ac.signal, tools: null, toolChoice: "none" },
+              (delta) => { if (aborted) return; streamedAny = true; sse({ type: "token", delta }); });
+            workStop();
+            if (!cont.ok) break;
+            bumpUsage(cont.usage);
+            answer += (cont.content || "");
+            if (cont.reasoning) lastReasoning = cont.reasoning;
+            fr = cont.finishReason;
+          }
+          if (contLeft <= 0 && fr === "length") console.log(`[dominion-ai] continuation budget (${CONT_MAX}) exhausted for ${cloudModel} — answer may still be capped`);
+        }
+        answer = answer.trim();
         if (!answer && !emptyRetried && round + 1 < CLOUD_MAX_ROUNDS) {
           // Reasoning models sometimes think without speaking (all output in the reasoning channel).
           // One explicit retry: demand plain text. If it's empty again, fall back to reasoning below.
@@ -2327,12 +2395,36 @@ const server = http.createServer(async (req, res) => {
     // can dim models that can't be called yet. Keys are NEVER included — only booleans.
     if (path === "/api/models" && req.method === "GET") {
       const payload = catalogPayload();
+      // Tenant-aware default: the owner lands on the global default; everyone else lands on the tenant
+      // default (Hermes 4 70B) so the picker preselects it for them.
+      try { payload.default = defaultModelFor(resolveTenant(req).isOwner); } catch {}
       payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY };
       // Phase 2: tell the UI the privacy modes + which providers each mode permits, so the picker can
       // filter and the switch can render. The server ALSO enforces (privacy.mjs) — this is display only.
       payload.privacy = { modes: PRIVACY_MODES, default: DEFAULT_PRIVACY_MODE, trustedProviders: [...TRUSTED_PROVIDERS] };
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify(payload));
+    }
+
+    // Generated-document download. Serves a native export (docx/pdf/xlsx/csv/txt/md) from the exports
+    // folder by basename only — no path segments, no traversal. The whole app is Access-gated at the
+    // Cloudflare edge, so reaching here already means an authenticated session. (Multi-tenant note:
+    // item 2 will resolve the per-user exports dir here; today it serves the owner's exports dir.)
+    if (path.startsWith("/exports/") && req.method === "GET") {
+      const name = decodeURIComponent(path.slice("/exports/".length));
+      // Refuse anything that isn't a bare filename with an allowed extension.
+      if (!name || name !== basename(name) || !/\.(pdf|docx|xlsx|csv|txt|md|json|html)$/i.test(name)) {
+        res.writeHead(400, { "content-type": "text/plain" }); return res.end("bad export name");
+      }
+      const file = join(ARTIFACT_DIR, "exports", name);
+      if (!existsSync(file)) { res.writeHead(404, { "content-type": "text/plain" }); return res.end("not found"); }
+      const buf = readFileSync(file);
+      res.writeHead(200, {
+        "content-type": TYPES[extname(name).toLowerCase()] || "application/octet-stream",
+        "content-disposition": `attachment; filename="${name.replace(/"/g, "")}"`,
+        "content-length": buf.length, "cache-control": "no-store",
+      });
+      return res.end(buf);
     }
 
     // Pre-send cost estimate (§6): deterministic preflight, no model call. The composer chip polls this.
