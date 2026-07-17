@@ -281,11 +281,7 @@
       const y = Math.max(0, Math.min(1, (pending.clientY - rect.top) / rect.height));
       root.style.setProperty("--glare-x", (x * 100).toFixed(2) + "%");
       root.style.setProperty("--glare-y", (y * 100).toFixed(2) + "%");
-      root.style.setProperty("--tilt-x", ((x - .5) * .34).toFixed(3) + "deg");
-      root.style.setProperty("--tilt-y", ((.5 - y) * .27).toFixed(3) + "deg");
       root.style.setProperty("--signal-x", (x * 100).toFixed(2) + "%");
-      root.style.setProperty("--scene-shift-x", ((.5 - x) * 7).toFixed(2) + "px");
-      root.style.setProperty("--scene-shift-y", ((.5 - y) * 5).toFixed(2) + "px");
       if (reflection) reflection.style.transform = `translateX(${((x - .5) * 230).toFixed(1)}px) rotate(17deg)`;
     };
     window.addEventListener("pointermove", (event) => {
@@ -293,10 +289,6 @@
       if (!frame) frame = requestAnimationFrame(renderPointer);
     }, { passive: true });
     pane.addEventListener("pointerleave", () => {
-      root.style.setProperty("--tilt-x", "0deg");
-      root.style.setProperty("--tilt-y", "0deg");
-      root.style.setProperty("--scene-shift-x", "0px");
-      root.style.setProperty("--scene-shift-y", "0px");
       if (reflection) reflection.style.transform = "translateX(0) rotate(17deg)";
     });
   }

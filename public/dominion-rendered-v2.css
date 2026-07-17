@@ -17,8 +17,6 @@
   --energy-core: #dffff0;
   --energy-vivid: #70ff82;
   --energy-deep: #157442;
-  --scene-shift-x: 0px;
-  --scene-shift-y: 0px;
   --chassis-shadow: 0 30px 80px rgba(0, 0, 0, .86), 0 8px 22px rgba(0, 0, 0, .72);
   --module-shadow: 0 18px 38px rgba(0, 0, 0, .62), inset 0 1px 0 rgba(235, 249, 255, .23), inset 0 -3px 0 rgba(0, 0, 0, .9);
 }
@@ -50,11 +48,11 @@ body {
   background-repeat: no-repeat;
   background-size: contain;
   background-position: center;
-  filter: contrast(1.08) saturate(1.06) brightness(.84);
-  /* Never enlarge the scene beyond the viewport just to hide its edges. The old scale values were
-     the source of the unwanted zoom and magnified the 1672px source on desktop and mobile. */
-  transform: translate3d(var(--scene-shift-x), var(--scene-shift-y), 0);
-  transition: transform .22s ease-out, filter .3s ease;
+  filter: contrast(1.04) saturate(1.08) brightness(1);
+  /* The master artwork already contains its own perspective. Keep its geometry completely stable;
+     moving or rotating this layer creates a second, visibly distorted perspective system. */
+  transform: none;
+  transition: filter .3s ease;
 }
 
 #rendered-scene::before {
@@ -62,8 +60,8 @@ body {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse 42% 49% at 50% 56%, transparent 0 38%, rgba(0, 3, 6, .08) 62%, rgba(0, 2, 5, .5) 100%),
-    linear-gradient(180deg, rgba(0, 2, 5, .2), transparent 16% 77%, rgba(0, 2, 4, .42));
+    radial-gradient(ellipse 48% 54% at 50% 56%, transparent 0 58%, rgba(0, 2, 5, .16) 100%),
+    linear-gradient(180deg, rgba(0, 2, 5, .08), transparent 19% 81%, rgba(0, 2, 4, .18));
 }
 
 .scene-energize {
@@ -83,7 +81,7 @@ body {
 .scene-caustic {
   position: absolute;
   inset: -25% -12%;
-  opacity: .16;
+  opacity: .055;
   background: linear-gradient(112deg, transparent 37%, rgba(216, 244, 255, .13) 43%, rgba(255, 255, 255, .24) 46%, rgba(104, 211, 255, .08) 50%, transparent 57%);
   transform: translateX(-32%);
   mix-blend-mode: screen;
@@ -92,7 +90,7 @@ body {
 
 #bgglass {
   z-index: 1;
-  opacity: .44;
+  opacity: .18;
   background:
     radial-gradient(circle at 50% 57%, rgba(211, 255, 231, .2) 0 .4%, rgba(76, 255, 142, .1) 3%, transparent 24%),
     repeating-linear-gradient(90deg, transparent 0 119px, rgba(70, 221, 255, .025) 120px, transparent 121px 238px),
@@ -103,11 +101,11 @@ body {
 body::before {
   z-index: 1;
   background:
-    linear-gradient(90deg, rgba(0, 2, 5, .62), transparent 16% 84%, rgba(0, 2, 5, .62)),
-    radial-gradient(ellipse at 50% 54%, transparent 0 28%, rgba(0, 3, 6, .08) 56%, rgba(0, 2, 5, .56) 100%);
+    linear-gradient(90deg, rgba(0, 2, 5, .32), transparent 13% 87%, rgba(0, 2, 5, .32)),
+    radial-gradient(ellipse at 50% 54%, transparent 0 53%, rgba(0, 2, 5, .22) 100%);
 }
 
-body::after { z-index: 2; opacity: .12; }
+body::after { z-index: 2; opacity: .045; }
 
 /* Heavy chassis: beveled outer masses, bright steel catches, deep edge absorption. */
 #commandbar,
@@ -150,8 +148,13 @@ body::after { z-index: 2; opacity: .12; }
   grid-template-columns: minmax(320px, .92fr) minmax(540px, 1.58fr) minmax(210px, .64fr) minmax(390px, 1.24fr);
   gap: 10px;
   padding: 10px 13px;
-  clip-path: polygon(18px 0, calc(100% - 18px) 0, 100% 18px, 100% calc(100% - 15px), calc(100% - 15px) 100%, 15px 100%, 0 calc(100% - 15px), 0 18px);
+  /* Never clip the header itself: CSS clip-path also clips positioned descendants, which made the
+     open model list and other flyouts invisible and impossible to click. The inset pseudo-element
+     retains the machined-corner silhouette without sacrificing functionality. */
+  clip-path: none;
   overflow: visible;
+  isolation: isolate;
+  z-index: 100;
 }
 
 #commandbar::after {
@@ -318,6 +321,8 @@ body::after { z-index: 2; opacity: .12; }
     inset 4px 0 0 rgba(140, 213, 244, .09),
     inset -4px 0 0 rgba(43, 108, 85, .11);
   backdrop-filter: saturate(1.18) contrast(1.06);
+  /* The scene is already perspective-rendered. Cursor movement may move light, never geometry. */
+  transform: none !important;
 }
 
 .neural-glass::before {
@@ -350,26 +355,25 @@ main { padding: 46px 28px 14px; }
 .empty {
   min-height: 0;
   height: 100%;
-  display: grid;
-  grid-template-columns: minmax(320px, .82fr) minmax(250px, .58fr);
-  align-items: center;
-  justify-content: space-between;
-  gap: 20%;
-  padding: 10px 4% 12px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 46px 28px 12px;
   text-align: left;
 }
 
 .empty-intro {
   position: relative;
-  max-width: 430px;
-  padding: 17px 20px 19px;
+  width: min(350px, 100%);
+  max-width: 350px;
+  padding: 13px 16px 15px;
   border: 1px solid rgba(170, 215, 238, .25);
   clip-path: polygon(16px 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%, 0 16px);
   background:
     linear-gradient(180deg, rgba(240, 251, 255, .08), transparent 9%),
-    linear-gradient(135deg, rgba(4, 18, 26, .8), rgba(0, 7, 11, .48));
-  box-shadow: 0 26px 58px rgba(0,0,0,.52), inset 0 1px 0 rgba(236,250,255,.16), inset 3px 0 0 rgba(97,203,247,.09);
-  backdrop-filter: blur(12px) saturate(1.2);
+    linear-gradient(135deg, rgba(4, 18, 26, .62), rgba(0, 7, 11, .3));
+  box-shadow: 0 20px 44px rgba(0,0,0,.34), inset 0 1px 0 rgba(236,250,255,.13), inset 3px 0 0 rgba(97,203,247,.07);
+  backdrop-filter: blur(5px) saturate(1.08);
 }
 
 .empty-intro::before,
@@ -384,17 +388,18 @@ main { padding: 46px 28px 14px; }
 
 .hero-kicker { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; color: #c8dfb0; font-size: 8px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; }
 .hero-kicker i { width: 8px; height: 8px; border: 1px solid #ddffe2; background: var(--energy-deep); transform: rotate(45deg); box-shadow: 0 0 6px #fff, 0 0 18px var(--energy-vivid); }
-.empty .empty-core { width: 61px; height: 61px; box-shadow: 0 0 0 4px rgba(0,7,9,.74), 0 0 0 5px rgba(118,255,138,.23), 0 0 38px rgba(90,255,118,.3), inset 0 1px 0 rgba(235,255,239,.34); }
-.empty .empty-core .glyph { font-size: 36px; }
-.empty .brand { margin-top: 12px; font-size: clamp(29px, 2.5vw, 39px); line-height: .98; letter-spacing: .115em; text-shadow: 0 2px 2px #000, 0 0 24px rgba(193, 235, 255, .18); }
+.empty .empty-core { width: 49px; height: 49px; box-shadow: 0 0 0 3px rgba(0,7,9,.7), 0 0 0 4px rgba(118,255,138,.2), 0 0 28px rgba(90,255,118,.24), inset 0 1px 0 rgba(235,255,239,.28); }
+.empty .empty-core .glyph { font-size: 29px; }
+.empty .brand { margin-top: 10px; font-size: clamp(25px, 2.1vw, 32px); line-height: .98; letter-spacing: .115em; text-shadow: 0 2px 2px #000, 0 0 20px rgba(193, 235, 255, .14); }
 .empty .byline { margin-top: 6px; color: #ffd0a5; font-size: 9px; letter-spacing: .2em; }
 .empty .hint { max-width: 430px; margin-top: 11px; color: #b1c5d2; font-size: 12.5px; line-height: 1.5; }
 
-.hero-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 13px; }
+.hero-actions { display: none; }
 .hero-actions span { min-height: 42px; display: flex; flex-direction: column; justify-content: center; padding: 6px 8px; border: 1px solid rgba(135, 194, 225, .16); background: rgba(0, 7, 12, .48); color: #98adba; font-size: 7px; letter-spacing: .08em; text-transform: uppercase; }
 .hero-actions b { margin-bottom: 5px; color: #8dff97; font-size: 10px; letter-spacing: .12em; }
 
 .hero-readout {
+  display: none;
   position: relative;
   align-self: end;
   width: min(330px, 100%);
@@ -508,7 +513,7 @@ body.is-thinking .neural-glass { border-color: rgba(135, 255, 150, .46); box-sha
   #commandbar { grid-template-columns: 285px minmax(430px, 1fr) minmax(320px, .9fr); }
   .telemetry-rail { display: none; }
   #rendered-scene { background-position: center; }
-  .empty { grid-template-columns: minmax(320px, .86fr) minmax(220px, .5fr); gap: 10%; }
+  .empty { padding-inline: 24px; }
   .wrap { width: 90%; }
 }
 
@@ -521,7 +526,7 @@ body.is-thinking .neural-glass { border-color: rgba(135, 255, 150, .46); box-sha
   .command-actions .command-icon { min-width: 43px; box-shadow: inset 0 1px 0 rgba(255,255,255,.08); }
   #sidebar { position: fixed; width: min(88vw, 350px); }
   .neural-glass { flex: 1; transform: none; }
-  .empty { grid-template-columns: 1fr; gap: 14px; align-content: center; padding: 42px 7% 115px; }
+  .empty { padding: 42px 7% 115px; }
   .hero-readout { display: none; }
   .empty-intro { max-width: 560px; }
   .console-footer { display: none; }
@@ -541,14 +546,14 @@ body.is-thinking .neural-glass { border-color: rgba(135, 255, 150, .46); box-sha
 @media (max-width: 620px) {
   html, body { width: 100%; max-width: 100%; overflow-x: hidden; }
   body { box-sizing: border-box; }
-  #rendered-scene { filter: contrast(1.03) saturate(1.05) brightness(.7); transform: none; }
+  #rendered-scene { filter: contrast(1.03) saturate(1.07) brightness(.94); transform: none; }
   #commandbar, .neural-glass {
     width: calc(100vw - 16px);
     min-width: 0;
     max-width: calc(100vw - 16px);
     align-self: center;
   }
-  #commandbar { grid-template-areas: "brand actions" "controls controls"; overflow: hidden; }
+  #commandbar { grid-template-areas: "brand actions" "controls controls"; overflow: visible; }
   .brand-core { display: none; }
   .brand-cluster { min-width: 0; grid-template-columns: 38px minmax(0, 1fr); padding-right: 7px; }
   .brand-copy { min-width: 0; }
@@ -564,7 +569,7 @@ body.is-thinking .neural-glass { border-color: rgba(135, 255, 150, .46); box-sha
   .command-select { min-height: 52px; padding: 7px 26px 7px 9px; }
   .neural-glass, main, .wrap, .empty, .empty-intro { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
   main { padding: 39px 10px 7px; overflow-x: hidden; }.wrap { width: 100%; }
-  .empty { padding: 36px 4px 90px; text-align: left; }.empty-intro { padding: 21px 18px 23px; }.empty .empty-core { width: 66px; height: 66px; }.empty .empty-core .glyph { font-size: 38px; }.empty .brand { font-size: 29px; }.empty .hint { font-size: 12.5px; }.hero-actions { grid-template-columns: 1fr; }.hero-actions span { min-height: 36px; flex-direction: row; align-items: center; gap: 8px; }.hero-actions b { margin: 0; }
+  .empty { padding: 32px 4px 90px; text-align: left; }.empty-intro { width: min(310px, calc(100% - 8px)); padding: 15px 16px 17px; }.empty .empty-core { width: 50px; height: 50px; }.empty .empty-core .glyph { font-size: 29px; }.empty .brand { font-size: 25px; }.empty .hint { font-size: 12px; }
   .bubble { padding: 35px 14px 14px; font-size: 14px; }
   .neural-glass > footer { width: auto; max-width: none; margin: 0 6px 6px; padding: 9px; box-sizing: border-box; overflow: hidden; }
   .composer-label { display: none; }
@@ -576,5 +581,10 @@ body.is-thinking .neural-glass { border-color: rgba(135, 255, 150, .46); box-sha
   .send { grid-column: 3; grid-row: 2; width: 55px; height: 55px; margin-left: 0; }
 }
 
-@media (hover: none) { .scene-caustic { opacity: .09; } }
+@media (hover: none) { .scene-caustic { opacity: .035; } }
 @media (prefers-reduced-motion: reduce) { .scene-energize, .scene-caustic, .hero-wave i { animation: none !important; } }
+
+/* Functional overlays must sit above the command surface and must never be trapped by chassis
+   styling. This deliberately outranks the decorative layer's stacking contexts. */
+.model-select { clip-path: none; overflow: visible; }
+.model-panel { z-index: 10000; }
