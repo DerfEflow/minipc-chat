@@ -472,9 +472,12 @@ function processEvent(st, ev) {
   } else if (ev.type === "token") {
     st.raw += ev.delta || ""; const shown = stripThink(st.raw); live.classList.toggle("think", !shown); live.textContent = shown || "Dominion AI is working…"; scroll();
   } else if (ev.type === "error") {
-    st.errMsg = ev.code === "privacy_mode_block"
-      ? (ev.message || "Blocked by privacy mode.")
-      : "Chat failed: " + (ev.error || "server error") + " — tap send to retry.";
+    // Gate refusals (access code / credits) carry a human message and send the user to Setup —
+    // never swallow them into a generic "server error".
+    st.gateCode = (ev.code === "needs_invite" || ev.code === "needs_credits") ? ev.code : "";
+    st.errMsg = ev.message || (ev.code === "privacy_mode_block"
+      ? "Blocked by privacy mode."
+      : "Chat failed: " + (ev.error || "server error") + " — tap send to retry.");
   }
 }
 
@@ -523,6 +526,8 @@ function finalizeSession(st) {
   clearLiveJob(); liveSession = null;
   setBusy(false); aborter = null; renderAll();
   if (st.errMsg) showErr(st.errMsg);
+  // Access-code / credits gate: show the message, then take them to the Setup page that fixes it.
+  if (st.gateCode) setTimeout(() => { location.href = "/setup"; }, 2500);
   if (st.mentorCritique) {   // Mentor mode: show the critique card under the fresh answer
     const card = document.createElement("div"); card.className = "critique";
     renderCritiqueCard(card, st.mentorCritique, (c.messages.filter((m) => m.role === "user").slice(-1)[0] || {}).content || "", final);

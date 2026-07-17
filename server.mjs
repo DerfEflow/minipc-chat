@@ -876,6 +876,28 @@ async function handleStripeWebhook(req, res) {
   return sjson(res, 200, { received: true });
 }
 
+// Door-list automation: when the owner mints a code for a specific email, add that email to the
+// Cloudflare Access allow policy so the person can sign in with just their email + the emailed PIN.
+// Best-effort: without the CF_* credentials the mint still works and the owner door-lists by hand.
+const CF_DOOR = { token: cfgGet("CF_API_TOKEN", ""), account: cfgGet("CF_ACCESS_ACCOUNT_ID", ""), app: cfgGet("CF_ACCESS_APP_ID", "") };
+async function cfAllowEmail(email) {
+  if (!CF_DOOR.token || !CF_DOOR.account || !CF_DOOR.app) return { ok: false, error: "door-list credentials not set" };
+  const base = `https://api.cloudflare.com/client/v4/accounts/${CF_DOOR.account}/access/apps/${CF_DOOR.app}/policies`;
+  const H = { authorization: "Bearer " + CF_DOOR.token, "content-type": "application/json" };
+  try {
+    const pols = await (await fetch(base, { headers: H })).json();
+    if (!pols.success) return { ok: false, error: "policy list failed" };
+    const allow = pols.result.find((p) => p.decision === "allow") || pols.result[0];
+    if (!allow) return { ok: false, error: "no allow policy" };
+    const inc = allow.include || [];
+    if (inc.some((i) => i.email && i.email.email && i.email.email.toLowerCase() === email)) return { ok: true, already: true };
+    inc.push({ email: { email } });
+    const put = await (await fetch(base + "/" + allow.id, { method: "PUT", headers: H,
+      body: JSON.stringify({ name: allow.name, decision: allow.decision, include: inc, exclude: allow.exclude || [], require: allow.require || [] }) })).json();
+    return put.success ? { ok: true } : { ok: false, error: "policy update failed" };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
 // Owner-only admin: users, codes (mint invite/free at will), balances.
 async function handleAdmin(req, res, u) {
   const T = resolveTenant(req);
@@ -900,9 +922,12 @@ async function handleAdmin(req, res, u) {
   }
   if (req.method === "POST" && p === "/admin/codes/mint") {
     const count = Math.max(1, Math.min(100, Number(body.count) || 1));
+    const email = String(body.email || "").trim().toLowerCase();
     const codes = [];
-    for (let i = 0; i < count; i++) codes.push(billing.mintCode({ type: body.type, capUsd: body.capUsd, credits: body.credits, note: body.note }));
-    return sjson(res, 200, { codes });
+    for (let i = 0; i < count; i++) codes.push(billing.mintCode({ type: body.type, capUsd: body.capUsd, credits: body.credits, note: body.note || (email ? "for " + email : "") }));
+    // Door-list their email on the Cloudflare sign-in so the code is the only thing they need.
+    const door = email ? await cfAllowEmail(email) : null;
+    return sjson(res, 200, { codes, email: email || undefined, doorListed: door ? door.ok : undefined, doorError: door && !door.ok ? door.error : undefined });
   }
   if (req.method === "POST" && p === "/admin/codes/revoke") { billing.revokeCode(String(body.code || "")); return sjson(res, 200, { ok: true }); }
   return sjson(res, 404, { error: "not found" });
@@ -2031,13 +2056,13 @@ async function handleChat(req, res) {
   }
   // Invite gate: a non-owner who has not redeemed a code (invite or free) has no access yet.
   if (!T.isOwner && !T.invited) {
-    sse({ type: "error", code: "needs_invite", message: "Enter an invite code to start using Dominion." });
+    sse({ type: "error", code: "needs_invite", message: "You need an access code. Opening Setup so you can enter it." });
     sse({ type: "stopped" }); return endStream();
   }
   // Credit gate: a paid (credit) user with an empty balance must top up. Sponsored/free users are
   // gated by their cap (status paused above), not by credits.
   if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) {
-    sse({ type: "error", code: "needs_credits", message: "You're out of credits. Add credits to continue." });
+    sse({ type: "error", code: "needs_credits", message: "You're out of credits. Opening Setup so you can add more." });
     sse({ type: "stopped" }); return endStream();
   }
   if (!T.isOwner && !cloudModel) {
@@ -2759,6 +2784,12 @@ const server = http.createServer(async (req, res) => {
       return proxy(req, res, rest + (u.search || ""));
     }
 
+    // Multi-tenant front door: a signed-in user who has not redeemed an access code is sent to the
+    // Setup page (which asks for the code) instead of a chat that would only refuse them silently.
+    if (MULTI_TENANT && (path === "/" || path === "/index.html")) {
+      const T0 = resolveTenant(req);
+      if (T0.role !== "anon" && !T0.isOwner && !T0.invited) { res.writeHead(302, { location: "/setup" }); return res.end(); }
+    }
     let rel = path === "/" ? "/index.html" : path;
     const safe = normalize(rel).replace(/\\/g, "/");
     const file = join(PUBLIC, safe);

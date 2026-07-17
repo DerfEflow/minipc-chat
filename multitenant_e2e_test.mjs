@@ -43,7 +43,7 @@ function req(method, path, { email = "", body = null } = {}) {
   return new Promise((resolve) => {
     const data = body ? JSON.stringify(body) : null;
     const r = http.request({ host: "127.0.0.1", port: PORT, path, method, headers: { ...(data ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {}), ...H(email) } },
-      (res) => { let b = ""; res.on("data", (d) => b += d); res.on("end", () => { let j; try { j = JSON.parse(b); } catch { j = b; } resolve({ status: res.statusCode, body: j }); }); });
+      (res) => { let b = ""; res.on("data", (d) => b += d); res.on("end", () => { let j; try { j = JSON.parse(b); } catch { j = b; } resolve({ status: res.statusCode, body: j, headers: res.headers }); }); });
     r.on("error", () => resolve({ status: 0, body: null }));
     if (data) r.write(data); r.end();
   });
@@ -89,6 +89,19 @@ await t("a new user is INVITE-GATED until they redeem a code", async () => {
   if (!codes.includes("needs_invite")) throw new Error("expected needs_invite, got " + JSON.stringify(codes));
 });
 
+await t("a non-invited user opening the app is sent to /setup (never a dead chat)", async () => {
+  const r = await req("GET", "/", { email: "newbie@test.com" });
+  if (r.status !== 302 || r.headers.location !== "/setup") throw new Error("expected 302 /setup, got " + r.status + " " + r.headers.location);
+  const owner = await req("GET", "/", { email: OWNER });
+  if (owner.status !== 200) throw new Error("owner should get the app, got " + owner.status);
+});
+
+await t("minting a code WITH an email reports door-list status (no CF creds here => honest failure)", async () => {
+  const r = await req("POST", "/admin/codes/mint", { email: OWNER, body: { type: "invite", credits: 100, email: "doortest@test.com" } });
+  if (!r.body.codes || !/^DOMI-/.test(r.body.codes[0].code)) throw new Error("mint with email failed: " + JSON.stringify(r.body));
+  if (r.body.doorListed !== false || !r.body.doorError) throw new Error("expected doorListed:false + doorError, got " + JSON.stringify(r.body));
+});
+
 await t("redeeming an invite code activates a CREDIT user with promo credits", async () => {
   const r = await req("POST", "/account/redeem", { email: "newbie@test.com", body: { code: inviteCode } });
   if (!r.body.ok || r.body.role !== "credit") throw new Error("redeem failed: " + JSON.stringify(r.body));
@@ -100,6 +113,8 @@ await t("redeeming an invite code activates a CREDIT user with promo credits", a
 await t("a credit user WITH balance passes the gates (fails only at the provider)", async () => {
   const codes = await chatCodes("newbie@test.com");
   if (codes.includes("needs_invite") || codes.includes("needs_credits")) throw new Error("should have passed gates: " + JSON.stringify(codes));
+  const page = await req("GET", "/", { email: "newbie@test.com" });
+  if (page.status !== 200) throw new Error("redeemed user should get the app, got " + page.status);
 });
 
 await t("a credit user with ZERO balance is credit-gated", async () => {
