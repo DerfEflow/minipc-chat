@@ -127,6 +127,16 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {} } = 
     });
   }
 
+  // Pick a connected node to act on: an explicit preference wins; otherwise prefer an always-on
+  // mini-PC name, else the first connected node, else null (no machine available).
+  function pick(preferred) {
+    const p = String(preferred || "").toLowerCase();
+    if (p && nodes.has(p)) return p;
+    for (const n of ["mini-pc", "minipc", "mini_pc"]) if (nodes.has(n)) return n;
+    const first = nodes.keys().next();
+    return first.done ? null : first.value;
+  }
+  const nodeNames = () => [...nodes.keys()];
   const stats = () => ({ enabled, nodes: nodes.size, pendingJobs: jobs.size });
-  return { enabled, handleStream, handleResult, handleRun, handleNodes, dispatch, stats };
+  return { enabled, handleStream, handleResult, handleRun, handleNodes, dispatch, pick, nodeNames, stats };
 }

@@ -640,6 +640,19 @@ const CONFIRM_TOOLS_ENV = String(cfgGet("CONFIRM_TOOLS", "0")) === "1";
 // stream; we dispatch tool jobs down it. No HANDS_TOKEN -> the entire surface answers 503.
 const HANDS_TOKEN = cfgGet("HANDS_TOKEN", "");
 const handsHub = createHandsHub({ token: HANDS_TOKEN, log: (m) => console.log("[dominion-ai] " + m) });
+// Wire the model's machine tools (forge_read/write/run) to the hands hub -> the connected node,
+// replacing the RETIRED Command Deck bridge. The node is picked at call time (connections change);
+// the node itself enforces the carve-outs (D:/backups/customer-DBs). Multi-tenant later scopes this
+// to each user's own node; for now the owner's tools reach whichever node is connected.
+const HANDS_DEFAULT_NODE = cfgGet("HANDS_DEFAULT_NODE", "");
+CTX.hands = {
+  target: () => handsHub.pick(HANDS_DEFAULT_NODE),
+  dispatch: (tool, args) => {
+    const n = handsHub.pick(HANDS_DEFAULT_NODE);
+    return n ? handsHub.dispatch(n, tool, args || {}, { timeoutMs: 60000 })
+             : Promise.resolve({ ok: false, offline: true, error: "No machine is connected. Start your Dominion hands node on the computer you want to reach." });
+  },
+};
 
 // Bearer check for admin/hands-token-gated endpoints (constant-time over a digest — length-safe).
 const _tokDigest = HANDS_TOKEN ? createHash("sha256").update(HANDS_TOKEN).digest() : null;

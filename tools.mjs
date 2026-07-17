@@ -89,6 +89,23 @@ async function forgeRead(ctx, op, path = "", query = "", signal = null) {
   return "The bridge didn't answer in time — it may be busy on the mini-PC.";
 }
 
+// ---- machine access via the hands node (replaces the retired Command Deck bridge) ----
+// ctx.hands.dispatch(tool, args) reaches the connected node; the node enforces the carve-outs and its
+// allowed roots. These are how the cloud assistant reads/writes/runs on Fred's (or a user's) machine.
+function fmtHands(r, okFmt) {
+  if (!r) return "No response from the machine.";
+  if (r.refused) return "Refused (carve-out): " + (r.reason || "protected resource — never touched.");
+  if (r.offline) return r.error || "That machine is offline. Start your Dominion hands node on it, then retry.";
+  if (!r.ok) return "Couldn't do that on the machine: " + (r.error || "unknown error");
+  return okFmt(r);
+}
+async function handsRead(ctx, op, path, query) {
+  if (op === "list") return fmtHands(await ctx.hands.dispatch("fs_list", { path }), (r) => (r.entries || []).map((e) => `${e.type === "dir" ? "[dir] " : "      "}${e.name}${e.size != null ? "  (" + e.size + " b)" : ""}`).join("\n") || "(empty)");
+  if (op === "tree") return fmtHands(await ctx.hands.dispatch("fs_tree", { path, depth: 3 }), (r) => (r.tree || []).join("\n") || "(empty)");
+  if (op === "grep") return "To search on the machine, use forge_run with a search command for that OS (PowerShell Select-String on Windows, grep/rg on Linux), or use forge_read op:list/tree/read to browse.";
+  return fmtHands(await ctx.hands.dispatch("fs_read", { path }), (r) => String(r.text ?? "(empty)").slice(0, 8000));
+}
+
 // ---- sandbox (jailed to ctx.sandboxDir on the mini-PC) ----
 function jail(ctx, filename) {
   const root = resolve(ctx.sandboxDir);
@@ -172,7 +189,9 @@ export const TOOLS = [
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_add_next_step", description: "Add an actionable next-step to a project.", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } } },
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_set_next_proof", description: "Set a project's Next Proof — the single riskiest thing it must prove next.", parameters: { type: "object", properties: { project_id: { type: "string" }, proof: { type: "string" } }, required: ["project_id", "proof"] } } } },
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_create_project", description: "Create a new Command Deck project. discipline: Apps|Writing|Business|Product Development|Saints Dominion. status: Idea|Building|Live|Paused|Done.", parameters: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, discipline: { type: "string" }, status: { type: "string" }, priority: { type: "string" } }, required: ["name"] } } } },
-  { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "forge_read", description: "Read source/files on Fred's machine (READ-ONLY). op: 'read' a file or folder, 'list' a folder (omit path to see allowed roots), 'tree' a folder tree, 'grep' (needs query). Paths must be under the bridge's allowed roots.", parameters: { type: "object", properties: { op: { type: "string", enum: ["read", "list", "tree", "grep"] }, path: { type: "string" }, query: { type: "string" } }, required: ["op"] } } } },
+  { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "forge_read", description: "Read files on the connected machine (READ-ONLY). op: 'read' a file, 'list' a folder, 'tree' a folder tree, 'grep' (search hint). Reaches the machine through its Dominion hands node; the node enforces allowed folders + carve-outs.", parameters: { type: "object", properties: { op: { type: "string", enum: ["read", "list", "tree", "grep"] }, path: { type: "string" }, query: { type: "string" } }, required: ["op"] } } } },
+  { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_write", description: "Write (create or overwrite) a file on the connected machine, in a folder the machine allows. Reaches it through the Dominion hands node (carve-outs + allowed-folders enforced). Use for real file changes as you build.", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path on that machine." }, content: { type: "string" } }, required: ["path", "content"] } } } },
+  { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_run", description: "Run a shell command on the connected machine and return its output (PowerShell on Windows, sh on Linux). Reaches it through the Dominion hands node; the node enforces carve-outs and refuses destructive commands against protected dirs. Use to build, test, and inspect as you work.", parameters: { type: "object", properties: { command: { type: "string" }, timeoutMs: { type: "number", description: "Optional, default 60000, max 600000." } }, required: ["command"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, allowedModes: ["fast", "normal", "deep_think", "long_context", "tool", "mentor"], def: { type: "function", function: { name: "forge_send", description: "Queue a REAL code/file work order for Claude Code on Fred's machine (the Forge). Use only for actual source/file changes or builds. repo is a named shortcut ('command-deck','cad-sandbox') or an absolute path under the allowed roots. Needs the run-password (configured on the server). The change snapshots first and is always rollback-able.", parameters: { type: "object", properties: { repo: { type: "string" }, title: { type: "string" }, instructions: { type: "string", description: "Clear, complete plain-English steps." } }, required: ["repo", "title", "instructions"] } } } },
   { category: "file", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "sandbox_write", description: "Write (overwrite) a text file in your private sandbox folder on the mini-PC.", parameters: { type: "object", properties: { filename: { type: "string" }, content: { type: "string" } }, required: ["filename", "content"] } } } },
   { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "sandbox_read", description: "Read a text file from your private sandbox folder.", parameters: { type: "object", properties: { filename: { type: "string" } }, required: ["filename"] } } } },
@@ -275,7 +294,7 @@ const PROTECTED_RE = [
   /\bdb[-_ ]?backups?\b/i,
   /pg_dump|pg_restore/i,         // dumping/restoring a (prod) DB
 ];
-const REACHES_OUT = new Set(["forge_read", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox"]);
+const REACHES_OUT = new Set(["forge_read", "forge_write", "forge_run", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox"]);
 export function assertNotProtected(name, args) {
   if (!REACHES_OUT.has(name)) return { ok: true };
   const blob = JSON.stringify(args || {});
@@ -324,9 +343,24 @@ export async function runTool(name, args, ctx, signal = null) {
       case "deck_add_next_step": { const d = await agent(ctx, "add_next_step", { projectId: args.project_id, text: args.text }, signal); return d.message || d.error || "Next step added."; }
       case "deck_set_next_proof": { const d = await agent(ctx, "set_next_proof", { projectId: args.project_id, proof: args.proof }, signal); return d.message || d.error || "Next proof set."; }
       case "deck_create_project": { const d = await agent(ctx, "create_project", { name: args.name, description: args.description || "", discipline: args.discipline || "", status: args.status || "", priority: args.priority || "" }, signal); return d.message || d.error || "Project created."; }
-      case "forge_read": return await forgeRead(ctx, args.op, args.path || "", args.query || "", signal);
+      // Machine access via the hands node (the retired bridge's replacement). Fall back to the old
+      // bridge only when no hands node is wired AND a SYNC_SECRET exists (legacy local mini-PC mode).
+      case "forge_read":
+        if (ctx.hands) return await handsRead(ctx, args.op, args.path || "", args.query || "");
+        return await forgeRead(ctx, args.op, args.path || "", args.query || "", signal);
+      case "forge_write": {
+        if (!ctx.hands) return "Writing to a machine needs a connected Dominion hands node. Start it on the computer you want to reach.";
+        return fmtHands(await ctx.hands.dispatch("fs_write", { path: args.path, content: args.content ?? "" }), (r) => `Wrote ${r.bytes} bytes to ${r.path} on ${r.node || "the machine"}.`);
+      }
+      case "forge_run": {
+        if (!ctx.hands) return "Running commands on a machine needs a connected Dominion hands node. Start it on the computer you want to reach.";
+        const r = await ctx.hands.dispatch("shell_run", { command: args.command, timeoutMs: args.timeoutMs });
+        return fmtHands(r, (x) => `exit ${x.code}${x.stdout ? "\n" + x.stdout.slice(0, 7000) : ""}${x.stderr ? "\nstderr:\n" + x.stderr.slice(0, 2000) : ""}`);
+      }
       case "forge_send": {
-        if (!ctx.runPassword) return "I can read and plan, but real code/file changes need the run-password configured on the server (RUN_PASSWORD). Ask Fred to set it on the mini-PC.";
+        // Legacy Claude-Code work-order path (bridge). On the cloud/hands path, redirect to the direct tools.
+        if (ctx.hands) return "Build directly on the machine: use forge_write to create/change files and forge_run to run commands. (The old work-order bridge is retired.)";
+        if (!ctx.runPassword) return "Real code/file changes need a connected hands node (forge_write/forge_run), or the legacy run-password on the mini-PC.";
         const r = await request("POST", ctx.baseUrl + "/api/jobs", { "x-sync-key": ctx.syncKey }, { repo: args.repo, title: args.title, instructions: args.instructions, pin: ctx.runPassword }, signal);
         if (r.aborted) return ABORTED;
         const d = parse(r.text) || {};
