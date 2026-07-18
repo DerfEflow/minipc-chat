@@ -71,9 +71,12 @@ export const REGISTRY = [
     ownerEnv: { token: "CONNECTOR_CF_TOKEN", account: "CONNECTOR_CF_ACCOUNT" },
     help: "dash.cloudflare.com: My Profile, API Tokens. The account ID is on any zone's overview page." },
   { id: "vercel", name: "Vercel", group: "Development", auth: "oauth", pending: true,
-    blurb: "Deployments, projects and logs. Vercel's official server requires an interactive OAuth sign-in; arriving with the Google wave." },
-  { id: "google", name: "Google Workspace", group: "Google", auth: "oauth", pending: true,
-    blurb: "Gmail, Calendar, Drive, Docs, Sheets on the connected Google account. Needs the one-time OAuth consent step; arriving in wave 2. Meanwhile Zapier reaches all of these today." },
+    blurb: "Deployments, projects and logs. Vercel's official server requires an interactive OAuth sign-in; not wired yet." },
+  // Provider-backed (native implementation, not MCP): the "provider" flag makes the engine route
+  // this entry to the matching object in the providers map (google.mjs). OAuth per account.
+  { id: "google", name: "Google Workspace", group: "Google", auth: "oauth", provider: true, guestDefault: false,
+    blurb: "Gmail, Calendar, Drive, Docs and Sheets on this account's own connected Google account.",
+    help: "Click Connect Google, approve the consent screen, and the tools go live for this account." },
 ];
 const BY_ID = new Map(REGISTRY.map((r) => [r.id, r]));
 
@@ -87,6 +90,12 @@ const IDLE_KILL_MS = 5 * 60 * 1000;   // stdio child reaper
 const PROTOCOL = "2025-03-26";
 
 // ---- crypto -----------------------------------------------------------------------------------
+// connectorCrypto: the same key + cipher the engine uses, exported so provider modules
+// (google.mjs) can encrypt their own token stores without a second key to manage.
+export function connectorCrypto({ dir, cfgGet }) {
+  const key = loadKey(join(dir, "connectors"), cfgGet("CONNECTORS_SECRET", ""));
+  return { enc: (s) => enc(key, s), dec: (s) => dec(key, s) };
+}
 function loadKey(dir, envSecret) {
   if (envSecret) return createHash("sha256").update(String(envSecret)).digest();
   const f = join(dir, ".connector-key");
@@ -195,7 +204,7 @@ function stdioRpc(conn, method, params, notify = false) {
 }
 
 // ---- the store + engine -----------------------------------------------------------------------
-export function createConnectors({ dir, cfgGet }) {
+export function createConnectors({ dir, cfgGet, providers = {} }) {
   // dir = the data root (owner state at <dir>/connectors.json, guests at <dir>/users/<uid>/connectors.json)
   const keyDir = join(dir, "connectors");
   const key = loadKey(keyDir, cfgGet("CONNECTORS_SECRET", ""));
@@ -248,8 +257,11 @@ export function createConnectors({ dir, cfgGet }) {
     if (e.fixedUrl) out.url = e.fixedUrl;
     return out;
   }
+  const providerOf = (e) => (e && e.provider && providers[e.id]) || null;
   const configured = (T, id) => {
     const e = entryFor(T, id); if (!e) return false;
+    const p = providerOf(e);
+    if (p) return p.ready() && p.connected(T);
     const c = configFor(T, id) || {};
     if (e.custom) return !!c.url;
     return (e.fields || []).every((f) => !!c[f.k]);
@@ -258,9 +270,12 @@ export function createConnectors({ dir, cfgGet }) {
   // May THIS account use THIS connector right now?
   function usable(T, id) {
     const e = entryFor(T, id);
-    if (!e || e.builtin || e.pending) return { ok: false, reason: e && e.pending ? "not available yet" : "built in" };
+    if (!e || e.builtin || (e.pending && !providerOf(e))) return { ok: false, reason: e && e.pending ? "not available yet" : "built in" };
+    const p = providerOf(e);
+    if (e.provider && !p) return { ok: false, reason: "not available yet" };
+    if (p && !p.ready()) return { ok: false, reason: "not set up on the server yet" };
     if (!T.isOwner && !e.custom && !guestAllowed(id)) return { ok: false, reason: "not enabled for guest accounts" };
-    if (!configured(T, id)) return { ok: false, reason: "needs credentials" };
+    if (!configured(T, id)) return { ok: false, reason: p ? "account not connected yet" : "needs credentials" };
     return { ok: true };
   }
 
@@ -324,7 +339,18 @@ export function createConnectors({ dir, cfgGet }) {
         pending: !!e.pending, experimental: !!e.experimental, custom: !!e.custom, help: e.help || "",
         fields: (e.fields || []).map((f) => ({ k: f.k, label: f.label, secret: !!f.secret })) };
       if (e.builtin) { row.enabled = true; row.status = "on"; rows.push(row); continue; }
-      if (e.pending) { row.enabled = false; row.status = "pending"; rows.push(row); continue; }
+      const prov = providerOf(e);
+      if (e.pending || (e.provider && !prov) || (prov && !prov.ready())) { row.enabled = false; row.status = "pending"; rows.push(row); continue; }
+      if (prov) {
+        row.guestAllowed = T.isOwner ? guestAllowed(e.id) : undefined;
+        row.usable = T.isOwner || guestAllowed(e.id);
+        row.configured = prov.connected(T);
+        row.enabled = !!(s.enabled || {})[e.id];
+        row.authUrl = "/connectors/" + e.id + "/start";
+        row.disconnectable = row.configured;
+        row.status = !row.usable ? "guest-locked" : !row.configured ? "needs-auth" : row.enabled ? "ready" : "off";
+        rows.push(row); continue;
+      }
       row.guestAllowed = T.isOwner ? guestAllowed(e.id) || !!e.custom : undefined;
       row.usable = T.isOwner || e.custom || guestAllowed(e.id);
       row.configured = configured(T, e.id);
@@ -338,7 +364,7 @@ export function createConnectors({ dir, cfgGet }) {
   }
   function setEnabled(T, id, on) {
     const e = entryFor(T, id);
-    if (!e || e.builtin || e.pending) return { ok: false, error: "cannot toggle this connector" };
+    if (!e || e.builtin || (e.pending && !providerOf(e))) return { ok: false, error: "cannot toggle this connector" };
     if (on) { const u = usable(T, id); if (!u.ok) return { ok: false, error: u.reason }; }
     const s = loadState(T);
     s.enabled = s.enabled || {}; s.enabled[id] = !!on;
@@ -392,6 +418,8 @@ export function createConnectors({ dir, cfgGet }) {
   async function test(T, id) {
     const u = usable(T, id);
     if (!u.ok) return { ok: false, error: u.reason };
+    const p = providerOf(entryFor(T, id));
+    if (p) return await p.test(T);
     try {
       conns.delete(cacheKey(T, id));
       const c = await toolsOf(T, id, true);
@@ -404,12 +432,13 @@ export function createConnectors({ dir, cfgGet }) {
     const s = loadState(T);
     const out = [];
     for (const e of entriesFor(T)) {
-      if (e.builtin || e.pending) continue;
+      if (e.builtin || (e.pending && !providerOf(e))) continue;
       if (!(s.enabled || {})[e.id]) continue;
       if (!usable(T, e.id).ok) continue;
+      const p = providerOf(e);
       try {
-        const c = await toolsOf(T, e.id);
-        for (const t of c.tools) out.push({ type: "function", function: {
+        const tools = p ? p.toolDefs() : (await toolsOf(T, e.id)).tools;
+        for (const t of tools) out.push({ type: "function", function: {
           name: mangle(e.id, t.name),
           description: `[${e.name} connector] ` + String(t.description || t.name).slice(0, 700),
           parameters: t.inputSchema || { type: "object", properties: {} } } });
@@ -426,10 +455,12 @@ export function createConnectors({ dir, cfgGet }) {
     // Resolve the mangled name via the live nameMap (exact original casing), falling back over
     // every enabled connector whose sane() id matches.
     for (const e of entriesFor(T)) {
-      if (e.builtin || e.pending || sane(e.id) !== m[1]) continue;
+      if (e.builtin || (e.pending && !providerOf(e)) || sane(e.id) !== m[1]) continue;
       const u = usable(T, e.id);
       if (!u.ok) return `Connector ${e.name} is not available: ${u.reason}.`;
       if (!(loadState(T).enabled || {})[e.id]) return `Connector ${e.name} is switched off.`;
+      const p = providerOf(e);
+      if (p) return String(await p.call(T, m[2], args || {}, signal));
       try {
         const c = await toolsOf(T, e.id);
         const real = c.nameMap.get(mangled);
@@ -446,5 +477,17 @@ export function createConnectors({ dir, cfgGet }) {
 
   const metaFor = () => ({ category: "connector", permissionClass: "requires_confirmation", logsInputs: true, allowedModes: null });
 
-  return { listFor, setEnabled, setConfig, addCustom, removeCustom, setGuestAllowed, test, toolDefsFor, run, metaFor, REGISTRY };
+  // Provider-backed disconnect (OAuth un-link): wipes the account's token store + disables.
+  function disconnect(T, id) {
+    const p = providerOf(entryFor(T, id));
+    if (!p) return { ok: false, error: "nothing to disconnect" };
+    p.disconnect(T);
+    const s = loadState(T);
+    if (s.enabled) delete s.enabled[id];
+    saveState(T, s);
+    return { ok: true };
+  }
+  const provider = (id) => providers[id] || null;
+
+  return { listFor, setEnabled, setConfig, addCustom, removeCustom, setGuestAllowed, test, toolDefsFor, run, metaFor, disconnect, provider, REGISTRY };
 }

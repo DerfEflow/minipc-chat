@@ -1046,7 +1046,7 @@
 
       // ---- Connectors: outside services as live tools, per-account ----
       const cxList = byId("dt-cx-list"), cxMessage = byId("dt-cx-message");
-      const CX_STATUS = { on: ["Always on", "dt-pill-live"], pending: ["Coming soon", ""], "guest-locked": ["Not open to guests", ""], "needs-key": ["Needs credentials", "dt-pill-warn"], ready: ["On", "dt-pill-live"], off: ["Off", ""] };
+      const CX_STATUS = { on: ["Always on", "dt-pill-live"], pending: ["Coming soon", ""], "guest-locked": ["Not open to guests", ""], "needs-key": ["Needs credentials", "dt-pill-warn"], "needs-auth": ["Not connected", "dt-pill-warn"], ready: ["On", "dt-pill-live"], off: ["Off", ""] };
       async function loadConnectors() {
         let data;
         try { data = await api("/connectors"); }
@@ -1124,6 +1124,36 @@
           details.append(stack);
           row.append(details);
         }
+        if (r.authUrl) {
+          const line = node("div", "dt-inline");
+          line.style.marginTop = "9px";
+          if (!r.configured) {
+            if (r.usable) {
+              const connect = node("a", "dt-button dt-button-small", "Connect " + r.name);
+              connect.href = r.authUrl;
+              line.append(connect);
+            }
+          } else {
+            const test = node("button", "dt-button dt-button-secondary dt-button-small", "Test");
+            test.type = "button";
+            test.addEventListener("click", async () => {
+              setBusy(test, true, "Testing");
+              try {
+                const t = await api("/connectors/test", { method: "POST", body: { id: r.id } });
+                setMessage(cxMessage, r.name + " connected: " + t.tools + " tool(s)" + (t.server ? " as " + t.server : "") + ".", "success");
+              } catch (error) { setMessage(cxMessage, r.name + " test failed: " + errorLabel(error), "error"); }
+              setBusy(test, false);
+            });
+            const disc = node("button", "dt-button dt-button-secondary dt-button-small", "Disconnect");
+            disc.type = "button";
+            disc.addEventListener("click", async () => {
+              try { await api("/connectors/" + r.id + "/disconnect", { method: "POST", body: {} }); toast("Disconnected " + r.name, "success"); loadConnectors(); }
+              catch (error) { setMessage(cxMessage, errorLabel(error), "error"); }
+            });
+            line.append(test, disc);
+          }
+          if (line.childNodes.length) row.append(line);
+        }
         if (state.account?.isOwner && !r.custom) {
           const guestRow = node("div", "dt-switch-row dt-cx-guest");
           guestRow.append(node("span", "dt-copy", "Guests may connect their own " + r.name + " account"));
@@ -1166,6 +1196,10 @@
 
       async function boot() {
         bindEvents();
+        // OAuth return (connector providers): surface the verdict from the redirect query.
+        const returnQ = new URLSearchParams(window.location.search);
+        if (returnQ.get("google") === "connected") toast("Google account connected", "success");
+        else if ((returnQ.get("google") || "").startsWith("error:")) setMessage(cxMessage, "Google connect failed: " + decodeURIComponent(returnQ.get("google").slice(6)), "error");
         try {
           await loadAccount();
           ui.globalBanner.hidden = true;

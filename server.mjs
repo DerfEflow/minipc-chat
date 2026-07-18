@@ -39,7 +39,8 @@ import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createUsersStore } from "./tenancy.mjs";
 import { createTenantResolver, filterToolDefs, FORGE_TOOLS } from "./tenantstores.mjs";
-import { createConnectors, isConnectorTool } from "./connectors.mjs";
+import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors.mjs";
+import { createGoogleProvider } from "./google.mjs";
 import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
@@ -895,7 +896,10 @@ const OWNER_T = { role: "owner", isOwner: true, uid: "owner", email: OWNER_EMAIL
 const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
 // Connectors (Fred's "complete access" wave): outside services as MCP tools, per-account. The
 // owner's creds default from env; guests must bring their own. See connectors.mjs for the wall.
-const connectors = createConnectors({ dir: DATA_DIR, cfgGet });
+// Google Workspace is provider-backed (native REST + per-account OAuth, google.mjs).
+const cxCrypto = connectorCrypto({ dir: DATA_DIR, cfgGet });
+const googleProvider = createGoogleProvider({ dir: DATA_DIR, cfgGet, baseUrl: () => APP_BASE_URL, enc: cxCrypto.enc, dec: cxCrypto.dec });
+const connectors = createConnectors({ dir: DATA_DIR, cfgGet, providers: { google: googleProvider } });
 // Billing (SaaS layer, SOW item 2). Stripe uses the sandbox keys; billing's auto-recharge charge is
 // wired to Stripe. Both are inert until MULTI_TENANT is on and a user is a non-owner. The app base URL
 // is used to build Checkout return links.
@@ -1132,6 +1136,22 @@ async function handleConnectors(req, res, u) {
   if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
   const p = u.pathname;
   if (req.method === "GET" && p === "/connectors") return sjson(res, 200, { connectors: await connectors.listFor(T), isOwner: !!T.isOwner });
+  // Provider OAuth (google): browser-facing start + callback, both behind Cloudflare Access.
+  const oauthMatch = /^\/connectors\/([a-z0-9_]+)\/(start|callback|disconnect)$/.exec(p);
+  if (oauthMatch) {
+    const prov = connectors.provider(oauthMatch[1]);
+    if (!prov) return sjson(res, 404, { error: "unknown provider" });
+    if (req.method === "GET" && oauthMatch[2] === "start") {
+      if (!prov.ready()) return sjson(res, 409, { error: "provider is not set up on the server yet" });
+      res.writeHead(302, { location: prov.authUrl(T) }); return res.end();
+    }
+    if (req.method === "GET" && oauthMatch[2] === "callback") {
+      const r = await prov.handleCallback(u.searchParams);
+      res.writeHead(302, { location: "/setup?" + oauthMatch[1] + "=" + (r.ok ? "connected" : "error:" + encodeURIComponent(r.error || "failed")) });
+      return res.end();
+    }
+    if (req.method === "POST" && oauthMatch[2] === "disconnect") return sjson(res, 200, connectors.disconnect(T, oauthMatch[1]));
+  }
   const body = (await readJsonBody(req)) || {};
   if (req.method === "POST" && p === "/connectors/toggle") return sjson(res, 200, connectors.setEnabled(T, String(body.id || ""), body.on !== false));
   if (req.method === "POST" && p === "/connectors/config") return sjson(res, 200, connectors.setConfig(T, String(body.id || ""), body.fields || {}));

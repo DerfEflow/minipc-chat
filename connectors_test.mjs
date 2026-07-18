@@ -7,7 +7,8 @@ import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createConnectors, isConnectorTool, REGISTRY } from "./connectors.mjs";
+import { createConnectors, connectorCrypto, isConnectorTool, REGISTRY } from "./connectors.mjs";
+import { createGoogleProvider } from "./google.mjs";
 
 let pass = 0, fail = 0;
 async function t(name, fn) {
@@ -175,6 +176,64 @@ await t("disabled connector refuses to run", async () => {
   assert.match(out, /switched off/i);
   cx.setEnabled(OWNER, "zapier", true);
 });
+
+// ---- provider-backed entries (google) ----
+const dir2 = mkdtempSync(join(tmpdir(), "cx-prov-"));
+const connectedSet = new Set();
+const fakeGoogle = {
+  ready: () => true,
+  connected: (T) => connectedSet.has(T.uid),
+  authUrl: () => "https://example.invalid/auth",
+  handleCallback: async () => ({ ok: true }),
+  disconnect: (T) => { connectedSet.delete(T.uid); return { ok: true }; },
+  toolDefs: () => [{ name: "gmail_search", description: "search mail", inputSchema: { type: "object", properties: { query: { type: "string" } } } }],
+  call: async (T, name) => name + ":" + (T.isOwner ? "owner" : T.uid),
+  test: async () => ({ ok: true, tools: 1, total: 1, server: "google (owner@x)" }),
+};
+const cx2 = createConnectors({ dir: dir2, cfgGet: (k, d) => d, providers: { google: fakeGoogle } });
+
+await t("provider row: live (not pending), needs-auth, carries authUrl", async () => {
+  const g = (await cx2.listFor(OWNER)).find((r) => r.id === "google");
+  assert.equal(g.status, "needs-auth");
+  assert.equal(g.authUrl, "/connectors/google/start");
+  assert.equal(cx2.setEnabled(OWNER, "google", true).ok, false, "cannot enable before connect");
+});
+
+await t("provider guest wall: google closed to guests by default", async () => {
+  const g = (await cx2.listFor(GUEST)).find((r) => r.id === "google");
+  assert.equal(g.status, "guest-locked");
+});
+
+await t("provider connect -> enable -> defs + call routed per account", async () => {
+  connectedSet.add("owner");
+  assert.equal(cx2.setEnabled(OWNER, "google", true).ok, true);
+  const defs = await cx2.toolDefsFor(OWNER);
+  assert.ok(defs.some((d) => d.function.name === "cx_google__gmail_search"));
+  assert.equal(await cx2.run(OWNER, "cx_google__gmail_search", { query: "x" }), "gmail_search:owner");
+  assert.equal((await cx2.test(OWNER, "google")).server, "google (owner@x)");
+});
+
+await t("provider disconnect wipes enablement and returns to needs-auth", async () => {
+  assert.equal(cx2.disconnect(OWNER, "google").ok, true);
+  const g = (await cx2.listFor(OWNER)).find((r) => r.id === "google");
+  assert.equal(g.status, "needs-auth");
+  assert.equal((await cx2.toolDefsFor(OWNER)).length, 0);
+});
+
+await t("real google.mjs: authUrl shape + bad-state callback rejected + crypto roundtrip", async () => {
+  const crypto = connectorCrypto({ dir: dir2, cfgGet: (k, d) => d });
+  const gp = createGoogleProvider({ dir: dir2, cfgGet: (k, d) => ({ GOOGLE_CLIENT_ID: "cid", GOOGLE_CLIENT_SECRET: "sec" }[k] ?? d),
+    baseUrl: () => "https://app.example", enc: crypto.enc, dec: crypto.dec });
+  assert.equal(gp.ready(), true);
+  const url = gp.authUrl(OWNER);
+  assert.ok(url.startsWith("https://accounts.google.com/o/oauth2/v2/auth?"));
+  assert.ok(url.includes(encodeURIComponent("https://app.example/connectors/google/callback")));
+  assert.ok(url.includes("access_type=offline"));
+  const bad = await gp.handleCallback(new URLSearchParams({ state: "forged.deadbeef", code: "x" }));
+  assert.equal(bad.ok, false);
+  assert.equal(crypto.dec(crypto.enc("round-trip")), "round-trip");
+});
+try { rmSync(dir2, { recursive: true, force: true }); } catch {}
 
 await new Promise((r) => fake.close(r));
 try { rmSync(dir, { recursive: true, force: true }); } catch {}
