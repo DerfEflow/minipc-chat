@@ -36,12 +36,16 @@ Client message shape stays `{ role, content: string }` everywhere, with an OPTIO
   gemma-4-31b-it:free, mistral-small-3.2-24b-instruct, perplexity/sonar-pro.
   Text-only confirmed for every other OpenRouter model in the catalog, including
   minimax-m2.5, glm-5.2, qwen3-235b (owner default), and all direct DeepSeek ids.
-- [verified: provider documentation] OpenAI gpt-4o / gpt-5.5 / gpt-5.6 family and
-  Anthropic claude-opus-4-8 / sonnet-5 / haiku-4.5 accept image_url parts with base64
-  data URLs on their OpenAI-compatible chat endpoints.
+- [verified 2026-07-18, LIVE PROBE with real pixels] a generated solid-orange PNG sent as
+  our exact streamed payload was correctly named "orange" by qwen3-vl-8b via OpenRouter
+  ($0.0000114) and by claude-haiku-4-5 on Anthropic's OpenAI-compat endpoint (data-URL
+  image_url confirmed working there). OpenAI gpt-4o / gpt-5.5 / gpt-5.6 remain
+  documentation-verified (same wire format).
 - [verified: PROVIDERS table in server.mjs] local qwen3 tiers are supportsVision:false.
-- [assumed, rounded DOWN to safe] DeepSeek V4 chat API takes no image input; flagged
-  vision:false. Wrong-false costs a refusal message; wrong-true costs a guest-facing 400.
+- [verified 2026-07-18, LIVE PROBE] DeepSeek's chat API REJECTS image parts outright
+  (HTTP 400: unknown variant `image_url`, expected `text`). vision:false is fact, and
+  since DeepSeek V4 Flash is the GUEST DEFAULT model, the vision gate is exactly what
+  stands between every guest and that raw 400.
 - The weekly catalog audit now checks vision drift the same way it checks tool drift.
 
 ## Wargamed risks and their mitigations
@@ -87,9 +91,12 @@ Client message shape stays `{ role, content: string }` everywhere, with an OPTIO
       line had not yet appeared in the pulled log window; the identical audit ran green
       locally against live OpenRouter data this session (0 problems, 0 vision drift) and
       its verdict lands in the owner console at /setup.
-- Remaining human step: Fred taps the paperclip on his phone with a vision model picked
-  and sends one real picture (the only check that exercises a REAL provider with REAL
-  pixels; every layer up to that boundary is proven above).
+- Live provider probe DONE 2026-07-18 (Fred's pick, option 2): real pixels against real
+  providers using the exact deployed payload shape. Two vision-positive answers, one
+  expected rejection, total spend under a cent. The only remaining unexercised span is
+  Fred's phone -> Cloudflare Access -> the deployed /chat plumbing in one motion, and the
+  byte-level e2e already pins that plumbing's output to the probed shape. First casual
+  photo Fred sends closes it as a side effect.
 
 ## Ledger
 
@@ -99,8 +106,8 @@ Client message shape stays `{ role, content: string }` everywhere, with an OPTIO
 - L-A2 OPEN (low): the content wall screens text only; image content is not screened
   locally. Providers' own abuse filters are the only image-side backstop. Acceptable per
   current safety.mjs scope; revisit if guests misuse it.
-- L-A3 OPEN (info): DeepSeek V4 vision assumed false (see above). One live probe with a
-  data URL would settle it; flip the flag only on proof.
+- L-A3 CLOSED 2026-07-18: live probe settled it. DeepSeek rejects image parts at the API
+  boundary (400 deserialization error), so vision:false stays and no flag flips.
 - L-A4 CLOSED 2026-07-18: image tokens are billed by providers inside prompt_tokens, so
   metering/credits needed no change; verified usage rows carry the higher token counts.
 
