@@ -4,19 +4,19 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
 <title>Dominion AI</title>
-<meta name="theme-color" content="#020817" />
+<meta name="theme-color" content="#01060a" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Dominion AI" />
 <link rel="manifest" href="/manifest.webmanifest" />
-<link rel="apple-touch-icon" href="/icon-180.png" />
-<link rel="icon" href="/icon-192.png" />
+<link rel="apple-touch-icon" href="/icons/dominion-core-180-v1.png" />
+<link rel="icon" href="/icons/dominion-core-192-v1.png" />
 <link rel="stylesheet" href="/dominion-ui.css?v=39" />
-<link rel="stylesheet" href="/dominion-tenant.css?v=2" />
+<link rel="stylesheet" href="/dominion-tenant.css?v=3" />
 <link rel="stylesheet" href="/dominion-vault.css?v=1" />
 </head>
 <body>
-  <video id="bgvideo" autoplay muted loop playsinline preload="auto" poster="/icon-512.png">
+  <video id="bgvideo" autoplay muted loop playsinline preload="auto" poster="/icons/dominion-core-512-v1.png">
     <source src="/circuit-bg.mp4" type="video/mp4" />
   </video>
   <div id="rendered-scene" aria-hidden="true">
@@ -104,7 +104,7 @@
     <div class="sb-head">
       <span class="h">Conversation Archive</span>
       <button id="newchat" class="sb-new">
-        <svg class="glyph"><use href="#i-new"></use></svg><span>New</span>
+        <svg class="glyph"><use href="#i-new"></use></svg><span>Start a New Conversation or Project</span>
       </button>
     </div>
     <div class="sb-search">
@@ -112,6 +112,9 @@
       <input id="chatsearch" type="search" placeholder="Search conversations…" autocomplete="off" />
     </div>
     <div id="chatlist"></div>
+    <button id="sb-setup" class="sb-setup" type="button" title="Connectors, credits, and account setup">
+      <span class="sb-setup-core" aria-hidden="true"></span><span>Setup · Connectors &amp; Credits</span>
+    </button>
     <div class="sb-foot">Dominion AI <span>·</span> by Frederick Wolfe</div>
   </aside>
 
@@ -280,6 +283,7 @@
         </select>
       </label>
       <textarea id="persona-custom" placeholder="Custom persona / system style…" hidden></textarea>
+      <p class="frow-note">Persona sets the assistant's <em>voice and style</em>: how it talks. The header's Operating Mode sets <em>how hard it thinks</em>: speed, depth, context length, or a special discipline like As&nbsp;Fred. They stack: a Concise persona in Deep&nbsp;Think mode thinks deeply and reports briefly.</p>
       <label class="frow">Creativity (temperature): <span id="temp-val">0.7</span>
         <input id="temp" type="range" min="0" max="1.2" step="0.1" value="0.7" />
       </label>
@@ -385,7 +389,7 @@
     </div>
   </div>
 
-  <script src="/app.js?v=37"></script>
+  <script src="/app.js?v=38"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=2" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>

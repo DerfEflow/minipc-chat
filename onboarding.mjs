@@ -79,6 +79,31 @@ export const TUTORIAL = {
       ],
     },
     {
+      id: "mentor",
+      heading: "Mentor and Improvement",
+      body: "The Mentor button in the header opens Dominion's self-improvement bay. This is where the assistant gets better over time instead of making the same mistake twice. It reviews its own answers, keeps a ledger of failures, runs evaluations against saved test cases, and turns hard-won lessons into standing rules that shape every future answer.",
+      what: "What the tabs mean: Failures is the ledger of answers that went wrong and why. Evals are saved test cases the system re-runs to prove a weakness got fixed. Rules are standing instructions the assistant learned from past mistakes; active ones are injected into every conversation. Prompts and Finetune are the deeper training layers built from all of the above.",
+      how: "You rarely need to open it. It matters when you want to see what the system has learned, retire a rule that no longer applies, or check whether a past failure stayed fixed.",
+      points: [
+        "Failures: what went wrong, kept honestly.",
+        "Evals: saved tests that prove fixes stick.",
+        "Rules: lessons promoted into standing behavior.",
+        "It all feeds the flywheel: every correction trains the system.",
+      ],
+    },
+    {
+      id: "message-actions",
+      heading: "The buttons under an answer",
+      body: "Under each finished answer sit a few unusual buttons. They are the front door to the same self-improvement bay, aimed at the answer you are looking at.",
+      points: [
+        "Critique: the assistant formally reviews its own answer for errors and weak reasoning, and offers a revision you can apply or reject.",
+        "Inspect: a focused check for hallucinations; it hunts for claims in the answer that do not hold up.",
+        "Save Lesson: when an answer taught you (or it) something worth keeping, file it as a failure, an eval, or a rule so the system remembers.",
+        "Create Evaluation: turn this exchange into a saved test case the system can re-run later to prove it still gets this right.",
+        "Copy, Save, Continue, and Regenerate do exactly what they say.",
+      ],
+    },
+    {
       id: "credits",
       heading: "Credits and billing",
       body: "Usage is prepaid with credits. You add credits, and each answer draws down a small amount based on what it costs to produce. When your balance runs low it tops up automatically so you are never interrupted mid-thought. You can turn auto-recharge off and top up by hand.",

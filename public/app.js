@@ -130,7 +130,14 @@ function summarizeLeft(id) {
   if (!c || c.messages.length < 4) return;
   fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
 }
-function newChat() { if (busy) return; const prev = curId; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); input.focus(); if (prev) summarizeLeft(prev); }
+function newChat() { if (busy) return; const prev = curId; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); }
+// Fresh-start ignition: a quick green scan-sweep over the chat surface as the rail closes.
+function igniteChatSurface() {
+  const surf = document.getElementById("neural-glass") || document.body;
+  surf.classList.remove("nc-ignite"); void surf.offsetWidth;   // retrigger
+  surf.classList.add("nc-ignite");
+  setTimeout(() => surf.classList.remove("nc-ignite"), 1000);
+}
 function switchChat(id) { if (busy) return; const prev = curId; curId = id; save(); renderAll(); scroll(true); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); }
 function deleteChat(id) {
   // True forget: also erase the server's transcript copy + any episodic memory distilled from this
@@ -141,8 +148,8 @@ function deleteChat(id) {
 function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = prompt("Rename chat", c.title); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); } }
 
 // ---------- sidebar ----------
-const openSidebar = () => { sidebar.classList.add("open"); overlay.classList.add("show"); };
-const closeSidebar = () => { sidebar.classList.remove("open"); overlay.classList.remove("show"); };
+const openSidebar = () => { sidebar.classList.add("open"); overlay.classList.add("show"); document.body.classList.add("rail-open"); };
+const closeSidebar = () => { sidebar.classList.remove("open"); overlay.classList.remove("show"); document.body.classList.remove("rail-open"); };
 const MODE_LABEL = { fast: "Fast", normal: "Normal", deep_think: "Deep", long_context: "Long", draft: "Draft", tool: "Tool", mentor: "Mentor" };
 // Friendly tier labels — raw LOCAL model names never surface anywhere in the UI (Fred's lock).
 // Cloud (OpenRouter) models DO surface by name on purpose: Fred chose one and is spending on it.
@@ -1482,14 +1489,62 @@ const enterSends = !(window.matchMedia && window.matchMedia("(pointer: coarse)")
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && enterSends) { e.preventDefault(); send(); } });
 sendBtn.addEventListener("click", send);
 menuBtn.addEventListener("click", () => (sidebar.classList.contains("open") ? closeSidebar() : openSidebar()));
+// Setup door in the rail: connectors + credits. Everyone gets their own setup page (the page
+// itself renders owner vs guest panels by role; the server enforces owner-only endpoints).
+const sbSetup = $("sb-setup");
+if (sbSetup) sbSetup.addEventListener("click", () => { location.href = "/setup"; });
+// Guests never see the Private/Local lane: the local model is owner-only (the server already
+// refuses it; offering a dead option would just confuse a paying guest). Owner path unchanged.
+fetch("/account").then((r) => r.json()).then((a) => {
+  if (a && a.multiTenant && !a.isOwner && privacyModeSel) {
+    const opt = privacyModeSel.querySelector('option[value="private"]');
+    if (opt) opt.remove();
+    if (privacyModeSel.value === "private" || (localStorage.getItem(LS_PMODE) || "") === "private") {
+      try { localStorage.setItem(LS_PMODE, "normal"); } catch {}
+      privacyModeSel.value = "normal";
+      privacyModeSel.dispatchEvent(new Event("change"));
+    }
+  }
+}).catch(() => {});
 overlay.addEventListener("click", closeSidebar);
 newBtn.addEventListener("click", newChat);
 if (chatSearch) chatSearch.addEventListener("input", () => { chatQuery = chatSearch.value || ""; renderSidebar(); });
 if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODE, modeSel.value); } catch {} updateEstimate(); });
 // Privacy mode persists, re-filters the picker to the allowed providers, and refreshes the estimate.
-if (privacyModeSel) privacyModeSel.addEventListener("change", () => { try { localStorage.setItem(LS_PMODE, privacyModeSel.value); } catch {} applyPrivacyFilter(); updateEstimate(); updateAttachGate(); });
+if (privacyModeSel) privacyModeSel.addEventListener("change", () => { try { localStorage.setItem(LS_PMODE, privacyModeSel.value); } catch {} applyPrivacyFilter(); updateEstimate(); updateAttachGate(); explainPrivacy(privacyModeSel.value); });
+// Why the privacy dial matters (Fred, 2026-07-18): the selector decides WHERE your words may
+// travel. Explain it in place the moment it's touched, not in a manual nobody opens.
+const PRIVACY_NOTES = {
+  normal: "Normal: any model, any provider. Fine for everyday questions with nothing sensitive in them.",
+  trusted: "Trusted: only providers with the strictest data-retention terms (OpenAI, Anthropic) plus the local engine. Use it for business details, client names, and money.",
+  private: "Private: nothing leaves this machine; local model only. Use it for secrets, credentials, legal matters, or anything you would not put in an email.",
+};
+function explainPrivacy(mode) {
+  const text = PRIVACY_NOTES[mode];
+  if (!text) return;
+  document.querySelector(".privacy-note")?.remove();
+  const n = document.createElement("div");
+  n.className = "privacy-note";
+  n.innerHTML = "<b>Privacy dial</b> — it controls where your words are allowed to travel.<br>" + text;
+  document.body.appendChild(n);
+  setTimeout(() => { n.classList.add("gone"); setTimeout(() => n.remove(), 400); }, 8000);
+  n.addEventListener("click", () => n.remove());
+}
+if (privacyModeSel) privacyModeSel.addEventListener("pointerdown", () => {
+  if (!explainPrivacy._seen) { explainPrivacy._seen = true; explainPrivacy(privacyModeSel.value); }
+}, { passive: true });
 // Model pick persists immediately (matches Mode) and flips the "via OpenRouter" spend indicator live.
-if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateModelTrigger(); updateCloudBadge(); updateEstimate(); updateAttachGate(); });
+if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateModelTrigger(); updateCloudBadge(); updateEstimate(); updateAttachGate(); modelLaser(); });
+// Selection ceremony: a green laser races the trigger's border, then the model name flares and
+// settles. Pure class choreography; the CSS lives in dominion-tenant.css.
+function modelLaser() {
+  if (!modelTrigger || !modelCurrent) return;
+  modelTrigger.classList.remove("laser"); modelCurrent.classList.remove("name-flare");
+  void modelTrigger.offsetWidth;   // retrigger
+  modelTrigger.classList.add("laser");
+  setTimeout(() => { modelTrigger.classList.remove("laser"); modelCurrent.classList.add("name-flare"); }, 900);
+  setTimeout(() => modelCurrent.classList.remove("name-flare"), 2600);
+}
 // Attachments: button opens the picker; picked/pasted/dropped files stage into the strip.
 if (attachBtn && attachFile) {
   attachBtn.addEventListener("click", () => attachFile.click());
@@ -1605,6 +1660,10 @@ async function micTap() {
   rec.onstop = async () => {
     try { recStream.getTracks().forEach((t) => t.stop()); } catch {}
     micBtn.classList.remove("rec"); micBtn.classList.add("busy");
+    // Instant feedback in the input itself: server STT takes a few seconds and Fred read the
+    // silence as "it's broken". The placeholder talks while the transcript is in flight.
+    const oldPlaceholder = input.placeholder;
+    input.placeholder = "Transcribing your voice…";
     try {
       const blob = new Blob(recChunks, { type: (rec && rec.mimeType) || mime || "audio/webm" });
       if (blob.size < 1000) { showErr("Didn't catch that — recording was too short."); return; }
@@ -1613,10 +1672,11 @@ async function micTap() {
       if (!r.ok || !j || !j.text) { showErr((j && j.error) || "Transcription failed — try again."); return; }
       input.value = j.text; autosize();
       if (!busy) send();   // straight through the normal flow: picked model, tools, the works
-    } finally { micBtn.classList.remove("busy"); rec = null; }
+    } finally { micBtn.classList.remove("busy"); rec = null; input.placeholder = oldPlaceholder; }
   };
   rec.start();
   micBtn.classList.add("rec");
+  input.placeholder = "Listening… tap the mic again to finish.";
 }
 if (micBtn) micBtn.addEventListener("click", micTap);
 
@@ -1627,10 +1687,19 @@ async function speakAnswer(text) {
   if (!t) return;
   try {
     const r = await fetch("/api/voice/tts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: t }) });
-    if (!r.ok) return;   // silent — spoken answers are a bonus, never an error state
+    if (!r.ok) {
+      // Spoken answers are a bonus, but a SILENT failure looked like the feature never shipped.
+      // Say why, once per session (quota outages on the voice provider are the usual culprit).
+      if (!speakAnswer._warned) {
+        speakAnswer._warned = true;
+        const j = await r.json().catch(() => null);
+        showErr("Voice reply failed: " + ((j && j.error) || ("HTTP " + r.status)) + ". The speaker toggle stays on; it retries on the next answer.");
+      }
+      return;
+    }
     const blob = await r.blob();
     if (ttsAudio) { try { ttsAudio.pause(); } catch {} }
     ttsAudio = new Audio(URL.createObjectURL(blob));
-    ttsAudio.play().catch(() => {});
+    ttsAudio.play().catch(() => { if (!speakAnswer._warned) { speakAnswer._warned = true; showErr("Your browser blocked audio autoplay — tap anywhere once and the next answer will speak."); } });
   } catch {}
 }

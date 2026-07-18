@@ -6,11 +6,11 @@
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#000023",
-  "theme_color": "#000023",
+  "background_color": "#01060a",
+  "theme_color": "#01060a",
   "icons": [
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    { "src": "/icons/dominion-core-192-v1.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/dominion-core-512-v1.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/dominion-core-maskable-512-v1.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

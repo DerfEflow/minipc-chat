@@ -253,3 +253,111 @@
 .dt-install-copy b { display: block; color: #dff2ff; font-size: 13px; letter-spacing: .04em; }
 .dt-install-copy span { display: block; margin-top: 2px; color: #8fb0c4; font-size: 11.5px; line-height: 1.45; }
 .dt-install-actions { display: flex; gap: 8px; flex: none; }
+
+/* ---- Setup access (Fred, 2026-07-18): the ONE lime-electric element in the rail — the door to
+   connectors + credits, deliberately unmissable for owner and guests alike. ---- */
+.sb-setup {
+  display: flex; align-items: center; gap: 10px; width: calc(100% - 24px); margin: 10px 12px 4px;
+  padding: 12px 14px; border-radius: 12px; cursor: pointer;
+  background: linear-gradient(160deg, rgba(60, 255, 120, 0.10), rgba(8, 28, 14, 0.7));
+  border: 1px solid rgba(102, 255, 140, 0.55); color: #b8ffcf;
+  font: inherit; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; font-size: 11.5px;
+  box-shadow: 0 0 14px rgba(80, 255, 130, 0.3), inset 0 0 10px rgba(80, 255, 130, 0.1);
+  animation: sbSetupPulse 2.2s ease-in-out infinite;
+}
+.sb-setup:hover { filter: brightness(1.18); }
+.sb-setup-core {
+  width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; background: #66ff8c;
+  box-shadow: 0 0 12px #66ff8c, 0 0 26px rgba(102, 255, 140, 0.8);
+}
+@keyframes sbSetupPulse {
+  0%, 100% { box-shadow: 0 0 10px rgba(80, 255, 130, 0.22), inset 0 0 8px rgba(80, 255, 130, 0.08); }
+  50% { box-shadow: 0 0 24px rgba(80, 255, 130, 0.6), inset 0 0 14px rgba(80, 255, 130, 0.22); }
+}
+/* The rail's New button now carries a full sentence — keep it on one graceful line-or-two. */
+.sb-head .sb-new span { font-size: 11px; letter-spacing: 0.05em; line-height: 1.3; text-align: left; white-space: normal; }
+
+/* Privacy explainer card (appears under the header when the dial is touched or changed). */
+.privacy-note {
+  position: fixed; top: 74px; left: 50%; transform: translateX(-50%);
+  z-index: 2147480200; max-width: min(480px, calc(100vw - 24px));
+  padding: 12px 16px; border-radius: 12px; cursor: pointer;
+  background: linear-gradient(165deg, rgba(10, 24, 38, 0.96), rgba(4, 10, 18, 0.96));
+  border: 1px solid rgba(120, 200, 255, 0.35); color: #cfe6f5;
+  font-size: 12.5px; line-height: 1.5; letter-spacing: 0.02em;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6), 0 0 18px rgba(90, 180, 255, 0.15);
+  transition: opacity 0.4s ease;
+}
+.privacy-note b { color: #eaf6ff; }
+.privacy-note.gone { opacity: 0; }
+/* Settings sheet helper text (persona vs Operating Mode). */
+.frow-note {
+  margin: 6px 2px 10px; color: #8fb0c4; font-size: 11.5px; line-height: 1.55; letter-spacing: 0.02em;
+}
+.frow-note em { color: #cfe6f5; font-style: normal; font-weight: 600; }
+
+/* ==== Badass Cyber Mech pass (Fred, 2026-07-18) ==================================== */
+
+/* Model selection ceremony: green laser races the trigger border, then the name flares. */
+@property --laser-a { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+.model-trigger { position: relative; }
+.model-trigger.laser::after {
+  content: ""; position: absolute; inset: -2px; border-radius: 12px; padding: 2px;
+  background: conic-gradient(from var(--laser-a), transparent 0deg 318deg, rgba(102, 255, 140, 0.25) 330deg, #66ff8c 352deg 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  animation: laserRace 0.9s linear 1 forwards;
+  pointer-events: none;
+  filter: drop-shadow(0 0 6px rgba(102, 255, 140, 0.8));
+}
+@keyframes laserRace { from { --laser-a: 0deg; } to { --laser-a: 720deg; } }
+.model-current.name-flare { animation: nameFlare 1.7s ease-out 1; }
+@keyframes nameFlare {
+  0% { color: #eafff0; text-shadow: 0 0 14px rgba(102, 255, 140, 0.95), 0 0 30px rgba(102, 255, 140, 0.5); }
+  55% { color: #a8ffc4; text-shadow: 0 0 8px rgba(102, 255, 140, 0.55); }
+  100% { color: inherit; text-shadow: none; }
+}
+
+/* Dominion Prime: the core breathes green while the four bars ignite one at a time and then
+   pulse in step with it — the "connecting to something bigger" look. */
+.prime-module .prime-core { position: relative; }
+.prime-module .prime-core .glyph, .prime-module .prime-core { animation: primeBreathe 3.2s ease-in-out infinite; }
+@keyframes primeBreathe {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(102, 255, 140, 0.35)); }
+  50% { filter: drop-shadow(0 0 14px rgba(102, 255, 140, 0.95)) drop-shadow(0 0 30px rgba(102, 255, 140, 0.45)); }
+}
+.prime-bars i {
+  background: #66ff8c !important;
+  opacity: 0.15;
+  animation: barIgnite 3.2s ease-in-out infinite;
+  box-shadow: 0 0 8px rgba(102, 255, 140, 0.7);
+}
+.prime-bars i:nth-child(1) { animation-delay: 0s; }
+.prime-bars i:nth-child(2) { animation-delay: 0.22s; }
+.prime-bars i:nth-child(3) { animation-delay: 0.44s; }
+.prime-bars i:nth-child(4) { animation-delay: 0.66s; }
+@keyframes barIgnite {
+  0% { opacity: 0.15; }
+  18% { opacity: 1; }
+  45% { opacity: 0.85; }
+  60% { opacity: 1; }
+  100% { opacity: 0.15; }
+}
+
+/* GUIDE pill: never sit on the send arrow (mobile) and never cover the rail's Prime bars. */
+@media (max-width: 620px) {
+  .dt-guide-pill { bottom: max(96px, calc(env(safe-area-inset-bottom) + 84px)); }
+}
+.rail-open .dt-guide-pill { opacity: 0; pointer-events: none; transition: opacity 0.2s ease; }
+
+/* Fresh-start ignition: one green scanline sweeps the chat surface after "Start a New
+   Conversation or Project". */
+#neural-glass { position: relative; }
+.nc-ignite::before {
+  content: ""; position: absolute; inset: 0; z-index: 40; pointer-events: none;
+  background: linear-gradient(180deg, transparent 0%, rgba(102, 255, 140, 0.14) 46%, rgba(102, 255, 140, 0.5) 50%, rgba(102, 255, 140, 0.14) 54%, transparent 100%);
+  background-size: 100% 220%;
+  animation: ncSweep 0.9s ease-out 1 forwards;
+  mix-blend-mode: screen;
+}
+@keyframes ncSweep { from { background-position: 0 -120%; opacity: 1; } to { background-position: 0 120%; opacity: 0; } }
