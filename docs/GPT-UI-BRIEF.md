@@ -14,20 +14,16 @@ You are the UI designer and front-end builder for Dominion AI, a private multi-u
 6. All fetches are same-origin with no auth headers; the gateway (Cloudflare Access) has already identified the user before any request reaches the page.
 7. `dominion-tenant.js` must expose one global entry point: `window.DominionTenant.init()`. It fetches `/account`, then decides what to show (consent, tutorial, top-up toast). It must be safe to call on every page load.
 
-## Design language (this matters as much as function)
-The product's look is "old-world craftsmanship fused with ultra-high-tech": a cinematic machine built of deep blacks and blues, optical glass panels, machined steel edges, copper and brass accents, and a restrained green energy glow. Think precision instrument, engraved metal, glass over circuitry. Absolutely no cartoonish elements, no generic SaaS gradients, no rounded-bubbly startup look, no emoji as decoration.
+## Match the existing app (this matters as much as function)
+The app's current design is approved and final. Your only aesthetic job is to make every new element look like it has always been part of it.
 
-Reuse these existing palette tokens (define them locally in your files with the same values so the pages match the app):
+Attached to this chat is `dominion-style-reference.css`: the app's real stylesheets bundled into one file, in load order. It is the single source of truth for the look.
 
-```css
---machine-black:#010407; --machine-cavity:#03090e; --machine-blue:#081824;
---steel-edge:rgba(206,235,250,.72); --steel-mid:rgba(91,135,158,.46); --steel-dark:rgba(4,10,14,.96);
---copper-line:rgba(216,127,66,.72); --copper-glint:#ffd2a4;
---energy-core:#dffff0; --energy-vivid:#70ff82; --energy-deep:#157442;
---chassis-shadow:0 30px 80px rgba(0,0,0,.86),0 8px 22px rgba(0,0,0,.72);
-```
-
-Panels should read as glass-fronted metal modules: subtle inner highlights, hairline steel borders, copper accent lines used sparingly (section rules, active states), green energy glow reserved for live/positive states (node connected, payment complete, code redeemed). System font stack. Typography: engraved-label feel for section headers (small caps, letterspacing), clean and readable body text.
+Rules:
+- Derive everything from those files: colors, tokens, borders, corner treatments, shadows, spacing, type sizes and weights, state colors, hover and active treatments. Do not invent, reinterpret, or "improve" the style. No new palettes, no new visual ideas.
+- Where a comparable component already exists in those files (panel, button, chip, table, input, header label), replicate its exact treatment under your own `dt-` class names.
+- Never restyle or override existing selectors; duplicate what you need under `dt-` names so the existing app is untouched.
+- If the stylesheets leave something genuinely unspecified, choose the most conservative option consistent with them and note it in INTEGRATION NOTES.
 
 ## Copy rules
 - All long-form copy (tutorial, consent, Forge warning) comes from the server and must be rendered verbatim; you never write or paraphrase it.
@@ -80,3 +76,5 @@ Modal and toast layer for the main app shell:
 
 ## Output format
 Return the three files complete, each in its own fenced code block, preceded by a line with its exact path. Then a short "INTEGRATION NOTES" list: any hooks you need (for example, where `DominionTenant.init()` should be called and where the Guide pill mounts). Nothing else.
+
+(To the person pasting this brief: attach the file `docs/dominion-style-reference.css` along with it.)
