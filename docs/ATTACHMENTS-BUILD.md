@@ -165,10 +165,20 @@ Fred's picks 2+3. Both ride the round-2 architecture.
 - L-A1 CLOSED 2026-07-18 (round 3): scanned/image-only PDFs now transcribe via /api/ocr.
   Remaining niche: scans BEYOND 12 pages transcribe only the first 12 (said honestly in
   the attachment text); raise OCR_MAX_PAGES if Fred ever needs more.
-- L-A5 OPEN (low): raw PHOTOS of documents attached as images still require a vision
-  model; a "read text from this picture" action reusing /api/ocr would let them reach
-  text-only models too. Small follow-up.
+- L-A5 CLOSED 2026-07-18 (round 4): the vision-gate warning now offers "Read text
+  instead" whenever pictures are staged on a non-vision model (Private mode gets honest
+  copy with NO button, since OCR is cloud and would be refused). One tap transcribes the
+  staged pictures via the same gated/metered /api/ocr (source:"photo" honesty note) and
+  replaces them with a text attachment that works with any model. Never automatic: on a
+  vision model, real pixels beat OCR. Verified: e2e photo-source cases; devboot drive of
+  the button (appears, honest no-key failure, pictures preserved, private-mode copy swap);
+  LIVE probe: headless Chrome drew an invoice-style photo, production model transcribed
+  it character-perfect ("INVOICE 42 / TRULINE ROOFING / TOTAL $135.00", $0.00006).
 - L-A6 NOTE: the content wall does not screen OCR'd text (same scope as L-A2).
+- L-A7 OPEN (low): during the live probe qwen3-vl was briefly 429-rate-limited upstream
+  (transient, cleared in one retry). /api/ocr surfaces that honestly today; a retry-then-
+  fallback to the trusted-mode OCR model would ride it out invisibly. Same shape as the
+  existing tools_fallback pattern.
 - L-A2 OPEN (low): the content wall screens text only; image content is not screened
   locally. Providers' own abuse filters are the only image-side backstop. Acceptable per
   current safety.mjs scope; revisit if guests misuse it.

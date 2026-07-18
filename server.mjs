@@ -1481,7 +1481,7 @@ function readRawBody(req, maxBytes = 25 * 1024 * 1024) {
 const OCR_MODEL = cfgGet("OCR_MODEL", "qwen/qwen3-vl-8b-instruct");
 const OCR_MODEL_TRUSTED = cfgGet("OCR_MODEL_TRUSTED", "anthropic/claude-haiku-4-5");
 const OCR_MAX_PAGES = 12;
-const OCR_PROMPT = "Transcribe ALL text on this scanned page verbatim, top to bottom, left to right. Preserve line breaks and table alignment where you can (use tabs between columns). Output ONLY the transcription — no commentary, no summary. If the page is blank, output exactly: (blank page)";
+const OCR_PROMPT = "Transcribe ALL text on this scanned or photographed page verbatim, top to bottom, left to right. Preserve line breaks and table alignment where you can (use tabs between columns). Output ONLY the transcription — no commentary, no summary. If the page contains no text, output exactly: (blank page)";
 
 // Charge a non-owner for OCR exactly like a chat turn, but WITHOUT the training-sink write
 // (a transcription job is not a conversation).
@@ -1563,7 +1563,12 @@ async function handleOcr(req, res) {
   meterOcr(T, costUsd);
   await logUsage({ ts: startedAt, model, mode: "ocr", status: "completed", pages: pages.length, promptTokens: inTok || null, outputTokens: outTok || null, costUsd, uid: T.uid });
   console.log(`[dominion-ai] ocr ${name}: ${pages.length} page(s) via ${model} · $${costUsd} · ${T.isOwner ? "owner" : T.email || T.uid}`);
-  const text = `(Transcribed from a scanned PDF by OCR — verify critical numbers against the original.)\n\n` + out;
+  // Two callers, one wire: scanned-PDF pages (default) and photographed documents
+  // ("Read text instead" on picture attachments). The honesty note names the source.
+  const sourceLabel = body.source === "photo"
+    ? (pages.length === 1 ? "a photographed document" : pages.length + " photographed documents")
+    : "a scanned PDF";
+  const text = `(Transcribed from ${sourceLabel} by OCR — verify critical numbers against the original.)\n\n` + out;
   return json(200, { text, pages: pages.length, costUsd, model: rec.name });
 }
 

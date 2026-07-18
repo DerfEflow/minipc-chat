@@ -23,7 +23,7 @@ export const TUTORIAL = {
       body: "Chat with a large catalog of AI models, from fast and cheap to frontier-grade. Attach files with the paperclip: PDFs, Word documents, and text files work with every model, and pictures work with any model showing the eye badge. Ask for real documents and it will produce them as Word, PDF, Excel, or plain text, laid out professionally, with a download link. Ask it to build an app and it will lay out the whole file tree. It can search the web, remember what matters to you, and keep your work in its own private space that no other user can see.",
       points: [
         "Pick any model from the catalog, or let it choose for you.",
-        "Attach PDFs, Word .docx, Excel .xlsx, text, and Markdown files; they work with every model. Scanned PDFs are read by OCR automatically. Pictures need a model showing the 👁 badge.",
+        "Attach PDFs, Word .docx, Excel .xlsx, text, and Markdown files; they work with every model. Scanned PDFs are read by OCR automatically. Pictures need a model showing the 👁 badge, or tap \"Read text instead\" to transcribe a photographed document for any model.",
         "Generate Word, PDF, Excel, Markdown, and text files that look professional.",
         "Long answers finish in full; they do not get cut off.",
         "Your chats, memory, and files are private to your account.",

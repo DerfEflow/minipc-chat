@@ -236,6 +236,14 @@ try {
     assert(typeof r.body.costUsd === "number", "cost must be reported");
   });
 
+  await t("/api/ocr: photo source gets the photographed-document honesty note", async () => {
+    const r = await req("POST", "/api/ocr", { email: OWNER, body: { name: "receipt.jpg", privacyMode: "normal", source: "photo", pages: [PNG] } });
+    assert(r.status === 200, "expected 200, got " + r.status);
+    assert(r.body.text.includes("a photographed document"), "photo note missing: " + r.body.text.slice(0, 80));
+    const many = await req("POST", "/api/ocr", { email: OWNER, body: { name: "pics", privacyMode: "normal", source: "photo", pages: [PNG, PNG] } });
+    assert(many.body.text.includes("2 photographed documents"), "plural photo note missing");
+  });
+
   await t("/api/ocr: Private mode refuses (no cloud OCR), zero provider calls", async () => {
     const before = orBodies.length;
     const r = await req("POST", "/api/ocr", { email: OWNER, body: { name: "scan.pdf", privacyMode: "private", pages: [PNG] } });

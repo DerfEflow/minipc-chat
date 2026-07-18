@@ -438,6 +438,35 @@ function attStatus(msg) {   // transient progress line above the composer (OCR c
   if (msg) { attachWarn.hidden = false; attachWarn.textContent = msg; }
   else updateAttachGate();
 }
+// One wire for both OCR callers (scanned-PDF pages and photographed documents).
+async function postOcr(pages, name, source) {
+  const resp = await fetch("/api/ocr", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, pages, source, privacyMode: privacyModeSel ? privacyModeSel.value : "normal" }) });
+  const j = await resp.json().catch(() => ({}));
+  if (!resp.ok || j.error) throw new Error(j.error || "OCR failed");
+  return j;
+}
+// "Read text instead": staged pictures transcribe via /api/ocr and become a text attachment,
+// so a photo of a document reaches models that can't see pixels. Never automatic — the user
+// taps it from the vision-gate warning, because on a vision model real pixels beat OCR.
+let ocrBusy = false;
+async function ocrPendingImages() {
+  const imgs = pendingAtt.filter((a) => a.kind === "image" && a.dataUrl);
+  if (!imgs.length || ocrBusy) return;
+  ocrBusy = true; if (attachBtn) attachBtn.classList.add("busy");
+  attStatus("Reading " + imgs.length + " picture" + (imgs.length === 1 ? "" : "s") + " with OCR… (~" + Math.max(5, imgs.length * 2) + "s)");
+  try {
+    const j = await postOcr(imgs.map((a) => a.dataUrl), imgs[0].name || "photo", "photo");
+    pendingAtt = pendingAtt.filter((a) => !(a.kind === "image" && a.dataUrl));
+    const base = imgs.length === 1 ? (imgs[0].name || "photo").replace(/\.[a-z0-9]+$/i, "") : imgs.length + " pictures";
+    pendingAtt.push({ kind: "text", name: (base + " — transcribed").slice(0, 120), text: j.text });
+    renderAttachStrip(); updateEstimate(); attStatus("");
+  } catch (e) {
+    attStatus("");
+    attachWarn.hidden = false; attachWarn.textContent = "OCR: " + ((e && e.message) || "failed");
+    setTimeout(updateAttachGate, 6000);
+  } finally { ocrBusy = false; if (attachBtn) attachBtn.classList.remove("busy"); }
+}
 async function extractDocFile(f) {
   if (!("DecompressionStream" in window)) throw new Error("this browser can't unpack documents; paste the text instead");
   extractMod ||= await import("/attach-extract.mjs?v=2");
@@ -458,11 +487,9 @@ async function extractDocFile(f) {
       attStatus("Scanned PDF — rendering pages for OCR…");
       const rp = await extractMod.renderPdfPages(buf, pdfjsLib, { maxPages: 12 });
       attStatus("Reading " + rp.rendered + (rp.total > rp.rendered ? " of " + rp.total : "") + " page(s) with OCR… (~" + Math.max(5, rp.rendered * 2) + "s)");
-      const resp = await fetch("/api/ocr", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: f.name || "document.pdf", pages: rp.pages, privacyMode: privacyModeSel ? privacyModeSel.value : "normal" }) });
-      const j = await resp.json().catch(() => ({}));
-      attStatus("");
-      if (!resp.ok || j.error) throw new Error(j.error || "OCR failed");
+      let j;
+      try { j = await postOcr(rp.pages, f.name || "document.pdf", "pdf"); }
+      finally { attStatus(""); }
       let text = j.text;
       if (rp.total > rp.rendered) text += "\n\n(Only the first " + rp.rendered + " of " + rp.total + " pages were transcribed — the OCR cap.)";
       return { kind: "text", name: (f.name || "document.pdf").slice(0, 120), text };
@@ -564,14 +591,29 @@ function renderAttachStrip() {
 }
 
 // The honest gate, mirrored from the server: pictures need a vision-badged model. Never swaps the
-// model, never silently drops the picture — it just says so and holds Send until resolved.
+// model, never silently drops the picture — it says so, and offers the one real fix that doesn't
+// change the user's model pick: transcribing the picture to text ("Read text instead"). Private
+// mode gets its own honest copy with NO button, because OCR itself is cloud and would be refused.
 function attachSendBlocked() { return attImages() > 0 && !modelSeesImages(); }
 function updateAttachGate() {
   if (!attachWarn) return;
   if (attachSendBlocked()) {
     attachWarn.hidden = false;
-    attachWarn.textContent = "This model can't view pictures — pick one with the 👁 badge, or remove the picture.";
-  } else { attachWarn.hidden = true; attachWarn.textContent = ""; }
+    attachWarn.replaceChildren();
+    const priv = privacyModeSel && privacyModeSel.value === "private";
+    const span = document.createElement("span");
+    span.textContent = priv
+      ? "Private mode is local-only and the local model can't view pictures. Remove the picture, or change Privacy to use a vision model or OCR."
+      : "This model can't view pictures — pick one with the 👁 badge, remove it, or transcribe it: ";
+    attachWarn.appendChild(span);
+    if (!priv) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "att-ocr"; b.textContent = "Read text instead";
+      b.title = "Transcribe the picture(s) with OCR so this model can read them";
+      b.onclick = ocrPendingImages;
+      attachWarn.appendChild(b);
+    }
+  } else { attachWarn.hidden = true; attachWarn.replaceChildren(); }
 }
 
 // Chrome blocks top-frame data: navigation; a Blob URL opens fine in a new tab.
@@ -1445,7 +1487,7 @@ newBtn.addEventListener("click", newChat);
 if (chatSearch) chatSearch.addEventListener("input", () => { chatQuery = chatSearch.value || ""; renderSidebar(); });
 if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODE, modeSel.value); } catch {} updateEstimate(); });
 // Privacy mode persists, re-filters the picker to the allowed providers, and refreshes the estimate.
-if (privacyModeSel) privacyModeSel.addEventListener("change", () => { try { localStorage.setItem(LS_PMODE, privacyModeSel.value); } catch {} applyPrivacyFilter(); updateEstimate(); });
+if (privacyModeSel) privacyModeSel.addEventListener("change", () => { try { localStorage.setItem(LS_PMODE, privacyModeSel.value); } catch {} applyPrivacyFilter(); updateEstimate(); updateAttachGate(); });
 // Model pick persists immediately (matches Mode) and flips the "via OpenRouter" spend indicator live.
 if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateModelTrigger(); updateCloudBadge(); updateEstimate(); updateAttachGate(); });
 // Attachments: button opens the picker; picked/pasted/dropped files stage into the strip.
