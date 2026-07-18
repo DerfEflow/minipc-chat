@@ -15,7 +15,7 @@
  */
 import http from "node:http";
 import https from "node:https";
-import { readFile, appendFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, appendFile, mkdir } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync, appendFileSync, statSync, mkdirSync } from "node:fs";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { join, normalize, extname, basename } from "node:path";
@@ -876,6 +876,29 @@ async function handleStripeWebhook(req, res) {
   return sjson(res, 200, { received: true });
 }
 
+// Weekly catalog self-audit (Fred, 2026-07-17): the server verifies its OWN model catalog against
+// live provider data — on boot after every deploy, then every 7 days. Problems (mislabels/dead ids,
+// the classes that error in a guest's face) are stored and shown in the owner console; the runtime
+// tools-fallback keeps chat alive meanwhile. CATALOG_AUDIT=0 disables (tests).
+import { runCatalogAudit } from "./catalogaudit.mjs";
+const AUDIT_FILE = dataPath("catalog-audit.json");
+let lastAudit = null;
+try { lastAudit = JSON.parse(await readFile(AUDIT_FILE, "utf8")); } catch {}
+async function runAuditAndStore(trigger) {
+  try {
+    const r = await runCatalogAudit({ openrouter: OPENROUTER_KEY, openai: OPENAI_KEY, anthropic: ANTHROPIC_KEY, deepseek: DEEPSEEK_KEY });
+    r.trigger = trigger;
+    lastAudit = r;
+    try { await writeFile(AUDIT_FILE, JSON.stringify(r, null, 1)); } catch {}
+    console.log(`[dominion-ai] catalog audit (${trigger}): ${r.ok ? "CLEAN" : r.problems.length + " PROBLEM(S)"} · ${r.notes.length} note(s)`);
+    return r;
+  } catch (e) { console.log("[dominion-ai] catalog audit failed:", String(e && e.message || e)); return lastAudit; }
+}
+if (String(cfgGet("CATALOG_AUDIT", "1")) === "1") {
+  setTimeout(() => runAuditAndStore("boot"), 90 * 1000);
+  setInterval(() => runAuditAndStore("weekly"), 7 * 24 * 3600 * 1000);
+}
+
 // Door-list automation: when the owner mints a code for a specific email, add that email to the
 // Cloudflare Access allow policy so the person can sign in with just their email + the emailed PIN.
 // Best-effort: without the CF_* credentials the mint still works and the owner door-lists by hand.
@@ -930,6 +953,8 @@ async function handleAdmin(req, res, u) {
     return sjson(res, 200, { codes, email: email || undefined, doorListed: door ? door.ok : undefined, doorError: door && !door.ok ? door.error : undefined });
   }
   if (req.method === "POST" && p === "/admin/codes/revoke") { billing.revokeCode(String(body.code || "")); return sjson(res, 200, { ok: true }); }
+  if (req.method === "GET" && p === "/admin/audit") return sjson(res, 200, { audit: lastAudit });
+  if (req.method === "POST" && p === "/admin/audit/run") { const r = await runAuditAndStore("manual"); return sjson(res, 200, { audit: r }); }
   return sjson(res, 404, { error: "not found" });
 }
 

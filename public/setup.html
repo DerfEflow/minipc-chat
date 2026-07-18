@@ -387,6 +387,8 @@
         <div class="dt-owner-block">
           <div class="dt-inline" style="justify-content:space-between"><h3>Users</h3><button class="dt-button dt-button-secondary dt-button-small" id="dt-refresh-users" type="button">Refresh users</button></div>
           <div id="dt-users-output"><div class="dt-empty">Loading users</div></div>
+          <div class="dt-inline" style="justify-content:space-between"><h3>Model catalog audit</h3><button class="dt-button dt-button-secondary dt-button-small" id="dt-audit-run" type="button">Run audit now</button></div>
+          <div id="dt-audit-output"><div class="dt-empty">Loading audit</div></div>
         </div>
       </section>
 
@@ -440,7 +442,7 @@
         rail: byId("dt-rail-state"), globalBanner: byId("dt-global-banner"), accountState: byId("dt-account-state"), accountDetails: byId("dt-account-details"),
         redeemPanel: byId("dt-redeem-panel"), redeemForm: byId("dt-redeem-form"), redeemButton: byId("dt-redeem-button"), redeemMessage: byId("dt-redeem-message"),
         billingPanel: byId("dt-billing-panel"), billingState: byId("dt-billing-state"), billingCopy: byId("dt-billing-copy"), tierGrid: byId("dt-tier-grid"), buyButton: byId("dt-buy-button"), cardState: byId("dt-card-state"), autoWrap: byId("dt-auto-wrap"), autoToggle: byId("dt-auto-toggle"), autoCopy: byId("dt-auto-copy"), billingMessage: byId("dt-billing-message"),
-        ownerPanel: byId("dt-owner-panel"), mintForm: byId("dt-mint-form"), mintType: byId("dt-mint-type"), mintCredits: byId("dt-mint-credits"), mintCap: byId("dt-mint-cap"), mintCreditField: byId("dt-mint-credit-field"), mintCapField: byId("dt-mint-cap-field"), mintButton: byId("dt-mint-button"), mintOutput: byId("dt-mint-output"), codesOutput: byId("dt-codes-output"), usersOutput: byId("dt-users-output"),
+        ownerPanel: byId("dt-owner-panel"), mintForm: byId("dt-mint-form"), mintType: byId("dt-mint-type"), mintCredits: byId("dt-mint-credits"), mintCap: byId("dt-mint-cap"), mintCreditField: byId("dt-mint-credit-field"), mintCapField: byId("dt-mint-cap-field"), mintButton: byId("dt-mint-button"), mintOutput: byId("dt-mint-output"), codesOutput: byId("dt-codes-output"), usersOutput: byId("dt-users-output"), auditRun: byId("dt-audit-run"), auditOutput: byId("dt-audit-output"),
         forgeWarning: byId("dt-forge-warning"), forgeToggle: byId("dt-forge-toggle"), nodeState: byId("dt-node-state"), tokenState: byId("dt-token-state"), tokenButton: byId("dt-token-button"), tokenOutput: byId("dt-token-output"), rootList: byId("dt-root-list"), browserPath: byId("dt-browser-path"), dirList: byId("dt-dir-list"), upButton: byId("dt-up-button"), addCurrent: byId("dt-add-current"), saveRoots: byId("dt-save-roots"), rootCount: byId("dt-root-count"), forgeMessage: byId("dt-forge-message"), toastZone: byId("dt-toast-zone")
       };
 
@@ -888,6 +890,27 @@
         } catch (error) { clear(ui.usersOutput); addBanner(ui.usersOutput, errorLabel(error), "danger"); }
       }
 
+      function renderAudit(audit) {
+        clear(ui.auditOutput);
+        if (!audit) { ui.auditOutput.append(node("div", "dt-empty", "No audit has run yet. It runs after every deploy and weekly; you can also run it now.")); return; }
+        const when = audit.checkedAt ? new Date(audit.checkedAt).toLocaleString() : "unknown time";
+        if (audit.ok) addBanner(ui.auditOutput, `Catalog clean. Every model checked against live provider data (${when}).`, "success");
+        else (audit.problems || []).forEach(p => addBanner(ui.auditOutput, `${p.kind}: ${p.id} — ${p.note}`, "danger"));
+        Object.entries(audit.providers || {}).forEach(([name, status]) => addKv(ui.auditOutput, name, status));
+        if ((audit.notes || []).length) addKv(ui.auditOutput, "Minor notes", `${audit.notes.length} (cosmetic; see server log)`);
+      }
+      async function loadAudit() {
+        if (!state.account?.isOwner) return;
+        try { const r = await api("/admin/audit"); renderAudit(r.audit); }
+        catch (error) { clear(ui.auditOutput); addBanner(ui.auditOutput, errorLabel(error), "danger"); }
+      }
+      async function runAuditNow() {
+        setBusy(ui.auditRun, true, "Auditing");
+        try { const r = await api("/admin/audit/run", { method: "POST", body: {} }); renderAudit(r.audit); toast("Audit finished", "success"); }
+        catch (error) { toast(errorLabel(error), "error"); }
+        finally { setBusy(ui.auditRun, false); }
+      }
+
       async function saveUser(row, button) {
         const body = {
           email: row.dataset.dtUserEmail,
@@ -963,6 +986,7 @@
         ui.mintForm.addEventListener("submit", mintCode);
         byId("dt-refresh-codes").addEventListener("click", loadCodes);
         byId("dt-refresh-users").addEventListener("click", loadUsers);
+        ui.auditRun.addEventListener("click", runAuditNow);
         ui.codesOutput.addEventListener("click", event => {
           const button = event.target.closest("[data-dt-revoke-code]");
           if (button) revokeCode(button.dataset.dtRevokeCode, button);
@@ -997,7 +1021,7 @@
           await loadAccount();
           ui.globalBanner.hidden = true;
           const jobs = [loadContent(), loadForge()];
-          if (state.account.isOwner) jobs.push(loadCodes(), loadUsers());
+          if (state.account.isOwner) jobs.push(loadCodes(), loadUsers(), loadAudit());
           await Promise.allSettled(jobs);
         } catch (error) {
           ui.rail.textContent = "Account unavailable";
