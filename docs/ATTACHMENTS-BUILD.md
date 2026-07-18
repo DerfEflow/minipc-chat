@@ -81,7 +81,15 @@ Client message shape stays `{ role, content: string }` everywhere, with an OPTIO
 - [x] Visual: composer attach + preview + thumbnail + honest non-vision hint verified on
       owner (8095) AND guest (8094) devboot surfaces via live DOM drive; full send round
       trip with a file chip confirmed. (Pixel screenshot skipped: known pane timeout.)
-- [ ] Deployed via railway up; /api/version build changed; boot log clean.
+- [x] Deployed via railway up 2026-07-18 (commit 4f11062); /api/version build flipped
+      1784347357945 -> 1784376123662 in ~40s; boot log clean (4 providers keyed, corpus
+      885/14696 intact, mini-pc hands node reconnected). The 90s post-boot catalog audit
+      line had not yet appeared in the pulled log window; the identical audit ran green
+      locally against live OpenRouter data this session (0 problems, 0 vision drift) and
+      its verdict lands in the owner console at /setup.
+- Remaining human step: Fred taps the paperclip on his phone with a vision model picked
+  and sends one real picture (the only check that exercises a REAL provider with REAL
+  pixels; every layer up to that boundary is proven above).
 
 ## Ledger
 
