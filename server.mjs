@@ -1055,9 +1055,11 @@ async function ollamaChat(model, messages, opts = {}) {
     const body = JSON.stringify(payload);
     // Per-model endpoint: MAIN_MODEL / heavy tags → on-demand heavy tier; else always-on light tier.
     // http vs https + bearer are handled by ollamaReq. Single-box mode: both resolve to OLLAMA_URL.
-    const { mod, opts } = ollamaReq(endpointForModel(model), "/api/chat", "POST", { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+    // reqOpts, NOT opts: destructuring into `opts` here shadowed the function parameter and put every
+    // earlier `opts.*` read in the temporal dead zone — every local-model call crashed on arrival.
+    const { mod, opts: reqOpts } = ollamaReq(endpointForModel(model), "/api/chat", "POST", { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
     const r = mod.request(
-      { ...opts, timeout: 180000 },
+      { ...reqOpts, timeout: 180000 },
       (resp) => { let buf = ""; resp.on("data", (d) => (buf += d)); resp.on("end", () => { try { resolve(JSON.parse(buf)); } catch { resolve(null); } }); }
     );
     if (opts.signal) opts.signal.addEventListener("abort", () => { try { r.destroy(); } catch {} resolve(null); }, { once: true });

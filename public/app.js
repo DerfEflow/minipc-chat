@@ -107,8 +107,8 @@ function summarizeLeft(id) {
   if (!c || c.messages.length < 4) return;
   fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
 }
-function newChat() { if (busy) return; const prev = curId; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); closeSidebar(); input.focus(); if (prev) summarizeLeft(prev); }
-function switchChat(id) { if (busy) return; const prev = curId; curId = id; save(); renderAll(); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); }
+function newChat() { if (busy) return; const prev = curId; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); input.focus(); if (prev) summarizeLeft(prev); }
+function switchChat(id) { if (busy) return; const prev = curId; curId = id; save(); renderAll(); scroll(true); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); }
 function deleteChat(id) {
   // True forget: also erase the server's transcript copy + any episodic memory distilled from this
   // chat, so cross-chat retrieval can never resurrect it (fire-and-forget; nothing breaks offline).
@@ -153,7 +153,13 @@ function renderSidebar() {
 
 // ---------- rendering ----------
 const stripThink = (t) => t.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
-const scroll = () => { main.scrollTop = main.scrollHeight; };
+// Follow the stream only while the reader is AT the bottom. The old unconditional snap fought any
+// upward scroll during generation (the "shaking"). Scrolling up hands control to the user; coming
+// back to the bottom re-engages the follow; scroll(true) re-engages explicitly (send / chat switch).
+let followStream = true;
+const nearBottom = () => main.scrollHeight - main.scrollTop - main.clientHeight < 140;
+main.addEventListener("scroll", () => { followStream = nearBottom(); }, { passive: true });
+const scroll = (force) => { if (force) followStream = true; if (followStream) main.scrollTop = main.scrollHeight; };
 function mkAct(label, fn, title) { const b = document.createElement("button"); b.className = "act"; b.textContent = label; if (title) b.title = title; b.onclick = fn; return b; }
 // The user prompt that preceded message i (feeds hallucination check / save lesson / convert-to-eval).
 function precedingUser(c, i) { for (let k = i - 1; k >= 0; k--) if (c.messages[k].role === "user") return c.messages[k].content; return ""; }
@@ -625,6 +631,7 @@ function send() {
   const text = input.value.trim(); if (!text) return;
   const c = cur(); if (!c) return;
   input.value = ""; autosize(); hideCostChip();
+  scroll(true);   // a fresh send always re-engages the follow so the reply starts in view
   c.messages.push({ role: "user", content: text });
   if (c.title === "New chat") c.title = titleFrom(c.messages);
   c.updatedAt = Date.now(); save(); renderAll();
