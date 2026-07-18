@@ -68,6 +68,9 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
     createdAt TEXT, redeemedBy TEXT, redeemedAt TEXT )`);
   // Idempotency for paid Checkout sessions (return handler AND webhook may both fire).
   db.exec(`CREATE TABLE IF NOT EXISTS paid_sessions ( id TEXT PRIMARY KEY, email TEXT, credits INTEGER, ts TEXT )`);
+  // Additive migration: pay-before-access. Promo credits on an invite code are held here and released
+  // by the FIRST purchase, so handing out codes costs nothing until the guest actually subscribes.
+  try { db.exec("ALTER TABLE credits ADD COLUMN pendingPromo INTEGER NOT NULL DEFAULT 0"); } catch {}
 
   const q = {
     get: db.prepare("SELECT * FROM credits WHERE email=?"),
@@ -85,6 +88,8 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
     codeAll: db.prepare("SELECT * FROM codes ORDER BY createdAt DESC LIMIT ?"),
     sessGet: db.prepare("SELECT id FROM paid_sessions WHERE id=?"),
     sessIns: db.prepare("INSERT INTO paid_sessions (id,email,credits,ts) VALUES (?,?,?,?)"),
+    sessByEmail: db.prepare("SELECT id FROM paid_sessions WHERE email=? LIMIT 1"),
+    setPending: db.prepare("UPDATE credits SET pendingPromo=?, updatedAt=? WHERE email=?"),
   };
 
   const lc = (e) => String(e || "").trim().toLowerCase();
@@ -106,13 +111,23 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
 
   // Grant purchased/promo credits from a USD amount (markup applied).
   function grantUsd(email, usd, reason) { return apply(email, creditsForUsd(usd), reason || `top-up $${usd}`); }
+  // Has this user ever completed a paid Checkout? (Pay-before-access: chat wording + the app-door
+  // redirect key off this; auto-recharge grants can only exist after a first purchase anyway.)
+  const hasPaid = (email) => !!q.sessByEmail.get(lc(email));
   // Idempotent grant for a paid Checkout session (safe to call from BOTH the return handler and the
-  // webhook). Grants exactly the credits recorded on the session, once.
+  // webhook). Grants exactly the credits recorded on the session, once. The FIRST purchase also
+  // releases any held welcome bonus and turns mandatory auto-recharge on.
   function grantSession(id, email, credits) {
     const sid = String(id || ""); if (!sid) return { error: "no_session" };
     if (q.sessGet.get(sid)) return { already: true, balance: balance(email) };
     q.sessIns.run(sid, lc(email), Math.trunc(credits) || 0, now());
-    const bal = apply(email, Math.trunc(credits) || 0, `top-up session ${sid}`);
+    let bal = apply(email, Math.trunc(credits) || 0, `top-up session ${sid}`);
+    const row = ensure(email);
+    if (row.pendingPromo > 0) {
+      bal = apply(email, row.pendingPromo, "welcome bonus (released by first purchase)");
+      q.setPending.run(0, now(), lc(email));
+    }
+    q.setRecharge.run(1, Math.max(MIN_TOPUP_USD, row.topupUsd || MIN_TOPUP_USD), now(), lc(email));
     return { ok: true, credited: Math.trunc(credits) || 0, balance: bal };
   }
   // Deduct a turn's token cost (USD) in credits. Returns { balance, deducted, low }.
@@ -183,17 +198,25 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
       users.setStatus(e, "active");
       if (users.markInvited) users.markInvited(e);   // redeeming any code passes the invite gate
     }
-    if (row.credits > 0) grantUsd_credits(e, row.credits, `code ${row.code}`);
-    return { ok: true, type: row.type, role: row.type === "free" ? "sponsored" : "credit", credits: row.credits };
+    // Pay-before-access: an invite code's promo credits are HELD as a welcome bonus and released by
+    // the first purchase (grantSession), so unredeemed generosity never spends Fred's money. Free
+    // codes are the deliberate comp path and are unaffected (their spend is capped, not credited).
+    if (row.credits > 0 && row.type !== "free") {
+      const r = ensure(e);
+      q.setPending.run((r.pendingPromo || 0) + row.credits, now(), e);
+    } else if (row.credits > 0) {
+      apply(e, row.credits, `code ${row.code}`);
+    }
+    return { ok: true, type: row.type, role: row.type === "free" ? "sponsored" : "credit", credits: row.credits,
+      pendingPromo: row.type !== "free" ? row.credits : 0 };
   }
-  function grantUsd_credits(email, credits, reason) { return apply(email, credits, reason); }   // raw-credit grant (promo)
 
   return {
     // ledger
-    balance, canChat, grantUsd, grantSession, chargeTurn, autoRecharge, apply,
+    balance, canChat, hasPaid, grantUsd, grantSession, chargeTurn, autoRecharge, apply,
     adminAdjust: (email, credits, reason) => apply(email, credits, reason || "admin adjust"),
     ledger: (email, limit = 50) => q.ledgerFor.all(lc(email), limit),
-    account: (email) => { const r = ensure(email); return { balance: r.balance, usdValue: usdValueOfCredits(r.balance), autorecharge: !!r.autorecharge, topupUsd: r.topupUsd, hasCard: !!r.defaultPm, rechargeFails: r.rechargeFails }; },
+    account: (email) => { const r = ensure(email); return { balance: r.balance, usdValue: usdValueOfCredits(r.balance), autorecharge: !!r.autorecharge, topupUsd: r.topupUsd, hasCard: !!r.defaultPm, rechargeFails: r.rechargeFails, pendingPromo: r.pendingPromo || 0, hasPaid: hasPaid(email) }; },
     // payment wiring
     setStripe, setAutorecharge,
     // codes

@@ -102,19 +102,26 @@ await t("minting a code WITH an email reports door-list status (no CF creds here
   if (r.body.doorListed !== false || !r.body.doorError) throw new Error("expected doorListed:false + doorError, got " + JSON.stringify(r.body));
 });
 
-await t("redeeming an invite code activates a CREDIT user with promo credits", async () => {
+await t("redeeming an invite code activates a CREDIT user; promo is HELD, chat stays locked (pay-before-access)", async () => {
   const r = await req("POST", "/account/redeem", { email: "newbie@test.com", body: { code: inviteCode } });
   if (!r.body.ok || r.body.role !== "credit") throw new Error("redeem failed: " + JSON.stringify(r.body));
   const acct = await req("GET", "/account", { email: "newbie@test.com" });
   if (!acct.body.invited || acct.body.role !== "credit") throw new Error("not activated");
-  if (!acct.body.credits || acct.body.credits.balance !== 500) throw new Error("promo credits missing: " + JSON.stringify(acct.body.credits));
+  if (!acct.body.credits || acct.body.credits.balance !== 0) throw new Error("balance should be 0 pre-purchase: " + JSON.stringify(acct.body.credits));
+  if (acct.body.credits.pendingPromo !== 500) throw new Error("welcome bonus not held: " + JSON.stringify(acct.body.credits));
+  const codes = await chatCodes("newbie@test.com");
+  if (!codes.includes("needs_credits")) throw new Error("chat should be locked until first purchase, got " + JSON.stringify(codes));
+  const page = await req("GET", "/", { email: "newbie@test.com" });
+  if (page.status !== 302 || page.headers.location !== "/setup") throw new Error("never-paid user should be sent to /setup, got " + page.status);
 });
 
 await t("a credit user WITH balance passes the gates (fails only at the provider)", async () => {
+  // No Stripe in this test env, so stand in for the first purchase with an owner credit grant.
+  await req("POST", "/admin/user", { email: OWNER, body: { email: "newbie@test.com", adjustCredits: 300 } });
   const codes = await chatCodes("newbie@test.com");
   if (codes.includes("needs_invite") || codes.includes("needs_credits")) throw new Error("should have passed gates: " + JSON.stringify(codes));
   const page = await req("GET", "/", { email: "newbie@test.com" });
-  if (page.status !== 200) throw new Error("redeemed user should get the app, got " + page.status);
+  if (page.status !== 200) throw new Error("funded user should get the app, got " + page.status);
 });
 
 await t("a credit user with ZERO balance is credit-gated", async () => {

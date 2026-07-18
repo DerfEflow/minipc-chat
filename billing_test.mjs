@@ -61,16 +61,39 @@ await t("chargeTurn flags low at/below the $1 threshold", () => {
   assert.equal(r.low, true);
 });
 
-await t("invite code: redeem activates a CREDIT user and grants promo credits", () => {
+await t("invite code: redeem activates a CREDIT user but HOLDS promo as a welcome bonus (pay-before-access)", () => {
   const users = mockUsers();
   const b = createBilling({ dir: join(dir, "c"), users });
   const code = b.mintCode({ type: "invite", credits: 500, note: "friend" });
   assert.match(code.code, /^DOMI-[A-Z0-9]{4}-[A-Z0-9]{4}$/);
   const r = b.redeem(code.code, "friend@x.com");
   assert.equal(r.ok, true); assert.equal(r.role, "credit");
+  assert.equal(r.pendingPromo, 500);
   assert.equal(users._state["friend@x.com"].role, "credit");
   assert.equal(users._state["friend@x.com"].status, "active");
-  assert.equal(b.balance("friend@x.com"), 500);
+  assert.equal(b.balance("friend@x.com"), 0);            // NOT spendable yet
+  assert.equal(b.canChat("friend@x.com"), false);         // chat locked until first purchase
+  assert.equal(b.hasPaid("friend@x.com"), false);
+  assert.equal(b.account("friend@x.com").pendingPromo, 500);
+});
+
+await t("first purchase releases the welcome bonus and turns auto-recharge on", () => {
+  const users = mockUsers();
+  const b = createBilling({ dir: join(dir, "c2"), users });
+  const code = b.mintCode({ type: "invite", credits: 500 });
+  b.redeem(code.code, "payer@x.com");
+  b.setAutorecharge("payer@x.com", false);                // even if they opted out pre-purchase
+  const g = b.grantSession("cs_test_1", "payer@x.com", 1000);   // $12.50 purchase
+  assert.equal(g.ok, true);
+  assert.equal(b.balance("payer@x.com"), 1500);           // purchase + released bonus
+  assert.equal(b.hasPaid("payer@x.com"), true);
+  assert.equal(b.canChat("payer@x.com"), true);
+  const a = b.account("payer@x.com");
+  assert.equal(a.pendingPromo, 0);
+  assert.equal(a.autorecharge, true);                     // mandatory after first purchase
+  const again = b.grantSession("cs_test_1", "payer@x.com", 1000);   // idempotent replay
+  assert.equal(again.already, true);
+  assert.equal(b.balance("payer@x.com"), 1500);           // bonus NOT double-released
 });
 
 await t("free code: redeem activates a SPONSORED user with the cap", () => {

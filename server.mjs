@@ -2060,9 +2060,13 @@ async function handleChat(req, res) {
     sse({ type: "stopped" }); return endStream();
   }
   // Credit gate: a paid (credit) user with an empty balance must top up. Sponsored/free users are
-  // gated by their cap (status paused above), not by credits.
+  // gated by their cap (status paused above), not by credits. Pay-before-access: someone who has
+  // never purchased gets the subscribe wording (their welcome bonus is held until they do).
   if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) {
-    sse({ type: "error", code: "needs_credits", message: "You're out of credits. Opening Setup so you can add more." });
+    const msg = billing.hasPaid(T.email)
+      ? "You're out of credits. Opening Setup so you can add more."
+      : "Chat unlocks after your first credit purchase. Opening Setup: add your card there and your welcome bonus is added on top.";
+    sse({ type: "error", code: "needs_credits", message: msg });
     sse({ type: "stopped" }); return endStream();
   }
   if (!T.isOwner && !cloudModel) {
@@ -2786,9 +2790,14 @@ const server = http.createServer(async (req, res) => {
 
     // Multi-tenant front door: a signed-in user who has not redeemed an access code is sent to the
     // Setup page (which asks for the code) instead of a chat that would only refuse them silently.
+    // Pay-before-access: a credit user who redeemed but has never purchased (and holds no balance)
+    // also lands on Setup, where the card + first purchase unlock the app.
     if (MULTI_TENANT && (path === "/" || path === "/index.html")) {
       const T0 = resolveTenant(req);
       if (T0.role !== "anon" && !T0.isOwner && !T0.invited) { res.writeHead(302, { location: "/setup" }); return res.end(); }
+      if (T0.role === "credit" && !T0.isOwner && billing.balance(T0.email) === 0 && !billing.hasPaid(T0.email)) {
+        res.writeHead(302, { location: "/setup" }); return res.end();
+      }
     }
     let rel = path === "/" ? "/index.html" : path;
     const safe = normalize(rel).replace(/\\/g, "/");

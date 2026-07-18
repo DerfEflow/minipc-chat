@@ -46,7 +46,7 @@ export const SETUP_HTML = `<!doctype html><html lang="en"><head><meta charset="u
   <div class="muted">Type their email first. Minting a code for an email also opens the sign-in door for it, so the code is the only thing you send them.</div>
   <div class="row">
     <button onclick="mint('invite')">Mint invite code</button>
-    <span class="muted">with</span><input type="number" id="promo" value="500" style="width:90px"><span class="muted">promo credits</span>
+    <span class="muted">with</span><input type="number" id="promo" value="500" style="width:90px"><span class="muted">bonus credits (released by their first purchase; codes cost you nothing up front)</span>
   </div>
   <div class="row"><button onclick="mint('free')">Mint free code</button><span class="muted">($20/mo, covered by you)</span></div>
   <div id="mintOut"></div>
@@ -81,6 +81,7 @@ async function loadAcct(){
   const c=[]; c.push(kv('Email',ACCT.email)); c.push(kv('Role',ACCT.role)); c.push(kv('Status',ACCT.status));
   c.push(kv('Access',ACCT.invited?'active':'needs a code'));
   if(ACCT.credits) c.push(kv('Credits',ACCT.credits.balance+' ('+ '$'+(ACCT.credits.usdValue||0).toFixed(2)+' value)'));
+  if(ACCT.credits&&ACCT.credits.pendingPromo) c.push(kv('Welcome bonus',ACCT.credits.pendingPromo+' credits, added with your first purchase'));
   if(ACCT.sponsored) c.push(kv('Free plan','$'+(ACCT.sponsored.spentUsd||0).toFixed(2)+' of $'+ACCT.sponsored.capUsd+' this month'));
   el('acct').innerHTML=c.join('');
   el('ownerCard').classList.toggle('hidden',!ACCT.isOwner);
@@ -88,7 +89,21 @@ async function loadAcct(){
   loadForge();
 }
 const kv=(k,v)=>'<div class="kv"><b>'+k+'</b><span>'+(v==null?'—':v)+'</span></div>';
-async function redeem(){const code=el('code').value.trim();if(!code)return;const r=await j('POST','/account/redeem',{code});el('redeemMsg').innerHTML=r.ok?'<span class=ok>Redeemed. You are now a '+r.role+' user'+(r.credits?(' with '+r.credits+' credits'):'')+'.</span> <a href="/">Open Dominion &rarr;</a>':'<span class=err>'+(r.error||'failed')+'</span>';loadAcct();}
+async function redeem(){
+  const code=el('code').value.trim(); if(!code)return;
+  const r=await j('POST','/account/redeem',{code});
+  if(!r.ok){ el('redeemMsg').innerHTML='<span class=err>'+(r.error||'failed')+'</span>'; loadAcct(); return; }
+  let next;
+  if(r.role==='credit'){
+    next='Next: buy your first credits below to unlock chat';
+    if(r.credits) next+=', and your '+r.credits+'-credit welcome bonus is added on top';
+    next+='.';
+  } else {
+    next='<a href="/">Open Dominion &rarr;</a>';
+  }
+  el('redeemMsg').innerHTML='<span class=ok>Redeemed. You are now a '+r.role+' user.</span> '+next;
+  loadAcct();
+}
 async function mint(type){const email=el('mintEmail').value.trim().toLowerCase();const credits=type==='invite'?Number(el('promo').value||0):0;const r=await j('POST','/admin/codes/mint',{type,credits,email});if(r.codes&&r.codes[0]){const door=email?(r.doorListed?'<div class=ok>&#10003; '+email+' can now sign in with just their email.</div>':'<div class=err>Door-list failed ('+(r.doorError||'unknown')+'). Tell Claude to add '+email+'.</div>'):'';el('mintOut').innerHTML='<div class=muted>'+(type==='invite'?'Invite':'Free')+' code (single use):</div><div class="code">'+r.codes[0].code+'</div><div class=muted>Email this code to the person. They sign in with their email, then paste it under "Redeem a code".</div>'+door+el('mintOut').innerHTML;}else{el('mintOut').innerHTML='<span class=err>'+(r.error||'mint failed')+'</span>';}}
 async function loadUsers(){const r=await j('GET','/admin/users');if(!r.users)return;let h='<table><tr><th>Email</th><th>Role</th><th>Status</th><th>Credits</th></tr>';for(const u of r.users)h+='<tr><td>'+u.email+'</td><td>'+u.role+'</td><td>'+u.status+'</td><td>'+(u.credits||0)+'</td></tr>';el('usersOut').innerHTML=h+'</table>';}
 async function topup(){const usd=Number(el('topupAmt').value);const r=await j('POST','/billing/topup',{usd});if(r.url)location.href=r.url;else el('billMsg').innerHTML='<span class=err>'+(r.error||'billing not ready')+'</span>';}
