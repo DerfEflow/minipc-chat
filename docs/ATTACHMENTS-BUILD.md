@@ -98,11 +98,38 @@ Client message shape stays `{ role, content: string }` everywhere, with an OPTIO
   byte-level e2e already pins that plumbing's output to the probed shape. First casual
   photo Fred sends closes it as a side effect.
 
+## Round 2 (2026-07-18): PDF + DOCX for everyone
+
+Fred's directive: pdf, docx, txt, and md attachments for every user. txt/md already
+worked; this round adds PDF + DOCX by extracting text ON THE DEVICE at attach time, so
+documents ride the existing {kind:"text"} wire and work with EVERY model (local Qwen and
+the DeepSeek guest default included), with no binary parsing added to the server and no
+provider-specific token surprises (extracted text bills as ordinary prompt tokens, so the
+cost chip stays honest via the new attachChars preflight field).
+
+- PDF engine: vendored Mozilla pdf.js 4.10.38 legacy (public/vendor/pdfjs, Apache-2.0,
+  lazy-loaded only when a document is attached; never precached). Real-world font/CMap
+  handling is exactly where homegrown extractors produce garbage.
+- DOCX: dependency-free central-directory zip reader + DecompressionStream in
+  public/attach-extract.mjs. Old binary .doc refuses with "save it as .docx first".
+- Honest refusals: scanned/image-only PDFs ("no extractable text"), password PDFs,
+  exotic-font garbage (readable-ratio check), zip64, non-docx bytes.
+- Server touches: .mjs MIME type (dynamic import() refuses non-JS types; found live in
+  devboot when the module fetch failed), attachChars in /estimate, attachment text
+  lengths in the context-window math. Nothing else.
+- Proof: attach_extract_test.mjs (6 round-trip/refusal tests using docwriters.mjs's own
+  generated PDF+DOCX against the same extractor code phones run, via the vendored
+  pdf.js); all 16 server suites re-run green; devboot browser drive extracted both
+  formats in 98ms, chips staged and rendered, marker text verified in storage, send
+  round-tripped. Deployed same day.
+
 ## Ledger
 
-- L-A1 OPEN (low): PDF attachments deferred. OpenRouter file parts + Anthropic document
-  blocks can carry PDFs later; v1 is images + text-like files. Composer says so honestly
-  (the picker filters to supported types).
+- L-A1 CLOSED for the common case 2026-07-18 (round 2): PDFs and Word docs attach for
+  everyone via on-device text extraction. Still OPEN as a narrow follow-up: scanned or
+  image-only PDFs have no text layer and are refused honestly; carrying THOSE needs
+  native provider file parts or OCR (OpenRouter file-parser / Anthropic document blocks)
+  and is deliberately not in this round.
 - L-A2 OPEN (low): the content wall screens text only; image content is not screened
   locally. Providers' own abuse filters are the only image-side backstop. Acceptable per
   current safety.mjs scope; revisit if guests misuse it.

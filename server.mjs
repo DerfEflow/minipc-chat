@@ -184,6 +184,7 @@ function startScan() {
 
 const TYPES = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",   // ES modules: import() refuses non-JS MIME types
   ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
   ".webmanifest": "application/manifest+json; charset=utf-8",
   ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon",
@@ -1406,7 +1407,10 @@ function estimatePreflight(input = {}) {
   // per-image estimate. The chip also mirrors the server's vision gate so a blocked send says so
   // before the user taps it.
   const pendingImages = Math.max(0, Math.min(ATTACH_MAX_IMAGES_PER_MSG, Number(input.images) || 0));
-  const tokensIn = estTokens(totalInputChars) + 900 + pendingImages * ATTACH_IMG_EST_TOKENS;
+  // Staged file text (extracted PDFs/Word docs included) as a char count, capped at the
+  // per-message maximum so a hostile count can't fake a giant estimate.
+  const pendingAttachChars = Math.max(0, Math.min(ATTACH_MAX_TEXT_FILES * ATTACH_MAX_TEXT_CHARS, Number(input.attachChars) || 0));
+  const tokensIn = estTokens(totalInputChars) + 900 + pendingImages * ATTACH_IMG_EST_TOKENS + estTokens(pendingAttachChars);
 
   const cloud = isCloudModel(forced) ? forced : "";
   if (pendingImages > 0 && !(cloud && isVisionCapable(cloud))) {
@@ -2430,8 +2434,9 @@ async function handleChat(req, res) {
   // as_fred keeps thinking ON (think:false made the model plan out loud); the answer-directly
   // order is the LAST thing it reads (top-of-prompt placement proved too weak).
   if (mode === "as_fred") messages.push({ role: "system", content: "Reply now with ONLY Fred's actual words. Do not analyze the request, do not restate the question, do not describe Fred's style or your approach — your first word is the first word of Fred's answer." });
-  const contextTokens = estTokens(messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0))
-    + countHistoryImages(messages) * ATTACH_IMG_EST_TOKENS;   // pictures consume real window too
+  const contextTokens = estTokens(messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0)
+      + (Array.isArray(m.attachments) ? m.attachments.reduce((s, a) => s + (a.kind === "text" && a.text ? a.text.length : 0), 0) : 0), 0))
+    + countHistoryImages(messages) * ATTACH_IMG_EST_TOKENS;   // pictures and attached file text consume real window too
   // D2 (audit item 12): the long-context re-check AFTER retrieval. Routing ran before context
   // assembly, so only NOW do we know what retrieval actually loaded — if the assembled prompt
   // would overflow the current window, escalate num_ctx (and the mode label) per the spec's first

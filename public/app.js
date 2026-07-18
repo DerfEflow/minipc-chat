@@ -425,6 +425,25 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modelPan
 // hundred KB, and only vision-badged models may receive them (the server enforces the same gate).
 const ATT_MAX_IMAGES = 4, ATT_MAX_TEXTS = 4, ATT_MAX_TEXT_BYTES = 200 * 1024, ATT_IMG_EDGE = 1568;
 const ATT_TEXT_EXT = /\.(txt|md|markdown|csv|json|log|xml|yaml|yml|html|css|js|mjs|ts|py|sql|sh|ps1)$/i;
+const ATT_DOC_EXT = /\.(pdf|docx)$/i;
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+// PDFs and Word docs extract to text ON THE DEVICE (lazy-loaded module + vendored pdf.js),
+// then ride the same {kind:"text"} wire as any pasted file — which is why they work with
+// every model, local included, and never add binary parsing to the server.
+let extractMod = null, pdfjsLib = null;
+async function extractDocFile(f) {
+  if (!("DecompressionStream" in window)) throw new Error("this browser can't unpack documents; paste the text instead");
+  extractMod ||= await import("/attach-extract.mjs?v=1");
+  const buf = await f.arrayBuffer();
+  if (f.type === "application/pdf" || /\.pdf$/i.test(f.name || "")) {
+    pdfjsLib ||= await extractMod.loadPdfjsBrowser();
+    const r = await extractMod.extractPdf(buf, pdfjsLib, { maxChars: ATT_MAX_TEXT_BYTES });
+    return { kind: "text", name: (f.name || "document.pdf").slice(0, 120), text: r.text };
+  }
+  const r = await extractMod.extractDocx(buf, { maxChars: ATT_MAX_TEXT_BYTES });
+  return { kind: "text", name: (f.name || "document.docx").slice(0, 120), text: r.text };
+}
 const attImages = () => pendingAtt.filter((a) => a.kind === "image").length;
 const attTexts = () => pendingAtt.filter((a) => a.kind === "text").length;
 
@@ -466,19 +485,28 @@ function readTextFile(file) {
 async function addFiles(fileList) {
   const files = Array.from(fileList || []); if (!files.length) return;
   let rejected = [];
-  for (const f of files) {
-    if (f.type && f.type.startsWith("image/")) {
-      if (attImages() >= ATT_MAX_IMAGES) { rejected.push(f.name + " (max " + ATT_MAX_IMAGES + " pictures)"); continue; }
-      const a = await downscaleImage(f);
-      if (a) pendingAtt.push(a); else rejected.push((f.name || "picture") + " (couldn't read it)");
-    } else if ((f.type && f.type.startsWith("text/")) || f.type === "application/json" || ATT_TEXT_EXT.test(f.name || "")) {
-      if (attTexts() >= ATT_MAX_TEXTS) { rejected.push(f.name + " (max " + ATT_MAX_TEXTS + " files)"); continue; }
-      const a = await readTextFile(f);
-      if (a) pendingAtt.push(a); else rejected.push((f.name || "file") + " (empty or unreadable)");
-    } else {
-      rejected.push((f.name || "file") + " (only pictures and text-type files for now — PDFs are coming)");
+  if (attachBtn) attachBtn.classList.add("busy");   // PDF extraction on a phone can take a couple seconds
+  try {
+    for (const f of files) {
+      if (f.type && f.type.startsWith("image/")) {
+        if (attImages() >= ATT_MAX_IMAGES) { rejected.push(f.name + " (max " + ATT_MAX_IMAGES + " pictures)"); continue; }
+        const a = await downscaleImage(f);
+        if (a) pendingAtt.push(a); else rejected.push((f.name || "picture") + " (couldn't read it)");
+      } else if (f.type === "application/pdf" || f.type === DOCX_MIME || ATT_DOC_EXT.test(f.name || "")) {
+        if (attTexts() >= ATT_MAX_TEXTS) { rejected.push(f.name + " (max " + ATT_MAX_TEXTS + " files)"); continue; }
+        try { pendingAtt.push(await extractDocFile(f)); }
+        catch (e) { rejected.push((f.name || "document") + " (" + ((e && e.message) || "couldn't read it") + ")"); }
+      } else if (/\.doc$/i.test(f.name || "")) {
+        rejected.push(f.name + " (old .doc format; save it as .docx first)");
+      } else if ((f.type && f.type.startsWith("text/")) || f.type === "application/json" || ATT_TEXT_EXT.test(f.name || "")) {
+        if (attTexts() >= ATT_MAX_TEXTS) { rejected.push(f.name + " (max " + ATT_MAX_TEXTS + " files)"); continue; }
+        const a = await readTextFile(f);
+        if (a) pendingAtt.push(a); else rejected.push((f.name || "file") + " (empty or unreadable)");
+      } else {
+        rejected.push((f.name || "file") + " (pictures, PDFs, Word .docx, and text files only)");
+      }
     }
-  }
+  } finally { if (attachBtn) attachBtn.classList.remove("busy"); }
   renderAttachStrip();
   if (rejected.length) { attachWarn.hidden = false; attachWarn.textContent = "Skipped: " + rejected.join(", "); setTimeout(updateAttachGate, 4000); }
   updateEstimate();
@@ -1350,7 +1378,9 @@ async function updateEstimate() {
   history.push({ role: "user", content: text });
   // Pictures ride the estimate as a COUNT only (the server prices them at a flat per-image token
   // figure); the chip also mirrors the vision gate so a doomed send says so before the tap.
-  const payload = { messages: history, mode: modeSel ? modeSel.value : "auto", model: forcedModel() || "auto", privacyMode: privacyModeSel ? privacyModeSel.value : "normal", images: attImages() };
+  // Staged file text (a 40-page PDF is real tokens) rides as a CHAR COUNT, never the bytes.
+  const attachChars = pendingAtt.reduce((n, a) => n + (a.kind === "text" && a.text ? a.text.length : 0), 0);
+  const payload = { messages: history, mode: modeSel ? modeSel.value : "auto", model: forcedModel() || "auto", privacyMode: privacyModeSel ? privacyModeSel.value : "normal", images: attImages(), attachChars };
   const seq = ++estSeq;
   costChip.className = "cost-chip cc-loading"; costChip.textContent = "estimating…"; costChip.hidden = false;
   let est;
