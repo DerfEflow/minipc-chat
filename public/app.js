@@ -354,7 +354,7 @@ function renderModelPanel() {
       const keyed = m.provider === "openrouter" ? availCache.openrouter : m.provider === "openai" ? availCache.openai : m.provider === "deepseek" ? availCache.deepseek : m.provider === "anthropic" ? availCache.anthropic : true;
       html += modelRowHtml({
         id: m.id, name: m.name, tool: m.toolCapable, free: (!m.inCost && !m.outCost), price: fmtPriceShort(m),
-        meta: [(m.params && m.params !== "undisclosed") ? m.params : null, fmtCtxShort(m.ctx), provLabel(m.provider)].filter(Boolean).join(" · "),
+        meta: [(m.params && m.params !== "undisclosed") ? m.params : null, fmtCtxShort(m.ctx)].filter(Boolean).join(" · "),
         noKey: keyed === false, blocked: !providerAllowedClient(mode, m.provider),
       }, cur, mode);
     }

@@ -13,6 +13,7 @@
 <link rel="icon" href="/icon-192.png" />
 <link rel="stylesheet" href="/dominion-ui.css?v=38" />
 <link rel="stylesheet" href="/dominion-tenant.css?v=1" />
+<link rel="stylesheet" href="/dominion-vault.css?v=1" />
 </head>
 <body>
   <video id="bgvideo" autoplay muted loop playsinline preload="auto" poster="/icon-512.png">
@@ -95,6 +96,7 @@
     <symbol id="i-network" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 11l10-4M7 13l10 4"/></symbol>
     <symbol id="i-context" viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="M8 9h8M8 12h5M8 15h7"/></symbol>
     <symbol id="i-route" viewBox="0 0 24 24"><path d="M4 12h7M13 12h7M11 12l3-3M11 12l3 3"/><circle cx="4" cy="12" r="1.5"/><circle cx="20" cy="12" r="1.5"/></symbol>
+    <symbol id="i-signal" viewBox="0 0 24 24"><circle cx="12" cy="17" r="1.6"/><path d="M8.5 13.5a5 5 0 017 0"/><path d="M5.5 10.5a9.2 9.2 0 0113 0"/></symbol>
   </svg>
 
   <aside id="sidebar">
@@ -175,7 +177,7 @@
 
     <div class="system-readout">
       <span id="connection-status" class="readout" aria-live="polite">
-        <svg class="glyph"><use href="#i-network"></use></svg><span>Online</span>
+        <svg class="glyph"><use href="#i-signal"></use></svg><span>Online</span>
       </span>
       <span id="context-status" class="readout">
         <svg class="glyph"><use href="#i-context"></use></svg><span>Context ready</span>
@@ -375,8 +377,8 @@
     </div>
   </div>
 
-  <script src="/app.js?v=31"></script>
-  <script src="/dominion-ui.js?v=38"></script>
+  <script src="/app.js?v=32"></script>
+  <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=1" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>
 </body>

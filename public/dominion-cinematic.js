@@ -371,4 +371,134 @@
   setInterval(updateTelemetry, 1000);
   requestAnimationFrame(sampleFrames);
 
+  // ===== Command deck: exclusive panels, click-away close, live Knowledge Vault, readout popovers =====
+  const MODAL_IDS = ["smodal", "mmodal", "pmodal", "tmodal", "amodal", "imodal", "vault-panel"];
+  const MODAL_FOR = { settings: "smodal", memory: "mmodal", persona: "pmodal", tools: "tmodal", artifacts: "amodal", improve: "imodal" };
+  const openModals = () => MODAL_IDS.map((id) => $(id)).filter((m) => m && !m.hidden);
+  const closeModals = (except) => { MODAL_IDS.forEach((id) => { if (id === except) return; const m = $(id); if (m && !m.hidden) m.hidden = true; }); };
+
+  // Opening any panel closes the others first (capture phase runs before app.js's own open handler),
+  // so the header icons SWITCH panels instead of stacking sheets the user must x out of one by one.
+  Object.entries(MODAL_FOR).forEach(([buttonId, modalId]) => {
+    $(buttonId)?.addEventListener("click", () => { closeModals(modalId); closePopover(); }, true);
+  });
+  // Click anywhere outside the open sheet closes it; clicking the dim backdrop does too.
+  document.addEventListener("pointerdown", (event) => {
+    const open = openModals();
+    if (!open.length) return;
+    const target = event.target;
+    if (target.closest?.(".command-icon") || target.closest?.(".vault-grid")) return;
+    open.forEach((m) => { if (target === m || !m.contains(target)) m.hidden = true; });
+  });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") { closeModals(); closePopover(); } });
+
+  // ---- Knowledge Vault: the three rail entries open live, tenant-scoped data terminals ----
+  function ensureVault() {
+    if ($("vault-panel")) return;
+    const panel = document.createElement("section");
+    panel.id = "vault-panel";
+    panel.hidden = true;
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.innerHTML = `
+      <div class="vp-frame">
+        <div class="vp-head"><span class="vp-title" id="vault-title">VAULT</span><button type="button" class="vp-close" id="vault-close" aria-label="Close">×</button></div>
+        <div class="vp-body" id="vault-body"></div>
+        <div class="vp-foot"><i></i><span>DOMINION KNOWLEDGE VAULT · SECURE CHANNEL</span><i></i></div>
+      </div>`;
+    document.body.appendChild(panel);
+    panel.querySelector("#vault-close").addEventListener("click", () => { panel.hidden = true; });
+  }
+  const vpLine = (text, cls) => `<div class="vp-line${cls ? " " + cls : ""}">${text}</div>`;
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  async function openVault(kind) {
+    ensureVault();
+    closeModals("vault-panel");
+    closePopover();
+    // On the phone the rail is the slide-in menu; opening a terminal should put the menu away.
+    document.getElementById("sidebar")?.classList.remove("open");
+    document.getElementById("overlay")?.classList.remove("show");
+    const panel = $("vault-panel"), title = $("vault-title"), out = $("vault-body");
+    const names = { ci: "CORPORATE INTELLIGENCE", ta: "TECHNOLOGY ARCHIVE", pp: "PERSONAL PLAYBOOK" };
+    title.textContent = names[kind] || "VAULT";
+    panel.hidden = false;
+    out.innerHTML = vpLine("ACCESSING SECURE ARCHIVE…", "dim");
+    try {
+      if (kind === "ci") {
+        const d = await (await fetch("/artifacts")).json();
+        const items = (d && d.items) || [];
+        out.innerHTML = items.length
+          ? vpLine("FILED DOCUMENTS · " + items.length, "cap") + items.map((a) =>
+              `<div class="vp-row"><b>${esc(a.title)}</b><span>${esc(a.type || "doc")} · ${esc(a.status || "")} · v${esc(a.version ?? 1)} · ${esc(a.wordCount ?? 0)} words</span></div>`).join("")
+          : vpLine("ARCHIVE EMPTY.", "cap") + vpLine("Documents you generate or save land here. Open the Artifacts panel to create, export, and manage them.", "dim");
+        out.innerHTML += vpLine("Full controls live in the Artifacts panel (top bar).", "hint");
+      } else if (kind === "ta") {
+        const d = await (await fetch("/api/models", { cache: "no-store" })).json();
+        const groups = (d && d.groups) || [];
+        out.innerHTML = vpLine("MODEL ARSENAL · LIVE CATALOG", "cap") + groups.map((g) =>
+          vpLine(esc(g.category || "MODELS"), "group") + (g.models || []).map((m) =>
+            `<div class="vp-row"><b>${esc(m.name)}${m.toolCapable ? ' <em class="vp-badge">TOOLS</em>' : ""}</b><span>${[m.params && m.params !== "undisclosed" ? esc(m.params) : null, m.ctx ? esc(Math.round(m.ctx / 1000)) + "K context" : null, (!m.inCost && !m.outCost) ? "free" : "$" + esc(m.inCost) + " / $" + esc(m.outCost) + " per M"].filter(Boolean).join(" · ")}</span></div>`).join("")).join("");
+        out.innerHTML += vpLine("Pick any of these from the Model selector in the command bar.", "hint");
+      } else {
+        const d = await (await fetch("/memory")).json();
+        const items = (d && d.items) || [];
+        out.innerHTML = items.length
+          ? vpLine("PLAYBOOK ENTRIES · " + items.length, "cap") + items.map((m) =>
+              `<div class="vp-row"><b>${esc((m.text || m.content || m.summary || "").slice(0, 90) || "(entry)")}</b><span>${esc(m.kind || m.status || "saved")}</span></div>`).join("")
+          : vpLine("PLAYBOOK EMPTY.", "cap") + vpLine("Lasting facts, preferences, and lessons the assistant saves about your work land here. Ask it to remember something important.", "dim");
+        out.innerHTML += vpLine("Full controls live in the Memory panel (top bar).", "hint");
+      }
+    } catch {
+      out.innerHTML = vpLine("LINK ERROR — the archive did not answer. Try again.", "err");
+    }
+  }
+  document.querySelectorAll(".vault-grid button").forEach((button, index) => {
+    button.addEventListener("click", () => openVault(["ci", "ta", "pp"][index]));
+  });
+
+  // ---- Readout popovers: the header status lights answer when touched ----
+  let pop = null;
+  function closePopover() { if (pop) { pop.remove(); pop = null; } }
+  function showPopover(anchor, title, lines) {
+    closePopover();
+    pop = document.createElement("div");
+    pop.className = "readout-pop";
+    pop.innerHTML = `<b>${title}</b>` + lines.map((l) => `<span>${l}</span>`).join("");
+    document.body.appendChild(pop);
+    const r = anchor.getBoundingClientRect();
+    pop.style.top = (r.bottom + 10) + "px";
+    pop.style.left = Math.max(12, Math.min(window.innerWidth - pop.offsetWidth - 12, r.left + r.width / 2 - pop.offsetWidth / 2)) + "px";
+  }
+  document.addEventListener("pointerdown", (event) => {
+    if (pop && !pop.contains(event.target) && !event.target.closest?.(".readout")) closePopover();
+  });
+  connection?.addEventListener("click", () => {
+    showPopover(connection, navigator.onLine ? "ONLINE" : "OFFLINE", [
+      navigator.onLine ? "Link to the Dominion core is live." : "No network. Reconnect to continue.",
+      "Answers, memory, and documents flow over this link.",
+    ]);
+  });
+  context?.addEventListener("click", () => {
+    const active = contextState === "active";
+    showPopover(context, active ? "CONTEXT ACTIVE" : "CONTEXT READY", [
+      "Context is what the assistant loads alongside your message:",
+      "your saved memories, filed documents, and tool results.",
+      active ? "This conversation is drawing on loaded context now." : "Nothing loaded yet. It fills as you work.",
+    ]);
+  });
+  document.getElementById("cloudbadge")?.addEventListener("click", (event) => {
+    const label = document.getElementById("model-current")?.textContent?.trim() || "a cloud model";
+    showPopover(event.currentTarget, "CLOUD ROUTE", [
+      "Answers are routing to: " + label + ".",
+      "Paid cloud model: each reply draws on your balance.",
+      "Switch models anytime from the Model selector.",
+    ]);
+  });
+
+  // ---- The sliders button becomes the command-controls shortcut it claims to be ----
+  document.querySelector(".console-tune")?.addEventListener("click", () => {
+    closeModals();
+    document.getElementById("model-trigger")?.click();
+  });
 })();
