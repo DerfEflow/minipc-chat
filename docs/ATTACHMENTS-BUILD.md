@@ -154,6 +154,11 @@ Fred's picks 2+3. Both ride the round-2 architecture.
   cases: per-page provider calls + page tags asserted against the mock, Private-mode
   refusal with zero calls, invite gate before spend, page cap + junk stripping), full
   suite green, real-Chrome CDP drive of the scanned pipeline end to end.
+- LIVE PROBE 2026-07-18 (deployed same day, build 1784383906119): the page JPEG that
+  real Chrome rendered from the scanned fixture, sent to the REAL production OCR model
+  (qwen3-vl via OpenRouter) with the exact server prompt, returned exactly "(blank
+  page)" for the text-free page — verbatim prompt-following on the live provider,
+  $0.000067. Every link in the OCR chain now has at least one real observation.
 
 ## Ledger
 
