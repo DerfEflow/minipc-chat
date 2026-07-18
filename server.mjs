@@ -2729,7 +2729,13 @@ const server = http.createServer(async (req, res) => {
     // are per-caller; admin is owner-only. Inert for the owner in single-tenant mode.
     if (path === "/content/tutorial" && req.method === "GET") { res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); return res.end(JSON.stringify(onboardingPayload())); }
     // Plain clickable Setup page (account / redeem / mint / billing / forge) — no dev console needed.
-    if ((path === "/setup" || path === "/setup/") && req.method === "GET") { res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); return res.end(SETUP_HTML); }
+    if ((path === "/setup" || path === "/setup/") && req.method === "GET") {
+      // Serve the styled setup page from disk (GPT-built); the inline SETUP_HTML remains the fallback
+      // so /setup can never 500 into a blank page if the file goes missing.
+      let page = SETUP_HTML;
+      try { page = await readFile(join(PUBLIC, "setup.html"), "utf8"); } catch {}
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); return res.end(page);
+    }
     if (path === "/billing/return" && req.method === "GET") return handleBilling(req, res, u);
     if (path === "/webhooks/stripe" && req.method === "POST") return handleStripeWebhook(req, res);
     if (path === "/account" || path.startsWith("/account/")) return handleAccount(req, res, u);

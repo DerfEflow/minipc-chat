@@ -1,9 +1,12 @@
 // Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v38-functional-scene";
+const CACHE = "dominion-ai-v39-tenant";
 const SHELL = [
   "/",
   "/index.html",
-  "/app.js?v=30",
+  "/setup.html",
+  "/dominion-tenant.css?v=1",
+  "/dominion-tenant.js?v=1",
+  "/app.js?v=31",
   "/dominion-ui.css?v=38",
   "/dominion-ui.js?v=38",
   "/dominion-cinematic.js?v=38",
@@ -34,7 +37,8 @@ self.addEventListener("activate", (e) => {
 
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
-  const dyn = ["/chat", "/memory", "/toolruns", "/tool-confirm", "/artifacts", "/mentor", "/ledger", "/evals", "/rules", "/prompts", "/persona", "/finetune", "/reviews", "/pipeline", "/tool-overlays"];
+  const dyn = ["/chat", "/memory", "/toolruns", "/tool-confirm", "/artifacts", "/mentor", "/ledger", "/evals", "/rules", "/prompts", "/persona", "/finetune", "/reviews", "/pipeline", "/tool-overlays",
+    "/account", "/billing", "/admin", "/forge", "/content", "/setup"];
   if (url.pathname.startsWith("/ollama") || dyn.some((b) => url.pathname === b || url.pathname.startsWith(b + "/"))) return;
   e.respondWith(
     fetch(e.request)

@@ -1,111 +1,1015 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dominion AI — Setup</title>
-<style>
-  :root{color-scheme:dark}
-  *{box-sizing:border-box}
-  body{margin:0;font:16px/1.5 system-ui,Segoe UI,Roboto,sans-serif;background:#0b0f1a;color:#e7ecf5}
-  .wrap{max-width:720px;margin:0 auto;padding:22px 16px 60px}
-  h1{font-size:22px;margin:.2em 0;color:#cfe0ff}
-  h2{font-size:15px;text-transform:uppercase;letter-spacing:.06em;color:#8aa2c8;margin:0 0 10px}
-  .card{background:#121829;border:1px solid #223052;border-radius:14px;padding:16px 16px;margin:14px 0}
-  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
-  input,select{background:#0d1322;border:1px solid #2a3a5f;color:#e7ecf5;border-radius:9px;padding:9px 11px;font-size:15px;min-width:0}
-  input[type=text]{flex:1}
-  button{background:#1c4fd8;border:0;color:#fff;border-radius:9px;padding:10px 15px;font-size:15px;font-weight:600;cursor:pointer}
-  button.alt{background:#243252}
-  button:active{transform:translateY(1px)}
-  .kv{display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px solid #1a2540}
-  .kv b{color:#a9c2ee;font-weight:600}
-  .code{font:600 20px ui-monospace,Consolas,monospace;color:#8fe3b0;background:#0d1c14;border:1px dashed #2f5c43;border-radius:9px;padding:10px 12px;margin:8px 0;user-select:all;word-break:break-all}
-  .muted{color:#7d8cab;font-size:13px}
-  .ok{color:#8fe3b0}.err{color:#ff9a9a}
-  table{width:100%;border-collapse:collapse;font-size:14px}
-  td,th{text-align:left;padding:6px 6px;border-bottom:1px solid #1a2540}
-  .hidden{display:none}
-  a{color:#7fb0ff}
-</style></head><body><div class="wrap">
-<h1>Dominion AI — Setup</h1>
-<p class="muted">A simple control panel. Everything here also works once the full app UI is finished.</p>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#010306">
+  <title>Dominion AI: Setup</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --dt-void: #010306;
+      --dt-abyss: #030812;
+      --dt-navy: #06111d;
+      --dt-ink: #eef8ff;
+      --dt-ink-soft: #c6d6e2;
+      --dt-muted: #71879a;
+      --dt-copper: #b96b32;
+      --dt-copper-hot: #ffc18a;
+      --dt-energy: #76ff68;
+      --dt-energy-hot: #ddffd8;
+      --dt-cyan: #83ddff;
+      --dt-danger: #ff7569;
+      --dt-success: #7cff8e;
+      --dt-line: rgba(139, 205, 244, .26);
+      --dt-panel: linear-gradient(180deg, rgba(255,255,255,.075), transparent 9%), linear-gradient(125deg, rgba(7,20,32,.88), rgba(1,8,15,.78) 52%, rgba(7,19,30,.86));
+      --dt-shadow: 0 25px 65px rgba(0,0,0,.68), 0 5px 18px rgba(0,0,0,.55);
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html { min-height: 100%; background: #000; }
+    body {
+      min-width: 0;
+      min-height: 100vh;
+      margin: 0;
+      color: var(--dt-ink);
+      background:
+        radial-gradient(circle at 74% 9%, rgba(55, 158, 195, .13), transparent 28rem),
+        radial-gradient(circle at 16% 38%, rgba(74, 255, 91, .065), transparent 24rem),
+        linear-gradient(135deg, #010306, #04101a 54%, #010407);
+      font: 400 15px/1.48 "Bahnschrift", "Segoe UI Variable", "Aptos", system-ui, sans-serif;
+      letter-spacing: .01em;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      opacity: .32;
+      background:
+        repeating-linear-gradient(90deg, transparent 0 62px, rgba(67,215,255,.045) 63px, transparent 64px 128px),
+        repeating-linear-gradient(0deg, transparent 0 71px, rgba(90,255,124,.035) 72px, transparent 73px 142px),
+        linear-gradient(110deg, transparent 0 46%, rgba(66,189,255,.055) 46.2%, transparent 46.5% 58%, rgba(107,255,93,.06) 58.2%, transparent 58.5%);
+    }
+    button, input, select { font: inherit; }
+    button, select { color: inherit; }
+    button { touch-action: manipulation; }
+    button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+      outline: 1px solid rgba(128,235,255,.88);
+      outline-offset: 2px;
+    }
+    [hidden] { display: none !important; }
+    .dt-shell {
+      position: relative;
+      z-index: 1;
+      width: min(1500px, 100%);
+      margin: 0 auto;
+      padding: max(12px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) max(36px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
+    }
+    .dt-command-rail, .dt-panel {
+      position: relative;
+      border: 1px solid var(--dt-line);
+      background: var(--dt-panel);
+      box-shadow: var(--dt-shadow), inset 0 1px 0 rgba(239,251,255,.19), inset 0 -1px 0 rgba(0,0,0,.92), inset 1px 0 0 rgba(121,192,236,.08);
+      backdrop-filter: blur(8px) saturate(1.35);
+      clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+    }
+    .dt-command-rail::before, .dt-panel::before {
+      content: "";
+      position: absolute;
+      inset: 3px;
+      z-index: 0;
+      pointer-events: none;
+      border: 1px solid rgba(215,240,255,.075);
+      clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px), 0 10px);
+    }
+    .dt-command-rail > *, .dt-panel > * { position: relative; z-index: 1; }
+    .dt-command-rail {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 78px;
+      padding: 12px 14px;
+      overflow: hidden;
+    }
+    .dt-command-rail::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 18%;
+      width: 250px;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, rgba(170,233,255,.8), #fff, rgba(106,255,93,.72), transparent);
+      box-shadow: 0 0 7px rgba(146,231,255,.8), 0 0 22px rgba(66,185,255,.45);
+    }
+    .dt-brand-core {
+      position: relative;
+      flex: 0 0 50px;
+      width: 50px;
+      height: 50px;
+      display: grid;
+      place-items: center;
+      color: var(--dt-energy-hot);
+      clip-path: polygon(50% 0, 88% 18%, 100% 54%, 78% 91%, 38% 100%, 5% 75%, 0 34%, 22% 7%);
+      background: radial-gradient(circle at 50% 46%, rgba(201,255,193,.3), transparent 25%), linear-gradient(145deg, rgba(63,136,55,.76), rgba(7,38,20,.72));
+      box-shadow: 0 0 30px rgba(94,255,79,.26), inset 0 0 18px rgba(187,255,177,.16);
+    }
+    .dt-brand-core::before { content: ""; position: absolute; inset: 6px; border: 1px solid rgba(198,255,191,.48); clip-path: inherit; }
+    .dt-brand-core span { width: 8px; height: 8px; border-radius: 50%; background: #fff; box-shadow: 0 0 6px #fff, 0 0 18px var(--dt-energy); }
+    .dt-brand-copy { min-width: 0; flex: 1; }
+    .dt-eyebrow, .dt-kicker, .dt-field-label {
+      color: #91a9bb;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    .dt-brand-copy h1 { margin: 3px 0 0; font-size: clamp(20px, 5vw, 29px); line-height: 1.05; letter-spacing: .045em; text-transform: uppercase; }
+    .dt-rail-status { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; color: #bcffc2; font-size: 10px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
+    .dt-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dt-energy); box-shadow: 0 0 5px #fff, 0 0 14px var(--dt-energy); }
+    .dt-layout { display: grid; gap: 10px; margin-top: 10px; }
+    .dt-panel { padding: 17px 16px 18px; overflow: hidden; }
+    .dt-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; padding-bottom: 11px; border-bottom: 1px solid rgba(139,204,241,.12); }
+    .dt-panel-title { margin: 3px 0 0; color: #effaff; font-size: 17px; font-weight: 700; letter-spacing: .055em; text-transform: uppercase; }
+    .dt-panel-index { flex: 0 0 auto; color: var(--dt-copper-hot); font: 700 11px/1 ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: .12em; }
+    .dt-copy { margin: 0; color: #91a6b6; font-size: 13px; }
+    .dt-grid { display: grid; gap: 10px; }
+    .dt-grid-two { display: grid; gap: 10px; }
+    .dt-kv {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      min-width: 0;
+      padding: 9px 10px;
+      border: 1px solid rgba(139,202,239,.12);
+      background: rgba(0,8,15,.55);
+    }
+    .dt-kv span:first-child { color: #8096a7; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+    .dt-kv strong { min-width: 0; color: #d7e7f1; font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+    .dt-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .dt-stack { display: flex; flex-direction: column; gap: 8px; }
+    .dt-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    .dt-input, .dt-select {
+      width: 100%;
+      min-width: 0;
+      min-height: 44px;
+      padding: 10px 11px;
+      border: 1px solid rgba(142,204,239,.18);
+      border-radius: 0;
+      color: var(--dt-ink);
+      background: rgba(0,7,13,.68);
+      box-shadow: inset 0 2px 8px rgba(0,0,0,.62), inset 2px 0 0 rgba(103,188,230,.07);
+      clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
+      outline: 0;
+    }
+    .dt-input::placeholder { color: #5e7384; }
+    .dt-select { appearance: auto; }
+    .dt-button {
+      position: relative;
+      min-height: 42px;
+      padding: 8px 13px;
+      border: 1px solid rgba(126,255,111,.25);
+      border-radius: 0;
+      color: #c9ffc3;
+      background: linear-gradient(145deg, rgba(31,102,35,.34), rgba(2,17,11,.52));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.09), inset 0 -2px 0 rgba(0,0,0,.58);
+      clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .065em;
+      text-transform: uppercase;
+      transition: transform .15s ease, color .15s ease, border-color .15s ease, box-shadow .15s ease;
+    }
+    .dt-button:hover { color: #fff; border-color: rgba(139,231,255,.45); box-shadow: 0 0 20px rgba(57,187,255,.12), inset 0 1px 0 rgba(255,255,255,.1); }
+    .dt-button:active { transform: translateY(1px); box-shadow: inset 0 3px 7px rgba(0,0,0,.55); }
+    .dt-button:disabled { cursor: not-allowed; opacity: .45; }
+    .dt-button-secondary { border-color: rgba(141,204,239,.18); color: #a7b9c6; background: rgba(1,9,15,.55); }
+    .dt-button-copper { border-color: rgba(255,181,115,.34); color: #ffd0a4; background: linear-gradient(145deg, rgba(93,45,20,.5), rgba(18,10,7,.7)); }
+    .dt-button-danger { border-color: rgba(255,117,105,.34); color: #ffaaa2; background: rgba(65,18,16,.42); }
+    .dt-button-small { min-height: 32px; padding: 5px 9px; font-size: 9px; }
+    .dt-pill, .dt-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      padding: 4px 8px;
+      border: 1px solid rgba(141,204,240,.17);
+      color: #a8bac8;
+      background: rgba(0,8,15,.62);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+    }
+    .dt-pill-live { border-color: rgba(118,255,104,.3); color: #caffc5; }
+    .dt-pill-warn { border-color: rgba(255,181,115,.32); color: var(--dt-copper-hot); }
+    .dt-pill-danger { border-color: rgba(255,117,105,.42); color: #ffaaa2; }
+    .dt-banner {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 10px;
+      padding: 11px 12px;
+      border: 1px solid rgba(255,181,115,.25);
+      background: rgba(63,30,14,.35);
+      color: #f2c48f;
+      font-size: 12px;
+    }
+    .dt-banner-danger { border-color: rgba(255,117,105,.34); background: rgba(67,18,16,.42); color: #ffc0ba; }
+    .dt-banner-success { border-color: rgba(118,255,104,.28); background: rgba(25,77,31,.33); color: #caffc5; }
+    .dt-banner strong { color: inherit; }
+    .dt-meter { overflow: hidden; height: 10px; border: 1px solid rgba(139,202,239,.16); background: rgba(0,6,12,.72); }
+    .dt-meter span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #388f48, var(--dt-energy)); box-shadow: 0 0 13px rgba(118,255,104,.4); transition: width .3s ease; }
+    .dt-meter-danger span { background: linear-gradient(90deg, #8c3d2f, var(--dt-danger)); box-shadow: 0 0 13px rgba(255,117,105,.35); }
+    .dt-tier-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 7px; margin-top: 10px; }
+    .dt-tier { min-height: 62px; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; }
+    .dt-tier strong { color: #f4fbff; font-size: 18px; }
+    .dt-tier span { margin-top: 3px; color: #7590a2; font-size: 9px; }
+    .dt-tier[aria-pressed="true"] { color: var(--dt-energy-hot); border-color: rgba(118,255,104,.5); background: linear-gradient(145deg, rgba(37,122,43,.42), rgba(2,18,12,.66)); box-shadow: inset 0 -2px 0 rgba(118,255,104,.55), 0 0 18px rgba(118,255,104,.09); }
+    .dt-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px; border: 1px solid rgba(139,202,239,.12); background: rgba(0,8,15,.55); }
+    .dt-switch-copy { min-width: 0; }
+    .dt-switch-copy strong { display: block; color: #cbd9e3; font-size: 12px; }
+    .dt-switch-copy span { display: block; margin-top: 3px; color: #718797; font-size: 10px; }
+    .dt-switch { position: relative; flex: 0 0 48px; width: 48px; height: 27px; }
+    .dt-switch input { position: absolute; opacity: 0; pointer-events: none; }
+    .dt-switch span { position: absolute; inset: 0; border: 1px solid rgba(139,202,239,.2); background: #06131d; cursor: pointer; transition: .18s ease; }
+    .dt-switch span::after { content: ""; position: absolute; top: 4px; left: 5px; width: 17px; height: 17px; background: #6d8291; box-shadow: inset 0 1px 0 rgba(255,255,255,.2); transition: .18s ease; }
+    .dt-switch input:checked + span { border-color: rgba(118,255,104,.38); background: rgba(31,102,35,.34); box-shadow: 0 0 15px rgba(118,255,104,.1); }
+    .dt-switch input:checked + span::after { left: 24px; background: var(--dt-energy); box-shadow: 0 0 8px rgba(118,255,104,.55); }
+    .dt-switch input:focus-visible + span { outline: 1px solid rgba(128,235,255,.88); outline-offset: 2px; }
+    .dt-code {
+      padding: 11px 12px;
+      border: 1px solid rgba(118,255,104,.25);
+      color: #caffc5;
+      background: rgba(4,29,15,.55);
+      font: 700 15px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace;
+      letter-spacing: .055em;
+      overflow-wrap: anywhere;
+      user-select: all;
+    }
+    .dt-table-wrap { overflow-x: auto; border: 1px solid rgba(139,202,239,.1); }
+    .dt-table { width: 100%; min-width: 680px; border-collapse: collapse; background: rgba(0,7,13,.46); font-size: 11px; }
+    .dt-table th, .dt-table td { padding: 9px 8px; border-bottom: 1px solid rgba(139,202,239,.09); text-align: left; vertical-align: middle; }
+    .dt-table th { color: #869bad; font-size: 9px; letter-spacing: .09em; text-transform: uppercase; }
+    .dt-table td { color: #c0d0dc; }
+    .dt-table .dt-input, .dt-table .dt-select { min-height: 34px; padding: 6px 7px; font-size: 11px; }
+    .dt-table-actions { display: flex; align-items: center; gap: 5px; }
+    .dt-owner-block { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(139,204,241,.12); }
+    .dt-owner-block h3, .dt-forge-browser h3 { margin: 0 0 9px; color: #d7e9f4; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+    .dt-mint-output { margin-top: 11px; }
+    .dt-browser-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+    .dt-browser-path { flex: 1 1 180px; min-width: 0; padding: 8px 9px; border-left: 1px solid rgba(123,217,255,.28); color: #b7cedc; background: rgba(1,7,13,.5); font: 600 10px/1.4 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+    .dt-dir-list { display: grid; gap: 5px; max-height: 280px; margin-top: 8px; overflow: auto; scrollbar-width: thin; scrollbar-color: rgba(102,255,91,.25) transparent; }
+    .dt-dir { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 6px; padding: 6px; border: 1px solid rgba(139,202,239,.11); background: rgba(0,8,15,.55); }
+    .dt-dir-open { min-width: 0; border: 0; color: #c5d8e5; background: transparent; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+    .dt-root-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0; }
+    .dt-chip { max-width: 100%; color: #c7e1ef; text-transform: none; }
+    .dt-chip span { min-width: 0; overflow-wrap: anywhere; }
+    .dt-chip button { width: 22px; height: 22px; padding: 0; border: 0; color: #8ca4b4; background: transparent; cursor: pointer; }
+    .dt-empty { padding: 15px; border: 1px solid rgba(139,202,239,.1); color: #758999; background: rgba(0,7,13,.38); text-align: center; font-size: 12px; }
+    .dt-message { min-height: 20px; margin-top: 8px; color: #8399aa; font-size: 11px; }
+    .dt-message-success { color: var(--dt-success); }
+    .dt-message-error { color: #ffaaa2; }
+    .dt-emphasis { border-color: rgba(118,255,104,.5); box-shadow: var(--dt-shadow), 0 0 34px rgba(118,255,104,.12), inset 0 1px 0 rgba(239,251,255,.19); }
+    .dt-footer { display: flex; justify-content: center; padding: 24px 0 4px; }
+    .dt-footer a { color: #8ca5b6; font-size: 11px; letter-spacing: .09em; text-decoration: none; text-transform: uppercase; }
+    .dt-footer a:hover { color: var(--dt-energy-hot); }
+    .dt-toast-zone { position: fixed; z-index: 50; right: 12px; bottom: 12px; width: min(360px, calc(100vw - 24px)); display: grid; gap: 8px; }
+    .dt-toast { padding: 11px 12px; border: 1px solid rgba(139,202,239,.24); color: #c6d6e2; background: rgba(2,10,19,.94); box-shadow: 0 18px 42px rgba(0,0,0,.58), inset 0 1px 0 rgba(239,251,255,.14); clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px); font-size: 12px; }
+    .dt-toast-success { border-color: rgba(118,255,104,.34); color: #caffc5; }
+    .dt-toast-error { border-color: rgba(255,117,105,.4); color: #ffaaa2; }
+    .dt-loading { opacity: .55; pointer-events: none; }
+    @media (min-width: 640px) {
+      .dt-shell { padding: 16px 16px 48px; }
+      .dt-panel { padding: 20px; }
+      .dt-grid-two { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .dt-tier-grid { grid-template-columns: repeat(4, minmax(0,1fr)); }
+      .dt-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 9px; }
+      .dt-form-wide { grid-column: 1 / -1; }
+    }
+    @media (min-width: 1000px) {
+      .dt-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+      .dt-span-all { grid-column: 1 / -1; }
+      .dt-command-rail { min-height: 86px; padding: 14px 18px; }
+      .dt-owner-console { padding: 22px; }
+    }
+    @media (max-width: 420px) {
+      .dt-command-rail { align-items: flex-start; }
+      .dt-brand-core { flex-basis: 42px; width: 42px; height: 42px; }
+      .dt-rail-status { display: none; }
+      .dt-panel-head { gap: 8px; }
+      .dt-inline > .dt-button { flex: 1 1 auto; }
+      .dt-kv { flex-direction: column; gap: 4px; }
+      .dt-kv strong { text-align: left; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="dt-shell">
+    <header class="dt-command-rail">
+      <div class="dt-brand-core" aria-hidden="true"><span></span></div>
+      <div class="dt-brand-copy">
+        <div class="dt-eyebrow">Account and machine control</div>
+        <h1>Dominion AI: Setup</h1>
+      </div>
+      <div class="dt-rail-status"><span class="dt-status-dot"></span><span id="dt-rail-state">Connecting</span></div>
+    </header>
 
-<div class="card"><h2>Your account</h2><div id="acct">Loading…</div>
-  <div class="row"><button class="alt" onclick="loadAcct()">Refresh</button></div></div>
+    <div id="dt-global-banner" class="dt-banner dt-banner-danger" role="alert" hidden></div>
 
-<div class="card" id="redeemCard"><h2>Redeem a code</h2>
-  <div class="row"><input type="text" id="code" placeholder="DOMI-XXXX-XXXX"><button onclick="redeem()">Redeem</button></div>
-  <div id="redeemMsg" class="muted"></div></div>
+    <main class="dt-layout">
+      <section class="dt-panel" id="dt-account-panel" aria-labelledby="dt-account-title">
+        <div class="dt-panel-head">
+          <div><div class="dt-kicker">Identity channel</div><h2 class="dt-panel-title" id="dt-account-title">Your account</h2></div>
+          <span class="dt-panel-index">01</span>
+        </div>
+        <div id="dt-account-state"></div>
+        <div class="dt-grid" id="dt-account-details" aria-live="polite"><div class="dt-empty">Loading account</div></div>
+      </section>
 
-<div class="card hidden" id="ownerCard"><h2>Owner — mint codes</h2>
-  <div class="row"><input type="text" id="mintEmail" placeholder="their-email@example.com"></div>
-  <div class="muted">Type their email first. Minting a code for an email also opens the sign-in door for it, so the code is the only thing you send them.</div>
-  <div class="row">
-    <button onclick="mint('invite')">Mint invite code</button>
-    <span class="muted">with</span><input type="number" id="promo" value="500" style="width:90px"><span class="muted">bonus credits (released by their first purchase; codes cost you nothing up front)</span>
+      <section class="dt-panel" id="dt-redeem-panel" aria-labelledby="dt-redeem-title">
+        <div class="dt-panel-head">
+          <div><div class="dt-kicker">Single-use authorization</div><h2 class="dt-panel-title" id="dt-redeem-title">Access code</h2></div>
+          <span class="dt-panel-index">02</span>
+        </div>
+        <form class="dt-stack" id="dt-redeem-form">
+          <label class="dt-field"><span class="dt-field-label">Code</span><input class="dt-input" id="dt-code-input" name="code" autocomplete="one-time-code" placeholder="DOMI-XXXX-XXXX" required></label>
+          <div class="dt-inline"><button class="dt-button" id="dt-redeem-button" type="submit">Redeem code</button></div>
+        </form>
+        <div class="dt-message" id="dt-redeem-message" aria-live="polite"></div>
+      </section>
+
+      <section class="dt-panel dt-span-all" id="dt-billing-panel" aria-labelledby="dt-billing-title" hidden>
+        <div class="dt-panel-head">
+          <div><div class="dt-kicker">Usage value</div><h2 class="dt-panel-title" id="dt-billing-title">Credits and billing</h2></div>
+          <span class="dt-panel-index">03</span>
+        </div>
+        <div id="dt-billing-state"></div>
+        <p class="dt-copy" id="dt-billing-copy"></p>
+        <div class="dt-tier-grid" id="dt-tier-grid" role="group" aria-label="Credit purchase amount"></div>
+        <div class="dt-inline" style="margin-top:10px">
+          <button class="dt-button dt-button-copper" id="dt-buy-button" type="button">Buy credits</button>
+          <span class="dt-pill" id="dt-card-state">No saved card</span>
+        </div>
+        <div id="dt-auto-wrap" style="margin-top:10px">
+          <div class="dt-switch-row">
+            <div class="dt-switch-copy"><strong>Automatic recharge</strong><span id="dt-auto-copy">Recharge when the balance reaches the threshold</span></div>
+            <label class="dt-switch"><input id="dt-auto-toggle" type="checkbox" aria-label="Automatic recharge"><span></span></label>
+          </div>
+        </div>
+        <div class="dt-message" id="dt-billing-message" aria-live="polite"></div>
+      </section>
+
+      <section class="dt-panel dt-span-all dt-owner-console" id="dt-owner-panel" aria-labelledby="dt-owner-title" hidden>
+        <div class="dt-panel-head">
+          <div><div class="dt-kicker">Owner authorization</div><h2 class="dt-panel-title" id="dt-owner-title">Owner console</h2></div>
+          <span class="dt-panel-index">04</span>
+        </div>
+        <div class="dt-owner-block" style="margin-top:0;padding-top:0;border-top:0">
+          <h3>Mint a single-use code</h3>
+          <form class="dt-form-grid" id="dt-mint-form">
+            <label class="dt-field dt-form-wide"><span class="dt-field-label">Recipient email</span><input class="dt-input" id="dt-mint-email" name="email" type="email" autocomplete="off" placeholder="person@example.com"></label>
+            <label class="dt-field"><span class="dt-field-label">Code type</span><select class="dt-select" id="dt-mint-type" name="type"><option value="invite">Credit account</option><option value="free">Sponsored account</option></select></label>
+            <label class="dt-field" id="dt-mint-credit-field"><span class="dt-field-label">Welcome bonus credits</span><input class="dt-input" id="dt-mint-credits" name="credits" type="number" min="0" step="1" value="500"></label>
+            <label class="dt-field" id="dt-mint-cap-field" hidden><span class="dt-field-label">Monthly cap in USD</span><input class="dt-input" id="dt-mint-cap" name="capUsd" type="number" min="0" step="0.01" value="20"></label>
+            <div class="dt-inline dt-form-wide"><button class="dt-button" id="dt-mint-button" type="submit">Mint code</button><span class="dt-copy">Adding an email also opens the sign-in door for that address.</span></div>
+          </form>
+          <div class="dt-mint-output" id="dt-mint-output" aria-live="polite"></div>
+        </div>
+        <div class="dt-owner-block">
+          <div class="dt-inline" style="justify-content:space-between"><h3>Codes</h3><button class="dt-button dt-button-secondary dt-button-small" id="dt-refresh-codes" type="button">Refresh codes</button></div>
+          <div id="dt-codes-output"><div class="dt-empty">Loading codes</div></div>
+        </div>
+        <div class="dt-owner-block">
+          <div class="dt-inline" style="justify-content:space-between"><h3>Users</h3><button class="dt-button dt-button-secondary dt-button-small" id="dt-refresh-users" type="button">Refresh users</button></div>
+          <div id="dt-users-output"><div class="dt-empty">Loading users</div></div>
+        </div>
+      </section>
+
+      <section class="dt-panel dt-span-all" id="dt-forge-panel" aria-labelledby="dt-forge-title">
+        <div class="dt-panel-head">
+          <div><div class="dt-kicker">Local execution boundary</div><h2 class="dt-panel-title" id="dt-forge-title">Forge, your machine</h2></div>
+          <span class="dt-panel-index">05</span>
+        </div>
+        <div id="dt-forge-warning" class="dt-banner" hidden></div>
+        <div class="dt-grid-two">
+          <div class="dt-stack">
+            <div class="dt-switch-row">
+              <div class="dt-switch-copy"><strong>Forge access</strong><span>Allow Dominion to use your connected machine</span></div>
+              <label class="dt-switch"><input id="dt-forge-toggle" type="checkbox" aria-label="Enable Forge"><span></span></label>
+            </div>
+            <div class="dt-kv"><span>Node</span><strong id="dt-node-state">Checking</strong></div>
+            <div class="dt-kv"><span>Token</span><strong id="dt-token-state">Checking</strong></div>
+          </div>
+          <div class="dt-stack">
+            <p class="dt-copy">Issue a node token when connecting this account to a machine. The token is shown once.</p>
+            <div class="dt-inline"><button class="dt-button dt-button-copper" id="dt-token-button" type="button">Issue node token</button></div>
+            <div id="dt-token-output"></div>
+          </div>
+        </div>
+        <div class="dt-owner-block dt-forge-browser">
+          <h3>Allowed folders</h3>
+          <div id="dt-root-list" class="dt-root-list"></div>
+          <div class="dt-browser-head">
+            <button class="dt-button dt-button-secondary dt-button-small" id="dt-drives-button" type="button">Drives</button>
+            <button class="dt-button dt-button-secondary dt-button-small" id="dt-up-button" type="button">Up</button>
+            <div class="dt-browser-path" id="dt-browser-path">Drives</div>
+            <button class="dt-button dt-button-small" id="dt-add-current" type="button">Add this folder</button>
+          </div>
+          <div class="dt-dir-list" id="dt-dir-list"><div class="dt-empty">Connect a node to browse folders</div></div>
+          <div class="dt-inline" style="margin-top:9px"><button class="dt-button" id="dt-save-roots" type="button">Save folders</button><span class="dt-copy" id="dt-root-count">0 of 20 selected</span></div>
+          <div class="dt-message" id="dt-forge-message" aria-live="polite"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="dt-footer"><a href="/">Open Dominion</a></footer>
   </div>
-  <div class="row"><button onclick="mint('free')">Mint free code</button><span class="muted">($20/mo, covered by you)</span></div>
-  <div id="mintOut"></div>
-  <div class="row"><button class="alt" onclick="loadUsers()">View users</button></div>
-  <div id="usersOut"></div>
-</div>
+  <div class="dt-toast-zone" id="dt-toast-zone" aria-live="polite" aria-atomic="true"></div>
 
-<div class="card"><h2>Credits & billing</h2>
-  <div class="row">
-    <span class="muted">Top up</span>
-    <select id="topupAmt"><option value="12.5">$12.50</option><option value="25">$25</option><option value="50">$50</option><option value="100">$100</option></select>
-    <button onclick="topup()">Buy credits</button>
-  </div>
-  <div class="row"><label><input type="checkbox" id="autorc" onchange="setAuto()"> Auto-recharge when low</label></div>
-  <div id="billMsg" class="muted"></div></div>
+  <script>
+    (() => {
+      "use strict";
+      const state = { account: null, content: null, selectedUsd: null, roots: [], forge: null, browsePath: "" };
+      const byId = id => document.getElementById(id);
+      const ui = {
+        rail: byId("dt-rail-state"), globalBanner: byId("dt-global-banner"), accountState: byId("dt-account-state"), accountDetails: byId("dt-account-details"),
+        redeemPanel: byId("dt-redeem-panel"), redeemForm: byId("dt-redeem-form"), redeemButton: byId("dt-redeem-button"), redeemMessage: byId("dt-redeem-message"),
+        billingPanel: byId("dt-billing-panel"), billingState: byId("dt-billing-state"), billingCopy: byId("dt-billing-copy"), tierGrid: byId("dt-tier-grid"), buyButton: byId("dt-buy-button"), cardState: byId("dt-card-state"), autoWrap: byId("dt-auto-wrap"), autoToggle: byId("dt-auto-toggle"), autoCopy: byId("dt-auto-copy"), billingMessage: byId("dt-billing-message"),
+        ownerPanel: byId("dt-owner-panel"), mintForm: byId("dt-mint-form"), mintType: byId("dt-mint-type"), mintCredits: byId("dt-mint-credits"), mintCap: byId("dt-mint-cap"), mintCreditField: byId("dt-mint-credit-field"), mintCapField: byId("dt-mint-cap-field"), mintButton: byId("dt-mint-button"), mintOutput: byId("dt-mint-output"), codesOutput: byId("dt-codes-output"), usersOutput: byId("dt-users-output"),
+        forgeWarning: byId("dt-forge-warning"), forgeToggle: byId("dt-forge-toggle"), nodeState: byId("dt-node-state"), tokenState: byId("dt-token-state"), tokenButton: byId("dt-token-button"), tokenOutput: byId("dt-token-output"), rootList: byId("dt-root-list"), browserPath: byId("dt-browser-path"), dirList: byId("dt-dir-list"), upButton: byId("dt-up-button"), addCurrent: byId("dt-add-current"), saveRoots: byId("dt-save-roots"), rootCount: byId("dt-root-count"), forgeMessage: byId("dt-forge-message"), toastZone: byId("dt-toast-zone")
+      };
 
-<div class="card"><h2>Forge (your machine)</h2>
-  <div id="forgeStatus" class="muted">Loading…</div>
-  <div class="row"><label><input type="checkbox" id="forgeEnable" onchange="toggleForge()"> Enable Forge</label></div>
-  <div class="row"><button onclick="getToken()">Get my node token</button><span class="muted">to install the Dominion node on your computer</span></div>
-  <div id="tokenOut"></div>
-  <div class="row"><input type="text" id="rootsIn" placeholder="C:/Users/you/projects, C:/Users/you/docs"><button onclick="saveRoots()">Save folders</button></div>
-  <div class="muted">List the folders Dominion may touch (up to 20), comma-separated. The picker with drive browsing arrives with the full UI.</div>
-  <div id="forgeMsg" class="muted"></div></div>
+      async function api(path, options = {}) {
+        const request = { method: options.method || "GET", headers: {} };
+        if (Object.prototype.hasOwnProperty.call(options, "body")) {
+          request.headers["content-type"] = "application/json";
+          request.body = JSON.stringify(options.body);
+        }
+        const response = await fetch(path, request);
+        let data = {};
+        try { data = await response.json(); } catch { data = {}; }
+        if (!response.ok || data.ok === false) {
+          const error = new Error(data.error || `Request failed (${response.status})`);
+          error.status = response.status;
+          error.data = data;
+          throw error;
+        }
+        return data;
+      }
 
-<script>
-const j = async (m,p,b)=>{const r=await fetch(p,{method:m,headers:b?{'content-type':'application/json'}:{},body:b?JSON.stringify(b):undefined});try{return await r.json()}catch{return{status:r.status}}};
-const el = id=>document.getElementById(id);
-let ACCT={};
-async function loadAcct(){
-  ACCT = await j('GET','/account');
-  const c=[]; c.push(kv('Email',ACCT.email)); c.push(kv('Role',ACCT.role)); c.push(kv('Status',ACCT.status));
-  c.push(kv('Access',ACCT.invited?'active':'needs a code'));
-  if(ACCT.credits) c.push(kv('Credits',ACCT.credits.balance+' ('+ '$'+(ACCT.credits.usdValue||0).toFixed(2)+' value)'));
-  if(ACCT.credits&&ACCT.credits.pendingPromo) c.push(kv('Welcome bonus',ACCT.credits.pendingPromo+' credits, added with your first purchase'));
-  if(ACCT.sponsored) c.push(kv('Free plan','$'+(ACCT.sponsored.spentUsd||0).toFixed(2)+' of $'+ACCT.sponsored.capUsd+' this month'));
-  el('acct').innerHTML=c.join('');
-  el('ownerCard').classList.toggle('hidden',!ACCT.isOwner);
-  if(ACCT.credits) el('autorc').checked=!!ACCT.credits.autorecharge;
-  loadForge();
-}
-const kv=(k,v)=>'<div class="kv"><b>'+k+'</b><span>'+(v==null?'—':v)+'</span></div>';
-async function redeem(){
-  const code=el('code').value.trim(); if(!code)return;
-  const r=await j('POST','/account/redeem',{code});
-  if(!r.ok){ el('redeemMsg').innerHTML='<span class=err>'+(r.error||'failed')+'</span>'; loadAcct(); return; }
-  let next;
-  if(r.role==='credit'){
-    next='Next: buy your first credits below to unlock chat';
-    if(r.credits) next+=', and your '+r.credits+'-credit welcome bonus is added on top';
-    next+='.';
-  } else {
-    next='<a href="/">Open Dominion &rarr;</a>';
-  }
-  el('redeemMsg').innerHTML='<span class=ok>Redeemed. You are now a '+r.role+' user.</span> '+next;
-  loadAcct();
-}
-async function mint(type){const email=el('mintEmail').value.trim().toLowerCase();const credits=type==='invite'?Number(el('promo').value||0):0;const r=await j('POST','/admin/codes/mint',{type,credits,email});if(r.codes&&r.codes[0]){const door=email?(r.doorListed?'<div class=ok>&#10003; '+email+' can now sign in with just their email.</div>':'<div class=err>Door-list failed ('+(r.doorError||'unknown')+'). Tell Claude to add '+email+'.</div>'):'';el('mintOut').innerHTML='<div class=muted>'+(type==='invite'?'Invite':'Free')+' code (single use):</div><div class="code">'+r.codes[0].code+'</div><div class=muted>Email this code to the person. They sign in with their email, then paste it under "Redeem a code".</div>'+door+el('mintOut').innerHTML;}else{el('mintOut').innerHTML='<span class=err>'+(r.error||'mint failed')+'</span>';}}
-async function loadUsers(){const r=await j('GET','/admin/users');if(!r.users)return;let h='<table><tr><th>Email</th><th>Role</th><th>Status</th><th>Credits</th></tr>';for(const u of r.users)h+='<tr><td>'+u.email+'</td><td>'+u.role+'</td><td>'+u.status+'</td><td>'+(u.credits||0)+'</td></tr>';el('usersOut').innerHTML=h+'</table>';}
-async function topup(){const usd=Number(el('topupAmt').value);const r=await j('POST','/billing/topup',{usd});if(r.url)location.href=r.url;else el('billMsg').innerHTML='<span class=err>'+(r.error||'billing not ready')+'</span>';}
-async function setAuto(){const r=await j('POST','/billing/autorecharge',{on:el('autorc').checked});el('billMsg').textContent=r.ok?'Saved.':'';}
-async function loadForge(){const s=await j('GET','/forge/status');el('forgeEnable').checked=!!s.enabled;el('forgeStatus').innerHTML=kv('Enabled',s.enabled?'yes':'no')+kv('Your node',s.nodeConnected?'<span class=ok>connected</span>':'not connected')+kv('Folders',(s.roots&&s.roots.length)?s.roots.join(', '):'none chosen');if(s.roots)el('rootsIn').value=(s.roots||[]).join(', ');}
-async function toggleForge(){await j('POST','/forge/enable',{on:el('forgeEnable').checked});loadForge();}
-async function getToken(){const r=await j('POST','/forge/token');if(r.token){el('tokenOut').innerHTML='<div class=muted>Your node token (keep it secret):</div><div class="code">'+r.token+'</div><div class=muted>Install the Dominion hands node on your computer with this token, then choose folders below.</div>';}}
-async function saveRoots(){const roots=el('rootsIn').value.split(',').map(s=>s.trim()).filter(Boolean);const r=await j('POST','/forge/roots',{roots});el('forgeMsg').innerHTML='<span class=ok>Saved '+(r.roots?r.roots.length:0)+' folder(s).'+(r.capped?' (capped at 20)':'')+'</span>';loadForge();}
-loadAcct();
-</script>
-</div></body></html>
+      function node(tag, className, text) {
+        const element = document.createElement(tag);
+        if (className) element.className = className;
+        if (text !== undefined && text !== null) element.textContent = String(text);
+        return element;
+      }
+      function clear(element) { element.replaceChildren(); }
+      function money(value) { return `$${Number(value || 0).toFixed(2)}`; }
+      function creditsForUsd(usd) {
+        const pricing = state.account?.pricing || {};
+        // Purchases carry the markup: $12.50 buys 1000 credits, never 1250. Mirror the server math.
+        return Math.round(Number(usd || 0) / Number(pricing.MARKUP || 1.25) * Number(pricing.CREDITS_PER_USD || 100));
+      }
+      function errorLabel(error) {
+        const map = { invalid_code: "That code is not valid.", code_used: "That code has already been used.", code_revoked: "That code was revoked.", "billing not configured": "Billing is not configured." };
+        return map[error?.message] || error?.message || "The request could not be completed.";
+      }
+      function setMessage(element, message, kind = "") {
+        element.textContent = message || "";
+        element.className = `dt-message${kind ? ` dt-message-${kind}` : ""}`;
+      }
+      function setBusy(button, busy, label) {
+        if (!button) return;
+        if (busy) {
+          button.dataset.dtLabel = button.textContent;
+          button.textContent = label || "Working";
+          button.disabled = true;
+        } else {
+          button.textContent = button.dataset.dtLabel || button.textContent;
+          button.disabled = false;
+          delete button.dataset.dtLabel;
+        }
+      }
+      function toast(message, kind = "") {
+        const item = node("div", `dt-toast${kind ? ` dt-toast-${kind}` : ""}`, message);
+        ui.toastZone.append(item);
+        window.setTimeout(() => item.remove(), 5000);
+      }
+      function addKv(parent, label, value, valueClass = "") {
+        const row = node("div", "dt-kv");
+        row.append(node("span", "", label), node("strong", valueClass, value));
+        parent.append(row);
+      }
+      function addBanner(parent, text, kind = "") {
+        const banner = node("div", `dt-banner${kind ? ` dt-banner-${kind}` : ""}`);
+        banner.setAttribute("role", "status");
+        banner.textContent = text;
+        parent.append(banner);
+      }
+      async function copyText(text) {
+        try { await navigator.clipboard.writeText(text); }
+        catch {
+          const input = node("textarea", "dt-input");
+          input.value = text;
+          input.style.position = "fixed";
+          input.style.opacity = "0";
+          document.body.append(input);
+          input.select();
+          document.execCommand("copy");
+          input.remove();
+        }
+        toast("Copied to clipboard", "success");
+      }
+
+      function renderAccount() {
+        const account = state.account;
+        clear(ui.accountState);
+        clear(ui.accountDetails);
+        if (account.status === "paused") addBanner(ui.accountState, "This sponsored account is paused because its monthly limit has been reached. Contact the owner for access.", "danger");
+        if (account.status === "locked") addBanner(ui.accountState, "This account is locked after a recharge failure. Update billing by purchasing credits to restore access.", "danger");
+        addKv(ui.accountDetails, "Email", account.email || "Unknown");
+        addKv(ui.accountDetails, "Role", account.isOwner ? "Owner" : account.role || "Unknown");
+        addKv(ui.accountDetails, "Status", account.status || "Unknown");
+        addKv(ui.accountDetails, "Access", account.invited ? "Authorized" : "Code required");
+        if (account.credits) {
+          addKv(ui.accountDetails, "Credit balance", `${Number(account.credits.balance || 0).toLocaleString()} credits`);
+          addKv(ui.accountDetails, "Usage value", money(account.credits.usdValue));
+          if (Number(account.credits.pendingPromo || 0) > 0) addKv(ui.accountDetails, "Welcome bonus", `${Number(account.credits.pendingPromo).toLocaleString()} credits held until first purchase`);
+        }
+        if (account.sponsored) {
+          const spent = Number(account.sponsored.spentUsd || 0);
+          const cap = Number(account.sponsored.capUsd || 0);
+          addKv(ui.accountDetails, "Monthly usage", `${money(spent)} of ${money(cap)}`);
+          const meter = node("div", `dt-meter${cap > 0 && spent >= cap ? " dt-meter-danger" : ""}`);
+          const fill = node("span");
+          fill.style.width = `${Math.min(100, cap > 0 ? spent / cap * 100 : 0)}%`;
+          meter.setAttribute("role", "progressbar");
+          meter.setAttribute("aria-valuemin", "0");
+          meter.setAttribute("aria-valuemax", String(cap));
+          meter.setAttribute("aria-valuenow", String(spent));
+          meter.append(fill);
+          ui.accountDetails.append(meter);
+        }
+        ui.rail.textContent = account.status === "active" ? "Account online" : `Account ${account.status}`;
+      }
+
+      function renderBilling() {
+        const account = state.account;
+        const visible = account.role === "credit" || account.isOwner;
+        ui.billingPanel.hidden = !visible;
+        if (!visible) return;
+        const pricing = account.pricing || {};
+        const credits = account.credits;
+        const tiers = Array.isArray(pricing.TOPUP_TIERS) ? pricing.TOPUP_TIERS : [];
+        if (!tiers.includes(state.selectedUsd)) state.selectedUsd = tiers[0] ?? pricing.MIN_TOPUP_USD ?? 12.5;
+        clear(ui.billingState);
+        if (account.status === "locked") addBanner(ui.billingState, `Recharge has failed ${Number(credits?.rechargeFails || 0)} time(s). Buy credits to restore access.`, "danger");
+        if (credits && !credits.hasPaid) {
+          const bonus = Number(credits.pendingPromo || 0);
+          ui.billingCopy.textContent = bonus > 0
+            ? `Chat unlocks after your first purchase. Your ${bonus.toLocaleString()}-credit welcome bonus is added on top.`
+            : "Chat unlocks after your first credit purchase.";
+          ui.buyButton.textContent = "Buy first credits";
+        } else {
+          ui.billingCopy.textContent = `${Number(pricing.CREDITS_PER_USD || 100)} credits equal $1 of usage value. Choose a purchase amount.`;
+          ui.buyButton.textContent = "Buy credits";
+        }
+        clear(ui.tierGrid);
+        tiers.forEach(usd => {
+          const button = node("button", "dt-button dt-tier");
+          button.type = "button";
+          button.dataset.dtUsd = String(usd);
+          button.setAttribute("aria-pressed", String(Number(usd) === Number(state.selectedUsd)));
+          button.append(node("strong", "", money(usd)), node("span", "", `${creditsForUsd(usd).toLocaleString()} credits`));
+          ui.tierGrid.append(button);
+        });
+        ui.cardState.textContent = credits?.hasCard ? "Saved card ready" : "No saved card";
+        ui.cardState.className = `dt-pill${credits?.hasCard ? " dt-pill-live" : ""}`;
+        ui.autoWrap.hidden = !credits;
+        if (credits) {
+          ui.autoToggle.checked = Boolean(credits.autorecharge);
+          ui.autoCopy.textContent = `Recharge ${money(credits.topupUsd || state.selectedUsd)} when the balance reaches ${Number(pricing.RECHARGE_THRESHOLD || 0).toLocaleString()} credits`;
+        }
+        ui.buyButton.disabled = !account.stripeConfigured;
+        if (!account.stripeConfigured) setMessage(ui.billingMessage, "Billing is not configured.", "error");
+      }
+
+      function renderForgeStatus() {
+        const forge = state.forge || {};
+        ui.forgeToggle.checked = Boolean(forge.enabled);
+        ui.nodeState.textContent = forge.nodeConnected ? "Connected" : "Not connected";
+        ui.nodeState.style.color = forge.nodeConnected ? "var(--dt-success)" : "var(--dt-copper-hot)";
+        ui.tokenState.textContent = forge.hasToken ? "Issued" : "Not issued";
+        ui.tokenButton.textContent = forge.hasToken ? "Issue new node token" : "Issue node token";
+        state.roots = Array.isArray(forge.roots) ? forge.roots.slice(0, 20) : [];
+        renderRoots();
+        if (forge.nodeConnected) browse(state.browsePath || "");
+        else {
+          clear(ui.dirList);
+          ui.dirList.append(node("div", "dt-empty", "Install and start your Dominion node, then return here to browse folders."));
+          ui.addCurrent.disabled = true;
+          ui.upButton.disabled = true;
+        }
+      }
+
+      function renderRoots() {
+        clear(ui.rootList);
+        if (!state.roots.length) ui.rootList.append(node("div", "dt-empty", "No folders selected"));
+        state.roots.forEach((root, index) => {
+          const chip = node("div", "dt-chip");
+          chip.append(node("span", "", root));
+          const remove = node("button", "", "×");
+          remove.type = "button";
+          remove.setAttribute("aria-label", `Remove ${root}`);
+          remove.dataset.dtRootIndex = String(index);
+          chip.append(remove);
+          ui.rootList.append(chip);
+        });
+        ui.rootCount.textContent = `${state.roots.length} of 20 selected`;
+        ui.saveRoots.disabled = state.roots.length > 20;
+      }
+
+      function addRoot(path) {
+        if (!path || state.roots.includes(path)) return;
+        if (state.roots.length >= 20) { setMessage(ui.forgeMessage, "You can select up to 20 folders.", "error"); return; }
+        state.roots.push(path);
+        renderRoots();
+        setMessage(ui.forgeMessage, "Folder added. Save folders to apply the change.");
+      }
+
+      function parentPath(path) {
+        if (!path) return "";
+        if (/^[A-Za-z]:[\\/]?$/.test(path) || path === "/") return "";
+        const clean = path.replace(/[\\/]+$/, "");
+        const index = Math.max(clean.lastIndexOf("\\"), clean.lastIndexOf("/"));
+        if (index < 0) return "";
+        if (/^[A-Za-z]:$/.test(clean.slice(0, index))) return `${clean.slice(0, index)}\\`;
+        return clean.slice(0, index) || "/";
+      }
+
+      async function browse(path) {
+        if (!state.forge?.nodeConnected) return;
+        ui.dirList.classList.add("dt-loading");
+        try {
+          const data = await api(`/forge/browse?path=${encodeURIComponent(path || "")}`);
+          state.browsePath = data.path || "";
+          ui.browserPath.textContent = state.browsePath || "Drives";
+          ui.upButton.disabled = !state.browsePath;
+          ui.addCurrent.disabled = !state.browsePath || state.roots.includes(state.browsePath) || state.roots.length >= 20;
+          clear(ui.dirList);
+          const dirs = Array.isArray(data.dirs) ? data.dirs : [];
+          if (!dirs.length) ui.dirList.append(node("div", "dt-empty", "No folders found here"));
+          dirs.forEach(dir => {
+            const row = node("div", "dt-dir");
+            const open = node("button", "dt-dir-open", dir.name || dir.path);
+            open.type = "button";
+            open.dataset.dtBrowsePath = dir.path;
+            const add = node("button", "dt-button dt-button-secondary dt-button-small", "Add");
+            add.type = "button";
+            add.dataset.dtAddPath = dir.path;
+            add.disabled = state.roots.includes(dir.path) || state.roots.length >= 20;
+            row.append(open, add);
+            ui.dirList.append(row);
+          });
+          setMessage(ui.forgeMessage, "");
+        } catch (error) {
+          clear(ui.dirList);
+          if (error.status === 409) ui.dirList.append(node("div", "dt-empty", "Install and start your Dominion node, then return here to browse folders."));
+          else ui.dirList.append(node("div", "dt-empty", errorLabel(error)));
+          setMessage(ui.forgeMessage, errorLabel(error), "error");
+        } finally { ui.dirList.classList.remove("dt-loading"); }
+      }
+
+      async function loadAccount() {
+        state.account = await api("/account");
+        renderAccount();
+        renderBilling();
+        ui.ownerPanel.hidden = !state.account.isOwner;
+        if (state.account.pricing?.FREE_CAP_USD != null) ui.mintCap.value = String(state.account.pricing.FREE_CAP_USD);
+      }
+      async function loadContent() {
+        try {
+          state.content = await api("/content/tutorial");
+          if (state.content.forgeModeWarning) {
+            ui.forgeWarning.textContent = state.content.forgeModeWarning;
+            ui.forgeWarning.hidden = false;
+          }
+        } catch { ui.forgeWarning.hidden = true; }
+      }
+      async function loadForge() {
+        try { state.forge = await api("/forge/status"); renderForgeStatus(); }
+        catch (error) { setMessage(ui.forgeMessage, errorLabel(error), "error"); }
+      }
+
+      async function redeem(event) {
+        event.preventDefault();
+        const code = byId("dt-code-input").value.trim();
+        if (!code) return;
+        setBusy(ui.redeemButton, true, "Redeeming");
+        setMessage(ui.redeemMessage, "");
+        try {
+          const result = await api("/account/redeem", { method: "POST", body: { code } });
+          await loadAccount();
+          if (result.role === "credit") {
+            const bonus = Number(result.pendingPromo ?? result.credits ?? 0);
+            setMessage(ui.redeemMessage, bonus > 0 ? `Code redeemed. Buy your first credits to unlock chat, and ${bonus.toLocaleString()} bonus credits will be added on top.` : "Code redeemed. Buy your first credits to unlock chat.", "success");
+            ui.billingPanel.hidden = false;
+            ui.billingPanel.classList.add("dt-emphasis");
+            ui.billingPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+          } else setMessage(ui.redeemMessage, "Code redeemed. Your account is ready.", "success");
+          byId("dt-code-input").value = "";
+        } catch (error) { setMessage(ui.redeemMessage, errorLabel(error), "error"); }
+        finally { setBusy(ui.redeemButton, false); }
+      }
+
+      async function buyCredits() {
+        setBusy(ui.buyButton, true, "Opening checkout");
+        setMessage(ui.billingMessage, "");
+        try {
+          const result = await api("/billing/topup", { method: "POST", body: { usd: Number(state.selectedUsd) } });
+          if (!result.url) throw new Error("Checkout is unavailable.");
+          location.href = result.url;
+        } catch (error) {
+          setMessage(ui.billingMessage, errorLabel(error), "error");
+          setBusy(ui.buyButton, false);
+        }
+      }
+
+      async function setAutoRecharge() {
+        ui.autoToggle.disabled = true;
+        try {
+          const result = await api("/billing/autorecharge", { method: "POST", body: { on: ui.autoToggle.checked, topupUsd: Number(state.selectedUsd) } });
+          if (state.account.credits) {
+            state.account.credits.autorecharge = ui.autoToggle.checked;
+            state.account.credits.topupUsd = result.topupUsd;
+          }
+          renderBilling();
+          setMessage(ui.billingMessage, "Automatic recharge saved.", "success");
+        } catch (error) {
+          ui.autoToggle.checked = !ui.autoToggle.checked;
+          setMessage(ui.billingMessage, errorLabel(error), "error");
+        } finally { ui.autoToggle.disabled = false; }
+      }
+
+      function renderMintResult(result, email) {
+        clear(ui.mintOutput);
+        const code = result.codes?.[0]?.code;
+        if (!code) { addBanner(ui.mintOutput, "The code was not returned.", "danger"); return; }
+        const codeBox = node("div", "dt-code", code);
+        const actions = node("div", "dt-inline");
+        actions.style.marginTop = "7px";
+        const copy = node("button", "dt-button dt-button-secondary dt-button-small", "Copy code");
+        copy.type = "button";
+        copy.addEventListener("click", () => copyText(code));
+        actions.append(copy, node("span", "dt-copy", "This code can be used once."));
+        ui.mintOutput.append(codeBox, actions);
+        if (email && result.doorListed) addBanner(ui.mintOutput, `${email} can now sign in. Send this code to that address.`, "success");
+        else if (email && !result.doorListed) addBanner(ui.mintOutput, `The code was created, but the sign-in door was not opened: ${result.doorError || "unknown error"}.`, "danger");
+      }
+
+      async function mintCode(event) {
+        event.preventDefault();
+        const type = ui.mintType.value;
+        const email = byId("dt-mint-email").value.trim().toLowerCase();
+        const body = { type };
+        if (email) body.email = email;
+        if (type === "invite") body.credits = Number(ui.mintCredits.value || 0);
+        else body.capUsd = Number(ui.mintCap.value || 0);
+        setBusy(ui.mintButton, true, "Minting");
+        try {
+          const result = await api("/admin/codes/mint", { method: "POST", body });
+          renderMintResult(result, email);
+          await Promise.all([loadCodes(), loadUsers()]);
+        } catch (error) { clear(ui.mintOutput); addBanner(ui.mintOutput, errorLabel(error), "danger"); }
+        finally { setBusy(ui.mintButton, false); }
+      }
+
+      async function loadCodes() {
+        if (!state.account?.isOwner) return;
+        try {
+          const result = await api("/admin/codes?limit=200");
+          clear(ui.codesOutput);
+          const codes = Array.isArray(result.codes) ? result.codes : [];
+          if (!codes.length) { ui.codesOutput.append(node("div", "dt-empty", "No codes")); return; }
+          const wrap = node("div", "dt-table-wrap");
+          const table = node("table", "dt-table");
+          const head = node("thead");
+          const headerRow = node("tr");
+          ["Code", "Type", "Status", "Value", "Redeemed by", "Created", "Action"].forEach(label => headerRow.append(node("th", "", label)));
+          head.append(headerRow);
+          const body = node("tbody");
+          codes.forEach(item => {
+            const row = node("tr");
+            const codeCell = node("td");
+            const codeButton = node("button", "dt-button dt-button-secondary dt-button-small", item.code);
+            codeButton.type = "button";
+            codeButton.title = "Copy code";
+            codeButton.addEventListener("click", () => copyText(item.code));
+            codeCell.append(codeButton);
+            const value = item.type === "free" ? `${money(item.capUsd)}/month` : `${Number(item.credits || 0).toLocaleString()} credits`;
+            const actionCell = node("td");
+            if (item.status === "unused") {
+              const revoke = node("button", "dt-button dt-button-danger dt-button-small", "Revoke");
+              revoke.type = "button";
+              revoke.dataset.dtRevokeCode = item.code;
+              actionCell.append(revoke);
+            }
+            row.append(codeCell, node("td", "", item.type), node("td", "", item.status), node("td", "", value), node("td", "", item.redeemedBy || ""), node("td", "", item.createdAt ? new Date(item.createdAt).toLocaleDateString() : ""), actionCell);
+            body.append(row);
+          });
+          table.append(head, body); wrap.append(table); ui.codesOutput.append(wrap);
+        } catch (error) { clear(ui.codesOutput); addBanner(ui.codesOutput, errorLabel(error), "danger"); }
+      }
+
+      async function revokeCode(code, button) {
+        if (!window.confirm(`Revoke code ${code}?`)) return;
+        setBusy(button, true, "Revoking");
+        try { await api("/admin/codes/revoke", { method: "POST", body: { code } }); await loadCodes(); toast("Code revoked", "success"); }
+        catch (error) { toast(errorLabel(error), "error"); setBusy(button, false); }
+      }
+
+      function option(value, label, selected) {
+        const item = node("option", "", label);
+        item.value = value;
+        item.selected = value === selected;
+        return item;
+      }
+
+      async function loadUsers() {
+        if (!state.account?.isOwner) return;
+        try {
+          const result = await api("/admin/users");
+          clear(ui.usersOutput);
+          const users = Array.isArray(result.users) ? result.users : [];
+          if (!users.length) { ui.usersOutput.append(node("div", "dt-empty", "No users")); return; }
+          const wrap = node("div", "dt-table-wrap");
+          const table = node("table", "dt-table");
+          table.style.minWidth = "960px";
+          const head = node("thead");
+          const headerRow = node("tr");
+          ["Email", "Role", "Status", "Credits", "Monthly cap", "Adjust credits", "Action"].forEach(label => headerRow.append(node("th", "", label)));
+          head.append(headerRow);
+          const body = node("tbody");
+          users.forEach(user => {
+            const row = node("tr");
+            row.dataset.dtUserEmail = user.email;
+            const roleCell = node("td");
+            const role = node("select", "dt-select");
+            role.dataset.dtUserRole = "";
+            if (user.role === "owner") role.append(option("owner", "Owner", user.role));
+            role.append(option("credit", "Credit", user.role), option("sponsored", "Sponsored", user.role));
+            roleCell.append(role);
+            const statusCell = node("td");
+            const status = node("select", "dt-select");
+            status.dataset.dtUserStatus = "";
+            ["active", "paused", "locked"].forEach(value => status.append(option(value, value[0].toUpperCase() + value.slice(1), user.status)));
+            statusCell.append(status);
+            const capCell = node("td");
+            const cap = node("input", "dt-input");
+            cap.type = "number"; cap.min = "0"; cap.step = "0.01"; cap.value = String(user.sponsoredCapUsd ?? ""); cap.placeholder = "0.00"; cap.dataset.dtUserCap = "";
+            capCell.append(cap);
+            const adjustCell = node("td");
+            const adjust = node("input", "dt-input");
+            adjust.type = "number"; adjust.step = "1"; adjust.value = "0"; adjust.dataset.dtUserAdjust = "";
+            adjustCell.append(adjust);
+            const actionCell = node("td");
+            const save = node("button", "dt-button dt-button-small", "Save");
+            save.type = "button"; save.dataset.dtSaveUser = "";
+            actionCell.append(save);
+            row.append(node("td", "", user.email), roleCell, statusCell, node("td", "", Number(user.credits || 0).toLocaleString()), capCell, adjustCell, actionCell);
+            body.append(row);
+          });
+          table.append(head, body); wrap.append(table); ui.usersOutput.append(wrap);
+        } catch (error) { clear(ui.usersOutput); addBanner(ui.usersOutput, errorLabel(error), "danger"); }
+      }
+
+      async function saveUser(row, button) {
+        const body = {
+          email: row.dataset.dtUserEmail,
+          role: row.querySelector("[data-dt-user-role]").value,
+          status: row.querySelector("[data-dt-user-status]").value
+        };
+        const cap = row.querySelector("[data-dt-user-cap]").value;
+        const adjustment = Number(row.querySelector("[data-dt-user-adjust]").value || 0);
+        if (cap !== "") body.capUsd = Number(cap);
+        if (adjustment) body.adjustCredits = adjustment;
+        setBusy(button, true, "Saving");
+        try { await api("/admin/user", { method: "POST", body }); await loadUsers(); toast("User updated", "success"); }
+        catch (error) { toast(errorLabel(error), "error"); setBusy(button, false); }
+      }
+
+      async function toggleForge() {
+        ui.forgeToggle.disabled = true;
+        try { state.forge = await api("/forge/enable", { method: "POST", body: { on: ui.forgeToggle.checked } }); await loadForge(); toast("Forge setting saved", "success"); }
+        catch (error) { ui.forgeToggle.checked = !ui.forgeToggle.checked; toast(errorLabel(error), "error"); }
+        finally { ui.forgeToggle.disabled = false; }
+      }
+
+      async function issueToken() {
+        setBusy(ui.tokenButton, true, "Issuing");
+        try {
+          const result = await api("/forge/token", { method: "POST", body: {} });
+          clear(ui.tokenOutput);
+          ui.tokenOutput.append(node("div", "dt-code", result.token));
+          const actions = node("div", "dt-inline"); actions.style.marginTop = "7px";
+          const copy = node("button", "dt-button dt-button-secondary dt-button-small", "Copy token"); copy.type = "button"; copy.addEventListener("click", () => copyText(result.token));
+          const download = node("button", "dt-button dt-button-secondary dt-button-small", "Download config"); download.type = "button";
+          download.addEventListener("click", () => {
+            const blob = new Blob([JSON.stringify(result.config || {}, null, 2)], { type: "text/plain;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a"); link.href = url; link.download = "dominion-node-config.txt"; link.click();
+            window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+          });
+          actions.append(copy, download); ui.tokenOutput.append(actions);
+          if (state.forge) state.forge.hasToken = true;
+          ui.tokenState.textContent = "Issued";
+          toast("Node token issued. Store it now.", "success");
+        } catch (error) { toast(errorLabel(error), "error"); }
+        finally { setBusy(ui.tokenButton, false); }
+      }
+
+      async function saveRoots() {
+        setBusy(ui.saveRoots, true, "Saving");
+        try {
+          const result = await api("/forge/roots", { method: "POST", body: { roots: state.roots.slice(0, 20) } });
+          state.roots = Array.isArray(result.roots) ? result.roots : state.roots;
+          if (state.forge) state.forge.roots = state.roots.slice();
+          renderRoots();
+          setMessage(ui.forgeMessage, result.capped ? "Folders saved. The list was capped at 20." : "Folders saved.", "success");
+        } catch (error) { setMessage(ui.forgeMessage, errorLabel(error), "error"); }
+        finally { setBusy(ui.saveRoots, false); }
+      }
+
+      function bindEvents() {
+        ui.redeemForm.addEventListener("submit", redeem);
+        ui.tierGrid.addEventListener("click", event => {
+          const button = event.target.closest("[data-dt-usd]");
+          if (!button) return;
+          state.selectedUsd = Number(button.dataset.dtUsd);
+          renderBilling();
+        });
+        ui.buyButton.addEventListener("click", buyCredits);
+        ui.autoToggle.addEventListener("change", setAutoRecharge);
+        ui.mintType.addEventListener("change", () => {
+          const isInvite = ui.mintType.value === "invite";
+          ui.mintCreditField.hidden = !isInvite;
+          ui.mintCapField.hidden = isInvite;
+        });
+        ui.mintForm.addEventListener("submit", mintCode);
+        byId("dt-refresh-codes").addEventListener("click", loadCodes);
+        byId("dt-refresh-users").addEventListener("click", loadUsers);
+        ui.codesOutput.addEventListener("click", event => {
+          const button = event.target.closest("[data-dt-revoke-code]");
+          if (button) revokeCode(button.dataset.dtRevokeCode, button);
+        });
+        ui.usersOutput.addEventListener("click", event => {
+          const button = event.target.closest("[data-dt-save-user]");
+          if (button) saveUser(button.closest("tr"), button);
+        });
+        ui.forgeToggle.addEventListener("change", toggleForge);
+        ui.tokenButton.addEventListener("click", issueToken);
+        byId("dt-drives-button").addEventListener("click", () => browse(""));
+        ui.upButton.addEventListener("click", () => browse(parentPath(state.browsePath)));
+        ui.addCurrent.addEventListener("click", () => addRoot(state.browsePath));
+        ui.saveRoots.addEventListener("click", saveRoots);
+        ui.dirList.addEventListener("click", event => {
+          const open = event.target.closest("[data-dt-browse-path]");
+          const add = event.target.closest("[data-dt-add-path]");
+          if (open) browse(open.dataset.dtBrowsePath);
+          if (add) addRoot(add.dataset.dtAddPath);
+        });
+        ui.rootList.addEventListener("click", event => {
+          const button = event.target.closest("[data-dt-root-index]");
+          if (!button) return;
+          state.roots.splice(Number(button.dataset.dtRootIndex), 1);
+          renderRoots();
+        });
+      }
+
+      async function boot() {
+        bindEvents();
+        try {
+          await loadAccount();
+          ui.globalBanner.hidden = true;
+          const jobs = [loadContent(), loadForge()];
+          if (state.account.isOwner) jobs.push(loadCodes(), loadUsers());
+          await Promise.allSettled(jobs);
+        } catch (error) {
+          ui.rail.textContent = "Account unavailable";
+          ui.globalBanner.textContent = error.status === 401 ? "Your identity was not provided by the gateway. Sign in again, then reload this page." : errorLabel(error);
+          ui.globalBanner.hidden = false;
+          clear(ui.accountDetails);
+          ui.accountDetails.append(node("div", "dt-empty", "Account data is unavailable"));
+        }
+      }
+
+      boot();
+    })();
+  </script>
+</body>
+</html>

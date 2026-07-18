@@ -12,6 +12,7 @@
 <link rel="apple-touch-icon" href="/icon-180.png" />
 <link rel="icon" href="/icon-192.png" />
 <link rel="stylesheet" href="/dominion-ui.css?v=38" />
+<link rel="stylesheet" href="/dominion-tenant.css?v=1" />
 </head>
 <body>
   <video id="bgvideo" autoplay muted loop playsinline preload="auto" poster="/icon-512.png">
@@ -376,5 +377,7 @@
 
   <script src="/app.js?v=31"></script>
   <script src="/dominion-ui.js?v=38"></script>
+  <script src="/dominion-tenant.js?v=1" defer></script>
+  <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>
 </body>
 </html>

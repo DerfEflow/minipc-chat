@@ -8,10 +8,10 @@
       "port": 8088
     },
     {
-      "name": "dominion-preview-mock",
+      "name": "dominion-dev",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["C:\\Users\\rjfla\\AppData\\Local\\Temp\\claude\\C--Users-rjfla\\cd440068-66fc-4435-84ac-86e40e6008c5\\scratchpad\\preview-wrapper.mjs"],
-      "port": 18818
+      "runtimeArgs": ["devboot.mjs"],
+      "port": 8095
     }
   ]
 }
