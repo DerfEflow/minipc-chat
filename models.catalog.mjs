@@ -27,7 +27,9 @@ export const DEFAULT_MODEL = "qwen/qwen3-235b-a22b-2507";
 // The default model for EVERYONE ELSE using the interface (non-owner tenants). Fred's rule: always
 // Hermes 4 70B — neutral, steerable, minimal moralizing. They can still switch to any model their
 // privacy mode allows; this is just what they land on and what they fall back to.
-export const TENANT_DEFAULT_MODEL = "nousresearch/hermes-4-70b";
+// Guest default (Fred, 2026-07-17): DeepSeek V4 Flash — tool-capable, 1M context, cheapest strong
+// engine, served direct to DeepSeek. (Replaced Hermes 4 70B, whose OpenRouter hosts cannot run tools.)
+export const TENANT_DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
 // Which default a caller lands on: the owner keeps the global default, everyone else gets Hermes.
 export const defaultModelFor = (isOwner) => (isOwner ? DEFAULT_MODEL : TENANT_DEFAULT_MODEL);
 
