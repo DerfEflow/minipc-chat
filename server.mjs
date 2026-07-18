@@ -2250,7 +2250,7 @@ async function handleChat(req, res) {
     if (cloudModel) {
       const cloudProvider = providerOf(cloudModel) || "openrouter";
       const cloudRec = modelById(cloudModel);
-      const cloudTools = attachTools ? filterToolDefs(toolDefs(flywheel.activeToolOverlays()), T.role, forgeExtra) : null;
+      let cloudTools = attachTools ? filterToolDefs(toolDefs(flywheel.activeToolOverlays()), T.role, forgeExtra) : null;
       let inTokTotal = 0, outTokTotal = 0, costTotal = 0, sawCost = false, sawTok = false;
       const bumpUsage = (u) => {
         if (!u) return;
@@ -2291,10 +2291,22 @@ async function handleChat(req, res) {
         }
         working(round === 0 ? "thinking" : "writing");
         let streamed = false;
-        const or = await cloudChatStream(cloudModel, messages,
+        const onDelta = (delta) => { if (aborted) return; if (!streamed) { streamed = true; workStop(); } streamedAny = true; sse({ type: "token", delta }); };
+        let or = await cloudChatStream(cloudModel, messages,
           { temperature: opts.temperature, num_predict: outCap, signal: ac.signal,
             tools: concludePhase ? cloudTools : toolsThisRound, toolChoice: concludePhase ? "none" : undefined },
-          (delta) => { if (aborted) return; if (!streamed) { streamed = true; workStop(); } streamedAny = true; sse({ type: "token", delta }); });
+          onDelta);
+        // Safety net for catalog drift: if THIS request carried tools and the provider refused because
+        // no endpoint supports tool calling, answer anyway without tools and say so, instead of erroring
+        // the whole turn. The catalog is audited (tools_audit.mjs), so this should stay dormant.
+        if (!or.ok && toolsThisRound && /tool|function.?call/i.test(String(or.error || "")) && /support|endpoint|not available/i.test(String(or.error || ""))) {
+          sse({ type: "ctx", text: "This model's host can't run tools right now — answering without them." });
+          cloudTools = null;
+          or = await cloudChatStream(cloudModel, messages,
+            { temperature: opts.temperature, num_predict: outCap, signal: ac.signal, tools: null, toolChoice: "none" },
+            onDelta);
+          await logUsage({ ts: startedAt, model: cloudModel, mode, reason: "tools_unsupported_fallback", route: routeInfo, provider: cloudProvider, status: "tools_fallback" });
+        }
         workStop();
         if (aborted) { sse({ type: "stopped" }); await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "interrupted", rounds: roundsUsed, tools: toolCount }); return endStream(); }
         if (!or.ok) {

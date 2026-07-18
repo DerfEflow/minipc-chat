@@ -19,7 +19,7 @@
  * `ctx` is the context window in tokens. Snapshot date below.
  */
 
-export const CATALOG_UPDATED = "2026-07-08";
+export const CATALOG_UPDATED = "2026-07-17";   // tool flags + ctx audited against live OpenRouter (tools_audit.mjs)
 
 // The out-of-the-box default: fast, dirt-cheap, strong all-rounder. Change via env DEFAULT_CLOUD_MODEL.
 export const DEFAULT_MODEL = "qwen/qwen3-235b-a22b-2507";
@@ -120,7 +120,7 @@ export const MODELS = [
     category: "Frontier / Flagship", params: "456B (MoE)", paramsB: 456, inCost: 0.12, outCost: 0.48, ctx: 204000,
     specialty: "Cheap capable all-rounder for high-volume work" },
   { id: "z-ai/glm-5.2", name: "GLM 5.2", origin: "Zhipu AI (Tsinghua spinout)",
-    category: "Frontier / Flagship", params: "355B (MoE)", paramsB: 355, inCost: 0.45, outCost: 3.31, ctx: 202000,
+    category: "Frontier / Flagship", params: "355B (MoE)", paramsB: 355, inCost: 0.45, outCost: 3.31, ctx: 1048576,
     specialty: "Strong coder + long-horizon planning" },
   { id: "qwen/qwen3-235b-a22b-2507", name: "Qwen3 235B", origin: "Alibaba",
     category: "Frontier / Flagship", params: "235B (MoE·22B active)", paramsB: 235, inCost: 0.09, outCost: 0.10, ctx: 262144, maxOut: 16384,
@@ -134,7 +134,7 @@ export const MODELS = [
     category: "Reasoning & Math", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.70, outCost: 2.50, ctx: 163000, maxOut: 16384, reasoning: true,
     specialty: "Visible chain-of-thought; watch it reason step by step" },
   { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra", origin: "NVIDIA",
-    category: "Reasoning & Math", params: "550B (MoE·55B active)", paramsB: 550, inCost: 0.42, outCost: 2.61, ctx: 131072, maxOut: 16384, reasoning: true,
+    category: "Reasoning & Math", params: "550B (MoE·55B active)", paramsB: 550, inCost: 0.42, outCost: 2.61, ctx: 1000000, maxOut: 16384, reasoning: true,
     specialty: "Deep STEM reasoning when you need the big gun" },
   { id: "qwen/qwen3-8b", name: "Qwen3 8B", origin: "Alibaba",
     category: "Reasoning & Math", params: "8B", paramsB: 8, inCost: 0.05, outCost: 0.40, ctx: 128000, reasoning: true,
@@ -153,7 +153,7 @@ export const MODELS = [
 
   // ---- Science & Technical ------------------------------------------------------------------
   { id: "mistralai/mistral-small-24b-instruct-2501", name: "Mistral Small 3", origin: "Mistral AI (France)",
-    category: "Science & Technical", params: "24B", paramsB: 24, inCost: 0.05, outCost: 0.08, ctx: 32000,
+    category: "Science & Technical", params: "24B", paramsB: 24, inCost: 0.05, outCost: 0.08, ctx: 32000, toolCapable: false,   // audited: no tool endpoints
     specialty: "Excellent cheap technical/science Q&A; fully fine-tunable (Apache 2.0)" },
   { id: "mistralai/mistral-small-3.2-24b-instruct", name: "Mistral Small 3.2", origin: "Mistral AI (France)",
     category: "Science & Technical", params: "24B", paramsB: 24, inCost: 0.08, outCost: 0.20, ctx: 128000,
@@ -170,16 +170,16 @@ export const MODELS = [
     category: "Creative & Writing", params: "36B", paramsB: 36, inCost: 0.55, outCost: 0.80, ctx: 32000,
     specialty: "Longer-form scripts with narrative stamina" },
   { id: "arcee-ai/trinity-large-thinking", name: "Trinity Large Thinking", origin: "Arcee AI",
-    category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.25, outCost: 0.80, ctx: 262144,
+    category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.25, outCost: 0.80, ctx: 262144, toolCapable: true,   // audited: tool endpoints live
     specialty: "Expressive creative writing (already in Command Deck notes)" },
   { id: "thedrummer/rocinante-12b", name: "Rocinante 12B", origin: "TheDrummer (community)",
-    category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.17, outCost: 0.43, ctx: 32000,
+    category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.17, outCost: 0.43, ctx: 65536,
     specialty: "Cheapest uncensored storyteller — punches above 12B" },
   { id: "thedrummer/unslopnemo-12b", name: "UnslopNemo 12B", origin: "TheDrummer (community)",
-    category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.40, outCost: 0.40, ctx: 32000,
+    category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.40, outCost: 0.40, ctx: 32000, toolCapable: true,   // audited: tool endpoints live
     specialty: "'De-slopped' — kills purple-prose GPT-isms" },
   { id: "tencent/hy3-preview", name: "Tencent Hy3", origin: "Tencent",
-    category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.06, outCost: 0.21, ctx: 32000,
+    category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.06, outCost: 0.21, ctx: 262144, toolCapable: true,   // audited: tools live; ctx was 8x understated
     specialty: "Ultra-cheap, surprisingly vivid creative chat for volume" },
 
   // ---- Uncensored / Blunt -------------------------------------------------------------------
@@ -189,11 +189,11 @@ export const MODELS = [
   { id: "microsoft/wizardlm-2-8x22b", name: "WizardLM-2 8x22B", origin: "Microsoft",
     category: "Uncensored / Blunt", params: "141B (MoE·8x22B)", paramsB: 141, inCost: 0.62, outCost: 0.62, ctx: 65536,
     specialty: "Relatively unfiltered MoE; a piece of open-model history" },
-  // toolCapable override: Hermes is the DEFAULT for other users and Nous trains it for function-calling,
-  // so it gets the tools (its category would otherwise make it chat-only). Non-owners still only see the
-  // SAFE_TOOLS subset; Forge tools stay behind Forge Mode.
+  // AUDITED 2026-07-17 (tools_audit.mjs): NO OpenRouter endpoint for Hermes 4 70B supports tool use,
+  // whatever the model card claims. Sending tools = "No endpoints found that support tool use".
+  // It stays the guest default for its voice; tool work needs a TOOLS-badged model.
   { id: "nousresearch/hermes-4-70b", name: "Hermes 4 70B", origin: "Nous Research (open collective)",
-    category: "Uncensored / Blunt", params: "70B", paramsB: 70, inCost: 0.13, outCost: 0.40, ctx: 131072, toolCapable: true,
+    category: "Uncensored / Blunt", params: "70B", paramsB: 70, inCost: 0.13, outCost: 0.40, ctx: 131072, toolCapable: false,
     specialty: "Reflective, non-preachy dialogue; toggleable reasoning" },
   { id: "thedrummer/cydonia-24b-v4.1", name: "Cydonia 24B v4.1", origin: "TheDrummer (community)",
     category: "Uncensored / Blunt", params: "24B", paramsB: 24, inCost: 0.30, outCost: 0.50, ctx: 131072,
@@ -204,7 +204,7 @@ export const MODELS = [
 
   // ---- Vision / Multimodal ------------------------------------------------------------------
   { id: "minimax/minimax-m3", name: "MiniMax M3", origin: "MiniMax (Shanghai)",
-    category: "Vision / Multimodal", params: "undisclosed (MoE)", paramsB: null, inCost: 0.10, outCost: 1.21, ctx: 200000,
+    category: "Vision / Multimodal", params: "undisclosed (MoE)", paramsB: null, inCost: 0.10, outCost: 1.21, ctx: 1048576,
     specialty: "Strongest visual understanding here (image/video reasoning)" },
   { id: "qwen/qwen3-vl-8b-instruct", name: "Qwen3-VL 8B", origin: "Alibaba",
     category: "Vision / Multimodal", params: "8B", paramsB: 8, inCost: 0.08, outCost: 0.50, ctx: 128000,
@@ -212,7 +212,7 @@ export const MODELS = [
 
   // ---- Web / Research -----------------------------------------------------------------------
   { id: "perplexity/sonar-pro", name: "Perplexity Sonar Pro", origin: "Perplexity",
-    category: "Web / Research", params: "undisclosed (Llama-based)", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 200000,
+    category: "Web / Research", params: "undisclosed (Llama-based)", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 200000, toolCapable: false,   // audited: no tool endpoints; its web search is BUILT IN
     specialty: "Live web search with citations baked in — 'what's true right now'" },
 
   // ---- Open & Trainable ---------------------------------------------------------------------
@@ -220,7 +220,7 @@ export const MODELS = [
     category: "Open & Trainable", params: "400B (MoE·17B active)", paramsB: 400, inCost: 0.15, outCost: 0.60, ctx: 1000000,
     specialty: "The trunk of the whole open-source tree; 1M context" },
   { id: "allenai/olmo-3-32b-think", name: "OLMo 3 32B Think", origin: "Allen Institute (nonprofit)",
-    category: "Open & Trainable", params: "32B", paramsB: 32, inCost: 0.15, outCost: 0.50, ctx: 65536,
+    category: "Open & Trainable", params: "32B", paramsB: 32, inCost: 0.15, outCost: 0.50, ctx: 65536, toolCapable: false,   // audited: no tool endpoints
     specialty: "Fully open — weights, DATA, and training code. Study how models are built" },
   { id: "google/gemma-4-31b-it:free", name: "Gemma 4 31B", origin: "Google (open weights)",
     category: "Open & Trainable", params: "31B", paramsB: 31, inCost: 0, outCost: 0, ctx: 262144,
