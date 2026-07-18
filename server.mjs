@@ -1470,6 +1470,103 @@ function readRawBody(req, maxBytes = 25 * 1024 * 1024) {
 }
 
 // ---- Voice (Phase D): OpenAI ears + mouth, ANY picked model as the brain -------------------
+// ==== OCR for scanned PDFs (Phase: attachments round 3) =======================================
+// A PDF with no text layer arrives here as page IMAGES (rendered on the device by pdf.js);
+// a cheap vision model transcribes them and the text goes back to ride the normal
+// {kind:"text"} attachment wire — so a scanned document still works with EVERY chat model
+// afterward, DeepSeek and local included. Gates mirror /chat exactly (identity, invite,
+// credits), the privacy allow-list is honored refuse-not-substitute (Private mode = no
+// cloud OCR, period; Trusted mode = a trusted-provider vision model), pages are capped,
+// and non-owner cost is charged to their credits like any turn.
+const OCR_MODEL = cfgGet("OCR_MODEL", "qwen/qwen3-vl-8b-instruct");
+const OCR_MODEL_TRUSTED = cfgGet("OCR_MODEL_TRUSTED", "anthropic/claude-haiku-4-5");
+const OCR_MAX_PAGES = 12;
+const OCR_PROMPT = "Transcribe ALL text on this scanned page verbatim, top to bottom, left to right. Preserve line breaks and table alignment where you can (use tabs between columns). Output ONLY the transcription — no commentary, no summary. If the page is blank, output exactly: (blank page)";
+
+// Charge a non-owner for OCR exactly like a chat turn, but WITHOUT the training-sink write
+// (a transcription job is not a conversation).
+function meterOcr(T, costUsd) {
+  if (!MULTI_TENANT || !T || T.isOwner) return;
+  try {
+    if (T.role === "credit") {
+      const m = billing.chargeTurn(T.email, costUsd || 0);
+      if (m.low) billing.autoRecharge(T.email).catch(() => {});
+    } else if (T.role === "sponsored") {
+      users.addSponsoredSpend(T.email, costUsd || 0);
+    }
+  } catch {}
+}
+
+async function handleOcr(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const raw = await readRawBody(req, 32 * 1024 * 1024);
+  if (raw === null) return json(413, { error: "request too large" });
+  let body; try { body = JSON.parse(raw.toString("utf8")); } catch { return json(400, { error: "bad json" }); }
+
+  // Same wall as /chat: identity, account state, invite, credits — OCR is billable work.
+  const T = resolveTenant(req);
+  if (T.role === "anon") return json(401, { error: "Sign in to use Dominion.", code: "no_identity" });
+  if (T.status === "paused" || T.status === "locked") return json(403, { error: "Account " + T.status + ".", code: "account_" + T.status });
+  if (!T.isOwner && !T.invited) return json(403, { error: "You need an access code before OCR can run.", code: "needs_invite" });
+  if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) return json(402, { error: "OCR needs credits. Add credits in Setup first.", code: "needs_credits" });
+
+  // Privacy allow-list, refuse-not-substitute: Private = local only, and there is no local
+  // vision model, so scanned-PDF OCR is refused honestly rather than silently going out.
+  const pmode = normalizeMode(body.privacyMode);
+  let model = OCR_MODEL;
+  if (pmode === "private") return json(403, { error: "Private mode allows local models only, and OCR needs a cloud vision model. Switch privacy to Normal or Trusted for this file, or attach a text PDF.", code: "privacy_mode_block" });
+  if (pmode === "trusted") model = OCR_MODEL_TRUSTED;
+  const gate = modeAllows(pmode, model);
+  if (!gate.allowed) return json(403, { error: gate.reason, code: "privacy_mode_block" });
+  const rec = modelById(model);
+  if (!rec || !rec.vision) return json(500, { error: "OCR model misconfigured (not vision-capable): " + model });
+
+  // Validate pages with the same mime/size trust boundary as chat images, but with the OCR
+  // page cap (sanitizeAttachments caps at 4 images per chat MESSAGE, which is not this).
+  const rawPages = Array.isArray(body.pages) ? body.pages.slice(0, OCR_MAX_PAGES) : [];
+  const pages = [];
+  for (let i = 0; i < rawPages.length; i++) {
+    const p = rawPages[i];
+    if (typeof p !== "string") continue;
+    const m = /^data:([a-z0-9/+.-]+);base64,/i.exec(p.slice(0, 64));
+    if (!m || !ATTACH_IMAGE_MIMES.has(m[1].toLowerCase())) continue;
+    const approxBytes = Math.floor((p.length - m[0].length) * 3 / 4);
+    if (approxBytes <= 0 || approxBytes > ATTACH_MAX_IMG_BYTES) continue;
+    pages.push({ kind: "image", name: "page-" + (i + 1) + ".jpg", mime: m[1].toLowerCase(), dataUrl: p });
+  }
+  if (!pages.length) return json(400, { error: "no readable page images" });
+  const name = String(body.name || "document.pdf").slice(0, 120);
+
+  const startedAt = new Date().toISOString();
+  let out = "", inTok = 0, outTok = 0, costTotal = 0, sawCost = false;
+  for (let i = 0; i < pages.length; i++) {
+    const messages = [
+      { role: "system", content: "You are a precise OCR transcription engine." },
+      { role: "user", content: OCR_PROMPT, attachments: [pages[i]] },
+    ];
+    const r = await cloudChatStream(model, messages, { temperature: 0, num_predict: 2600 }, null);
+    if (!r.ok) {
+      await logUsage({ ts: startedAt, model, mode: "ocr", status: "error", error: String(r.error || "").slice(0, 200), pages: pages.length, pageFailed: i + 1, uid: T.uid });
+      return json(502, { error: "OCR failed on page " + (i + 1) + ": " + (r.error || "provider error") });
+    }
+    if (r.usage) {
+      const it = r.usage.prompt_tokens ?? r.usage.input_tokens, ot = r.usage.completion_tokens ?? r.usage.output_tokens;
+      if (typeof it === "number") inTok += it;
+      if (typeof ot === "number") outTok += ot;
+      if (typeof r.usage.cost === "number") { costTotal += r.usage.cost; sawCost = true; }
+    }
+    const pageText = String(r.content || "").trim();
+    out += (out ? "\n\n" : "") + `[Page ${i + 1} of ${pages.length}]\n` + (pageText || "(blank page)");
+  }
+  const costUsd = sawCost ? +costTotal.toFixed(6)
+    : +(((inTok * (rec.inCost || 0)) + (outTok * (rec.outCost || 0))) / 1e6).toFixed(6);
+  meterOcr(T, costUsd);
+  await logUsage({ ts: startedAt, model, mode: "ocr", status: "completed", pages: pages.length, promptTokens: inTok || null, outputTokens: outTok || null, costUsd, uid: T.uid });
+  console.log(`[dominion-ai] ocr ${name}: ${pages.length} page(s) via ${model} · $${costUsd} · ${T.isOwner ? "owner" : T.email || T.uid}`);
+  const text = `(Transcribed from a scanned PDF by OCR — verify critical numbers against the original.)\n\n` + out;
+  return json(200, { text, pages: pages.length, costUsd, model: rec.name });
+}
+
 // Pipeline mode: the phone records audio -> POST /api/voice/transcribe (OpenAI STT) -> the text
 // goes through the normal /chat flow on whatever model Fred picked (tools included) -> the answer
 // can be spoken back via POST /api/voice/tts (OpenAI TTS). Voice I/O is OpenAI; the BRAIN stays
@@ -2997,6 +3094,7 @@ const server = http.createServer(async (req, res) => {
     if (path.startsWith("/forge/")) return handleForge(req, res, u);
     if (path === "/connectors" || path.startsWith("/connectors/")) return handleConnectors(req, res, u);
 
+    if (path === "/api/ocr" && req.method === "POST") return handleOcr(req, res);
     if (path === "/api/voice/transcribe" && req.method === "POST") return handleVoiceTranscribe(req, res);
     if (path === "/api/voice/tts" && req.method === "POST") return handleVoiceTts(req, res);
 

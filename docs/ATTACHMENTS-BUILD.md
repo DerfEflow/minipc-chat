@@ -123,13 +123,47 @@ cost chip stays honest via the new attachChars preflight field).
   formats in 98ms, chips staged and rendered, marker text verified in storage, send
   round-tripped. Deployed same day.
 
+## Round 3 (2026-07-18): OCR for scanned PDFs + Excel .xlsx
+
+Fred's picks 2+3. Both ride the round-2 architecture.
+
+- **Scanned-PDF OCR**: when extractPdf finds no text layer, the device renders the pages
+  to JPEGs (pdf.js, <=12 pages, per-page hard timeouts so a pathological file can never
+  wedge the composer) and POST /api/ocr transcribes them with a vision model; the text
+  returns as a normal {kind:"text"} attachment, so a scanned document then works with
+  EVERY chat model. Gates mirror /chat exactly (identity, invite, credits before any
+  spend); privacy is refuse-not-substitute (Private = refused honestly, Trusted = Claude
+  Haiku, Normal = Qwen3-VL, env-overridable OCR_MODEL/OCR_MODEL_TRUSTED); non-owner cost
+  charges credits like a turn (no training-sink write); every run lands in usage.jsonl
+  (mode "ocr"). Output carries an in-band honesty note ("verify critical numbers").
+- **XLSX**: on-device extraction to "[Sheet: Name]" blocks of tab-separated rows.
+  Handles shared strings (incl. rich-text runs), inline strings, booleans, formula
+  cached values, and date cells (styles numFmt -> ISO dates, 1900 and 1904 systems).
+  Old .xls refuses with "save it as .xlsx first".
+- Bugs caught by verification, fixed: (1) pdf.js TRANSFERS (detaches) the ArrayBuffer it
+  is given — extract-then-render on the same buffer crashed; the module now always takes
+  a private copy. (2) The OCR endpoint initially reused the chat sanitizer whose
+  4-images-per-MESSAGE cap silently trimmed 12-page jobs to 4 — pages now validate
+  against the OCR cap. (3) My first xlsx date test asserted the WRONG date (the
+  extractor's calendar math was right). (4) The embedded test pane cannot rasterize
+  pdf.js renders at all (renders never resolve — same pane defect as its screenshot
+  timeouts); verification moved to REAL headless Chrome over raw CDP, where the full
+  scanned path runs in ~0.4s and page render in 59ms.
+- Proof: 9 extractor tests (xlsx round trip via docwriters' own writer + hand-built
+  Excel-shape fixture with sharedStrings/dates), 14 attachments e2e (4 new /api/ocr
+  cases: per-page provider calls + page tags asserted against the mock, Private-mode
+  refusal with zero calls, invite gate before spend, page cap + junk stripping), full
+  suite green, real-Chrome CDP drive of the scanned pipeline end to end.
+
 ## Ledger
 
-- L-A1 CLOSED for the common case 2026-07-18 (round 2): PDFs and Word docs attach for
-  everyone via on-device text extraction. Still OPEN as a narrow follow-up: scanned or
-  image-only PDFs have no text layer and are refused honestly; carrying THOSE needs
-  native provider file parts or OCR (OpenRouter file-parser / Anthropic document blocks)
-  and is deliberately not in this round.
+- L-A1 CLOSED 2026-07-18 (round 3): scanned/image-only PDFs now transcribe via /api/ocr.
+  Remaining niche: scans BEYOND 12 pages transcribe only the first 12 (said honestly in
+  the attachment text); raise OCR_MAX_PAGES if Fred ever needs more.
+- L-A5 OPEN (low): raw PHOTOS of documents attached as images still require a vision
+  model; a "read text from this picture" action reusing /api/ocr would let them reach
+  text-only models too. Small follow-up.
+- L-A6 NOTE: the content wall does not screen OCR'd text (same scope as L-A2).
 - L-A2 OPEN (low): the content wall screens text only; image content is not screened
   locally. Providers' own abuse filters are the only image-side backstop. Acceptable per
   current safety.mjs scope; revisit if guests misuse it.

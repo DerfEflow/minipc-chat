@@ -425,21 +425,48 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modelPan
 // hundred KB, and only vision-badged models may receive them (the server enforces the same gate).
 const ATT_MAX_IMAGES = 4, ATT_MAX_TEXTS = 4, ATT_MAX_TEXT_BYTES = 200 * 1024, ATT_IMG_EDGE = 1568;
 const ATT_TEXT_EXT = /\.(txt|md|markdown|csv|json|log|xml|yaml|yml|html|css|js|mjs|ts|py|sql|sh|ps1)$/i;
-const ATT_DOC_EXT = /\.(pdf|docx)$/i;
+const ATT_DOC_EXT = /\.(pdf|docx|xlsx)$/i;
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 // PDFs and Word docs extract to text ON THE DEVICE (lazy-loaded module + vendored pdf.js),
 // then ride the same {kind:"text"} wire as any pasted file — which is why they work with
 // every model, local included, and never add binary parsing to the server.
 let extractMod = null, pdfjsLib = null;
+function attStatus(msg) {   // transient progress line above the composer (OCR can take ~10-20s)
+  if (!attachWarn) return;
+  if (msg) { attachWarn.hidden = false; attachWarn.textContent = msg; }
+  else updateAttachGate();
+}
 async function extractDocFile(f) {
   if (!("DecompressionStream" in window)) throw new Error("this browser can't unpack documents; paste the text instead");
-  extractMod ||= await import("/attach-extract.mjs?v=1");
+  extractMod ||= await import("/attach-extract.mjs?v=2");
   const buf = await f.arrayBuffer();
+  if (f.type === XLSX_MIME || /\.xlsx$/i.test(f.name || "")) {
+    const r = await extractMod.extractXlsx(buf, { maxChars: ATT_MAX_TEXT_BYTES });
+    return { kind: "text", name: (f.name || "sheet.xlsx").slice(0, 120), text: r.text };
+  }
   if (f.type === "application/pdf" || /\.pdf$/i.test(f.name || "")) {
     pdfjsLib ||= await extractMod.loadPdfjsBrowser();
-    const r = await extractMod.extractPdf(buf, pdfjsLib, { maxChars: ATT_MAX_TEXT_BYTES });
-    return { kind: "text", name: (f.name || "document.pdf").slice(0, 120), text: r.text };
+    try {
+      const r = await extractMod.extractPdf(buf, pdfjsLib, { maxChars: ATT_MAX_TEXT_BYTES });
+      return { kind: "text", name: (f.name || "document.pdf").slice(0, 120), text: r.text };
+    } catch (e) {
+      if (!/scanned or image-only/.test((e && e.message) || "")) throw e;
+      // Scanned PDF: render pages on the device, let the server's vision OCR transcribe them,
+      // and the text comes back to ride the normal wire (works with every model afterward).
+      attStatus("Scanned PDF — rendering pages for OCR…");
+      const rp = await extractMod.renderPdfPages(buf, pdfjsLib, { maxPages: 12 });
+      attStatus("Reading " + rp.rendered + (rp.total > rp.rendered ? " of " + rp.total : "") + " page(s) with OCR… (~" + Math.max(5, rp.rendered * 2) + "s)");
+      const resp = await fetch("/api/ocr", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: f.name || "document.pdf", pages: rp.pages, privacyMode: privacyModeSel ? privacyModeSel.value : "normal" }) });
+      const j = await resp.json().catch(() => ({}));
+      attStatus("");
+      if (!resp.ok || j.error) throw new Error(j.error || "OCR failed");
+      let text = j.text;
+      if (rp.total > rp.rendered) text += "\n\n(Only the first " + rp.rendered + " of " + rp.total + " pages were transcribed — the OCR cap.)";
+      return { kind: "text", name: (f.name || "document.pdf").slice(0, 120), text };
+    }
   }
   const r = await extractMod.extractDocx(buf, { maxChars: ATT_MAX_TEXT_BYTES });
   return { kind: "text", name: (f.name || "document.docx").slice(0, 120), text: r.text };
@@ -496,14 +523,14 @@ async function addFiles(fileList) {
         if (attTexts() >= ATT_MAX_TEXTS) { rejected.push(f.name + " (max " + ATT_MAX_TEXTS + " files)"); continue; }
         try { pendingAtt.push(await extractDocFile(f)); }
         catch (e) { rejected.push((f.name || "document") + " (" + ((e && e.message) || "couldn't read it") + ")"); }
-      } else if (/\.doc$/i.test(f.name || "")) {
-        rejected.push(f.name + " (old .doc format; save it as .docx first)");
+      } else if (/\.(doc|xls)$/i.test(f.name || "")) {
+        rejected.push(f.name + (/\.doc$/i.test(f.name) ? " (old .doc format; save it as .docx first)" : " (old .xls format; save it as .xlsx first)"));
       } else if ((f.type && f.type.startsWith("text/")) || f.type === "application/json" || ATT_TEXT_EXT.test(f.name || "")) {
         if (attTexts() >= ATT_MAX_TEXTS) { rejected.push(f.name + " (max " + ATT_MAX_TEXTS + " files)"); continue; }
         const a = await readTextFile(f);
         if (a) pendingAtt.push(a); else rejected.push((f.name || "file") + " (empty or unreadable)");
       } else {
-        rejected.push((f.name || "file") + " (pictures, PDFs, Word .docx, and text files only)");
+        rejected.push((f.name || "file") + " (pictures, PDFs, Word .docx, Excel .xlsx, and text files only)");
       }
     }
   } finally { if (attachBtn) attachBtn.classList.remove("busy"); }

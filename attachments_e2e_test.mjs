@@ -220,6 +220,47 @@ try {
     assert(evs.some((e) => e.type === "done"), "turn completes");
   });
 
+  await t("/api/ocr: owner happy path — per-page vision calls, page tags, honesty note", async () => {
+    const before = orBodies.length;
+    const r = await req("POST", "/api/ocr", { email: OWNER, body: { name: "scan.pdf", privacyMode: "normal", pages: [PNG, PNG] } });
+    assert(r.status === 200, "expected 200, got " + r.status + " " + JSON.stringify(r.body));
+    assert(orBodies.length === before + 2, "one provider call per page (got " + (orBodies.length - before) + ")");
+    const call = orBodies[orBodies.length - 1];
+    assert(call.model === "qwen/qwen3-vl-8b-instruct", "normal-mode OCR should use the cheap vision model");
+    const user = call.messages.find((m) => m.role === "user");
+    assert(Array.isArray(user.content) && user.content.some((p) => p.type === "image_url"), "page image must reach the provider");
+    assert(JSON.stringify(call.messages).includes("Transcribe ALL text"), "OCR instruction missing");
+    assert(r.body.text.includes("[Page 1 of 2]") && r.body.text.includes("[Page 2 of 2]"), "page tags missing");
+    assert(r.body.text.includes("Transcribed from a scanned PDF"), "honesty note missing");
+    assert(r.body.text.includes("Seen."), "mock transcription should appear");
+    assert(typeof r.body.costUsd === "number", "cost must be reported");
+  });
+
+  await t("/api/ocr: Private mode refuses (no cloud OCR), zero provider calls", async () => {
+    const before = orBodies.length;
+    const r = await req("POST", "/api/ocr", { email: OWNER, body: { name: "scan.pdf", privacyMode: "private", pages: [PNG] } });
+    assert(r.status === 403 && r.body.code === "privacy_mode_block", "expected privacy refusal, got " + r.status + " " + JSON.stringify(r.body));
+    assert(orBodies.length === before, "no provider call in private mode");
+  });
+
+  await t("/api/ocr: un-invited guest is refused before any spend", async () => {
+    const before = orBodies.length;
+    const r = await req("POST", "/api/ocr", { email: "stranger@test.com", body: { name: "scan.pdf", privacyMode: "normal", pages: [PNG] } });
+    assert(r.status === 403 && r.body.code === "needs_invite", "expected needs_invite, got " + r.status + " " + JSON.stringify(r.body));
+    assert(orBodies.length === before, "no provider call for gated guests");
+  });
+
+  await t("/api/ocr: page cap holds and junk pages are stripped", async () => {
+    const before = orBodies.length;
+    const fourteen = Array.from({ length: 14 }, () => PNG);
+    const r = await req("POST", "/api/ocr", { email: OWNER, body: { name: "big.pdf", privacyMode: "normal", pages: fourteen } });
+    assert(r.status === 200, "expected 200, got " + r.status);
+    assert(r.body.pages === 12, "cap should trim to 12 pages, got " + r.body.pages);
+    assert(orBodies.length === before + 12, "exactly 12 provider calls");
+    const junk = await req("POST", "/api/ocr", { email: OWNER, body: { name: "junk.pdf", privacyMode: "normal", pages: ["data:image/svg+xml;base64,PHN2Zz4=", 42] } });
+    assert(junk.status === 400, "all-junk pages should 400, got " + junk.status);
+  });
+
   await t("/estimate prices pictures in and mirrors the vision gate", async () => {
     const ok = await req("POST", "/estimate", { email: OWNER, body: { model: VISION_MODEL, mode: "normal", images: 2, messages: [{ role: "user", content: "hi" }] } });
     assert(ok.body && ok.body.backend === "cloud", "vision estimate should be a normal cloud estimate");
