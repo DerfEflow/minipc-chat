@@ -107,6 +107,14 @@ const SELF_PROTECT = [
 ].map((p) => norm(p));
 const DESTRUCTIVE_RE = /(remove-item|\brmdir\b|\brd\b|\brm\b|\bdel\b|format-volume|\bformat\b|\bmklink\b)/i;
 
+// ---- Wave 3 surfaces: browser + desktop -------------------------------------------------------
+// The browser profile PERSISTS so sites logged into once stay logged in. Screenshots land in a
+// dedicated dir on the node. Desktop control is OFF unless deliberately switched on, because it
+// reaches below the tool-boundary carve-outs (see the header of hands/desktop.mjs).
+const BROWSER_PROFILE = String(process.env.HANDS_BROWSER_PROFILE || join(HERE, ".browser"));
+const SHOT_DIR = String(process.env.HANDS_SHOT_DIR || join(HERE, ".shots"));
+const DESKTOP_ON = String(process.env.HANDS_DESKTOP || "") === "1";
+
 function norm(p) { const r = resolve(String(p || "")); return IS_WIN ? r.toLowerCase() : r; }
 function underAny(target, dirs) {
   const t = norm(target);
@@ -242,6 +250,21 @@ export async function executeJob(tool, args = {}) {
         }
         return await runShell(cmdText, args.timeoutMs);
       }
+
+      // ---- Wave 3: real browser + desktop reach (Fred's option 2, 2026-07-18) ----
+      // browser_* drives a persistent Chrome profile over the DevTools Protocol (hands/browser.mjs).
+      // desktop_* drives the actual mouse/keyboard/screen (hands/desktop.mjs). Both already had the
+      // carve-out scan run against their args at the top of executeJob.
+      case "browser_control": {
+        const { browserOp } = await import("./browser.mjs");
+        return await browserOp(String(args.op || "read"), args, { profileDir: BROWSER_PROFILE, shotDir: SHOT_DIR });
+      }
+      case "desktop_control": {
+        if (!DESKTOP_ON) return refuse("desktop control is switched off on this node (set HANDS_DESKTOP=1 to enable it)");
+        const { desktopOp } = await import("./desktop.mjs");
+        return await desktopOp(String(args.op || "screenshot"), args, { shotDir: SHOT_DIR, runShell });
+      }
+
       default: return { ok: false, error: "unknown tool: " + tool };
     }
   } catch (e) {

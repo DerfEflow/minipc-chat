@@ -34,6 +34,11 @@ export const SAFE_TOOLS = new Set([
 // The machine-reach tools a non-owner gets ONLY when they have enabled their own Forge node AND
 // engaged Forge Mode this turn. They act on the user's OWN node (bound to their uid by the hub) within
 // the folders the user picked; the ironclad carve-outs still hold node-side and hub-side.
+//
+// browser_control and desktop_control are DELIBERATELY ABSENT (Fred, 2026-07-18). Both were built
+// for the owner's Wave 3 reach. desktop_control in particular acts below the tool-boundary
+// carve-outs (it can drive any app a person could), so handing it to paying guests on their own
+// machines is a liability decision Fred has not made. Adding them here is the only switch needed.
 export const FORGE_TOOLS = new Set(["forge_read", "forge_write", "forge_run", "scaffold_project"]);
 
 // Owner = all tools (null sentinel = no filter). Non-owner = SAFE_TOOLS (+ FORGE_TOOLS when engaged).

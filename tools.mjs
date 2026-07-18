@@ -154,6 +154,39 @@ async function scaffoldProject(ctx, args) {
     (issues.length ? `\n\nIssues:\n${issues.join("\n")}` : "");
 }
 
+// ---- Wave 3: browser + desktop on the connected machine (Fred's option 2, 2026-07-18) ----------
+// Both reach the node's browser_control / desktop_control verbs. The node keeps the carve-out scan
+// on every arg blob, refuses the file: scheme in the browser, and refuses protected paths in typed
+// desktop text. Desktop control also has to be switched on at the node (HANDS_DESKTOP=1).
+async function handsBrowser(ctx, args) {
+  if (!ctx.hands) return "Browser control needs a connected Dominion hands node. Start it on the computer whose browser you want to drive.";
+  const op = String(args.op || "read");
+  const r = await ctx.hands.dispatch("browser_control", { ...args, op }, { timeoutMs: 90000 });
+  if (!r || r.error) return `Browser ${op} failed: ` + ((r && (r.reason || r.error)) || "no response from the node");
+  if (r.refused) return `BLOCKED: ${r.reason}`;
+  if (op === "read") return `${r.title || "(untitled)"} — ${r.url}\n\n${r.text || "(no readable text)"}`;
+  if (op === "elements") return (r.elements || []).map((e) => `- <${e.tag}${e.type ? " type=" + e.type : ""}>${e.id ? " #" + e.id : ""}${e.name ? " name=" + e.name : ""} "${e.text}"${e.href ? " -> " + e.href : ""}`).join("\n") || "(no interactive elements found)";
+  if (op === "tabs") return (r.tabs || []).map((t) => `${t.active ? "* " : "  "}[${t.id.slice(0, 8)}] ${t.title} — ${t.url}`).join("\n") || "(no tabs)";
+  if (op === "screenshot") return `Screenshot saved on the machine: ${r.path} (${r.bytes} bytes). ${r.note || ""}`;
+  if (op === "navigate") return `Now at: ${r.title || "(untitled)"} — ${r.url}`;
+  if (op === "click") return `Clicked ${r.clicked}${r.label ? ` ("${r.label}")` : ""}. Now at ${r.url || "(same page)"}`;
+  if (op === "type") return `Typed ${r.typed}.${r.url ? " Now at " + r.url : ""}`;
+  if (op === "eval") return typeof r.result === "string" ? r.result : JSON.stringify(r.result ?? null).slice(0, 4000);
+  if (op === "open") return `Browser ready on the machine (${r.launched ? "launched" : "already running"}), profile ${r.profile}.`;
+  if (op === "close") return "Browser closed.";
+  return JSON.stringify(r).slice(0, 3000);
+}
+async function handsDesktop(ctx, args) {
+  if (!ctx.hands) return "Desktop control needs a connected Dominion hands node. Start it on the computer you want to control.";
+  const op = String(args.op || "screenshot");
+  const r = await ctx.hands.dispatch("desktop_control", { ...args, op }, { timeoutMs: 60000 });
+  if (!r || r.error) return `Desktop ${op} failed: ` + ((r && (r.reason || r.error)) || "no response from the node");
+  if (r.refused) return `BLOCKED: ${r.reason}`;
+  if (op === "screenshot") return `Screen captured on the machine: ${r.path}. ${r.note || ""}`;
+  if (op === "windows") return (r.windows || []).join("\n") || "(no windows with titles)";
+  return r.detail || "Done.";
+}
+
 async function handsRead(ctx, op, path, query) {
   if (op === "list") return fmtHands(await ctx.hands.dispatch("fs_list", { path }), (r) => (r.entries || []).map((e) => `${e.type === "dir" ? "[dir] " : "      "}${e.name}${e.size != null ? "  (" + e.size + " b)" : ""}`).join("\n") || "(empty)");
   if (op === "tree") return fmtHands(await ctx.hands.dispatch("fs_tree", { path, depth: 3 }), (r) => (r.tree || []).join("\n") || "(empty)");
@@ -248,6 +281,8 @@ export const TOOLS = [
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_write", description: "Write (create or overwrite) a file on the connected machine, in a folder the machine allows. Reaches it through the Dominion hands node (carve-outs + allowed-folders enforced). Use for real file changes as you build.", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path on that machine." }, content: { type: "string" } }, required: ["path", "content"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_run", description: "Run a shell command on the connected machine and return its output (PowerShell on Windows, sh on Linux). Reaches it through the Dominion hands node; the node enforces carve-outs and refuses destructive commands against protected dirs. Use to build, test, and inspect as you work.", parameters: { type: "object", properties: { command: { type: "string" }, timeoutMs: { type: "number", description: "Optional, default 60000, max 600000." } }, required: ["command"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "scaffold_project", description: "Create a whole project/app as a file TREE on the connected machine in one call. Give `root` (an absolute base folder on that machine) and `files` (each { path relative to root, content }). Creates all folders and files, then returns the rendered tree. Use this when the user asks you to build an app or project — lay out the full structure at once. Reaches the machine through its Dominion hands node (allowed folders + carve-outs enforced per file).", parameters: { type: "object", properties: { root: { type: "string", description: "Absolute base folder on the machine, e.g. C:/Users/Fred/projects/my-app." }, files: { type: "array", description: "Files to create.", items: { type: "object", properties: { path: { type: "string", description: "Path relative to root (e.g. src/index.js). Absolute paths allowed but discouraged." }, content: { type: "string" } }, required: ["path", "content"] } } }, required: ["root", "files"] } } } },
+  { category: "machine", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "browser_control", description: "Drive a REAL web browser on the connected machine (persistent profile, so sites stay logged in). Ops: open (start it), navigate {url}, read (page text), elements (list clickable/typable elements with selectors), click {selector}, type {selector,text,enter}, eval {expression}, screenshot {fullPage}, tabs, back, close. Typical flow: navigate, then read or elements, then click/type. Use this for anything behind a login or rendered by JavaScript; use web_read for a simple public page.", parameters: { type: "object", properties: { op: { type: "string", enum: ["open", "navigate", "read", "elements", "click", "type", "eval", "screenshot", "tabs", "back", "close"] }, url: { type: "string" }, selector: { type: "string", description: "CSS selector." }, text: { type: "string" }, enter: { type: "boolean", description: "Press Enter after typing." }, expression: { type: "string", description: "JavaScript to evaluate in the page." }, fullPage: { type: "boolean" }, max: { type: "number" } }, required: ["op"] } } } },
+  { category: "machine", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "desktop_control", description: "Control the actual mouse, keyboard and screen of the connected machine (Windows). Ops: screenshot, windows (list open windows), focus {title}, move {x,y}, click {x,y,button,double}, type {text}, key {keys} where keys is SendKeys syntax such as ^s for ctrl+s or %{F4} for alt+F4. Take a screenshot first to see where things are. This reaches below the file carve-outs, so be deliberate: it can do anything a person at that keyboard could do.", parameters: { type: "object", properties: { op: { type: "string", enum: ["screenshot", "windows", "focus", "move", "click", "type", "key"] }, x: { type: "number" }, y: { type: "number" }, button: { type: "string", enum: ["left", "right"] }, double: { type: "boolean" }, text: { type: "string" }, keys: { type: "string" }, title: { type: "string" } }, required: ["op"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, allowedModes: ["fast", "normal", "deep_think", "long_context", "tool", "mentor"], def: { type: "function", function: { name: "forge_send", description: "Queue a REAL code/file work order for Claude Code on Fred's machine (the Forge). Use only for actual source/file changes or builds. repo is a named shortcut ('command-deck','cad-sandbox') or an absolute path under the allowed roots. Needs the run-password (configured on the server). The change snapshots first and is always rollback-able.", parameters: { type: "object", properties: { repo: { type: "string" }, title: { type: "string" }, instructions: { type: "string", description: "Clear, complete plain-English steps." } }, required: ["repo", "title", "instructions"] } } } },
   { category: "file", permissionClass: "safe_local_write", logsInputs: true, def: { type: "function", function: { name: "sandbox_write", description: "Write (overwrite) a text file in your private sandbox folder on the mini-PC.", parameters: { type: "object", properties: { filename: { type: "string" }, content: { type: "string" } }, required: ["filename", "content"] } } } },
   { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "sandbox_read", description: "Read a text file from your private sandbox folder.", parameters: { type: "object", properties: { filename: { type: "string" } }, required: ["filename"] } } } },
@@ -350,7 +385,8 @@ const PROTECTED_RE = [
   /\bdb[-_ ]?backups?\b/i,
   /pg_dump|pg_restore/i,         // dumping/restoring a (prod) DB
 ];
-const REACHES_OUT = new Set(["forge_read", "forge_write", "forge_run", "scaffold_project", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox"]);
+const REACHES_OUT = new Set(["forge_read", "forge_write", "forge_run", "scaffold_project", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox",
+  "browser_control", "desktop_control"]);
 export function assertNotProtected(name, args) {
   if (!REACHES_OUT.has(name)) return { ok: true };
   const blob = JSON.stringify(args || {});
@@ -404,6 +440,8 @@ export async function runTool(name, args, ctx, signal = null) {
       case "deck_create_project": { const d = await agent(ctx, "create_project", { name: args.name, description: args.description || "", discipline: args.discipline || "", status: args.status || "", priority: args.priority || "" }, signal); return d.message || d.error || "Project created."; }
       // Machine access via the hands node (the retired bridge's replacement). Fall back to the old
       // bridge only when no hands node is wired AND a SYNC_SECRET exists (legacy local mini-PC mode).
+      case "browser_control": return await handsBrowser(ctx, args);
+      case "desktop_control": return await handsDesktop(ctx, args);
       case "forge_read":
         if (ctx.hands) return await handsRead(ctx, args.op, args.path || "", args.query || "");
         return await forgeRead(ctx, args.op, args.path || "", args.query || "", signal);
