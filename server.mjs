@@ -900,7 +900,9 @@ const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
 // ACCESS_JWT=enforce requires a valid JWT (production); "prefer" verifies when present and falls
 // back to the header when absent (migration); "off" is header-only (devboot rig + tests).
 const accessVerifier = createAccessVerifier({
-  teamDomain: cfgGet("CF_ACCESS_TEAM_DOMAIN", "misty-queen-8e41.cloudflareaccess.com"),
+  // NOTE: the team's auth domain is domi-ai.cloudflareaccess.com. "misty-queen-8e41..." is the
+  // organization's DISPLAY NAME, which merely looks like a domain and 404s on /cdn-cgi/access/certs.
+  teamDomain: cfgGet("CF_ACCESS_TEAM_DOMAIN", "domi-ai.cloudflareaccess.com"),
   aud: cfgGet("CF_ACCESS_AUD", ""),
   mode: cfgGet("ACCESS_JWT", "prefer"),
 });
@@ -1093,6 +1095,9 @@ async function handleAdmin(req, res, u) {
     return sjson(res, 200, { codes, email: email || undefined, doorListed: door ? door.ok : undefined, doorError: door && !door.ok ? door.error : undefined });
   }
   if (req.method === "POST" && p === "/admin/codes/revoke") { billing.revokeCode(String(body.code || "")); return sjson(res, 200, { ok: true }); }
+  // Access-identity health: is the JWKS loaded, and is real traffic arriving with verified JWTs?
+  // This is the evidence gate for flipping ACCESS_JWT to "enforce".
+  if (req.method === "GET" && p === "/admin/access") { await accessVerifier._loadKeys(); return sjson(res, 200, accessVerifier.health()); }
   if (req.method === "GET" && p === "/admin/audit") return sjson(res, 200, { audit: lastAudit });
   if (req.method === "POST" && p === "/admin/audit/run") { const r = await runAuditAndStore("manual"); return sjson(res, 200, { audit: r }); }
   return sjson(res, 404, { error: "not found" });

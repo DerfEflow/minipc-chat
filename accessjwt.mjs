@@ -32,6 +32,9 @@ export function createAccessVerifier({ teamDomain, aud, mode = "prefer", fetchIm
 
   let keys = new Map();          // kid -> KeyObject
   let fetchedAt = 0, inflight = null;
+  // Observed identity sources. This is the evidence for flipping mode to "enforce": if real traffic
+  // shows jwt>0 and header==0 for human requests, enforcing costs nobody their access.
+  const stats = { jwt: 0, header: 0, rejected: 0, service: 0, none: 0, lastReject: "", lastJwtAt: 0, jwksErrors: 0 };
   const TTL_MS = 60 * 60 * 1000;   // refresh the JWKS hourly
   const MIN_REFETCH_MS = 60 * 1000; // floor on unknown-kid refetches, so a bad token can't hammer CF
 
@@ -52,6 +55,7 @@ export function createAccessVerifier({ teamDomain, aud, mode = "prefer", fetchIm
         }
         if (next.size) { keys = next; fetchedAt = now(); }
       } catch (e) {
+        stats.jwksErrors++;
         console.log("[access] JWKS fetch failed:", String(e && e.message || e).slice(0, 120));
       } finally { inflight = null; }
       return keys;
@@ -113,16 +117,25 @@ export function createAccessVerifier({ teamDomain, aud, mode = "prefer", fetchIm
     if (MODE === "off") return { email: hdrEmail, source: "header", verified: false };
     const token = (req.headers && (req.headers["cf-access-jwt-assertion"] || req.headers["Cf-Access-Jwt-Assertion"])) || "";
     if (!token) {
-      if (MODE === "enforce") return { email: "", source: "none", verified: false, reason: "no Access JWT" };
+      if (MODE === "enforce") { stats.none++; return { email: "", source: "none", verified: false, reason: "no Access JWT" }; }
+      if (hdrEmail) stats.header++;
       return { email: hdrEmail, source: "header", verified: false };
     }
     const r = await verify(token);
-    if (!r.ok) return { email: "", source: "rejected", verified: false, reason: r.reason };
-    if (r.identity === "service") return { email: "", source: "service", verified: true, commonName: r.commonName };
+    if (!r.ok) { stats.rejected++; stats.lastReject = r.reason; return { email: "", source: "rejected", verified: false, reason: r.reason }; }
+    if (r.identity === "service") { stats.service++; return { email: "", source: "service", verified: true, commonName: r.commonName }; }
+    stats.jwt++; stats.lastJwtAt = now();
     // A verified JWT whose email disagrees with the header means something is rewriting headers.
     if (hdrEmail && hdrEmail !== r.email) console.log(`[access] header/JWT email mismatch (${hdrEmail} vs verified) - trusting the JWT`);
     return { email: r.email, source: "jwt", verified: true };
   }
 
-  return { verify, identify, mode: MODE, ready: () => !!TEAM, _loadKeys: loadKeys, _keyCount: () => keys.size };
+  return {
+    verify, identify, mode: MODE, ready: () => !!TEAM,
+    // Health + evidence for the enforce decision. keys>0 means the JWKS actually loaded, which is
+    // the check that would have caught the wrong team domain before it shipped.
+    health: () => ({ mode: MODE, teamDomain: TEAM, audCount: AUDS.length, keys: keys.size,
+                     keysFetchedAt: fetchedAt ? new Date(fetchedAt).toISOString() : null, stats: { ...stats } }),
+    _loadKeys: loadKeys, _keyCount: () => keys.size,
+  };
 }

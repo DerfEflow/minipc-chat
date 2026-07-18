@@ -154,6 +154,31 @@ await t("JWKS is cached, and an unknown kid does not let a bad token hammer Clou
   assert.ok(jwksHits <= 2, "unknown kids must be rate-limited to one forced refetch, saw " + jwksHits);
 });
 
+await t("health() reports JWKS load + identity-source counts (the enforce-flip evidence)", async () => {
+  const v = V("prefer");
+  await v.identify(reqOf({ "cf-access-jwt-assertion": mint({}) }));                          // jwt
+  await v.identify(reqOf({ "cf-access-authenticated-user-email": "fred@example.com" }));      // header
+  await v.identify(reqOf({ "cf-access-jwt-assertion": mint({ key: evil.privateKey }) }));     // rejected
+  const h = v.health();
+  assert.equal(h.mode, "prefer");
+  assert.equal(h.teamDomain, TEAM);
+  assert.ok(h.keys > 0, "keys must be loaded; 0 means the team domain is wrong");
+  assert.equal(h.stats.jwt, 1);
+  assert.equal(h.stats.header, 1);
+  assert.equal(h.stats.rejected, 1);
+  assert.equal(h.stats.lastReject, "bad signature");
+});
+
+await t("a wrong team domain surfaces as keys:0 rather than silent failure", async () => {
+  const bad = createAccessVerifier({ teamDomain: "wrong-name.cloudflareaccess.com", aud: AUD, mode: "prefer",
+    fetchImpl: async () => ({ json: async () => { throw new Error("Unexpected token '<'"); } }) });
+  const r = await bad.verify(mint({}));
+  assert.equal(r.ok, false);
+  const h = bad.health();
+  assert.equal(h.keys, 0, "keys:0 is the signal that the JWKS never loaded");
+  assert.ok(h.stats.jwksErrors > 0);
+});
+
 await t("malformed inputs rejected without throwing", async () => {
   const v = V();
   for (const bad of ["", "a", "a.b", "a.b.c.d", "...", null, undefined, 42, "not.a.jwt"]) {
