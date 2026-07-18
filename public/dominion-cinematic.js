@@ -501,4 +501,29 @@
     closeModals();
     document.getElementById("model-trigger")?.click();
   });
+
+  // ---- Context Window card: real numbers for the picked model (was a hard-coded "128K" prop) ----
+  const contextCount = $("context-count");
+  let ctxMap = null;
+  const fmtC = (n) => !n ? "--" : n >= 950000 ? String(Math.round(n / 100000) / 10).replace(/\.0$/, "") + "M" : Math.round(n / 1000) + "K";
+  async function loadCtxMap() {
+    try {
+      const d = await (await fetch("/api/models", { cache: "no-store" })).json();
+      ctxMap = new Map();
+      for (const g of (d.groups || [])) for (const m of (g.models || [])) ctxMap.set(m.id, m.ctx || 0);
+    } catch { ctxMap = new Map(); }
+    updateContextCard();
+  }
+  function updateContextCard() {
+    if (!contextCount || !ctxMap) return;
+    const id = model ? model.value : "";
+    // Local models are not in the cloud catalog; Qwen3's native window is 32K on-box.
+    const total = ctxMap.get(id) || 32768;
+    const usedTokens = Math.round((wrap ? wrap.textContent.length : 0) / 4);   // rough: 4 chars per token
+    const available = Math.max(0, total - usedTokens);
+    contextCount.textContent = fmtC(available) + " / " + fmtC(total);
+  }
+  model?.addEventListener("change", updateContextCard);
+  setInterval(updateContextCard, 5000);
+  loadCtxMap();
 })();
