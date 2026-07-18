@@ -44,7 +44,7 @@ export const CATEGORIES = [
   "Coding",
   "Science & Technical",
   "Creative & Writing",
-  "Uncensored / Blunt",
+  "Free-Thinking",
   "Vision / Multimodal",
   "Web / Research",
   "Open & Trainable",
@@ -182,7 +182,7 @@ export const MODELS = [
     specialty: "Expressive creative writing (already in Command Deck notes)" },
   { id: "thedrummer/rocinante-12b", name: "Rocinante 12B", origin: "TheDrummer (community)",
     category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.17, outCost: 0.43, ctx: 65536,
-    specialty: "Cheapest uncensored storyteller — punches above 12B" },
+    specialty: "Cheapest free-thinking storyteller — punches above 12B" },
   { id: "thedrummer/unslopnemo-12b", name: "UnslopNemo 12B", origin: "TheDrummer (community)",
     category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.40, outCost: 0.40, ctx: 32000, toolCapable: true,   // audited: tool endpoints live
     specialty: "'De-slopped' — kills purple-prose GPT-isms" },
@@ -190,24 +190,25 @@ export const MODELS = [
     category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.06, outCost: 0.21, ctx: 262144, toolCapable: true,   // audited: tools live; ctx was 8x understated
     specialty: "Ultra-cheap, surprisingly vivid creative chat for volume" },
 
-  // ---- Uncensored / Blunt -------------------------------------------------------------------
+  // ---- Free-Thinking (Fred 2026-07-18: renamed from "Uncensored / Blunt" — the old label
+  // sounded nefarious; same models, same chat-only bench) ---------------------------------------
   { id: "nousresearch/hermes-4-405b", name: "Hermes 4 405B", origin: "Nous Research (open collective)",
-    category: "Uncensored / Blunt", params: "405B", paramsB: 405, inCost: 1.00, outCost: 3.00, ctx: 131072,
+    category: "Free-Thinking", params: "405B", paramsB: 405, inCost: 1.00, outCost: 3.00, ctx: 131072,
     specialty: "Neutral, steerable, minimal moralizing — obeys your system prompt" },
   { id: "microsoft/wizardlm-2-8x22b", name: "WizardLM-2 8x22B", origin: "Microsoft",
-    category: "Uncensored / Blunt", params: "141B (MoE·8x22B)", paramsB: 141, inCost: 0.62, outCost: 0.62, ctx: 65536,
+    category: "Free-Thinking", params: "141B (MoE·8x22B)", paramsB: 141, inCost: 0.62, outCost: 0.62, ctx: 65536,
     specialty: "Relatively unfiltered MoE; a piece of open-model history" },
   // AUDITED 2026-07-17 (tools_audit.mjs): NO OpenRouter endpoint for Hermes 4 70B supports tool use,
   // whatever the model card claims. Sending tools = "No endpoints found that support tool use".
   // It stays the guest default for its voice; tool work needs a TOOLS-badged model.
   { id: "nousresearch/hermes-4-70b", name: "Hermes 4 70B", origin: "Nous Research (open collective)",
-    category: "Uncensored / Blunt", params: "70B", paramsB: 70, inCost: 0.13, outCost: 0.40, ctx: 131072, toolCapable: false,
+    category: "Free-Thinking", params: "70B", paramsB: 70, inCost: 0.13, outCost: 0.40, ctx: 131072, toolCapable: false,
     specialty: "Reflective, non-preachy dialogue; toggleable reasoning" },
   { id: "thedrummer/cydonia-24b-v4.1", name: "Cydonia 24B v4.1", origin: "TheDrummer (community)",
-    category: "Uncensored / Blunt", params: "24B", paramsB: 24, inCost: 0.30, outCost: 0.50, ctx: 131072,
+    category: "Free-Thinking", params: "24B", paramsB: 24, inCost: 0.30, outCost: 0.50, ctx: 131072,
     specialty: "Characterful, unfiltered; sharp dialogue with no hand-wringing" },
   { id: "cognitivecomputations/dolphin-mistral-24b-venice-edition:free", name: "Dolphin Mistral 24B", origin: "Cognitive Computations (Eric Hartford)",
-    category: "Uncensored / Blunt", params: "24B", paramsB: 24, inCost: 0, outCost: 0, ctx: 32768,
+    category: "Free-Thinking", params: "24B", paramsB: 24, inCost: 0, outCost: 0, ctx: 32768,
     specialty: "The classic de-censored Dolphin finetune — FREE to experiment" },
 
   // ---- Vision / Multimodal ------------------------------------------------------------------

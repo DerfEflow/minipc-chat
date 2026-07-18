@@ -2438,7 +2438,7 @@ async function handleChat(req, res) {
     // Cloud turn: never run the local light classifier (it picks a LOCAL tier and burns a warm-up).
     // Honor an explicitly chosen mode for its prompt fragment/temperature; otherwise "normal".
     // Phase B: DOING-bench models (catalog toolCapable) get this box's tools — that's the whole
-    // point of Dominion. CHATTING-bench models (creative/uncensored) stay chat-only: they fumble
+    // point of Dominion. CHATTING-bench models (creative/free-thinking) stay chat-only: they fumble
     // tool calls, and tool results (files, projects) should never egress to those endpoints.
     const cloudTools = isToolCapable(cloudModel);
     mode = (reqMode !== "auto" && MODES[reqMode] && (reqMode !== "tool" || cloudTools)) ? reqMode : "normal";
