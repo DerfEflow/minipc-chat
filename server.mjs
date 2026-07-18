@@ -39,6 +39,7 @@ import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createUsersStore } from "./tenancy.mjs";
 import { createTenantResolver, filterToolDefs, FORGE_TOOLS } from "./tenantstores.mjs";
+import { createConnectors, isConnectorTool } from "./connectors.mjs";
 import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
@@ -892,6 +893,9 @@ const tenants = createTenantResolver({ baseDir: DATA_DIR, embed: embedText,
 const OWNER_T = { role: "owner", isOwner: true, uid: "owner", email: OWNER_EMAIL, status: "active",
   memory, chatlog, artifacts, flywheel, sandboxDir: CTX.sandboxDir, persona, ctxBase: CTX };
 const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
+// Connectors (Fred's "complete access" wave): outside services as MCP tools, per-account. The
+// owner's creds default from env; guests must bring their own. See connectors.mjs for the wall.
+const connectors = createConnectors({ dir: DATA_DIR, cfgGet });
 // Billing (SaaS layer, SOW item 2). Stripe uses the sandbox keys; billing's auto-recharge charge is
 // wired to Stripe. Both are inert until MULTI_TENANT is on and a user is a non-owner. The app base URL
 // is used to build Checkout return links.
@@ -1117,6 +1121,24 @@ async function handleForge(req, res, u) {
     if (connected()) await handsHub.dispatch(nodeKey, "set_roots", { roots: saved.roots }, { timeoutMs: 15000 }).catch(() => {});
     return sjson(res, 200, saved);
   }
+  return sjson(res, 404, { error: "not found" });
+}
+
+// Connectors: per-account outside-service tools (connectors.mjs). Every route acts on the CALLER's
+// own connector state; the guest policy (owner's per-connector guest flag, own-creds-only) and the
+// owner-only guest-flag route are enforced inside the module.
+async function handleConnectors(req, res, u) {
+  const T = resolveTenant(req);
+  if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
+  const p = u.pathname;
+  if (req.method === "GET" && p === "/connectors") return sjson(res, 200, { connectors: await connectors.listFor(T), isOwner: !!T.isOwner });
+  const body = (await readJsonBody(req)) || {};
+  if (req.method === "POST" && p === "/connectors/toggle") return sjson(res, 200, connectors.setEnabled(T, String(body.id || ""), body.on !== false));
+  if (req.method === "POST" && p === "/connectors/config") return sjson(res, 200, connectors.setConfig(T, String(body.id || ""), body.fields || {}));
+  if (req.method === "POST" && p === "/connectors/custom") return sjson(res, 200, connectors.addCustom(T, body || {}));
+  if (req.method === "POST" && p === "/connectors/custom/remove") return sjson(res, 200, connectors.removeCustom(T, String(body.id || "")));
+  if (req.method === "POST" && p === "/connectors/test") return sjson(res, 200, await connectors.test(T, String(body.id || "")));
+  if (req.method === "POST" && p === "/connectors/guest-flag") return sjson(res, 200, connectors.setGuestAllowed(T, String(body.id || ""), body.on !== false));
   return sjson(res, 404, { error: "not found" });
 }
 // Auto mentor review — DEFAULT ON per Fred's LAX call (the self-improving loop stays alive):
@@ -2437,6 +2459,14 @@ async function handleChat(req, res) {
       const cloudProvider = providerOf(cloudModel) || "openrouter";
       const cloudRec = modelById(cloudModel);
       let cloudTools = attachTools ? filterToolDefs(toolDefs(flywheel.activeToolOverlays()), T.role, forgeExtra) : null;
+      // Connectors: every ENABLED connector of THIS account adds its MCP tools, namespaced
+      // cx_<connector>__<tool>. toolDefsFor enforces the tenant wall itself (a guest's rows come
+      // only from the guest's own creds and the owner's per-connector guest flag; the owner's env
+      // credentials never reach a non-owner under any code path).
+      if (cloudTools) {
+        try { const cxDefs = await connectors.toolDefsFor(T); if (cxDefs.length) cloudTools = cloudTools.concat(cxDefs); }
+        catch (e) { console.log("[connectors] tool defs failed:", String(e && e.message || e).slice(0, 150)); }
+      }
       let inTokTotal = 0, outTokTotal = 0, costTotal = 0, sawCost = false, sawTok = false;
       const bumpUsage = (u) => {
         if (!u) return;
@@ -2516,7 +2546,7 @@ async function handleChat(req, res) {
             const name = fn.name || "unknown";
             let args = fn.arguments;
             if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = {}; } }
-            const meta = toolMeta(name);
+            const meta = isConnectorTool(name) ? connectors.metaFor(name) : toolMeta(name);
             const runId = newRunId();
             const cls = effectivePermission(name, args, CTX);
             const callStartedAt = new Date().toISOString();
@@ -2564,14 +2594,14 @@ async function handleChat(req, res) {
             // 3) Run + report honestly. The abort signal reaches the tool (C5).
             life.push("executing");
             sse({ type: "tool", name, runId, cls, gated: WRITE_TOOLS.has(name), status: "run" });
-            const result = await runTool(name, args, reqCtx, ac.signal);
+            const result = isConnectorTool(name) ? String(await connectors.run(T, name, args, ac.signal)) : await runTool(name, args, reqCtx, ac.signal);
             if (aborted) {
               life.push("cancelled", { discarded: true, reason: String(result).startsWith("CANCELLED") ? "aborted in flight" : "finished but discarded (client stopped)" });
               await logToolRun({ ts: callStartedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: "cancelled", states: life.states, discarded: true, confirmedByUser: gate.confirmedByUser, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model: cloudModel });
               toolSummaries.push(name + " · cancelled");
               break;
             }
-            const failed = /^(Tool .+ failed|Unknown tool|Couldn't|I can read and plan|Memory isn't available|BLOCKED)/i.test(String(result));
+            const failed = /^(Tool .+ failed|Unknown tool|Unknown connector|Connector .+ (is not|not found)|Couldn't|I can read and plan|Memory isn't available|BLOCKED)/i.test(String(result));
             life.push(failed ? "failed" : "succeeded");
             if (failed) toolFailedThisTurn = true;
             if ((name === "create_artifact" || name === "revise_artifact") && !failed) artifactCreatedThisTurn = true;
@@ -2687,7 +2717,7 @@ async function handleChat(req, res) {
           const name = fn.name || "unknown";
           let args = fn.arguments;
           if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = {}; } }
-          const meta = toolMeta(name);
+          const meta = isConnectorTool(name) ? connectors.metaFor(name) : toolMeta(name);
           const runId = newRunId();
           // C1: EFFECTIVE class — sandbox overwrite / inferred-memory save escalate to requires_confirmation.
           const cls = effectivePermission(name, args, CTX);
@@ -2738,7 +2768,7 @@ async function handleChat(req, res) {
           // 3) Run + report honestly. The abort signal reaches the tool (C5).
           life.push("executing");
           sse({ type: "tool", name, runId, cls, gated: WRITE_TOOLS.has(name), status: "run" });
-          const result = await runTool(name, args, reqCtx, ac.signal);
+          const result = isConnectorTool(name) ? String(await connectors.run(T, name, args, ac.signal)) : await runTool(name, args, reqCtx, ac.signal);
           if (aborted) {
             // C5: client stopped mid-run. Abortable tools were cancelled; un-abortable ones
             // finished but their answer is DISCARDED (never fed back to the model).
@@ -2747,7 +2777,7 @@ async function handleChat(req, res) {
             toolSummaries.push(name + " · cancelled");
             break;
           }
-          const failed = /^(Tool .+ failed|Unknown tool|Couldn't|I can read and plan|Memory isn't available|BLOCKED)/i.test(String(result));
+          const failed = /^(Tool .+ failed|Unknown tool|Unknown connector|Connector .+ (is not|not found)|Couldn't|I can read and plan|Memory isn't available|BLOCKED)/i.test(String(result));
           life.push(failed ? "failed" : "succeeded");
           if (failed) toolFailedThisTurn = true;
           if ((name === "create_artifact" || name === "revise_artifact") && !failed) artifactCreatedThisTurn = true;
@@ -2940,6 +2970,7 @@ const server = http.createServer(async (req, res) => {
     if (path.startsWith("/billing/")) return handleBilling(req, res, u);
     if (path.startsWith("/admin/") && path !== "/admin/restore-corpus") return handleAdmin(req, res, u);
     if (path.startsWith("/forge/")) return handleForge(req, res, u);
+    if (path === "/connectors" || path.startsWith("/connectors/")) return handleConnectors(req, res, u);
 
     if (path === "/api/voice/transcribe" && req.method === "POST") return handleVoiceTranscribe(req, res);
     if (path === "/api/voice/tts" && req.method === "POST") return handleVoiceTts(req, res);

@@ -256,6 +256,17 @@
     .dt-table .dt-input, .dt-table .dt-select { min-height: 34px; padding: 6px 7px; font-size: 11px; }
     .dt-table-actions { display: flex; align-items: center; gap: 5px; }
     .dt-owner-block { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(139,204,241,.12); }
+    .dt-cx-group { margin: 13px 0 6px; color: #8fb4c9; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
+    .dt-cx-row { padding: 11px 12px; margin-bottom: 8px; border: 1px solid rgba(139,202,239,.14); background: rgba(0,8,15,.5); }
+    .dt-cx-row.dt-cx-dim { opacity: .62; }
+    .dt-cx-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .dt-cx-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .dt-cx-title strong { color: #e4f1f9; font-size: 13px; }
+    .dt-cx-blurb { margin: 6px 0 0; }
+    .dt-cx-cred { margin-top: 9px; }
+    .dt-cx-cred summary { cursor: pointer; color: #a9cde2; font-size: 11px; letter-spacing: .06em; }
+    .dt-cx-cred .dt-stack { margin-top: 9px; }
+    .dt-cx-guest { margin-top: 9px; }
     .dt-owner-block h3, .dt-forge-browser h3 { margin: 0 0 9px; color: #d7e9f4; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
     .dt-mint-output { margin-top: 11px; }
     .dt-browser-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
@@ -426,6 +437,24 @@
           <div class="dt-inline" style="margin-top:9px"><button class="dt-button" id="dt-save-roots" type="button">Save folders</button><span class="dt-copy" id="dt-root-count">0 of 20 selected</span></div>
           <div class="dt-message" id="dt-forge-message" aria-live="polite"></div>
         </div>
+      </section>
+
+      <section class="dt-panel dt-span-all" id="dt-connectors-panel" aria-labelledby="dt-connectors-title">
+        <header class="dt-panel-head">
+          <div><div class="dt-kicker">Outside reach</div><h2 class="dt-panel-title" id="dt-connectors-title">Connectors</h2></div>
+        </header>
+        <p class="dt-copy">Plug outside services into Dominion as live tools: GitHub, Zapier, Supabase, Stripe, databases and any MCP server you point it at. Each connector runs on this account's own credentials and can be switched on or off at any time.</p>
+        <div id="dt-cx-list"><div class="dt-empty">Loading connectors</div></div>
+        <div class="dt-owner-block" id="dt-cx-custom-wrap">
+          <h3>Add a custom MCP server</h3>
+          <form class="dt-form-grid" id="dt-cx-custom-form">
+            <label class="dt-field"><span class="dt-field-label">Name</span><input class="dt-input" id="dt-cx-custom-name" autocomplete="off" placeholder="My server"></label>
+            <label class="dt-field dt-form-wide"><span class="dt-field-label">MCP URL (https)</span><input class="dt-input" id="dt-cx-custom-url" autocomplete="off" placeholder="https://example.com/mcp"></label>
+            <label class="dt-field"><span class="dt-field-label">Bearer token (optional)</span><input class="dt-input" id="dt-cx-custom-token" type="password" autocomplete="off"></label>
+            <div class="dt-inline dt-form-wide"><button class="dt-button" id="dt-cx-custom-add" type="submit">Add connector</button></div>
+          </form>
+        </div>
+        <div class="dt-message" id="dt-cx-message" aria-live="polite"></div>
       </section>
     </main>
 
@@ -1015,12 +1044,132 @@
         });
       }
 
+      // ---- Connectors: outside services as live tools, per-account ----
+      const cxList = byId("dt-cx-list"), cxMessage = byId("dt-cx-message");
+      const CX_STATUS = { on: ["Always on", "dt-pill-live"], pending: ["Coming soon", ""], "guest-locked": ["Not open to guests", ""], "needs-key": ["Needs credentials", "dt-pill-warn"], ready: ["On", "dt-pill-live"], off: ["Off", ""] };
+      async function loadConnectors() {
+        let data;
+        try { data = await api("/connectors"); }
+        catch (error) { clear(cxList); cxList.append(node("div", "dt-empty", "Connectors unavailable: " + errorLabel(error))); return; }
+        clear(cxList);
+        const rows = data.connectors || [];
+        for (const group of [...new Set(rows.map(r => r.group))]) {
+          cxList.append(node("div", "dt-cx-group", group));
+          for (const row of rows.filter(r => r.group === group)) cxList.append(renderConnector(row));
+        }
+      }
+      function renderConnector(r) {
+        const row = node("div", "dt-cx-row" + (r.pending || r.status === "guest-locked" ? " dt-cx-dim" : ""));
+        const head = node("div", "dt-cx-head");
+        const title = node("div", "dt-cx-title");
+        title.append(node("strong", "", r.name));
+        if (r.experimental) title.append(node("span", "dt-pill", "Experimental"));
+        const [label, pillClass] = CX_STATUS[r.status] || [r.status, ""];
+        title.append(node("span", "dt-pill " + pillClass, label));
+        head.append(title);
+        if (!r.builtin && !r.pending) {
+          const sw = node("label", "dt-switch");
+          const input = node("input");
+          input.type = "checkbox"; input.checked = !!r.enabled;
+          input.disabled = !r.usable || (!r.configured && !r.enabled);
+          input.setAttribute("aria-label", "Enable " + r.name);
+          input.addEventListener("change", async () => {
+            try { await api("/connectors/toggle", { method: "POST", body: { id: r.id, on: input.checked } }); toast((input.checked ? "Enabled " : "Disabled ") + r.name, "success"); loadConnectors(); }
+            catch (error) { input.checked = !input.checked; setMessage(cxMessage, errorLabel(error), "error"); }
+          });
+          sw.append(input, node("span"));
+          head.append(sw);
+        }
+        row.append(head);
+        if (r.blurb) row.append(node("p", "dt-copy dt-cx-blurb", r.blurb));
+        if (r.builtin || r.pending) return row;
+        if (r.fields && r.fields.length) {
+          const details = node("details", "dt-cx-cred");
+          details.append(node("summary", "", r.configured ? "Credentials (saved)" : "Set up credentials"));
+          if (r.help) details.append(node("p", "dt-copy", r.help));
+          const stack = node("div", "dt-stack");
+          const inputs = {};
+          for (const f of r.fields) {
+            const field = node("label", "dt-field");
+            field.append(node("span", "dt-field-label", f.label));
+            const input = node("input", "dt-input");
+            if (f.secret) input.type = "password";
+            input.autocomplete = "off";
+            input.placeholder = (r.savedFields || []).includes(f.k) ? "Saved. Paste a new value to replace." : "";
+            inputs[f.k] = input;
+            field.append(input);
+            stack.append(field);
+          }
+          const line = node("div", "dt-inline");
+          const save = node("button", "dt-button dt-button-small", "Save");
+          save.type = "button";
+          save.addEventListener("click", async () => {
+            const fields = {};
+            for (const k of Object.keys(inputs)) if (inputs[k].value.trim()) fields[k] = inputs[k].value.trim();
+            try { await api("/connectors/config", { method: "POST", body: { id: r.id, fields } }); toast("Saved " + r.name + " credentials", "success"); loadConnectors(); }
+            catch (error) { setMessage(cxMessage, errorLabel(error), "error"); }
+          });
+          const test = node("button", "dt-button dt-button-secondary dt-button-small", "Test");
+          test.type = "button";
+          test.addEventListener("click", async () => {
+            setBusy(test, true, "Testing");
+            try {
+              const t = await api("/connectors/test", { method: "POST", body: { id: r.id } });
+              setMessage(cxMessage, r.name + " connected: " + t.tools + " tool(s)" + (t.total > t.tools ? " of " + t.total : "") + (t.server ? " from " + t.server : "") + ".", "success");
+            } catch (error) { setMessage(cxMessage, r.name + " test failed: " + errorLabel(error), "error"); }
+            setBusy(test, false);
+          });
+          line.append(save, test);
+          stack.append(line);
+          details.append(stack);
+          row.append(details);
+        }
+        if (state.account?.isOwner && !r.custom) {
+          const guestRow = node("div", "dt-switch-row dt-cx-guest");
+          guestRow.append(node("span", "dt-copy", "Guests may connect their own " + r.name + " account"));
+          const gsw = node("label", "dt-switch");
+          const ginput = node("input");
+          ginput.type = "checkbox"; ginput.checked = !!r.guestAllowed;
+          ginput.setAttribute("aria-label", "Allow guests to use " + r.name);
+          ginput.addEventListener("change", async () => {
+            try { await api("/connectors/guest-flag", { method: "POST", body: { id: r.id, on: ginput.checked } }); toast((ginput.checked ? "Opened " : "Closed ") + r.name + " for guests", "success"); }
+            catch (error) { ginput.checked = !ginput.checked; setMessage(cxMessage, errorLabel(error), "error"); }
+          });
+          gsw.append(ginput, node("span"));
+          guestRow.append(gsw);
+          row.append(guestRow);
+        }
+        if (r.custom) {
+          const remove = node("button", "dt-button dt-button-secondary dt-button-small", "Remove");
+          remove.type = "button";
+          remove.style.marginTop = "9px";
+          remove.addEventListener("click", async () => {
+            try { await api("/connectors/custom/remove", { method: "POST", body: { id: r.id } }); toast("Removed " + r.name, "success"); loadConnectors(); }
+            catch (error) { setMessage(cxMessage, errorLabel(error), "error"); }
+          });
+          row.append(remove);
+        }
+        return row;
+      }
+      byId("dt-cx-custom-form").addEventListener("submit", async event => {
+        event.preventDefault();
+        const nameInput = byId("dt-cx-custom-name"), urlInput = byId("dt-cx-custom-url"), tokenInput = byId("dt-cx-custom-token");
+        setBusy(byId("dt-cx-custom-add"), true, "Adding");
+        try {
+          await api("/connectors/custom", { method: "POST", body: { name: nameInput.value, url: urlInput.value, token: tokenInput.value } });
+          nameInput.value = ""; urlInput.value = ""; tokenInput.value = "";
+          toast("Custom connector added", "success");
+          loadConnectors();
+        } catch (error) { setMessage(cxMessage, errorLabel(error), "error"); }
+        setBusy(byId("dt-cx-custom-add"), false);
+      });
+
       async function boot() {
         bindEvents();
         try {
           await loadAccount();
           ui.globalBanner.hidden = true;
-          const jobs = [loadContent(), loadForge()];
+          const jobs = [loadContent(), loadForge(), loadConnectors()];
           if (state.account.isOwner) jobs.push(loadCodes(), loadUsers(), loadAudit());
           await Promise.allSettled(jobs);
         } catch (error) {

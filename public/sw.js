@@ -1,5 +1,5 @@
 // Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v45-attach";
+const CACHE = "dominion-ai-v46-connectors";
 const SHELL = [
   "/",
   "/index.html",
@@ -39,7 +39,7 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   const dyn = ["/chat", "/memory", "/toolruns", "/tool-confirm", "/artifacts", "/mentor", "/ledger", "/evals", "/rules", "/prompts", "/persona", "/finetune", "/reviews", "/pipeline", "/tool-overlays",
-    "/account", "/billing", "/admin", "/forge", "/content", "/setup"];
+    "/account", "/billing", "/admin", "/forge", "/content", "/setup", "/connectors"];
   if (url.pathname.startsWith("/ollama") || dyn.some((b) => url.pathname === b || url.pathname.startsWith(b + "/"))) return;
   e.respondWith(
     fetch(e.request)
