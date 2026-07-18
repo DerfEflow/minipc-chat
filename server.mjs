@@ -906,6 +906,13 @@ const accessVerifier = createAccessVerifier({
   aud: cfgGet("CF_ACCESS_AUD", ""),
   mode: cfgGet("ACCESS_JWT", "prefer"),
 });
+// Named service tokens that act AS the owner. accessjwt.mjs deliberately never resolves a service
+// token to a human account; this allow-list is the single explicit exception: a service token whose
+// JWT VERIFIED (signature+aud+expiry) and whose common_name matches an entry here is one of Fred's
+// own server-to-server callers (today: the Command Deck /api/chat proxy) and inherits the owner
+// identity. Empty list (the default) keeps the exception off. Exact common_name match only; the
+// unverified header path can never reach this.
+const SERVICE_OWNER_CNS = String(cfgGet("SERVICE_OWNER_CNS", "")).split(",").map((s) => s.trim()).filter(Boolean);
 // Connectors (Fred's "complete access" wave): outside services as MCP tools, per-account. The
 // owner's creds default from env; guests must bring their own. See connectors.mjs for the wall.
 // Google Workspace is provider-backed (native REST + per-account OAuth, google.mjs).
@@ -3035,6 +3042,13 @@ const server = http.createServer(async (req, res) => {
     // result on the request; tenancy.identify() reads that instead of the raw header. One await
     // here keeps every downstream handler synchronous. See accessjwt.mjs.
     req.dominionIdentity = await accessVerifier.identify(req);
+    // Owner-mapped service tokens (SERVICE_OWNER_CNS above): only a VERIFIED service JWT with an
+    // allow-listed common_name is promoted; everything else keeps its resolved identity untouched.
+    if (req.dominionIdentity && req.dominionIdentity.source === "service" && req.dominionIdentity.verified
+        && SERVICE_OWNER_CNS.includes(req.dominionIdentity.commonName)) {
+      req.dominionIdentity = { email: String(OWNER_EMAIL).trim().toLowerCase(), source: "service-owner",
+        verified: true, commonName: req.dominionIdentity.commonName };
+    }
 
     // Instant-wake for the Command Deck bridge: the deck app (in Fred's browser, on the tailnet)
     // POSTs here after a change, and we forward to the poller's localhost poke listener so it
