@@ -70,9 +70,17 @@ export function createUsersStore({ dir, ownerEmail }) {
     return row;
   }
 
-  // The identity a request carries. No header => anonymous (no tenant).
+  // The identity a request carries. No identity => anonymous (no tenant).
+  //
+  // SECURITY (2026-07-18): the request handler resolves identity ONCE via accessjwt.mjs and stashes
+  // it on `req.dominionIdentity` (verified Access JWT claims, or a header fallback when the verifier
+  // runs in "prefer"/"off" mode). We read that when present. The raw-header path below survives only
+  // for callers that never went through the HTTP entrypoint (tests, the devboot rig). Never widen it.
   function identify(req, { autocreate = true } = {}) {
-    const email = String((req && req.headers && req.headers[HEADER]) || "").trim().toLowerCase();
+    const resolved = req && req.dominionIdentity;
+    const email = resolved
+      ? String(resolved.email || "").trim().toLowerCase()
+      : String((req && req.headers && req.headers[HEADER]) || "").trim().toLowerCase();
     if (!email) return { email: "", uid: "", role: "anon", status: "anon", isOwner: false };
     const row = autocreate ? ensure(email) : stmt.get.get(email);
     if (!row) return { email, uid: userIdFor(email), role: "credit", status: "active", isOwner: email === OWNER, invited: email === OWNER, tutorialSeen: false };

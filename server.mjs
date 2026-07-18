@@ -40,6 +40,7 @@ import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./cor
 import { createUsersStore } from "./tenancy.mjs";
 import { createTenantResolver, filterToolDefs, FORGE_TOOLS } from "./tenantstores.mjs";
 import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors.mjs";
+import { createAccessVerifier } from "./accessjwt.mjs";
 import { createGoogleProvider } from "./google.mjs";
 import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
@@ -895,6 +896,14 @@ const tenants = createTenantResolver({ baseDir: DATA_DIR, embed: embedText,
 const OWNER_T = { role: "owner", isOwner: true, uid: "owner", email: OWNER_EMAIL, status: "active",
   memory, chatlog, artifacts, flywheel, sandboxDir: CTX.sandboxDir, persona, ctxBase: CTX };
 const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
+// Cloudflare Access JWT verification: identity comes from a SIGNATURE, not from a hostname.
+// ACCESS_JWT=enforce requires a valid JWT (production); "prefer" verifies when present and falls
+// back to the header when absent (migration); "off" is header-only (devboot rig + tests).
+const accessVerifier = createAccessVerifier({
+  teamDomain: cfgGet("CF_ACCESS_TEAM_DOMAIN", "misty-queen-8e41.cloudflareaccess.com"),
+  aud: cfgGet("CF_ACCESS_AUD", ""),
+  mode: cfgGet("ACCESS_JWT", "prefer"),
+});
 // Connectors (Fred's "complete access" wave): outside services as MCP tools, per-account. The
 // owner's creds default from env; guests must bring their own. See connectors.mjs for the wall.
 // Google Workspace is provider-backed (native REST + per-account OAuth, google.mjs).
@@ -3013,6 +3022,14 @@ const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, "http://localhost");
     const path = decodeURIComponent(u.pathname);
+
+    // IDENTITY, RESOLVED ONCE PER REQUEST (2026-07-18 security fix). Until now the app read the
+    // caller's email straight off `cf-access-authenticated-user-email` with no verification, so
+    // ANY path reaching this container outside the Cloudflare tunnel granted owner to whoever set
+    // one header. We now verify the Access JWT's signature/audience/expiry and stash the verified
+    // result on the request; tenancy.identify() reads that instead of the raw header. One await
+    // here keeps every downstream handler synchronous. See accessjwt.mjs.
+    req.dominionIdentity = await accessVerifier.identify(req);
 
     // Instant-wake for the Command Deck bridge: the deck app (in Fred's browser, on the tailnet)
     // POSTs here after a change, and we forward to the poller's localhost poke listener so it
