@@ -25,6 +25,7 @@ import { TOOL_DEFS, toolDefs, WRITE_TOOLS, runTool, toolMeta, assertNotProtected
 import { createMemoryStore } from "./memory.mjs";
 import { createArtifactStore } from "./artifacts.mjs";
 import { createMentor, MENTOR_ROLES } from "./mentor.mjs";
+import { Readable } from "node:stream";
 import { createFlywheel } from "./flywheel.mjs";
 import { createReviewEngine, computeQuality, extractCitations, wantsReview, detectArtifactTriggers, exportSafetyGate } from "./review.mjs";
 import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./routing.mjs";
@@ -89,6 +90,8 @@ const BRIDGE_POKE_PORT = Number(cfgGet("BRIDGE_POKE_PORT", "8188")) || 8188;
 const CTX = {
   baseUrl: String(cfgGet("COMMAND_DECK_URL", "https://command-deck-sigma.vercel.app")).replace(/\/$/, ""),
   syncKey: cfgGet("SYNC_SECRET", ""),
+  githubToken: cfgGet("GITHUB_TOKEN", ""),      // read-only PAT: github_* tools never mutate
+  githubUser: cfgGet("GITHUB_USER", "DerfEflow"),
   runPassword: cfgGet("RUN_PASSWORD", ""),
   sandboxDir: cfgGet("SANDBOX_DIR", dataPath("sandbox")),
   bridgePokePort: Number(cfgGet("BRIDGE_POKE_PORT", "8188")) || 8188,
@@ -883,6 +886,8 @@ const mentor = createMentor({
 });
 CTX.mentor = mentor;
 CTX.flywheel = flywheel;
+// Work-order hooks for the orchestrator tools (functions hoist; defined near the chat-job infra).
+CTX.internal = { startWorkOrder: (a) => startDominionWorkOrder(a), workOrderStatus: (id) => dominionWorkOrderStatus(id) };
 
 // ---- Multi-tenant (SOW items 1-6): resolve each request to its user; the OWNER short-circuits to
 // the global stores so Fred's path is byte-for-byte unchanged. Gated by MULTI_TENANT (default OFF)
@@ -913,6 +918,14 @@ const accessVerifier = createAccessVerifier({
 // identity. Empty list (the default) keeps the exception off. Exact common_name match only; the
 // unverified header path can never reach this.
 const SERVICE_OWNER_CNS = String(cfgGet("SERVICE_OWNER_CNS", "")).split(",").map((s) => s.trim()).filter(Boolean);
+// Deck-orchestrator wall (Fred's rule, 2026-07-18): a chat coming FROM the Command Deck (identity
+// source "service-owner") reads everything and DISPATCHES work, but never swings the heavy write
+// tools itself — real building leaves as a work order to Claude (deck bridge) or to this box
+// (dominion_work_order). Internal work-order turns (source "internal") get the inverse cut: full
+// hands, but no ability to spawn further work orders (no recursion).
+const DECK_ORCHESTRATOR_BLOCKED = new Set(["forge_write", "forge_run", "forge_send", "scaffold_project", "sandbox_write", "sandbox_append", "run_python_sandbox", "desktop_control", "browser_control", "create_artifact", "revise_artifact", "export_artifact", "scrape_to_persona"]);
+const WORK_ORDER_TOOLS = new Set(["dominion_work_order", "claude_work_order"]);
+const toolWallFor = (source) => (source === "service-owner" ? DECK_ORCHESTRATOR_BLOCKED : source === "internal" ? WORK_ORDER_TOOLS : null);
 // Connectors (Fred's "complete access" wave): outside services as MCP tools, per-account. The
 // owner's creds default from env; guests must bring their own. See connectors.mjs for the wall.
 // Google Workspace is provider-backed (native REST + per-account OAuth, google.mjs).
@@ -2309,6 +2322,43 @@ function handleChatAttach(req, res, u) {
   res.on("close", () => { const i = job.listeners.indexOf(listener); if (i >= 0) job.listeners.splice(i, 1); });
 }
 
+// ---- Dominion work orders (deck orchestrator) -------------------------------------------------
+// A background turn on this same brain: synthetic req/res drives handleChat end-to-end (same
+// pipeline, same tools, same chatlog/flywheel training), identity pinned to the owner with source
+// "internal" (full hands, but the tool wall strips the work-order spawners — no recursion). The
+// sidebar chat list is client-local, so these never appear in the Dominion UI.
+const WORK_ORDERS = new Map();   // wo id -> { jobId, chatId, model, instructions, startedAt }
+function startDominionWorkOrder({ instructions, model }) {
+  const woId = "wo_" + randomUUID().slice(0, 8);
+  const chatId = "wo-" + woId;
+  const chosen = (typeof model === "string" && model && isCloudModel(model)) ? model : defaultModelFor(true);
+  const rec = WORK_ORDERS.set(woId, { jobId: "", chatId, model: chosen, instructions: String(instructions).slice(0, 400), startedAt: Date.now() }).get(woId);
+  const body = JSON.stringify({ messages: [{ role: "user", content: String(instructions) }], model: chosen, mode: "normal", chatId });
+  const req = Readable.from([Buffer.from(body)]);
+  req.headers = {}; req.method = "POST"; req.url = "/chat";
+  req.dominionIdentity = { email: String(OWNER_EMAIL).trim().toLowerCase(), source: "internal", verified: true };
+  req.onJob = (job) => { rec.jobId = job.id; };
+  const res = { writeHead() {}, write() { return true; }, end() {}, headersSent: true };
+  Promise.resolve(handleChat(req, res)).catch((e) => console.log("[work-order] " + woId + " failed:", String(e && e.message || e).slice(0, 200)));
+  return { woId, model: chosen };
+}
+function dominionWorkOrderStatus(woId) {
+  const wo = WORK_ORDERS.get(String(woId || "").trim());
+  if (!wo) return { error: "no work order with that id (it may predate the last restart)" };
+  const job = CHAT_JOBS.get(wo.jobId);
+  if (!job) return { model: wo.model, done: true, expired: true, note: "The job buffer expired; the full transcript is in the chat log under " + wo.chatId + "." };
+  let text = "", meta = null, errors = [];
+  const tools = [];
+  for (const ev of job.events) {
+    if (ev.type === "token" && typeof ev.delta === "string") text += ev.delta;
+    else if (ev.type === "tool" && ev.status && ev.status !== "run") tools.push(ev.name + ":" + ev.status);
+    else if (ev.type === "error") errors.push(String(ev.message || ev.code || "error"));
+    else if (ev.type === "done") meta = ev.meta || null;
+  }
+  return { model: wo.model, done: job.done, runningForSec: Math.round((Date.now() - wo.startedAt) / 1000),
+    tools, errors, costUsd: meta && meta.costUsd, text: text.slice(-6000) };
+}
+
 async function handleChat(req, res) {
   // Capped read: picture attachments make multi-MB bodies normal, but a hostile client must not
   // be able to stream unbounded data at the box. Over-cap destroys the socket and answers 413.
@@ -2327,6 +2377,7 @@ async function handleChat(req, res) {
   // (/chat/attach) and catch up mid-stream or after the fact. Generation runs to completion
   // regardless of the client connection — writes to a dead res are harmless (try/catch below).
   const job = createChatJob();
+  if (req.onJob) { try { req.onJob(job); } catch {} }   // internal work orders track their job handle
   const sse = (o) => { jobEmit(job, o); try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
   // `aborted` = EXPLICIT stop only (POST /chat/stop). A client disconnect no longer aborts the turn.
   let aborted = false;
@@ -2536,6 +2587,17 @@ async function handleChat(req, res) {
   const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier) }];
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
+  // Deck-orchestrator directive: injected server-side (the deck's 2000-char persona field is too
+  // small to carry doctrine), enforced by the tool wall above it either way.
+  if (req.dominionIdentity && req.dominionIdentity.source === "service-owner") {
+    messages.push({ role: "system", content:
+      "DECK ORCHESTRATOR MODE. You are the co-pilot inside Fred's Command Deck. You READ everything: the deck (deck_list_projects, deck_get_project), his GitHub code (github_list_repos, github_read, github_search), the web, memory. You answer any question about his projects and apps. " +
+      "You NEVER build, edit code, or write files yourself in this session; those tools are disabled here. Real building is dispatched as a WORK ORDER, and FRED CHOOSES THE EXECUTOR, never you: " +
+      "if he says Claude, check bridge_status and create a claude_work_order (if the bridge worker is offline or a queued order goes unclaimed, tell him Claude isn't running and ASK whether to route to Dominion instead); " +
+      "if he says Dominion, use dominion_work_order, then verify with dominion_job_status and report the outcome honestly. " +
+      "If he does not name an executor for a piece of real work, ASK him which one before dispatching. " +
+      "Small deck-data edits (notes, next steps, proofs, capture) are still yours to do directly." });
+  }
   if (ctxInfo.block) messages.push({ role: "system", content: ctxInfo.block });
   // As-Fred mode: inject the distilled Fred Profile + real writing exemplars retrieved for this prompt.
   let personaInfo = null;
@@ -2615,6 +2677,11 @@ async function handleChat(req, res) {
         try { const cxDefs = await connectors.toolDefsFor(T); if (cxDefs.length) cloudTools = cloudTools.concat(cxDefs); }
         catch (e) { console.log("[connectors] tool defs failed:", String(e && e.message || e).slice(0, 150)); }
       }
+      // Orchestrator wall (see DECK_ORCHESTRATOR_BLOCKED): deck sessions lose the heavy write
+      // tools; internal work-order turns lose the work-order spawners. Def-level cut here, plus a
+      // runtime gate below for a hallucinated name that was never offered.
+      const idWall = toolWallFor(req.dominionIdentity && req.dominionIdentity.source);
+      if (cloudTools && idWall) cloudTools = cloudTools.filter((d) => !idWall.has(d && d.function && d.function.name));
       let inTokTotal = 0, outTokTotal = 0, costTotal = 0, sawCost = false, sawTok = false;
       const bumpUsage = (u) => {
         if (!u) return;
@@ -2713,6 +2780,18 @@ async function handleChat(req, res) {
               await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "blocked", reason: guard.reason, states: life.states, input: inPrev, chatId, model: cloudModel });
               toolMsg(`BLOCKED: this ${guard.reason}. I cannot do that.`);
               toolSummaries.push(name + " · blocked");
+              continue;
+            }
+
+            // 1a) Orchestrator wall, runtime side: even a hallucinated call to a tool this session
+            // was never offered stays blocked (deck sessions: heavy writes; internal: work orders).
+            const wall = toolWallFor(req.dominionIdentity && req.dominionIdentity.source);
+            if (wall && wall.has(name)) {
+              life.push("blocked", { reason: "orchestrator wall" });
+              sse({ type: "tool", name, runId, cls, status: "blocked", preview: "not available in this session" });
+              await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "blocked", reason: "orchestrator wall", states: life.states, input: inPrev, chatId, model: cloudModel });
+              toolMsg(`BLOCKED: ${name} is not available in this session. Building happens through work orders, never directly here.`);
+              toolSummaries.push(name + " · blocked (wall)");
               continue;
             }
 

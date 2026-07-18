@@ -59,6 +59,22 @@ function pokeBridge(ctx) {
   } catch {}
 }
 
+// ---- GitHub (READ-ONLY: every call is a GET; the write path is a work order, never a push) ----
+async function gh(ctx, path, signal = null) {
+  if (!ctx.githubToken) return { error: "no GITHUB_TOKEN configured on the server" };
+  const r = await request("GET", "https://api.github.com" + path, {
+    authorization: "Bearer " + ctx.githubToken,
+    accept: "application/vnd.github+json",
+    "user-agent": "dominion-ai",
+    "x-github-api-version": "2022-11-28",
+  }, null, signal);
+  if (r.aborted) return { aborted: true };
+  const d = parse(r.text);
+  if ((r.status || 0) >= 400 || !d) return { error: "GitHub HTTP " + r.status + (d && d.message ? ": " + String(d.message).slice(0, 120) : "") };
+  return { data: d };
+}
+const ghRepoFull = (ctx, repo) => (String(repo || "").includes("/") ? String(repo) : (ctx.githubUser || "DerfEflow") + "/" + String(repo || ""));
+
 // ---- Command Deck (cloud /api/agent) ----
 async function agent(ctx, action, extra = {}, signal = null) {
   if (!ctx.syncKey) return { error: "no SYNC_SECRET configured on the server" };
@@ -274,6 +290,7 @@ export const TOOLS = [
   { category: "system", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "deck_list_projects", description: "List Fred's Command Deck projects (id, name, status, priority, next proof, open next-steps). Use this before acting on a project so you have its id and current state.", parameters: { type: "object", properties: {} } } } },
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_capture", description: "Drop an idea, reminder, or link into Fred's capture inbox to triage later.", parameters: { type: "object", properties: { text: { type: "string", description: "What to capture." }, url: { type: "string", description: "Optional URL." } }, required: ["text"] } } } },
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_add_note", description: "Append a note/log entry to a project (get the project id from deck_list_projects first).", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } } },
+  { category: "system", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "deck_get_project", description: "Read ONE Command Deck project in full detail: description, milestones, next steps, assumptions, recent notes, links. Use deck_list_projects first for the id.", parameters: { type: "object", properties: { project_id: { type: "string" } }, required: ["project_id"] } } } },
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_add_next_step", description: "Add an actionable next-step to a project.", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } } },
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_set_next_proof", description: "Set a project's Next Proof — the single riskiest thing it must prove next.", parameters: { type: "object", properties: { project_id: { type: "string" }, proof: { type: "string" } }, required: ["project_id", "proof"] } } } },
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_create_project", description: "Create a new Command Deck project. discipline: Apps|Writing|Business|Product Development|Saints Dominion. status: Idea|Building|Live|Paused|Done.", parameters: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, discipline: { type: "string" }, status: { type: "string" }, priority: { type: "string" } }, required: ["name"] } } } },
@@ -315,6 +332,18 @@ export const TOOLS = [
   // web_search = SerpApi (SERP_API_KEY on the box); web_read fetches one page as readable text.
   { category: "retrieval", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "web_search", description: "Search the live web (Google via SerpApi) for current information — news, prices, docs, anything after your training data. Returns the top results (title, url, snippet) plus a direct answer when Google shows one. Follow up with web_read on a promising url when you need the full page.", parameters: { type: "object", properties: { query: { type: "string", description: "The search query." }, num: { type: "number", description: "How many results (default 6, max 10)." } }, required: ["query"] } } } },
   { category: "retrieval", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "web_read", description: "Fetch a web page and return its readable text (article/main content). Use after web_search to read a specific result in full.", parameters: { type: "object", properties: { url: { type: "string", description: "The page URL to read." } }, required: ["url"] } } } },
+  // GitHub, READ-ONLY (Fred's orchestrator rule: read code anywhere, write only via work orders).
+  // Token: GITHUB_TOKEN on the box is a read-only PAT; these tools never call a mutating endpoint.
+  { category: "retrieval", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "github_list_repos", description: "List Fred's GitHub repositories (name, private/public, last push, description).", parameters: { type: "object", properties: {} } } } },
+  { category: "retrieval", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "github_read", description: "Read a file or list a directory from one of Fred's GitHub repos. Path '' lists the repo root.", parameters: { type: "object", properties: { repo: { type: "string", description: "Repo name or owner/name, e.g. command-deck" }, path: { type: "string", description: "File or directory path inside the repo; empty for root" }, ref: { type: "string", description: "Optional branch/tag/SHA" } }, required: ["repo"] } } } },
+  { category: "retrieval", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "github_search", description: "Search code across Fred's GitHub repos (or one repo) and return matching file paths.", parameters: { type: "object", properties: { query: { type: "string" }, repo: { type: "string", description: "Optional: limit to one repo" } }, required: ["query"] } } } },
+  // Orchestration (Fred's deck rule): real building leaves as a WORK ORDER. Fred picks the
+  // executor; these tools dispatch, check, and report — they never write anything themselves.
+  { category: "system", permissionClass: "read_only", logsInputs: false, def: { type: "function", function: { name: "bridge_status", description: "Check whether the Claude bridge pollers (mini-PC / laptop) are alive before dispatching a Claude work order.", parameters: { type: "object", properties: {} } } } },
+  { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "claude_work_order", description: "Queue a work order for Claude Code on Fred's machine via the Command Deck bridge. Only when Fred explicitly picked Claude as the executor.", parameters: { type: "object", properties: { title: { type: "string" }, instructions: { type: "string", description: "Complete, self-contained instructions for Claude" }, repo: { type: "string", description: "Target repo/folder key on the machine (optional)" }, target: { type: "string", enum: ["minipc", "laptop"], description: "Which machine; default minipc" } }, required: ["title", "instructions"] } } } },
+  { category: "system", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "claude_job_status", description: "Check a queued Claude work order: claimed/running/applied/done/error, plus its result text.", parameters: { type: "object", properties: { job_id: { type: "string" } }, required: ["job_id"] } } } },
+  { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "dominion_work_order", description: "Run a work order on Dominion AI itself, in the background with full tools. Only when Fred explicitly picked Dominion as the executor.", parameters: { type: "object", properties: { instructions: { type: "string", description: "Complete, self-contained instructions" }, model: { type: "string", description: "Optional catalog model id; defaults to Fred's default engine" } }, required: ["instructions"] } } } },
+  { category: "system", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "dominion_job_status", description: "Check a Dominion work order: running/done, tools used, errors, cost, and the result text so far.", parameters: { type: "object", properties: { order_id: { type: "string" } }, required: ["order_id"] } } } },
   // C4: the six spec formatting tools — real tools on the light model (fast, cheap), read_only.
   { category: "formatting", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "format_as_markdown", description: "Reformat text/data as clean structured markdown (headings, lists, emphasis). Runs on the fast model — use for pure reformatting instead of doing it yourself.", parameters: { type: "object", properties: { content: { type: "string", description: "The content to reformat." }, instructions: { type: "string", description: "Optional extra formatting guidance." } }, required: ["content"] } } } },
   { category: "formatting", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "format_as_json", description: "Convert text/data into well-structured JSON (validated before returning). Runs on the fast model.", parameters: { type: "object", properties: { content: { type: "string" }, instructions: { type: "string", description: "Optional shape hints, e.g. desired keys." } }, required: ["content"] } } } },
@@ -438,6 +467,84 @@ export async function runTool(name, args, ctx, signal = null) {
       case "deck_add_next_step": { const d = await agent(ctx, "add_next_step", { projectId: args.project_id, text: args.text }, signal); return d.message || d.error || "Next step added."; }
       case "deck_set_next_proof": { const d = await agent(ctx, "set_next_proof", { projectId: args.project_id, proof: args.proof }, signal); return d.message || d.error || "Next proof set."; }
       case "deck_create_project": { const d = await agent(ctx, "create_project", { name: args.name, description: args.description || "", discipline: args.discipline || "", status: args.status || "", priority: args.priority || "" }, signal); return d.message || d.error || "Project created."; }
+      case "deck_get_project": {
+        const d = await agent(ctx, "get_project", { projectId: args.project_id }, signal);
+        if (d.error) return "Couldn't read the project: " + d.error;
+        return JSON.stringify(d.project, null, 1).slice(0, 14000);
+      }
+      case "github_list_repos": {
+        const g = await gh(ctx, "/user/repos?per_page=100&sort=pushed", signal);
+        if (g.aborted) return ABORTED;
+        if (g.error) return g.error;
+        const rows = (g.data || []).map((r) => `- ${r.full_name}${r.private ? " (private)" : ""} | pushed ${String(r.pushed_at || "").slice(0, 10)}${r.description ? " | " + String(r.description).slice(0, 80) : ""}`);
+        return rows.length ? rows.join("\n") : "No repos visible to this token.";
+      }
+      case "github_read": {
+        const repo = ghRepoFull(ctx, args.repo);
+        if (!repo || repo.endsWith("/")) return "Give me a repo name (e.g. command-deck).";
+        const p = String(args.path || "").replace(/^\/+/, "");
+        const ref = args.ref ? "?ref=" + encodeURIComponent(args.ref) : "";
+        const g = await gh(ctx, `/repos/${repo}/contents/${p.split("/").map(encodeURIComponent).join("/")}${ref}`, signal);
+        if (g.aborted) return ABORTED;
+        if (g.error) return g.error;
+        if (Array.isArray(g.data)) return g.data.map((e) => `${e.type === "dir" ? "d" : "-"} ${e.path}${e.type === "file" ? ` (${e.size}b)` : ""}`).join("\n").slice(0, 10000) || "(empty directory)";
+        if (g.data.content) return Buffer.from(String(g.data.content), "base64").toString("utf8").slice(0, 24000);
+        return "That path is a " + (g.data.type || "non-file") + "; give me a file or directory path.";
+      }
+      case "github_search": {
+        const q = String(args.query || "").trim();
+        if (!q) return "Give me a search query.";
+        const scope = args.repo ? "+repo:" + ghRepoFull(ctx, args.repo) : "+user:" + (ctx.githubUser || "DerfEflow");
+        const g = await gh(ctx, "/search/code?q=" + encodeURIComponent(q) + scope + "&per_page=10", signal);
+        if (g.aborted) return ABORTED;
+        if (g.error) return g.error;
+        const items = (g.data.items || []).map((i) => `- ${i.repository ? i.repository.full_name : "?"}: ${i.path}`);
+        return items.length ? items.join("\n") : "No code matches.";
+      }
+      case "bridge_status": {
+        const d = await agent(ctx, "bridge_status", {}, signal);
+        if (d.error) return "Couldn't check the bridge: " + d.error;
+        const ws = d.workers || [];
+        if (!ws.length) return "No bridge poller has ever checked in. Claude is not reachable right now.";
+        return ws.map((w) => `- ${w.worker}: ${w.online ? "ONLINE" : "offline"} (last seen ${w.minutesAgo} min ago)`).join("\n") + "\nNote: pollers idle on a 20-minute cycle; a freshly queued order being claimed is the definitive sign of life.";
+      }
+      case "claude_work_order": {
+        const title = String(args.title || "").trim(), instructions = String(args.instructions || "").trim();
+        if (!title || !instructions) return "A work order needs both a title and complete instructions.";
+        if (!ctx.syncKey) return "No SYNC_SECRET configured on the server.";
+        const target = args.target === "laptop" ? "laptop" : "";
+        const r = await request("POST", ctx.baseUrl + "/api/jobs", { "x-sync-key": ctx.syncKey }, { title, instructions, repo: args.repo || "", target }, signal);
+        if (r.aborted) return ABORTED;
+        const d = parse(r.text) || {};
+        if (r.status === 200 && d.job) return `Queued Claude work order "${d.job.title}" (job_id ${d.job.id}) for ${target || "minipc"}. It snapshots before changes and is rollback-able from the Forge. Check pickup with claude_job_status; if it sits unclaimed, Claude's bridge is not running.`;
+        return "Couldn't queue the work order: " + (d.error || `HTTP ${r.status}`);
+      }
+      case "claude_job_status": {
+        if (!ctx.syncKey) return "No SYNC_SECRET configured on the server.";
+        const r = await request("GET", ctx.baseUrl + "/api/jobs", { "x-sync-key": ctx.syncKey }, null, signal);
+        if (r.aborted) return ABORTED;
+        const d = parse(r.text) || {};
+        const j = (d.jobs || []).find((x) => x.id === String(args.job_id || "").trim());
+        if (!j) return "No job with that id.";
+        return `"${j.title}": ${j.status}${j.worker ? " on " + j.worker : ""}${j.result ? "\nResult: " + String(j.result).slice(0, 2000) : ""}`;
+      }
+      case "dominion_work_order": {
+        if (!ctx.internal) return "Work orders aren't available on this server build.";
+        const instructions = String(args.instructions || "").trim();
+        if (!instructions) return "A work order needs complete, self-contained instructions.";
+        const { woId, model } = ctx.internal.startWorkOrder({ instructions, model: args.model });
+        return `Dominion work order ${woId} started on ${model}. It runs in the background with full tools; check it with dominion_job_status (order_id ${woId}) and report the verified outcome to Fred.`;
+      }
+      case "dominion_job_status": {
+        if (!ctx.internal) return "Work orders aren't available on this server build.";
+        const s = ctx.internal.workOrderStatus(args.order_id);
+        if (s.error) return s.error;
+        const head = s.done ? "DONE" : `RUNNING (${s.runningForSec}s)`;
+        const tools = s.tools && s.tools.length ? `\nTools: ${s.tools.join(", ")}` : "";
+        const errs = s.errors && s.errors.length ? `\nErrors: ${s.errors.join("; ")}` : "";
+        const cost = typeof s.costUsd === "number" ? `\nCost: $${s.costUsd.toFixed(4)}` : "";
+        return `${head} on ${s.model}${tools}${errs}${cost}${s.expired ? "\n" + s.note : ""}\n${s.text ? "Output:\n" + s.text : "(no output yet)"}`;
+      }
       // Machine access via the hands node (the retired bridge's replacement). Fall back to the old
       // bridge only when no hands node is wired AND a SYNC_SECRET exists (legacy local mini-PC mode).
       case "browser_control": return await handsBrowser(ctx, args);

@@ -21,8 +21,9 @@
 
 export const CATALOG_UPDATED = "2026-07-18";   // tool+vision flags + ctx audited against live OpenRouter (tools_audit.mjs)
 
-// The out-of-the-box default: fast, dirt-cheap, strong all-rounder. Change via env DEFAULT_CLOUD_MODEL.
-export const DEFAULT_MODEL = "qwen/qwen3-235b-a22b-2507";
+// The owner's default engine (Fred, 2026-07-18): DeepSeek V4 Pro — frontier-class 671B MoE, 1M
+// context, tool-capable, served direct to DeepSeek. Picked over the old Qwen 235B all-rounder.
+export const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
 
 // The default model for EVERYONE ELSE using the interface (non-owner tenants). Fred's rule: always
 // Hermes 4 70B — neutral, steerable, minimal moralizing. They can still switch to any model their
