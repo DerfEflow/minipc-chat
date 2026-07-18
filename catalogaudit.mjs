@@ -62,6 +62,12 @@ export async function runCatalogAudit(keys = {}) {
       const supportsTools = (l.supported_parameters || []).includes("tools");
       if (m.toolCapable && !supportsTools) { result.ok = false; result.problems.push({ kind: "mislabel", id: m.id, note: "flagged tool-capable but no OpenRouter endpoint supports tools" + (special ? " · " + special : "") }); }
       else if (!m.toolCapable && supportsTools) result.notes.push({ kind: "undersell", id: m.id, note: "supports tools but flagged chat-only" });
+      // Vision drift, same discipline as tools: a wrong TRUE throws provider errors in a guest's
+      // face (problem); a wrong FALSE just hides a capability (note). Direct providers are not
+      // governed by OpenRouter data, so this check applies to openrouter-routed models only.
+      const supportsImages = ((l.architecture && l.architecture.input_modalities) || []).includes("image");
+      if (m.vision && !supportsImages) { result.ok = false; result.problems.push({ kind: "vision-mislabel", id: m.id, note: "flagged vision but OpenRouter reports no image input" + (special ? " · " + special : "") }); }
+      else if (!m.vision && supportsImages) result.notes.push({ kind: "vision-undersell", id: m.id, note: "accepts image input but not flagged vision" });
       const liveCtx = l.context_length || 0;
       if (m.ctx && liveCtx && Math.abs(m.ctx - liveCtx) / liveCtx > 0.5) result.notes.push({ kind: "ctx-drift", id: m.id, note: `catalog ${m.ctx} vs live ${liveCtx}` });
     } else {

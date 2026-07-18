@@ -31,7 +31,7 @@ import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./ro
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
-import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, outLimitFor, defaultModelFor, catalogPayload } from "./models.catalog.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload } from "./models.catalog.mjs";
 import { screenContent } from "./safety.mjs";
 import { wolfeLogic, tierFor, normalizeTier } from "./wolfe-logic.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
@@ -442,8 +442,23 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     let u; try { u = new URL(cfg.url); } catch { return resolve({ ok: false, error: `${cfg.label} endpoint is misconfigured.` }); }
     // OpenAI chat format. Tool-loop turns carry assistant tool_calls and tool results
     // (tool_call_id) — preserve those fields; everything else is plain {role, content}.
+    // Attachments: text files inline as fenced blocks for every model; pictures become
+    // image_url parts (base64 data URLs) ONLY when this model is vision-flagged, otherwise
+    // they flatten to honest markers. A message without attachments maps exactly as before.
+    const modelSeesImages = !!(rec && rec.vision);
     const msgs = messages.map((m) => {
-      const o = { role: m.role, content: typeof m.content === "string" ? m.content : String(m.content ?? "") };
+      const hasAtt = m.role === "user" && Array.isArray(m.attachments) && m.attachments.length;
+      let content;
+      if (!hasAtt) {
+        content = typeof m.content === "string" ? m.content : String(m.content ?? "");
+      } else {
+        const text = String(m.content ?? "") + attachmentTextBlocks(m) + (modelSeesImages ? attachmentImageMarkersRefsOnly(m) : attachmentImageMarkers(m));
+        const imgs = modelSeesImages ? m.attachments.filter((a) => a.kind === "image") : [];
+        content = imgs.length
+          ? [...imgs.map((a) => ({ type: "image_url", image_url: { url: a.dataUrl } })), ...(text.trim() ? [{ type: "text", text }] : [])]
+          : text;
+      }
+      const o = { role: m.role, content };
       if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) o.tool_calls = m.tool_calls;
       if (m.role === "tool" && m.tool_call_id) o.tool_call_id = m.tool_call_id;
       return o;
@@ -611,6 +626,113 @@ async function logUsage(entry) {
   } catch {}
 }
 const estTokens = (chars) => Math.ceil((chars || 0) / 4);
+
+// ==== Chat attachments (pictures + text files) =================================================
+// Wire shape (additive; absent = every path byte-identical to before): user turns may carry
+//   attachments: [{ kind:"image", name, mime, dataUrl } | { kind:"text", name, text }]
+// `content` stays a plain string everywhere, so screening, routing, chatlog, titles, retrieval,
+// and the training sink never see attachment bytes. Provider-specific multimodal parts are built
+// only at the model-call boundary (cloudChatStream); the local path flattens to honest markers.
+// Attachments are never persisted server-side.
+const ATTACH_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const ATTACH_MAX_IMAGES_PER_MSG = 4;
+const ATTACH_MAX_IMG_BYTES = 6 * 1024 * 1024;      // per image as sent (client downscales far below this)
+const ATTACH_MAX_TEXT_FILES = 4;
+const ATTACH_MAX_TEXT_CHARS = 200000;              // per text file
+const ATTACH_MAX_HISTORY_IMAGES = 12;              // newest images kept as pixels across replayed history
+const ATTACH_IMG_EST_TOKENS = 1100;                // rough tokens per image for window/cost math
+
+// Trust boundary: the client is friendly but the server still validates. Returns a clean array
+// (possibly empty) containing only known kinds/fields within caps; everything else is dropped.
+function sanitizeAttachments(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  let images = 0, texts = 0;
+  for (const a of list) {
+    if (!a || typeof a !== "object") continue;
+    const name = String(a.name || "file").replace(/[\r\n"<>]/g, "").slice(0, 120);
+    if (a.kind === "image" && typeof a.dataUrl === "string" && images < ATTACH_MAX_IMAGES_PER_MSG) {
+      const m = /^data:([a-z0-9/+.-]+);base64,/i.exec(a.dataUrl.slice(0, 64));
+      if (!m) continue;
+      const mime = m[1].toLowerCase();
+      if (!ATTACH_IMAGE_MIMES.has(mime)) continue;
+      const approxBytes = Math.floor((a.dataUrl.length - m[0].length) * 3 / 4);
+      if (approxBytes <= 0 || approxBytes > ATTACH_MAX_IMG_BYTES) continue;
+      out.push({ kind: "image", name, mime, dataUrl: a.dataUrl });
+      images++;
+    } else if (a.kind === "text" && typeof a.text === "string" && texts < ATTACH_MAX_TEXT_FILES) {
+      const text = a.text.slice(0, ATTACH_MAX_TEXT_CHARS);
+      if (!text.trim()) continue;
+      out.push({ kind: "text", name, text });
+      texts++;
+    } else if (a.kind === "image_ref") {
+      // an image whose bytes were already pruned (client storage cap) — keep the honest marker
+      out.push({ kind: "image_ref", name });
+    }
+  }
+  return out;
+}
+
+// Sanitize a whole incoming history in place: attachments live on user turns only, and pixel data
+// is kept for at most the newest ATTACH_MAX_HISTORY_IMAGES images (older ones become image_ref
+// markers) so a long image-heavy conversation can never balloon the provider payload.
+function sanitizeChatAttachments(history) {
+  let budget = ATTACH_MAX_HISTORY_IMAGES;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (!m || typeof m !== "object") continue;
+    if (m.role !== "user" || m.attachments == null) { if (m && "attachments" in m) delete m.attachments; continue; }
+    const clean = sanitizeAttachments(m.attachments);
+    const kept = [];
+    for (const a of clean) {
+      if (a.kind !== "image") { kept.push(a); continue; }
+      if (budget > 0) { budget--; kept.push(a); }
+      else kept.push({ kind: "image_ref", name: a.name });
+    }
+    if (kept.length) m.attachments = kept; else delete m.attachments;
+  }
+}
+
+const countImages = (m) => (m && Array.isArray(m.attachments)) ? m.attachments.filter((a) => a.kind === "image").length : 0;
+const countHistoryImages = (msgs) => msgs.reduce((n, m) => n + countImages(m), 0);
+
+// Text-file attachments inline as fenced blocks (work with EVERY model, local included).
+function attachmentTextBlocks(m) {
+  if (!m || !Array.isArray(m.attachments)) return "";
+  let s = "";
+  for (const a of m.attachments) {
+    if (a.kind === "text") s += `\n\n[Attached file: ${a.name}]\n\`\`\`\n${a.text}\n\`\`\``;
+  }
+  return s;
+}
+// Honest markers for images a non-vision model (or the local path) cannot see.
+function attachmentImageMarkers(m) {
+  if (!m || !Array.isArray(m.attachments)) return "";
+  let s = "";
+  for (const a of m.attachments) {
+    if (a.kind === "image") s += `\n[Picture attached: ${a.name} — this model cannot view images]`;
+    else if (a.kind === "image_ref") s += `\n[Picture attached earlier: ${a.name} — no longer carried in context]`;
+  }
+  return s;
+}
+// Markers ONLY for pruned image_refs (used when the model does see the live images, so the
+// still-carried pictures get no marker while the pruned ones stay honestly accounted for).
+function attachmentImageMarkersRefsOnly(m) {
+  if (!m || !Array.isArray(m.attachments)) return "";
+  let s = "";
+  for (const a of m.attachments) {
+    if (a.kind === "image_ref") s += `\n[Picture attached earlier: ${a.name} — no longer carried in context]`;
+  }
+  return s;
+}
+// Flatten one message to a plain string turn (local path, and any non-user leakage guard).
+function flattenAttachmentsForText(m) {
+  if (!m || !Array.isArray(m.attachments)) return m;
+  const content = String(m.content ?? "") + attachmentTextBlocks(m) + attachmentImageMarkers(m);
+  const o = { ...m, content };
+  delete o.attachments;
+  return o;
+}
 
 // Derive an artifact title from a generated document (first heading / first line).
 function deriveTitle(text, lastUser) {
@@ -1238,9 +1360,18 @@ function estimatePreflight(input = {}) {
   const outRange = band.slice();
   // System prompt + retrieved memory/artifacts/chats aren't in `history`; add a flat overhead so the
   // input-token figure isn't wildly optimistic (calibratable against usage.jsonl later).
-  const tokensIn = estTokens(totalInputChars) + 900;
+  // Pending pictures ride as a COUNT (input.images) — never as bytes — and price in at the flat
+  // per-image estimate. The chip also mirrors the server's vision gate so a blocked send says so
+  // before the user taps it.
+  const pendingImages = Math.max(0, Math.min(ATTACH_MAX_IMAGES_PER_MSG, Number(input.images) || 0));
+  const tokensIn = estTokens(totalInputChars) + 900 + pendingImages * ATTACH_IMG_EST_TOKENS;
 
   const cloud = isCloudModel(forced) ? forced : "";
+  if (pendingImages > 0 && !(cloud && isVisionCapable(cloud))) {
+    return { backend: "blocked", blocked: "attachments_unsupported", mode: normalizeMode(input.privacyMode),
+      model: cloud ? ((modelById(cloud) || {}).name || cloud) : "Local Qwen", estCost: "blocked", estLatency: "—",
+      confirm: false, message: "This model can't view pictures — pick one with the 👁 badge." };
+  }
   // Phase 2: if the picked cloud model is disallowed by the current privacy mode, the composer chip
   // says so up front (Send is refused server-side too). Mirrors the handleChat gate, display-side.
   if (cloud) {
@@ -2010,13 +2141,17 @@ function handleChatAttach(req, res, u) {
 }
 
 async function handleChat(req, res) {
-  let body = "";
-  req.on("data", (d) => (body += d));
-  await new Promise((r) => req.on("end", r));
+  // Capped read: picture attachments make multi-MB bodies normal, but a hostile client must not
+  // be able to stream unbounded data at the box. Over-cap destroys the socket and answers 413.
+  const raw = await readRawBody(req, 32 * 1024 * 1024);
+  if (raw === null) { try { res.writeHead(413, { "content-type": "application/json" }); res.end('{"error":"request too large"}'); } catch {} return; }
   let input;
-  try { input = JSON.parse(body); } catch { res.writeHead(400, { "content-type": "application/json" }); return res.end('{"error":"bad json"}'); }
+  try { input = JSON.parse(raw.toString("utf8")); } catch { res.writeHead(400, { "content-type": "application/json" }); return res.end('{"error":"bad json"}'); }
   const history = Array.isArray(input.messages) ? input.messages : [];
   if (!history.length) { res.writeHead(400, { "content-type": "application/json" }); return res.end('{"error":"no messages"}'); }
+  // Attachment trust boundary: validate/cap every attachment, prune old image bytes, and make
+  // sure non-user turns carry none. After this, `attachments` on a user turn is safe to trust.
+  sanitizeChatAttachments(history);
 
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
   // Durable turn: every SSE event is ALSO buffered in the job so a suspended phone can reattach
@@ -2111,6 +2246,26 @@ async function handleChat(req, res) {
   job.chatId = chatId;
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
+
+  // Vision gate (refuse, never substitute): pictures on THIS turn need a model that can see them.
+  // Local tiers have no vision, and non-vision cloud models would 400 or silently ignore — both
+  // refused honestly HERE, before any provider call, token, or credit is spent. Text-file
+  // attachments pass everywhere (they inline as text). Older in-history pictures don't block a
+  // text model; they flatten to markers so switching models never bricks a conversation.
+  const imagesThisTurn = countImages(lastUser);
+  if (imagesThisTurn > 0) {
+    const targetSeesImages = cloudModel ? isVisionCapable(cloudModel) : false;
+    if (!targetSeesImages) {
+      const examples = visionModelNames(5).join(", ");
+      const message = cloudModel
+        ? `${(modelById(cloudModel) || { name: cloudModel }).name} can't view pictures. Pick a model with the 👁 vision badge (e.g. ${examples}), or remove the image.`
+        : `The local model can't view pictures. Pick a cloud model with the 👁 vision badge (e.g. ${examples}), or remove the image.`;
+      await logUsage({ ts: new Date().toISOString(), model: cloudModel || "local", mode: "blocked", reason: "attachments_unsupported", status: "blocked_attachments", images: imagesThisTurn, uid: T.uid });
+      sse({ type: "error", code: "attachments_unsupported", message });
+      sse({ type: "stopped", reason: "attachments_unsupported" });
+      return endStream();
+    }
+  }
 
   // Route: an explicit mode wins; otherwise the combined heuristic+light-model router picks.
   // routeConfidence seeds the response quality block; needs.mentorReview is the spec's pre-answer
@@ -2226,11 +2381,15 @@ async function handleChat(req, res) {
   // every turn costs real minutes. Cap the replayed history — retrieval + episodic memory carry the
   // older context. long_context keeps a much deeper window on purpose (it is the intentional mode).
   const HISTORY_CAP = mode === "long_context" ? 48 : 16;
-  messages.push(...history.slice(-HISTORY_CAP));
+  // Cloud turns keep attachments on the message (cloudChatStream builds the multimodal parts);
+  // the local path flattens them to inlined text files + honest image markers, so Ollama only
+  // ever receives plain string content.
+  messages.push(...history.slice(-HISTORY_CAP).map((m) => (cloudModel ? m : flattenAttachmentsForText(m))));
   // as_fred keeps thinking ON (think:false made the model plan out loud); the answer-directly
   // order is the LAST thing it reads (top-of-prompt placement proved too weak).
   if (mode === "as_fred") messages.push({ role: "system", content: "Reply now with ONLY Fred's actual words. Do not analyze the request, do not restate the question, do not describe Fred's style or your approach — your first word is the first word of Fred's answer." });
-  const contextTokens = estTokens(messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0));
+  const contextTokens = estTokens(messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0))
+    + countHistoryImages(messages) * ATTACH_IMG_EST_TOKENS;   // pictures consume real window too
   // D2 (audit item 12): the long-context re-check AFTER retrieval. Routing ran before context
   // assembly, so only NOW do we know what retrieval actually loaded — if the assembled prompt
   // would overflow the current window, escalate num_ctx (and the mode label) per the spec's first
@@ -2487,7 +2646,7 @@ async function handleChat(req, res) {
         : (sawTok && cloudRec) ? +(((inTokTotal * (cloudRec.inCost || 0)) + (outTokTotal * (cloudRec.outCost || 0))) / 1e6).toFixed(6)
         : null;
       console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=${toolCount} rounds=${roundsUsed} conf=${quality.confidence}`);
-      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
+      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, images: imagesThisTurn || undefined, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
       try { T.chatlog.record(chatId, history, answer); } catch {}
       await meterTurn(T, costUsd, lastUserText, answer);   // SaaS: charge credits / draw cap / training sink (non-owner only)
       sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });

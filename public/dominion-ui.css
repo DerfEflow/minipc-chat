@@ -37,3 +37,65 @@
 .cost-chip.cc-heavy { border-color: rgba(255, 174, 103, .5); color: #ffbf94; }
 .cost-chip.cc-heavy.cc-cold { border-color: rgba(255, 116, 100, .6); color: #ff9f86; animation: cc-cold-pulse 1.8s ease-in-out infinite; }
 @keyframes cc-cold-pulse { 0%, 100% { box-shadow: inset 0 1px 0 rgba(210, 240, 255, .08); } 50% { box-shadow: inset 0 1px 0 rgba(210, 240, 255, .08), 0 0 12px rgba(255, 120, 90, .28); } }
+
+/* ---- Attachments (pictures + files in the composer and transcript) ---------------------------
+   Staging strip above the command bar, honest vision-gate warning, thumbnails inside sent
+   bubbles. Same glass-and-brass language as the rest of the console. */
+.attach-strip {
+  display: flex; gap: 8px; margin: 0 0 8px; padding: 2px 2px 6px;
+  overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin;
+}
+.attach-strip[hidden], .attach-warn[hidden] { display: none; }
+.att-cell { position: relative; flex: none; }
+.att-cell img {
+  display: block; width: 58px; height: 58px; object-fit: cover; cursor: zoom-in;
+  border: 1px solid rgba(179, 226, 255, .34);
+  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+  background: rgba(2, 10, 17, .7);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(235, 250, 255, .12);
+}
+.att-file {
+  display: inline-flex; align-items: center; max-width: 190px; height: 30px; padding: 0 10px;
+  border: 1px solid rgba(247, 177, 112, .38); color: #f2c48f;
+  clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .05), transparent 60%), rgba(2, 11, 18, .66);
+  font: 600 10.5px/1.2 "Cascadia Mono", "Consolas", monospace; letter-spacing: .03em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.att-cell .att-file { height: 58px; max-width: 160px; }
+.att-x {
+  position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; display: grid; place-items: center;
+  border: 1px solid rgba(255, 140, 120, .55); border-radius: 50%; cursor: pointer;
+  color: #ffb0a0; background: rgba(8, 4, 4, .92); font: 700 12px/1 "Cascadia Mono", monospace;
+  box-shadow: 0 0 8px rgba(255, 100, 80, .3);
+}
+.att-x:hover { color: #fff; border-color: rgba(255, 160, 140, .8); }
+.attach-warn {
+  margin: 0 0 8px; padding: 7px 11px;
+  border: 1px solid rgba(255, 174, 103, .5); color: #ffbf94;
+  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .04), transparent 60%), rgba(20, 8, 2, .72);
+  font: 600 11px/1.4 "Cascadia Mono", "Consolas", monospace; letter-spacing: .03em;
+}
+.attach-warn.shake { animation: att-shake .35s ease; }
+@keyframes att-shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
+.neural-glass > footer.att-drag { outline: 2px dashed rgba(118, 255, 104, .55); outline-offset: -6px; }
+/* sent-message gallery inside the bubble */
+.att-gallery { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 9px; }
+.att-gallery img {
+  display: block; max-width: min(230px, 62vw); max-height: 230px; cursor: zoom-in;
+  border: 1px solid rgba(179, 226, 255, .3);
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .5);
+}
+/* vision badge in the model panel rows (sits beside the doing/chatting bench glyph) */
+.mr-bench { letter-spacing: .06em; }
+/* the attach control leans amber like the other auxiliary console keys */
+#attach { color: #ffc28a; }
+@media (max-width: 620px) {
+  /* rendered-v2 turns .bar into a 3-column grid with an empty slot at row 2 col 1; the attach
+     key takes that slot so nothing else moves */
+  #attach { grid-column: 1; grid-row: 2; justify-self: start; width: 43px; height: 43px; }
+  .att-cell img, .att-cell .att-file { width: 50px; height: 50px; }
+  .att-cell .att-file { width: auto; }
+}

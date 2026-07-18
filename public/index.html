@@ -11,7 +11,7 @@
 <link rel="manifest" href="/manifest.webmanifest" />
 <link rel="apple-touch-icon" href="/icon-180.png" />
 <link rel="icon" href="/icon-192.png" />
-<link rel="stylesheet" href="/dominion-ui.css?v=38" />
+<link rel="stylesheet" href="/dominion-ui.css?v=39" />
 <link rel="stylesheet" href="/dominion-tenant.css?v=2" />
 <link rel="stylesheet" href="/dominion-vault.css?v=1" />
 </head>
@@ -81,6 +81,7 @@
       <rect x="8.5" y="3" width="7" height="12" rx="3.5"/>
       <path d="M5.5 11.5a6.5 6.5 0 0013 0M12 18v3M8.5 21h7"/>
     </symbol>
+    <symbol id="i-attach" viewBox="0 0 24 24"><path d="M8.5 12.5l6-6a3 3 0 014.2 4.2l-7.8 7.8a5 5 0 01-7-7l7.6-7.6"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h3"/></symbol>
@@ -246,7 +247,12 @@
     <footer>
       <div class="composer-label"><span>Command channel</span><i></i></div>
       <div class="cost-row"><span id="cost-chip" class="cost-chip" hidden></span></div>
+      <div id="attach-strip" class="attach-strip" hidden></div>
+      <div id="attach-warn" class="attach-warn" hidden></div>
       <div class="bar">
+        <button id="attach" class="mic attach" title="Attach a picture or file" aria-label="Attach a picture or file">
+          <svg class="glyph"><use href="#i-attach"></use></svg>
+        </button>
         <textarea id="input" rows="1" placeholder="Give Dominion a directive…" autocomplete="off"></textarea>
         <button id="speak" class="mic" title="Speak answers aloud (off)" aria-label="Toggle spoken answers">
           <svg class="glyph"><use href="#i-speaker"></use></svg>
@@ -255,6 +261,8 @@
           <svg class="glyph"><use href="#i-mic"></use></svg>
         </button>
         <button id="send" class="send" title="Send" aria-label="Send">↑</button>
+        <input id="attach-file" type="file" multiple hidden
+               accept="image/jpeg,image/png,image/webp,image/gif,.txt,.md,.markdown,.csv,.json,.log,.xml,.yaml,.yml,.html,.css,.js,.mjs,.ts,.py,.sql,.sh,.ps1" />
       </div>
     </footer>
   </section>
@@ -377,7 +385,7 @@
     </div>
   </div>
 
-  <script src="/app.js?v=33"></script>
+  <script src="/app.js?v=34"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=2" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>

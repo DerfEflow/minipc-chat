@@ -19,7 +19,7 @@
  * `ctx` is the context window in tokens. Snapshot date below.
  */
 
-export const CATALOG_UPDATED = "2026-07-17";   // tool flags + ctx audited against live OpenRouter (tools_audit.mjs)
+export const CATALOG_UPDATED = "2026-07-18";   // tool+vision flags + ctx audited against live OpenRouter (tools_audit.mjs)
 
 // The out-of-the-box default: fast, dirt-cheap, strong all-rounder. Change via env DEFAULT_CLOUD_MODEL.
 export const DEFAULT_MODEL = "qwen/qwen3-235b-a22b-2507";
@@ -64,6 +64,12 @@ export const CATEGORIES = [
 //               reasoning tokens don't starve the visible answer (the GPT-5.x token-starvation lesson).
 //   reasoningEffort — when set, sent as reasoning_effort on every non-OpenAI call. Required by models
 //               with mandatory reasoning (Kimi K3 only supports "max"). Omit to use provider default.
+//   vision    — true = the model accepts image input (image_url parts with base64 data URLs) on its
+//               chat endpoint, so the composer's picture attachments may route to it. NEVER guessed:
+//               OpenRouter models were verified against live architecture.input_modalities
+//               (2026-07-18 pull); direct OpenAI/Anthropic per their documented multimodal support.
+//               DeepSeek is false until a live probe proves otherwise (wrong-true throws a guest-facing
+//               error; wrong-false costs only an honest refusal). Audited weekly with the tool flags.
 // Direct hookups (Fred): OpenAI + DeepSeek go straight to their own APIs — no OpenRouter middleman,
 // so there's no question about where the calls go. Everything else rides OpenRouter. Claude stays
 // out entirely (Fred uses it through its own app).
@@ -78,42 +84,42 @@ export const MODELS = [
   // OpenAI GPT-5.6 family — DIRECT to OpenAI (provider:"openai"). Sol=agentic flagship, Terra=mid,
   // Luna=lightest/cheapest (price-implied tiering; ~1M context each). Fred picks per turn.
   { id: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-sol",
-    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 32768, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 32768, reasoning: true,
     specialty: "Agentic/terminal-coding flagship — the top 'doing' model" },
   { id: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-terra",
-    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 15.00, ctx: 1050000, maxOut: 32768, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 15.00, ctx: 1050000, maxOut: 32768, reasoning: true,
     specialty: "Mid-tier GPT-5.6 — strong general reasoning at half Sol's cost" },
   { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-luna",
-    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 6.00, ctx: 1050000, maxOut: 16384, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 6.00, ctx: 1050000, maxOut: 16384, reasoning: true,
     specialty: "Lightest/cheapest GPT-5.6 — fast conversational tier" },
   { id: "openai/gpt-5.5", name: "GPT-5.5", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.5",
-    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 32768, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 32768, reasoning: true,
     specialty: "Prior frontier flagship — reliable heavy knowledge work" },
   { id: "openai/gpt-4o", name: "GPT-4o", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-4o",
-    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 10.00, ctx: 128000, maxOut: 16384,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 10.00, ctx: 128000, maxOut: 16384,
     specialty: "Mature multimodal generalist; dependable, older generation" },
   // Kimi K3 (released 2026-07-15): 2.8T open-weight multimodal reasoner, 1M context. Its reasoning is
   // MANDATORY and the ONLY supported effort is "max" — reasoningEffort below is passed on every call
   // (the "new required language"). Draws reasoning tokens from the output budget, so maxOut is large
   // and the server auto-continues past it.
   { id: "moonshotai/kimi-k3", name: "Kimi K3", origin: "Moonshot AI (Beijing)",
-    category: "Frontier / Flagship", params: "2.8T (open-weight MoE)", paramsB: 2800, inCost: 3.00, outCost: 15.00, ctx: 1048576,
+    category: "Frontier / Flagship", vision: true, params: "2.8T (open-weight MoE)", paramsB: 2800, inCost: 3.00, outCost: 15.00, ctx: 1048576,
     maxOut: 32768, reasoning: true, reasoningEffort: "max",
     specialty: "Newest frontier open-weight reasoner — complex coding, long-horizon agentic work, multimodal" },
   { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", origin: "Moonshot AI (Beijing)",
-    category: "Frontier / Flagship", params: "1T (MoE·32B active)", paramsB: 1000, inCost: 0.66, outCost: 3.41, ctx: 262144, maxOut: 16384,
+    category: "Frontier / Flagship", vision: true, params: "1T (MoE·32B active)", paramsB: 1000, inCost: 0.66, outCost: 3.41, ctx: 262144, maxOut: 16384,
     specialty: "Agentic tool-use heavyweight; cult favorite for doing things" },
   // Anthropic Claude — DIRECT to Anthropic (provider:"anthropic"), added 2026-07-14 for Trusted mode
   // (strictest retention; ZDR-eligible). Reached via Anthropic's OpenAI-compatible endpoint so the
   // existing OpenAI-shaped streamer serves them unchanged. directId = the native Anthropic model id.
   { id: "anthropic/claude-opus-4-8", name: "Claude Opus 4.8", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-opus-4-8",
-    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 25.00, ctx: 200000, maxOut: 32768,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 25.00, ctx: 200000, maxOut: 32768,
     specialty: "Anthropic flagship — top-tier reasoning + agentic 'doing'; strictest data retention" },
   { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-sonnet-5",
-    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 200000, maxOut: 32768,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 200000, maxOut: 32768,
     specialty: "Balanced Claude — strong general work at mid cost; no-train direct provider" },
   { id: "anthropic/claude-haiku-4-5", name: "Claude Haiku 4.5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-haiku-4-5-20251001",
-    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 5.00, ctx: 200000, maxOut: 16384,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 5.00, ctx: 200000, maxOut: 16384,
     specialty: "Fast, cheap Claude — quick turns kept off training data (direct)" },
   { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-pro",
     category: "Frontier / Flagship", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.43, outCost: 0.87, ctx: 1000000, maxOut: 16384,
@@ -128,7 +134,7 @@ export const MODELS = [
     category: "Frontier / Flagship", params: "235B (MoE·22B active)", paramsB: 235, inCost: 0.09, outCost: 0.10, ctx: 262144, maxOut: 16384,
     specialty: "Fast, dirt-cheap, strong — the default daily driver" },
   { id: "x-ai/grok-4.20", name: "Grok 4.20", origin: "xAI (Musk)",
-    category: "Frontier / Flagship", params: "undisclosed", paramsB: null, inCost: 1.25, outCost: 2.50, ctx: 2000000, maxOut: 32768, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.25, outCost: 2.50, ctx: 2000000, maxOut: 32768, reasoning: true,
     specialty: "Frontier quality, 2M context, least hedgy of the majors" },
 
   // ---- Reasoning & Math ---------------------------------------------------------------------
@@ -158,7 +164,7 @@ export const MODELS = [
     category: "Science & Technical", params: "24B", paramsB: 24, inCost: 0.05, outCost: 0.08, ctx: 32000, toolCapable: false,   // audited: no tool endpoints
     specialty: "Excellent cheap technical/science Q&A; fully fine-tunable (Apache 2.0)" },
   { id: "mistralai/mistral-small-3.2-24b-instruct", name: "Mistral Small 3.2", origin: "Mistral AI (France)",
-    category: "Science & Technical", params: "24B", paramsB: 24, inCost: 0.08, outCost: 0.20, ctx: 128000,
+    category: "Science & Technical", vision: true, params: "24B", paramsB: 24, inCost: 0.08, outCost: 0.20, ctx: 128000,
     specialty: "Fast cheap scripting/technical helper (OpenSCAD, three.js)" },
 
   // ---- Creative & Writing -------------------------------------------------------------------
@@ -206,26 +212,26 @@ export const MODELS = [
 
   // ---- Vision / Multimodal ------------------------------------------------------------------
   { id: "minimax/minimax-m3", name: "MiniMax M3", origin: "MiniMax (Shanghai)",
-    category: "Vision / Multimodal", params: "undisclosed (MoE)", paramsB: null, inCost: 0.10, outCost: 1.21, ctx: 1048576,
+    category: "Vision / Multimodal", vision: true, params: "undisclosed (MoE)", paramsB: null, inCost: 0.10, outCost: 1.21, ctx: 1048576,
     specialty: "Strongest visual understanding here (image/video reasoning)" },
   { id: "qwen/qwen3-vl-8b-instruct", name: "Qwen3-VL 8B", origin: "Alibaba",
-    category: "Vision / Multimodal", params: "8B", paramsB: 8, inCost: 0.08, outCost: 0.50, ctx: 128000,
+    category: "Vision / Multimodal", vision: true, params: "8B", paramsB: 8, inCost: 0.08, outCost: 0.50, ctx: 128000,
     specialty: "Image/style critique, art analysis, prompt-writing (text+vision)" },
 
   // ---- Web / Research -----------------------------------------------------------------------
   { id: "perplexity/sonar-pro", name: "Perplexity Sonar Pro", origin: "Perplexity",
-    category: "Web / Research", params: "undisclosed (Llama-based)", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 200000, toolCapable: false,   // audited: no tool endpoints; its web search is BUILT IN
+    category: "Web / Research", vision: true, params: "undisclosed (Llama-based)", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 200000, toolCapable: false,   // audited: no tool endpoints; its web search is BUILT IN
     specialty: "Live web search with citations baked in — 'what's true right now'" },
 
   // ---- Open & Trainable ---------------------------------------------------------------------
   { id: "meta-llama/llama-4-maverick", name: "Llama 4 Maverick", origin: "Meta",
-    category: "Open & Trainable", params: "400B (MoE·17B active)", paramsB: 400, inCost: 0.15, outCost: 0.60, ctx: 1000000,
+    category: "Open & Trainable", vision: true, params: "400B (MoE·17B active)", paramsB: 400, inCost: 0.15, outCost: 0.60, ctx: 1000000,
     specialty: "The trunk of the whole open-source tree; 1M context" },
   { id: "allenai/olmo-3-32b-think", name: "OLMo 3 32B Think", origin: "Allen Institute (nonprofit)",
     category: "Open & Trainable", params: "32B", paramsB: 32, inCost: 0.15, outCost: 0.50, ctx: 65536, toolCapable: false,   // audited: no tool endpoints
     specialty: "Fully open — weights, DATA, and training code. Study how models are built" },
   { id: "google/gemma-4-31b-it:free", name: "Gemma 4 31B", origin: "Google (open weights)",
-    category: "Open & Trainable", params: "31B", paramsB: 31, inCost: 0, outCost: 0, ctx: 262144,
+    category: "Open & Trainable", vision: true, params: "31B", paramsB: 31, inCost: 0, outCost: 0, ctx: 262144,
     specialty: "Capable FREE baseline to sanity-check everything against" },
   { id: "mistralai/mistral-nemo", name: "Mistral Nemo", origin: "Mistral AI (France)",
     category: "Open & Trainable", params: "12B", paramsB: 12, inCost: 0.02, outCost: 0.04, ctx: 128000,
@@ -244,7 +250,9 @@ function finalize(m) {
   const maxOut = Number(m.maxOut) > 0 ? Number(m.maxOut) : DEFAULT_MAX_OUT;
   const reasoning = m.reasoning === true;
   const reasoningEffort = typeof m.reasoningEffort === "string" ? m.reasoningEffort : "";
-  return { ...m, provider, directId, toolCapable, maxOut, reasoning, reasoningEffort };
+  // vision NEVER defaults from category — explicit true only (verified per model; see field notes).
+  const vision = m.vision === true;
+  return { ...m, provider, directId, toolCapable, maxOut, reasoning, reasoningEffort, vision };
 }
 // Mutate in place so MODELS (exported) carries the normalized fields everywhere.
 for (let i = 0; i < MODELS.length; i++) MODELS[i] = finalize(MODELS[i]);
@@ -264,6 +272,10 @@ export const providerOf = (id) => { const m = BY_ID.get(id); return m ? m.provid
 export const isToolCapable = (id) => { const m = BY_ID.get(id); return !!(m && m.toolCapable); };
 // Whether a model is a chain-of-thought reasoner whose hidden thinking is billed against output.
 export const isReasoning = (id) => { const m = BY_ID.get(id); return !!(m && m.reasoning); };
+// Whether a model accepts image input (picture attachments may route to it). Explicit flag only.
+export const isVisionCapable = (id) => { const m = BY_ID.get(id); return !!(m && m.vision); };
+// Short honest list for refusal messages: "which models CAN see this image".
+export const visionModelNames = (limit = 6) => MODELS.filter((m) => m.vision).slice(0, limit).map((m) => m.name);
 
 // Per-CALL output ceiling for a model in a given mode. This is the CHUNK a single round may emit;
 // the server auto-continues past it (finish_reason "length") until the full answer is written, so a

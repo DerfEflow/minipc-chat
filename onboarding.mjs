@@ -20,9 +20,10 @@ export const TUTORIAL = {
     {
       id: "features",
       heading: "What it can do",
-      body: "Chat with a large catalog of AI models, from fast and cheap to frontier-grade. Ask for real documents and it will produce them as Word, PDF, Excel, or plain text, laid out professionally, with a download link. Ask it to build an app and it will lay out the whole file tree. It can search the web, remember what matters to you, and keep your work in its own private space that no other user can see.",
+      body: "Chat with a large catalog of AI models, from fast and cheap to frontier-grade. Attach pictures or files with the paperclip and models with the eye badge will look at them. Ask for real documents and it will produce them as Word, PDF, Excel, or plain text, laid out professionally, with a download link. Ask it to build an app and it will lay out the whole file tree. It can search the web, remember what matters to you, and keep your work in its own private space that no other user can see.",
       points: [
         "Pick any model from the catalog, or let it choose for you.",
+        "Attach pictures with the paperclip; models showing the 👁 badge can view them. Text files work with every model.",
         "Generate Word, PDF, Excel, Markdown, and text files that look professional.",
         "Long answers finish in full; they do not get cut off.",
         "Your chats, memory, and files are private to your account.",

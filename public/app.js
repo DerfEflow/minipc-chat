@@ -18,7 +18,8 @@ const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"
       padd = $("padd"), pkind = $("pkind"), ptitle = $("ptitle"), paddbtn = $("paddbtn"),
       purl = $("purl"), pscrape = $("pscrape"), pscan = $("pscan"), pdistill = $("pdistill"),
       pprofile = $("pprofile"), pfilterKind = $("pfilter-kind"), pmsg = $("pmsg"), plist = $("plist"),
-      costChip = $("cost-chip");
+      costChip = $("cost-chip"),
+      attachBtn = $("attach"), attachFile = $("attach-file"), attachStrip = $("attach-strip"), attachWarn = $("attach-warn");
 
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
       LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1",
@@ -64,6 +65,7 @@ const PRESETS = {
 
 let chats = [], curId = null, busy = false, aborter = null, chatQuery = "";
 let settings = { persona: "default", personaCustom: "", temperature: 0.7, confirmTools: false, privacy: "redacted_external" };
+let pendingAtt = [];   // attachments staged in the composer for the NEXT send
 
 // Background video: muted+playsinline autoplay is usually allowed, but Android suppresses it under
 // battery saver / when the PWA resumes from background — kick it back to life on those signals.
@@ -83,7 +85,28 @@ let settings = { persona: "default", personaCustom: "", temperature: 0.7, confir
 
 // ---------- persistence ----------
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "c" + Date.now() + Math.random().toString(36).slice(2));
-const save = () => { try { localStorage.setItem(LS_CHATS, JSON.stringify(chats.slice(0, 100))); localStorage.setItem(LS_CUR, curId || ""); } catch {} };
+// Attachment bytes are the one thing that can blow the ~5MB localStorage quota: full pixels are
+// kept for only the ATT_KEEP_CHATS most recently updated chats; older chats keep honest name-only
+// placeholders. If a save STILL overflows, one retry strips all attachment data rather than
+// silently losing the whole history write.
+const ATT_KEEP_CHATS = 12;
+function serializeChats(stripAll) {
+  const byRecency = [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const keep = new Set(byRecency.slice(0, ATT_KEEP_CHATS).map((c) => c.id));
+  return JSON.stringify(chats.slice(0, 100).map((c) => {
+    if (!c.messages.some((m) => m.attachments && m.attachments.length)) return c;
+    const full = keep.has(c.id) && !stripAll;
+    return { ...c, messages: c.messages.map((m) => {
+      if (!m.attachments || !m.attachments.length) return m;
+      if (full) return m;
+      return { ...m, attachments: m.attachments.map((a) => a.kind === "image" && a.dataUrl ? { kind: "image_ref", name: a.name } : a.kind === "text" ? { kind: "text", name: a.name, text: "" } : a) };
+    }) };
+  }));
+}
+const save = () => {
+  try { localStorage.setItem(LS_CHATS, serializeChats(false)); localStorage.setItem(LS_CUR, curId || ""); }
+  catch { try { localStorage.setItem(LS_CHATS, serializeChats(true)); localStorage.setItem(LS_CUR, curId || ""); } catch {} }
+};
 const saveSettings = () => { try { localStorage.setItem(LS_SET, JSON.stringify(settings)); } catch {} };
 function load() {
   try { const r = localStorage.getItem(LS_CHATS); const a = r && JSON.parse(r); if (Array.isArray(a)) chats = a; } catch {}
@@ -95,7 +118,7 @@ function load() {
   try { const p = localStorage.getItem(LS_PMODE); if (p && privacyModeSel) privacyModeSel.value = p; } catch {}
 }
 const cur = () => chats.find((c) => c.id === curId);
-const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); return (u ? u.content : "New chat").replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
+const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); const base = u ? (u.content || (Array.isArray(u.attachments) && u.attachments[0] && ("📎 " + u.attachments[0].name)) || "") : "New chat"; return String(base).replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
 const resolvePersona = () => settings.persona === "custom" ? (settings.personaCustom || "") : (PRESETS[settings.persona] || "");
 const forcedModel = () => { const v = modelSel ? modelSel.value : "local"; return (v && v !== "auto" && v !== "local") ? v : ""; };
 
@@ -168,6 +191,23 @@ function renderMsg(m, i, isLastAi) {
   const turn = document.createElement("div"); turn.className = "turn";
   const row = document.createElement("div"); row.className = "msg " + (m.role === "user" ? "me" : "ai");
   const b = document.createElement("div"); b.className = "bubble"; b.textContent = m.content; row.appendChild(b); turn.appendChild(row);
+  // Sent attachments render inside the bubble: picture thumbnails (tap to open full size) and
+  // file chips. Pruned ones (storage cap) show an honest placeholder instead of vanishing.
+  if (m.role === "user" && Array.isArray(m.attachments) && m.attachments.length) {
+    const gal = document.createElement("div"); gal.className = "att-gallery";
+    for (const a of m.attachments) {
+      if (a.kind === "image" && a.dataUrl) {
+        const img = document.createElement("img"); img.src = a.dataUrl; img.alt = a.name || "picture"; img.title = a.name || "";
+        img.onclick = () => openImageFull(a.dataUrl);
+        gal.appendChild(img);
+      } else {
+        const chip = document.createElement("span"); chip.className = "att-file";
+        chip.textContent = a.kind === "text" ? "📄 " + (a.name || "file") : "🖼 " + (a.name || "picture") + " (no longer stored on this device)";
+        gal.appendChild(chip);
+      }
+    }
+    b.prepend(gal);
+  }
   // Persistent "context used" line (spec: show context/tool usage per message) — survives reloads.
   // F4: the 🧠/📄/💬 chip expands on tap to list WHICH items were loaded (when the meta carries
   // them); the 🔧 chip opens the tool panel filtered to this message's runs. ⏸ marks interrupted.
@@ -341,7 +381,7 @@ function modelRowHtml(o, cur, mode) {
   const price = o.free ? `<span class="mr-price is-free">Free</span>` : (o.price ? `<span class="mr-price">${escapeHtml(o.price)}</span>` : "");
   const note = o.blocked ? `<span class="mr-note">blocked · ${escapeHtml(mode)}</span>` : (o.noKey ? `<span class="mr-note">key needed</span>` : "");
   return `<div class="${cls.join(" ")}" data-value="${escapeHtml(o.id)}" ${disabled ? 'aria-disabled="true"' : 'role="option"'}${sel ? ' aria-selected="true"' : ""}>
-    <span class="mr-name"><span class="mr-bench">${o.tool ? "🔧" : "💬"}</span><span class="mr-text">${escapeHtml(o.name)}</span></span>
+    <span class="mr-name"><span class="mr-bench">${o.tool ? "🔧" : "💬"}${o.vis ? "👁" : ""}</span><span class="mr-text">${escapeHtml(o.name)}</span></span>
     <span class="mr-meta">${escapeHtml(o.meta || "")}</span>
     <span class="mr-tag">${price}${note}</span></div>`;
 }
@@ -359,7 +399,7 @@ function renderModelPanel() {
     for (const m of g.models) {
       const keyed = m.provider === "openrouter" ? availCache.openrouter : m.provider === "openai" ? availCache.openai : m.provider === "deepseek" ? availCache.deepseek : m.provider === "anthropic" ? availCache.anthropic : true;
       html += modelRowHtml({
-        id: m.id, name: m.name, tool: m.toolCapable, free: (!m.inCost && !m.outCost), price: fmtPriceShort(m),
+        id: m.id, name: m.name, tool: m.toolCapable, vis: !!m.vision, free: (!m.inCost && !m.outCost), price: fmtPriceShort(m),
         meta: [(m.params && m.params !== "undisclosed") ? m.params : null, fmtCtxShort(m.ctx)].filter(Boolean).join(" · "),
         noKey: keyed === false, blocked: !providerAllowedClient(mode, m.provider),
       }, cur, mode);
@@ -377,6 +417,118 @@ if (modelPanel) modelPanel.addEventListener("click", (e) => {
 });
 document.addEventListener("click", (e) => { if (modelPanel && !modelPanel.hidden && !e.target.closest("#model-picker")) closeModelPanel(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modelPanel && !modelPanel.hidden) closeModelPanel(); });
+
+// ---------- attachments (pictures + text files) ----------
+// Staged in pendingAtt, sent as an OPTIONAL `attachments` field on the user message; content stays
+// a plain string so history, search, titles, and every server subsystem keep working unchanged.
+// Pictures are downscaled ON THE PHONE (long edge 1568px) so a 12MP camera shot becomes a few
+// hundred KB, and only vision-badged models may receive them (the server enforces the same gate).
+const ATT_MAX_IMAGES = 4, ATT_MAX_TEXTS = 4, ATT_MAX_TEXT_BYTES = 200 * 1024, ATT_IMG_EDGE = 1568;
+const ATT_TEXT_EXT = /\.(txt|md|markdown|csv|json|log|xml|yaml|yml|html|css|js|mjs|ts|py|sql|sh|ps1)$/i;
+const attImages = () => pendingAtt.filter((a) => a.kind === "image").length;
+const attTexts = () => pendingAtt.filter((a) => a.kind === "text").length;
+
+// Current model's vision capability: cloud models per the live catalog flag; local has none.
+function modelSeesImages() {
+  const v = modelSel ? modelSel.value : "local";
+  if (!v || v === "local" || !isCloudModel(v)) return false;
+  const m = findCatalogModel(v);
+  return !!(m && m.vision);
+}
+
+async function downscaleImage(file) {
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, ATT_IMG_EDGE / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
+    const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+    cv.getContext("2d").drawImage(bmp, 0, 0, w, h);
+    bmp.close && bmp.close();
+    // Screenshots keep PNG crispness when small enough; photos go JPEG. GIFs lose animation
+    // by design (models see a single frame anyway).
+    let dataUrl = "";
+    if (file.type === "image/png") { const png = cv.toDataURL("image/png"); if (png.length < 1.25 * 1024 * 1024) dataUrl = png; }
+    if (!dataUrl) dataUrl = cv.toDataURL("image/jpeg", 0.85);
+    const mime = dataUrl.slice(5, dataUrl.indexOf(";"));
+    return { kind: "image", name: (file.name || "picture").slice(0, 120), mime, dataUrl };
+  } catch { return null; }
+}
+
+function readTextFile(file) {
+  return new Promise((resolve) => {
+    const r = new FileReader();
+    r.onload = () => { const text = String(r.result || "").slice(0, ATT_MAX_TEXT_BYTES); resolve(text.trim() ? { kind: "text", name: (file.name || "file.txt").slice(0, 120), text } : null); };
+    r.onerror = () => resolve(null);
+    r.readAsText(file.slice(0, ATT_MAX_TEXT_BYTES));
+  });
+}
+
+async function addFiles(fileList) {
+  const files = Array.from(fileList || []); if (!files.length) return;
+  let rejected = [];
+  for (const f of files) {
+    if (f.type && f.type.startsWith("image/")) {
+      if (attImages() >= ATT_MAX_IMAGES) { rejected.push(f.name + " (max " + ATT_MAX_IMAGES + " pictures)"); continue; }
+      const a = await downscaleImage(f);
+      if (a) pendingAtt.push(a); else rejected.push((f.name || "picture") + " (couldn't read it)");
+    } else if ((f.type && f.type.startsWith("text/")) || f.type === "application/json" || ATT_TEXT_EXT.test(f.name || "")) {
+      if (attTexts() >= ATT_MAX_TEXTS) { rejected.push(f.name + " (max " + ATT_MAX_TEXTS + " files)"); continue; }
+      const a = await readTextFile(f);
+      if (a) pendingAtt.push(a); else rejected.push((f.name || "file") + " (empty or unreadable)");
+    } else {
+      rejected.push((f.name || "file") + " (only pictures and text-type files for now — PDFs are coming)");
+    }
+  }
+  renderAttachStrip();
+  if (rejected.length) { attachWarn.hidden = false; attachWarn.textContent = "Skipped: " + rejected.join(", "); setTimeout(updateAttachGate, 4000); }
+  updateEstimate();
+}
+
+function removeAttachment(i) { pendingAtt.splice(i, 1); renderAttachStrip(); updateEstimate(); }
+
+function renderAttachStrip() {
+  if (!attachStrip) return;
+  attachStrip.innerHTML = "";
+  attachStrip.hidden = pendingAtt.length === 0;
+  pendingAtt.forEach((a, i) => {
+    const cell = document.createElement("div"); cell.className = "att-cell";
+    if (a.kind === "image") {
+      const img = document.createElement("img"); img.src = a.dataUrl; img.alt = a.name; img.title = a.name;
+      img.onclick = () => openImageFull(a.dataUrl);
+      cell.appendChild(img);
+    } else {
+      const chip = document.createElement("span"); chip.className = "att-file"; chip.textContent = "📄 " + a.name; chip.title = a.name;
+      cell.appendChild(chip);
+    }
+    const x = document.createElement("button"); x.className = "att-x"; x.textContent = "×"; x.title = "Remove"; x.setAttribute("aria-label", "Remove " + a.name);
+    x.onclick = () => removeAttachment(i);
+    cell.appendChild(x);
+    attachStrip.appendChild(cell);
+  });
+  updateAttachGate();
+}
+
+// The honest gate, mirrored from the server: pictures need a vision-badged model. Never swaps the
+// model, never silently drops the picture — it just says so and holds Send until resolved.
+function attachSendBlocked() { return attImages() > 0 && !modelSeesImages(); }
+function updateAttachGate() {
+  if (!attachWarn) return;
+  if (attachSendBlocked()) {
+    attachWarn.hidden = false;
+    attachWarn.textContent = "This model can't view pictures — pick one with the 👁 badge, or remove the picture.";
+  } else { attachWarn.hidden = true; attachWarn.textContent = ""; }
+}
+
+// Chrome blocks top-frame data: navigation; a Blob URL opens fine in a new tab.
+function openImageFull(dataUrl) {
+  try {
+    const [head, b64] = dataUrl.split(",");
+    const mime = head.slice(5, head.indexOf(";"));
+    const bin = atob(b64); const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    window.open(URL.createObjectURL(new Blob([buf], { type: mime })), "_blank");
+  } catch {}
+}
 
 // ---------- agent loop over SSE ----------
 function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send"; if (on && typeof hideCostChip === "function") hideCostChip(); }
@@ -550,7 +702,9 @@ async function streamReply(c) {
     const res = await fetch("/chat", {
       method: "POST", headers: { "content-type": "application/json" }, signal: aborter.signal,
       body: JSON.stringify({
-        messages: c.messages.map((m) => ({ role: m.role, content: m.content })),
+        messages: c.messages.map((m) => (m.attachments && m.attachments.length
+          ? { role: m.role, content: m.content, attachments: m.attachments }
+          : { role: m.role, content: m.content })),
         mode: modeSel ? modeSel.value : "auto",
         model: forcedModel() || "auto",
         privacyMode: privacyModeSel ? privacyModeSel.value : "normal",
@@ -628,11 +782,14 @@ function send() {
     } else if (aborter) aborter.abort();
     return;
   }
-  const text = input.value.trim(); if (!text) return;
+  const text = input.value.trim(); if (!text && !pendingAtt.length) return;
+  if (attachSendBlocked()) { updateAttachGate(); attachWarn.classList.remove("shake"); void attachWarn.offsetWidth; attachWarn.classList.add("shake"); return; }
   const c = cur(); if (!c) return;
   input.value = ""; autosize(); hideCostChip();
   scroll(true);   // a fresh send always re-engages the follow so the reply starts in view
-  c.messages.push({ role: "user", content: text });
+  const msg = { role: "user", content: text || "" };
+  if (pendingAtt.length) { msg.attachments = pendingAtt; pendingAtt = []; renderAttachStrip(); }
+  c.messages.push(msg);
   if (c.title === "New chat") c.title = titleFrom(c.messages);
   c.updatedAt = Date.now(); save(); renderAll();
   streamReply(c);
@@ -650,7 +807,12 @@ function continueLast() {
 }
 function editUser(i) {
   if (busy) return; const c = cur(); if (!c) return;
-  input.value = c.messages[i].content; c.messages = c.messages.slice(0, i); c.updatedAt = Date.now(); save(); renderAll(); autosize(); input.focus();
+  input.value = c.messages[i].content;
+  // Attachments come back to the staging strip with the text, so an edited resend keeps them.
+  const att = c.messages[i].attachments;
+  pendingAtt = Array.isArray(att) ? att.filter((a) => a.kind === "image" ? a.dataUrl : a.kind === "text") : [];
+  renderAttachStrip();
+  c.messages = c.messages.slice(0, i); c.updatedAt = Date.now(); save(); renderAll(); autosize(); input.focus();
 }
 
 // ---------- settings ----------
@@ -1182,11 +1344,13 @@ function hideCostChip() { if (costChip) costChip.hidden = true; }
 async function updateEstimate() {
   if (!costChip) return;
   const text = input.value.trim();
-  if (!text || busy) { hideCostChip(); return; }
+  if ((!text && !pendingAtt.length) || busy) { hideCostChip(); return; }
   const c = cur();
   const history = c ? c.messages.map((m) => ({ role: m.role, content: m.content })) : [];
   history.push({ role: "user", content: text });
-  const payload = { messages: history, mode: modeSel ? modeSel.value : "auto", model: forcedModel() || "auto", privacyMode: privacyModeSel ? privacyModeSel.value : "normal" };
+  // Pictures ride the estimate as a COUNT only (the server prices them at a flat per-image token
+  // figure); the chip also mirrors the vision gate so a doomed send says so before the tap.
+  const payload = { messages: history, mode: modeSel ? modeSel.value : "auto", model: forcedModel() || "auto", privacyMode: privacyModeSel ? privacyModeSel.value : "normal", images: attImages() };
   const seq = ++estSeq;
   costChip.className = "cost-chip cc-loading"; costChip.textContent = "estimating…"; costChip.hidden = false;
   let est;
@@ -1195,7 +1359,7 @@ async function updateEstimate() {
     est = await r.json();
   } catch { if (seq === estSeq) hideCostChip(); return; }
   if (seq !== estSeq) return;                       // a newer keystroke already superseded this
-  if (busy || !input.value.trim()) { hideCostChip(); return; }
+  if (busy || (!input.value.trim() && !pendingAtt.length)) { hideCostChip(); return; }
   renderCostChip(est);
 }
 function renderCostChip(est) {
@@ -1203,7 +1367,7 @@ function renderCostChip(est) {
   let cls = "cost-chip", label = est.estCost || "";
   if (est.backend === "cloud") { cls += est.free ? " cc-free" : " cc-cloud"; label = (est.model ? est.model + " · " : "") + (est.estCost || ""); }
   else if (est.backend === "gpu-heavy") { cls += " cc-heavy" + (est.warm ? "" : " cc-cold"); label = "Heavy GPU · " + (est.estCost || ""); }
-  else if (est.backend === "blocked") { cls += " cc-cold"; label = "Blocked · " + (privacyModeSel ? privacyModeSel.value : "") + " mode"; }
+  else if (est.backend === "blocked") { cls += " cc-cold"; label = est.blocked === "attachments_unsupported" ? "Blocked · model can't see pictures" : "Blocked · " + (privacyModeSel ? privacyModeSel.value : "") + " mode"; }
   else { cls += " cc-free"; label = est.estCost || "included"; }   // gpu-light (always-on)
   costChip.className = cls;
   const lat = est.estLatency && est.estLatency !== "a few seconds" ? ` <span class="cc-lat">${escapeHtml(est.estLatency)}</span>` : "";
@@ -1226,7 +1390,22 @@ if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setIt
 // Privacy mode persists, re-filters the picker to the allowed providers, and refreshes the estimate.
 if (privacyModeSel) privacyModeSel.addEventListener("change", () => { try { localStorage.setItem(LS_PMODE, privacyModeSel.value); } catch {} applyPrivacyFilter(); updateEstimate(); });
 // Model pick persists immediately (matches Mode) and flips the "via OpenRouter" spend indicator live.
-if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateModelTrigger(); updateCloudBadge(); updateEstimate(); });
+if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateModelTrigger(); updateCloudBadge(); updateEstimate(); updateAttachGate(); });
+// Attachments: button opens the picker; picked/pasted/dropped files stage into the strip.
+if (attachBtn && attachFile) {
+  attachBtn.addEventListener("click", () => attachFile.click());
+  attachFile.addEventListener("change", async () => { await addFiles(attachFile.files); attachFile.value = ""; });
+}
+input.addEventListener("paste", (e) => {
+  const files = e.clipboardData && e.clipboardData.files;
+  if (files && files.length) { e.preventDefault(); addFiles(files); }
+});
+{
+  const footer = document.querySelector("#neural-glass footer") || document.body;
+  footer.addEventListener("dragover", (e) => { if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) { e.preventDefault(); footer.classList.add("att-drag"); } });
+  footer.addEventListener("dragleave", () => footer.classList.remove("att-drag"));
+  footer.addEventListener("drop", (e) => { footer.classList.remove("att-drag"); if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) { e.preventDefault(); addFiles(e.dataTransfer.files); } });
+}
 settingsBtn.addEventListener("click", openSettings);
 sclose.addEventListener("click", closeSettings);
 ssave.addEventListener("click", saveSettingsUI);
