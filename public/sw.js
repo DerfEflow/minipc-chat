@@ -1,11 +1,11 @@
 // Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v43-launch";
+const CACHE = "dominion-ai-v44-install";
 const SHELL = [
   "/",
   "/index.html",
   "/setup.html",
-  "/dominion-tenant.css?v=1",
-  "/dominion-tenant.js?v=1",
+  "/dominion-tenant.css?v=2",
+  "/dominion-tenant.js?v=2",
   "/dominion-vault.css?v=1",
   "/app.js?v=33",
   "/dominion-ui.css?v=38",

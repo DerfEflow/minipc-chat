@@ -238,3 +238,18 @@
 @media (prefers-reduced-motion: reduce) {
   .dt-tenant-layer *, .dt-tenant-layer *::before, .dt-tenant-layer *::after { animation: none !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
+
+/* ---- One-time install prompt card ---- */
+.dt-install {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  z-index: 2147483000; display: flex; align-items: center; gap: 14px;
+  width: min(480px, calc(100vw - 24px)); padding: 13px 15px;
+  background: linear-gradient(180deg, rgba(4, 16, 24, .98), rgba(1, 7, 12, .98));
+  border: 1px solid rgba(143, 208, 244, .4);
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+  box-shadow: 0 22px 54px rgba(0, 0, 0, .72), 0 0 22px rgba(112, 255, 130, .1), inset 0 1px 0 rgba(210, 240, 255, .12);
+}
+.dt-install-copy { flex: 1; min-width: 0; }
+.dt-install-copy b { display: block; color: #dff2ff; font-size: 13px; letter-spacing: .04em; }
+.dt-install-copy span { display: block; margin-top: 2px; color: #8fb0c4; font-size: 11.5px; line-height: 1.45; }
+.dt-install-actions { display: flex; gap: 8px; flex: none; }

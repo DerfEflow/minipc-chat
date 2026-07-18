@@ -257,6 +257,7 @@
         showToast("Guide progress could not be saved.", "error");
       }
     }
+    maybeShowInstall();   // the natural moment: they just finished the tour
   }
 
   async function openGuide() {
@@ -293,6 +294,52 @@
     } else if (result === "cancel") showToast("Checkout canceled. No charge was made.", "neutral");
   }
 
+  // ---- One-time install prompt (shown after the tutorial, never while installed) ----
+  const INSTALL_LS = "dominion.installNudge.v1";
+  let installPrompt = null;
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    installPrompt = event;
+    maybeShowInstall();
+  });
+  const isInstalled = () => window.matchMedia?.("(display-mode: standalone)").matches || window.navigator.standalone === true;
+  const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const installDone = () => { try { localStorage.setItem(INSTALL_LS, "1"); } catch {} };
+  const installSeen = () => { try { return localStorage.getItem(INSTALL_LS) === "1"; } catch { return false; } };
+  // Debug hook: append ?install-nudge to force the card (visual verification without browser heuristics).
+  const forceNudge = new URLSearchParams(window.location.search).has("install-nudge");
+
+  function maybeShowInstall() {
+    if (!state.account || isInstalled() || installSeen() && !forceNudge) return;
+    if (state.account.multiTenant && (!state.account.consented || !state.account.tutorialSeen)) return;
+    if (!installPrompt && !isIos() && !forceNudge) return;   // nothing actionable to offer this browser yet
+    if (document.querySelector(".dt-install")) return;
+    ensureLayer();
+    const card = node("div", "dt-install");
+    const copy = node("div", "dt-install-copy");
+    copy.append(node("b", "", "Install Dominion AI"), node("span", "", "Keep it one tap away, full screen, like any app."));
+    const actions = node("div", "dt-install-actions");
+    const later = node("button", "dt-secondary-button", "Not now");
+    later.type = "button";
+    later.addEventListener("click", () => { installDone(); card.remove(); });
+    const install = node("button", "dt-primary-button", "Install");
+    install.type = "button";
+    install.addEventListener("click", async () => {
+      if (installPrompt) {
+        const p = installPrompt; installPrompt = null;
+        try { p.prompt(); await p.userChoice; } catch {}
+        installDone(); card.remove();
+      } else {
+        copy.replaceChildren(node("b", "", "On iPhone:"), node("span", "", "Tap the Share button (the square with the arrow), then choose \"Add to Home Screen\"."));
+        install.remove();
+        later.textContent = "Got it";
+      }
+    });
+    actions.append(later, install);
+    card.append(copy, actions);
+    state.layer.append(card);
+  }
+
   async function runInit() {
     ensureLayer();
     let account;
@@ -306,6 +353,7 @@
     await handleTopupQuery();
     if (!state.account.multiTenant) {
       state.guide.hidden = true;
+      maybeShowInstall();
       return;
     }
     if (!state.account.consented) {
@@ -319,6 +367,7 @@
       return;
     }
     state.guide.hidden = false;
+    maybeShowInstall();
   }
 
   function init() {
