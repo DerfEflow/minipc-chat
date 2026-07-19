@@ -12,3 +12,4 @@ corpus/
 node_modules
 .DS_Store
 .devdata/
+.snapshots/
