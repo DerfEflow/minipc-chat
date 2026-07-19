@@ -72,7 +72,7 @@ Process follows the highest tier a move touches, per move.
 | L-2 | Billing races (autoRecharge mutex, addSponsoredSpend atomicity) predate this build | Guest parallel builds can double-charge | OPEN, due Phase 8.2 before guest flip |
 | L-3 | Merge-to-main coordination with concurrent sessions | Integration risk | OPEN, due at merge |
 | L-4 | Real-device push verification on iOS (home-screen install requirement) | Guest UX honesty | OPEN, due Phase 4.8 |
-| L-5 | Toggle state is per-device (localStorage) only; the SOW also called for a server-side per-user flag | Low: the mode re-arms with one tap on a second device | OPEN, deliberately deferred to Phase 2, where the per-user IDE store is created anyway. Adding a tenancy column for one boolean now, then a store immediately after, would be churn. NOT a silent simplification: recorded here on purpose |
+| L-5 | Toggle state was per-device only | Low | CLOSED in Phase 2: prefs live in the per-account IDE store, `POST /ide/prefs` on every flip, and a device with no stored opinion adopts the account's. A device that HAS an opinion keeps it, so the phone in your hand outranks a decision some other machine made |
 | L-6 | Phase 1 motion never visually confirmed by me | Aesthetic risk only | OPEN, needs Fred's eyes. The preview pane times out on screenshot with the animated chassis (known environment breakage), so geometry was verified numerically instead: shell settles at -112vh, works at 0, z-index 70, 0.45s shared curve |
 
 Mandatory-write rule: an item goes in this ledger the moment it is discovered, with a placeholder,
@@ -94,7 +94,7 @@ rather than being guessed silently. Done is not declared with OPEN high-impact i
 | --- | --- | --- |
 | 0 Groundwork | DONE | Worktree `minipc-chat-ide` on `feat/ide-mode` from e7aae5d; 6 rulings locked; FITS pack open; `ide.mjs` gate + `IDE_MODE` env + `/account.ideMode`; ide_test 7/7; all 28 existing suites green; verified live on devboot (owner true / guest false) |
 | 1 Toggle + reveal | DONE | Drawer toggle + `#ide-root` third reveal, stage-lift motion (shell -112vh out the top, works rise from 104vh), mutual exclusion wired both ways, Escape, composer trigger, SW v61 + `?v=1` trio. Verified live in-browser: lift geometry numerically correct, server authoritative over localStorage, guest walled, zero console errors, 29/29 suites |
-| 2 Workspace + job spine | not started | |
+| 2 Workspace + job spine | DONE | `idejobs.mjs` disk-journalled durable spine (replay, reattach, restart recovery, per-user multi-job registry) + `ide.mjs` workspace registry/prefs/gate stack + `/ide/*` routes + `isProtectedPath` carve-out on roots. 31/31 suites. Verified live: a job COMPLETED with zero clients attached then replayed 8 events; a container killed mid-job came back sealed `interrupted`, never "running" |
 | 3 Router + Assignment Board | not started | |
 | 4 Background persistence + callback | not started | |
 | 5 Build engine | not started | |

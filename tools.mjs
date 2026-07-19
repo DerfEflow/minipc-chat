@@ -424,6 +424,15 @@ export function assertNotProtected(name, args) {
   }
   return { ok: true };
 }
+// The same carve-out patterns, exposed for callers that guard a PATH or a plain string rather
+// than a named tool call (Dominion Works validates workspace roots with this). One source of
+// truth deliberately: a second copy of these patterns would drift, and drift here means the
+// backup drive stops being carved out.
+export function isProtectedPath(s) {
+  const str = String(s == null ? "" : s);
+  for (const re of PROTECTED_RE) if (re.test(str)) return true;
+  return false;
+}
 
 // E2: render a gated export result honestly for the model — blocked exports say WHY, warnings
 // ride along on success (the model must relay them, never bury them).

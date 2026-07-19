@@ -51,6 +51,9 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   const dyn = ["/chat", "/memory", "/toolruns", "/tool-confirm", "/artifacts", "/mentor", "/ledger", "/evals", "/rules", "/prompts", "/persona", "/finetune", "/reviews", "/pipeline", "/tool-overlays",
     "/account", "/billing", "/admin", "/forge", "/content", "/setup", "/connectors", "/api/images",
+    // Dominion Works: live state, workspaces, and the job SSE stream. Caching any of these would
+    // show a stale build or replay a finished job as if it were running.
+    "/ide",
     // "/chats" and "/chatlog" are NOT covered by "/chat": the match is exact-or-prefix-with-slash,
     // so /chats/sync would otherwise be cached and served stale to the device that just synced.
     "/chats", "/chatlog"];

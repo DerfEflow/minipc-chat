@@ -134,12 +134,22 @@
     }
   }
 
-  function setEngaged(on, { reveal = false } = {}) {
+  function setEngaged(on, { reveal = false, push = true } = {}) {
     state.engaged = !!on;
     writeEngaged(state.engaged);
     paintToggle();
     if (!state.engaged) closePanel();
     else if (reveal) openPanel();
+    // Remember it on the ACCOUNT too, so flipping it on the laptop is already on when the phone
+    // opens (ledger L-5). The local copy stays authoritative for the first paint: the switch must
+    // never wait on a network round trip to look right.
+    if (push) {
+      fetch("/ide/prefs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ engaged: state.engaged }),
+      }).catch(() => {});
+    }
   }
 
   function initToggleRow() {
@@ -180,8 +190,20 @@
       const a = await r.json();
       state.allowed = a && a.ideMode === true;
     } catch {}
-    if (!state.allowed) { state.engaged = false; closePanel(); }
+    if (!state.allowed) { state.engaged = false; closePanel(); paintToggle(); return; }
     paintToggle();
+    // Now that we know we are allowed, adopt the account's remembered switch position if this
+    // device has never set one. A device that HAS a stored preference keeps it: the person holding
+    // this phone gets the last word over what some other device decided.
+    try {
+      const r = await fetch("/ide/state", { headers: { accept: "application/json" } });
+      if (!r.ok) return;
+      const s = await r.json();
+      const deviceHasOpinion = (() => { try { return localStorage.getItem(ENGAGED_KEY) !== null; } catch { return false; } })();
+      if (!deviceHasOpinion && s && s.prefs && s.prefs.engaged === true) {
+        setEngaged(true, { reveal: false, push: false });
+      }
+    } catch {}
   }
 
   function init() {

@@ -21,7 +21,7 @@ import { timingSafeEqual, createHash } from "node:crypto";
 import { join, normalize, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { TOOL_DEFS, toolDefs, WRITE_TOOLS, runTool, toolMeta, assertNotProtected, effectivePermission, needsConfirm, lifecycle, passConfirmGate } from "./tools.mjs";
+import { TOOL_DEFS, toolDefs, WRITE_TOOLS, runTool, toolMeta, assertNotProtected, isProtectedPath, effectivePermission, needsConfirm, lifecycle, passConfirmGate } from "./tools.mjs";
 import { createMemoryStore } from "./memory.mjs";
 import { createArtifactStore } from "./artifacts.mjs";
 import { createMentor, MENTOR_ROLES } from "./mentor.mjs";
@@ -50,7 +50,8 @@ import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore } from "./forge.mjs";
-import { createIdeGate, IDE_MODE_DEFAULT } from "./ide.mjs";
+import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT } from "./ide.mjs";
+import { createIdeJobs } from "./idejobs.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
@@ -946,6 +947,35 @@ const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
 // Fred's ruling 2026-07-19: guests stay dark until Phase 8 (hardening), so the default is "owner".
 const ideGate = createIdeGate(cfgGet("IDE_MODE", IDE_MODE_DEFAULT));
 const ideAllowed = (T) => ideGate.allowed(T);
+// Workspace/prefs store per ACCOUNT: the owner keeps the global data dir (his path stays
+// byte-for-byte what it was), everyone else gets their own tenant directory, the same isolation
+// pattern memory/artifacts/chatsync already use.
+const IDE_STORES = new Map();
+function ideStoreFor(T) {
+  const key = T && T.isOwner ? "owner" : String((T && T.uid) || "anon");
+  if (!IDE_STORES.has(key)) {
+    const dir = T && T.isOwner ? DATA_DIR : join(DATA_DIR, "users", key);
+    IDE_STORES.set(key, createIdeStore({ dir, isProtectedPath }));
+  }
+  return IDE_STORES.get(key);
+}
+// The durable job spine. Unlike CHAT_JOBS (in-memory, 45min TTL) every structural event is
+// journalled to disk, because a build has to survive a container restart, not just a page reload.
+const ideJobs = createIdeJobs({ dir: dataPath("ide"), log: (m) => console.log(m) });
+// Restart recovery. Jobs whose journal has no terminal event were being driven by a process that
+// no longer exists, so they are sealed as interrupted rather than left looking alive. Saying
+// "interrupted, work up to here is on disk" is honest; showing a spinner forever is not.
+{
+  const rec = ideJobs.loadFromDisk();
+  if (rec.recovered) console.log(`[dominion-ai] ide jobs: recovered ${rec.recovered}, sealed ${rec.interrupted} as interrupted`);
+}
+// `billing` is declared further down, so it is read through a thunk rather than captured here:
+// capturing it directly is a temporal-dead-zone crash at boot. The indirection is deliberate.
+const ideFeature = createIdeFeature({
+  gate: ideGate, storeFor: ideStoreFor, jobs: ideJobs,
+  billing: { canChat: (email) => billing.canChat(email) },
+  multiTenant: MULTI_TENANT, log: (m) => console.log(m),
+});
 // Cloudflare Access JWT verification: identity comes from a SIGNATURE, not from a hostname.
 // ACCESS_JWT=enforce requires a valid JWT (production); "prefer" verifies when present and falls
 // back to the header when absent (migration); "off" is header-only (devboot rig + tests).
@@ -1010,6 +1040,68 @@ async function meterTurn(T, costUsd, promptText, answer) {
 
 // ===================== SaaS endpoints (account / billing / admin / onboarding) =====================
 const sjson = (res, code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+
+/* ---- Dominion Works (IDE mode) HTTP surface -------------------------------------------------
+ * All decisions live in ide.mjs (createIdeFeature); this is transport only: resolve the tenant,
+ * hand the body over, write the result. The one exception is /ide/job/attach, which needs the raw
+ * response object for SSE, so ownership is checked here via canAttach and the stream is wired to
+ * the job spine's replay-then-tail.
+ */
+async function handleIde(req, res, u) {
+  const T = resolveTenant(req);
+  const path = u.pathname;
+  const send = (r) => sjson(res, r.status || 200, r.body);
+
+  // SSE reattach: replay from ?from= then live-tail. This is how a build that kept running while
+  // the app was closed comes back on screen with its history intact.
+  if (req.method === "GET" && path === "/ide/job/attach") {
+    const gateCheck = ideFeature.canAttach(T, u.searchParams.get("job"));
+    if (gateCheck.status !== 200) return send(gateCheck);
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
+    const write = (o) => { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
+    const unsubscribe = ideJobs.attach(String(u.searchParams.get("job") || ""),
+      u.searchParams.get("from"),
+      (ev) => { if (ev === null) { try { res.end(); } catch {} } else write(ev); });
+    res.on("close", unsubscribe);
+    return;
+  }
+
+  if (req.method === "GET" && path === "/ide/state") return send(ideFeature.state(T));
+  if (req.method === "GET" && path === "/ide/jobs") return send(ideFeature.listJobs(T));
+  if (req.method === "GET" && path === "/ide/workspaces") return send(ideFeature.listWorkspaces(T));
+
+  const body = (await readJsonBody(req)) || {};
+  if (req.method === "POST" && path === "/ide/prefs") return send(ideFeature.setPrefs(T, body));
+  if (req.method === "POST" && path === "/ide/workspace") return send(ideFeature.createWorkspace(T, body));
+  if (req.method === "POST" && path === "/ide/workspace/update") return send(ideFeature.updateWorkspace(T, body));
+  if (req.method === "POST" && path === "/ide/workspace/delete") return send(ideFeature.removeWorkspace(T, body));
+  if (req.method === "POST" && path === "/ide/job/stop") return send(ideFeature.stopJob(T, body));
+  if (req.method === "POST" && path === "/ide/job") {
+    return send(ideFeature.startJob(T, body, { runner: runIdeProbe }));
+  }
+  return sjson(res, 404, { error: "unknown ide route" });
+}
+
+/*
+ * The Phase 2 probe job. It is NOT a build and is never presented as one: it emits a short, real
+ * sequence of structural events and completes, so the spine (journal, replay, reattach, restart
+ * recovery, multi-job registry) is proven end to end before the Phase 5 build engine relies on it.
+ * No model call, no tool call, no spend. It runs detached from the request that started it, which
+ * is the property the whole feature is built around.
+ */
+function runIdeProbe(job) {
+  const step = (ms, fn) => setTimeout(() => { try { fn(); } catch {} }, ms);
+  ideJobs.emit(job.id, { type: "plan", title: "Spine probe", moves: [
+    { id: "m1", title: "Confirm the job survives the client" },
+    { id: "m2", title: "Confirm the journal replays" },
+  ] });
+  step(400, () => ideJobs.emit(job.id, { type: "move", id: "m1", title: "Confirm the job survives the client", state: "running" }));
+  step(1200, () => ideJobs.emit(job.id, { type: "move", id: "m1", title: "Confirm the job survives the client", state: "done" }));
+  step(1600, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "running" }));
+  step(2400, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "done" }));
+  step(2600, () => ideJobs.emit(job.id, { type: "cost", usd: 0, credits: 0, note: "Probe jobs never spend." }));
+  step(2800, () => ideJobs.finish(job.id, { type: "done", message: "Spine probe complete." }));
+}
 
 // The caller's account view: role, status, onboarding flags, and (non-owner) their credit/sponsor state.
 async function handleAccount(req, res, u) {
@@ -3493,6 +3585,8 @@ const server = http.createServer(async (req, res) => {
     if (path === "/mentor/reject" && req.method === "POST") return handleMentorReject(req, res);
     if (["/ledger", "/evals", "/rules", "/prompts", "/finetune", "/reviews", "/pipeline", "/tool-overlays"].some((b) => path === b || path.startsWith(b + "/"))) return handleFlywheel(req, res, u);
     if (path === "/persona" || path.startsWith("/persona/")) return handlePersona(req, res, u);
+
+    if (path === "/ide" || path.startsWith("/ide/")) return handleIde(req, res, u);
 
     if (path === "/ollama" || path.startsWith("/ollama/")) {
       const rest = path.slice("/ollama".length) || "/";
