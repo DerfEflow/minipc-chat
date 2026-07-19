@@ -323,6 +323,20 @@ const nearBottom = () => main.scrollHeight - main.scrollTop - main.clientHeight 
 main.addEventListener("scroll", () => { followStream = nearBottom(); }, { passive: true });
 const scroll = (force) => { if (force) followStream = true; if (followStream) main.scrollTop = main.scrollHeight; };
 function mkAct(label, fn, title) { const b = document.createElement("button"); b.className = "act"; b.textContent = label; if (title) b.title = title; b.onclick = fn; return b; }
+// A produced document, as a control you can actually press. The server guarantees one of these
+// per exported file (Fred, 2026-07-19: "generate a downloadable document" used to end in an
+// artifact id and a server path, which is not a document you can open).
+const FILE_ICON = { pdf: "📕", docx: "📘", xlsx: "📗", csv: "📗", md: "📄", txt: "📄", json: "🧾", html: "🌐" };
+function fileChip(f) {
+  const a = document.createElement("a");
+  a.className = "filechip";
+  a.href = f.url;
+  a.download = f.name;
+  const ext = (f.name.split(".").pop() || "").toLowerCase();
+  a.textContent = (FILE_ICON[ext] || "📄") + " Download " + f.name;
+  a.title = "Save " + f.name + " to this device";
+  return a;
+}
 // The user prompt that preceded message i (feeds hallucination check / save lesson / convert-to-eval).
 function precedingUser(c, i) { for (let k = i - 1; k >= 0; k--) if (c.messages[k].role === "user") return c.messages[k].content; return ""; }
 async function copyText(t) { try { await navigator.clipboard.writeText(t); } catch { const a = document.createElement("textarea"); a.value = t; document.body.appendChild(a); a.select(); try { document.execCommand("copy"); } catch {} a.remove(); } }
@@ -380,6 +394,8 @@ function renderMsg(m, i, isLastAi) {
       bit(ctxBits.join(" · "), ci ? "Tap to see which items were loaded" : "Context loaded for this answer (per-item detail unavailable for this message)", ci ? () => toggleCtxDetail(turn, mm, ci) : null);
     }
     if (m.meta.tools) bit("🔧 " + m.meta.tools, "Tap to show this message's tool log", () => openTools({ runIds: m.meta.runIds, chatId: curId, label: "this message" }));
+    // Documents this turn produced stay downloadable after a reload.
+    if (Array.isArray(m.meta.files)) for (const f of m.meta.files) turn.appendChild(fileChip(f));
     // Per-exchange usage total (Fred, 2026-07-18): the running cost counter is gone from the
     // composer; the honest numbers land HERE, once, after the answer finishes.
     if (m.meta.outputTokens || m.meta.costUsd) {
@@ -856,6 +872,12 @@ function processEvent(st, ev) {
     note.textContent = "📄 saved artifact: " + ev.title + " (tap to open)";
     note.onclick = () => { openArtifacts(); openArtifact(ev.id); };
     inner.insertBefore(note, tools); scroll();
+  } else if (ev.type === "file") {
+    // A document the turn produced. It arrives as a real download control rather than as a link
+    // the model might forget to write, and it is recorded on the message so it survives a reload.
+    st.files = st.files || [];
+    if (!st.files.some((f) => f.url === ev.url)) st.files.push({ name: ev.name, url: ev.url });
+    inner.insertBefore(fileChip({ name: ev.name, url: ev.url }), tools); scroll();
   } else if (ev.type === "mentor") {
     const note = document.createElement("div"); note.className = "ctx";
     note.textContent = "🎓 mentor: " + ev.score + "/10" + (ev.priority && ev.priority !== "none" ? " · revise " + ev.priority : "") + (ev.findings ? " · " + ev.findings + " finding(s)" : "");
@@ -932,6 +954,8 @@ function finalizeSession(st) {
   if (st.done) {
     const msg = { role: "assistant", content: final || "(no response)" };
     if (st.doneMeta) { msg.meta = st.doneMeta; if (st.ctxItems) msg.meta.contextItems = st.ctxItems; if (st.doneMeta.mode) c.lastMode = st.doneMeta.mode; }
+    // Produced documents belong to the message, so the download survives a reload and a device hop.
+    if (st.files && st.files.length) { msg.meta = msg.meta || {}; msg.meta.files = st.files; }
     c.messages.push(msg); c.updatedAt = Date.now(); save();
     if (speakOn && final) speakAnswer(final);   // voice: read the finished answer aloud (toggle)
   } else if (final) {
@@ -1326,7 +1350,17 @@ async function showArtifactList() {
     const st = document.createElement("span"); st.className = "abadge " + a.status; st.textContent = a.status;
     const vc = document.createElement("span"); vc.textContent = "v" + a.version + (a.versionCount > 1 ? " of " + a.versionCount : "");
     const wc = document.createElement("span"); wc.textContent = a.wordCount + " words";
-    top.append(ty, st, vc, wc); it.append(ttl, top); it.onclick = () => openArtifact(a.id); alist.appendChild(it);
+    top.append(ty, st, vc, wc);
+    // The list used to be titles only, which read as a dead index (Fred, 2026-07-19: "all it does
+    // is list the names"). Every row now says plainly that it opens, and offers the two formats
+    // people actually want without opening anything.
+    const row = document.createElement("div"); row.className = "arow aitem-acts";
+    row.append(
+      mkAct("Open", (e) => { e.stopPropagation(); openArtifact(a.id); }, "Read this document"),
+      mkAct("PDF", (e) => { e.stopPropagation(); downloadArtifact(a, "pdf", { confirmReview: false }); }, "Download as PDF"),
+      mkAct("Word", (e) => { e.stopPropagation(); downloadArtifact(a, "docx", { confirmReview: false }); }, "Download as a Word document"),
+    );
+    it.append(ttl, top, row); it.onclick = () => openArtifact(a.id); alist.appendChild(it);
   }
 }
 async function openArtifact(id) {
@@ -1365,10 +1399,11 @@ async function openArtifact(id) {
   }
   adetail.appendChild(vrow);
   const c = document.createElement("div"); c.className = "acontent"; c.textContent = a.content; adetail.appendChild(c);
+  // Downloads sit directly under the document, where someone reading it looks for them.
+  adetail.appendChild(exportRow(a));
   const acts = document.createElement("div"); acts.className = "arow"; acts.style.marginTop = "8px";
   acts.append(
     mkAct("Revise", () => reviseArtifact(a)),
-    mkAct("Export", () => exportArtifact(a)),
     mkAct(a.status === "final" ? "Unfinalize" : "Mark final", () => markFinal(a)),
     mkAct("Review", () => reviewArtifact(a.id)),
     mkAct("Duplicate", async () => { const r = await aApi("/artifacts/duplicate", { id: a.id }); if (r.item) openArtifact(r.item.id); }),
@@ -1403,16 +1438,37 @@ async function showDiff(id, from, to) {
 async function reviseArtifact(a) { const t = await askText({ kicker: "Artifact", title: "Revise — the full new content", value: a.content, saveLabel: "Save version", hint: "Edit freely. Saving creates a new version; earlier ones are kept." }); if (t != null && t.trim()) { await aApi("/artifacts/version", { id: a.id, content: t }); openArtifact(a.id); } }
 // Export safety (spec, E2): the SERVER gate runs the seven checks — docx/pdf/xlsx/csv now export
 // natively. Sensitive-data detection blocks until explicitly overridden; other warnings ride along.
-async function exportArtifact(a) {
-  const f = await askText({ kicker: "Export", title: "Export format", multiline: false, value: "md", saveLabel: "Export", hint: "One of: md, txt, json, html, docx, pdf, xlsx, csv." }); if (f == null) return;
-  if (!a.mentorReviewed && !confirm("This artifact hasn't been mentor-reviewed. Export anyway?")) return;
-  let r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim() });
+// Download an artifact as a real file. The old version asked the user to TYPE a format, then
+// showed the server's own file path in an alert — a path on a machine he cannot browse, which is
+// why Fred said the documents landed "on the mini PC or some obscure file" (2026-07-19). The
+// server was already returning a downloadUrl; now it is actually used, and the browser saves the
+// file where the user's downloads go.
+async function downloadArtifact(a, fmt, { confirmReview = true } = {}) {
+  // The review nudge belongs on the detail view, where someone is deliberating. A one-tap download
+  // from the list should just download; the sensitive-data block below is the real gate.
+  if (confirmReview && !a.mentorReviewed && !confirm("This artifact hasn't been mentor-reviewed. Download anyway?")) return;
+  let r = await aApi("/artifacts/export", { id: a.id, format: fmt });
   if (r.blocked === "sensitive_data") {
-    if (!confirm("⚠ Possible sensitive data detected: " + (r.detected || []).join(", ") + "\n\nExport anyway?")) return;
-    r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim(), override_sensitive: true });
+    if (!confirm("⚠ Possible sensitive data detected: " + (r.detected || []).join(", ") + "\n\nDownload anyway?")) return;
+    r = await aApi("/artifacts/export", { id: a.id, format: fmt, override_sensitive: true });
   }
-  const warns = r.gate && r.gate.warnings && r.gate.warnings.length ? "\n\nWarnings: " + r.gate.warnings.map((w) => w.message || w.check).join("; ") : "";
-  alert(r.error ? "Export: " + r.error : "Exported to " + r.path + warns + (r.queued ? "\n\nForge conversion queued — the " + f.trim() + " lands next to it shortly." : r.warning ? "\n\n" + r.warning : ""));
+  if (r.error) return alert("Download failed: " + r.error);
+  if (!r.downloadUrl) return alert("The file was created but the server did not return a download link.\n\nServer path: " + (r.path || "unknown"));
+  const link = document.createElement("a");
+  link.href = r.downloadUrl;
+  link.download = r.fileName || (a.title + "." + fmt);
+  document.body.appendChild(link); link.click(); link.remove();
+  const warns = r.gate && r.gate.warnings && r.gate.warnings.length ? " Warnings: " + r.gate.warnings.map((w) => w.message || w.check).join("; ") : "";
+  if (warns) setTimeout(() => alert("Downloaded " + (r.fileName || "") + "." + warns), 300);
+}
+// The format row: one tap per format, no typing.
+const EXPORT_FORMATS = ["pdf", "docx", "xlsx", "csv", "md", "txt", "html", "json"];
+function exportRow(a) {
+  const row = document.createElement("div");
+  row.className = "arow aexports";
+  const lab = document.createElement("span"); lab.textContent = "Download as:"; row.appendChild(lab);
+  for (const f of EXPORT_FORMATS) row.appendChild(mkAct(f.toUpperCase(), () => downloadArtifact(a, f), "Download this artifact as " + f.toUpperCase()));
+  return row;
 }
 // Mark final offers a mentor review first (spec: review trigger on final) — one tap, never a blocker.
 async function markFinal(a) {
