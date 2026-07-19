@@ -100,8 +100,9 @@
     flame:   { name: "Flame",   desc: "Fuller reasoning and voice, for work with real weight.", cost: "More credits · slower" },
     furnace: { name: "Furnace", desc: "The whole framework, applied deliberately. Highest quality.", cost: "Most credits · slowest" },
   };
-  const ANGLE = { ember: -52, flame: 0, furnace: 52 };
+  const ANGLE = { ember: -38, flame: 0, furnace: 38 };
   const KEY = "dominion.forgeTier";
+  const MODE_KEY = "dominion.forgeModeEnabled";
 
   const getTier = () => { const t = localStorage.getItem(KEY); return TIERS.includes(t) ? t : "ember"; };
   function setTier(t) {
@@ -109,48 +110,42 @@
     localStorage.setItem(KEY, t);
     if (triggerEl) triggerEl.setAttribute("data-tier", t);
   }
-  // Ember => "" so the chat turn omits forgeMode entirely and stays byte-identical to today.
-  window.forgeTierValue = () => { const t = getTier(); return t === "ember" ? "" : t; };
+  const getForgeMode = () => localStorage.getItem(MODE_KEY) === "1";
+  function setForgeMode(on) {
+    localStorage.setItem(MODE_KEY, on ? "1" : "0");
+    if (triggerEl) triggerEl.setAttribute("data-forge", on ? "on" : "off");
+  }
+  // The dial chooses reasoning effort. Forge Mode is a separate, explicit tool/agent gate.
+  window.forgeTierValue = getTier;
+  window.forgeModeValue = getForgeMode;
   window.forgeCurrentTier = getTier;
 
   let triggerEl = null;
 
-  const FLAME_SVG =
-    '<svg class="dial-flame" viewBox="0 0 60 74" aria-hidden="true">' +
-      '<defs>' +
-        '<linearGradient id="fg-outer" x1="0" y1="1" x2="0" y2="0">' +
-          '<stop offset="0" stop-color="#ff5a1e"/><stop offset=".55" stop-color="#ff8a3a"/><stop offset="1" stop-color="#ffb454"/>' +
-        '</linearGradient>' +
-        '<linearGradient id="fg-inner" x1="0" y1="1" x2="0" y2="0">' +
-          '<stop offset="0" stop-color="#ffb04a"/><stop offset="1" stop-color="#ffe08a"/>' +
-        '</linearGradient>' +
-      '</defs>' +
-      '<path class="f-outer" d="M30 2C34 16 48 22 48 42a18 18 0 0 1-36 0C12 30 22 30 22 20c0-6-2-9 8-18z"/>' +
-      '<path class="f-inner" d="M30 24c2 8 10 12 10 22a10 10 0 0 1-20 0c0-7 6-9 6-15 0-3-1-5 4-7z"/>' +
-      '<circle class="f-core" cx="30" cy="52" r="5"/>' +
-    '</svg>';
-
   function openDial() {
     const cur = getTier();
+    let forgeOn = getForgeMode();
     const scrim = el("div", "dial-scrim");
     const card = el("div", "dial-card");
     card.setAttribute("data-tier", cur);
+    card.setAttribute("data-forge", forgeOn ? "on" : "off");
     card.innerHTML =
-      '<div class="dial-kicker">Forge Intensity</div>' +
-      '<div class="dial-title">Ember · Flame · Furnace</div>' +
-      '<div class="dial-stage" tabindex="0" role="slider" aria-valuemin="0" aria-valuemax="2" aria-label="Forge intensity">' +
-        '<div class="dial-glow"></div><div class="dial-bezel"></div><div class="dial-ticks"></div>' +
-        '<div class="dial-knob"></div>' +
-        '<div class="dial-core">' + FLAME_SVG + '</div>' +
+      '<div class="dial-kicker">Dominion Effort Core</div>' +
+      '<div class="dial-title">The Forge</div>' +
+      '<div class="dial-stage" tabindex="0" role="slider" aria-valuemin="0" aria-valuemax="2" aria-label="Model effort">' +
+        '<img class="dial-art dial-art-ember" src="/assets/forge-dial/forge-dial-ember-v2.jpg" alt="" aria-hidden="true">' +
+        '<img class="dial-art dial-art-flame" src="/assets/forge-dial/forge-dial-flame-v2.jpg" alt="" aria-hidden="true">' +
+        '<img class="dial-art dial-art-furnace" src="/assets/forge-dial/forge-dial-furnace-v2.jpg" alt="" aria-hidden="true">' +
+        '<div class="dial-knob" aria-hidden="true"><i class="dial-rod"></i><i class="dial-tip"></i><i class="dial-hub"></i></div>' +
+        '<button class="dial-step dial-station dial-station-ember" data-t="ember"><span>Ember</span></button>' +
+        '<button class="dial-step dial-station dial-station-flame" data-t="flame"><span>Flame</span></button>' +
+        '<button class="dial-step dial-station dial-station-furnace" data-t="furnace"><span>Furnace</span></button>' +
+        '<button class="dial-forge-mode" type="button" aria-pressed="false"><span>Forge Mode</span><small>Standby</small></button>' +
+        '<div class="dial-glass-live" aria-hidden="true"></div>' +
         '<div class="dial-spark s1"></div><div class="dial-spark s2"></div><div class="dial-spark s3"></div>' +
       '</div>' +
       '<div class="dial-readout"><div class="dial-tier-name"></div><div class="dial-tier-desc"></div><span class="dial-cost"></span></div>' +
-      '<div class="dial-scale">' +
-        '<button class="dial-step" data-t="ember">Ember</button>' +
-        '<button class="dial-step" data-t="flame">Flame</button>' +
-        '<button class="dial-step" data-t="furnace">Furnace</button>' +
-      '</div>' +
-      '<button class="dial-done">Done</button>';
+      '<button class="dial-done">Seal Setting</button>';
     scrim.appendChild(card);
     document.body.appendChild(scrim);
 
@@ -159,6 +154,7 @@
     const nameEl = card.querySelector(".dial-tier-name");
     const descEl = card.querySelector(".dial-tier-desc");
     const costEl = card.querySelector(".dial-cost");
+    const forgeButton = card.querySelector(".dial-forge-mode");
     const steps = Array.prototype.slice.call(card.querySelectorAll(".dial-step"));
 
     let live = cur;
@@ -169,10 +165,17 @@
       const m = TIER_META[t];
       nameEl.textContent = m.name; descEl.textContent = m.desc; costEl.textContent = m.cost;
       stage.setAttribute("aria-valuenow", TIERS.indexOf(t));
+      stage.setAttribute("aria-valuetext", m.name);
       steps.forEach((s) => s.setAttribute("aria-current", s.dataset.t === t ? "true" : "false"));
+    }
+    function paintForge() {
+      card.setAttribute("data-forge", forgeOn ? "on" : "off");
+      forgeButton.setAttribute("aria-pressed", forgeOn ? "true" : "false");
+      forgeButton.querySelector("small").textContent = forgeOn ? "Engaged" : "Standby";
     }
     function apply(t, persist) { live = t; paint(t); if (persist !== false) setTier(t); }
     paint(cur);
+    paintForge();
 
     knob.addEventListener("click", (e) => { e.stopPropagation(); apply(TIERS[(TIERS.indexOf(live) + 1) % TIERS.length]); });
     stage.addEventListener("wheel", (e) => {
@@ -187,10 +190,10 @@
 
     // drag to rotate -> nearest detent (top = flame, right = furnace, left = ember)
     let dragging = false;
-    const center = () => { const r = stage.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; };
+    const center = () => { const r = stage.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height * .56 }; };
     const angleToTier = (deg) => (deg <= -26 ? "ember" : deg >= 26 ? "furnace" : "flame");
     stage.addEventListener("pointerdown", (e) => {
-      if (e.target.closest(".dial-step") || e.target.closest(".dial-done")) return;
+      if (e.target.closest(".dial-step") || e.target.closest(".dial-forge-mode") || e.target.closest(".dial-done")) return;
       dragging = true; try { stage.setPointerCapture(e.pointerId); } catch (er) {}
     });
     stage.addEventListener("pointermove", (e) => {
@@ -205,12 +208,21 @@
     stage.addEventListener("pointercancel", endDrag);
 
     steps.forEach((s) => s.addEventListener("click", (e) => { e.stopPropagation(); apply(s.dataset.t); }));
+    forgeButton.addEventListener("click", (e) => {
+      e.stopPropagation();
+      forgeOn = !forgeOn;
+      setForgeMode(forgeOn);
+      paintForge();
+      card.classList.remove("forge-pulse");
+      requestAnimationFrame(() => card.classList.add("forge-pulse"));
+    });
     card.querySelectorAll(".dial-spark").forEach((sp, i) => sp.style.setProperty("--drift", (i % 2 ? -1 : 1) * (4 + i * 3) + "px"));
 
     let closed = false;
     const close = () => {
       if (closed) return; closed = true;
       setTier(live);
+      setForgeMode(forgeOn);
       scrim.classList.remove("in");
       document.removeEventListener("keydown", onKey, true);
       setTimeout(() => scrim.remove(), 240);
@@ -228,6 +240,7 @@
     triggerEl = document.getElementById("forge-trigger");
     if (!triggerEl) return;
     triggerEl.setAttribute("data-tier", getTier());
+    triggerEl.setAttribute("data-forge", getForgeMode() ? "on" : "off");
     triggerEl.addEventListener("click", (e) => { e.preventDefault(); openDial(); });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initTrigger);

@@ -840,10 +840,14 @@ async function streamReply(c) {
         temperature: settings.temperature,
         confirmTools: !!settings.confirmTools,
         chatId: c.id,
-        // Forge dial (ember/flame/furnace). forgeTierValue() returns "" at Ember, so the field is
-        // omitted entirely and the turn is byte-identical to pre-dial behavior. Only flame/furnace
-        // ride the wire.
-        ...(window.forgeTierValue && window.forgeTierValue() ? { forgeMode: window.forgeTierValue() } : {}),
+        // The dial controls reasoning effort. The side switch independently engages Forge Mode's
+        // special tool/agent logic; neither control impersonates the other.
+        // Send effort ONLY when raised above Ember: the server treats an explicit wolfeTier as final
+        // (server.mjs ~2583), so sending "ember" every turn would suppress the automatic depth boost
+        // that As-Fred / Deep-Think / Long-Context modes get. Omitting it at Ember lets those escalate
+        // as before, while Flame/Furnace still override deliberately.
+        ...((window.forgeTierValue && window.forgeTierValue() !== "ember") ? { wolfeTier: window.forgeTierValue() } : {}),
+        ...(window.forgeModeValue && window.forgeModeValue() ? { forgeMode: true } : {}),
       }),
     });
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);

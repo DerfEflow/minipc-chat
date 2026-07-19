@@ -2575,11 +2575,15 @@ async function handleChat(req, res) {
         needs: { tools: attachTools, memory: needs.memory, retrieval: !skipRetrieval, mentor_review: needs.mentorReview }, privacyRisk });
   console.log(`[dominion-ai] /chat route -> ${model} · ${mode} (${reason}) · tools=${attachTools ? "on" : "off"} retrieval=${skipRetrieval ? "skip" : "on"}`);
 
-  // Wolfe Logic tier for this turn (declared before reqCtx because the Forge gate below reads the dial):
-  // Ember always; Flame on deep_think/long_context; Furnace on As-Fred and Forge Mode. Forge Mode is
-  // the dial (ember|flame|furnace, or legacy boolean true = furnace).
-  const forgeDial = input.forgeMode === true ? "furnace" : (input.forgeMode || input.wolfeTier || "");
-  const wolfeTier = tierFor({ forgeMode: forgeDial, asFred: mode === "as_fred", hardProblem: (mode === "deep_think" || mode === "long_context") });
+  // The effort dial and Forge Mode are deliberately independent controls. wolfeTier selects the
+  // reasoning framework; forgeMode engages the special machine/tool gate. String forgeMode values
+  // remain accepted for older clients, where the one control carried both meanings.
+  const legacyForgeTier = typeof input.forgeMode === "string" ? input.forgeMode : "";
+  const explicitWolfeTier = input.wolfeTier || legacyForgeTier;
+  const wolfeTier = explicitWolfeTier
+    ? normalizeTier(explicitWolfeTier)
+    : tierFor({ asFred: mode === "as_fred", hardProblem: (mode === "deep_think" || mode === "long_context") });
+  const forgeEnabled = input.forgeMode === true || (!!legacyForgeTier && normalizeTier(legacyForgeTier) !== "ember");
   // Per-request tool context: the base CTX plus the live chat/mode (B2 scope for memory tools).
   const reqCtx = { ...(T.ctxBase || CTX), chatId, mode, model };
   // Per-user Forge: a non-owner who has ENABLED their own Forge node AND engaged Forge Mode this turn
@@ -2587,8 +2591,7 @@ async function handleChat(req, res) {
   // add the Forge tools to their wall for this turn. Carve-outs still hold node-side + hub-side.
   let forgeExtra = null;
   if (!T.isOwner) {
-    const forgeEngaged = !!forgeDial && normalizeTier(forgeDial) !== "ember";
-    const forgeOn = forgeEngaged && (() => { try { return forgeStore.status(T.uid).enabled; } catch { return false; } })();
+    const forgeOn = forgeEnabled && (() => { try { return forgeStore.status(T.uid).enabled; } catch { return false; } })();
     if (forgeOn) {
       forgeExtra = FORGE_TOOLS;
       reqCtx.hands = { dispatch: (tool, args) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000 }) };

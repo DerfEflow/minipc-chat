@@ -296,3 +296,277 @@
   .dial-spark { display: none; }
   .dfe-scrim, .dfe-panel, .dial-scrim, .dial-card { transition: opacity .12s ease; transform: none; }
 }
+
+/* ============================ Forge artifact v2 ============================
+   The rendered masters supply the material depth. Live HTML supplies exact labels, accessible
+   hit targets, a true rotating pointer, and the independent Forge Mode switch. */
+
+.dial-scrim {
+  place-items: center;
+  padding: 8px;
+  overflow: auto;
+  background:
+    radial-gradient(ellipse 58% 62% at 50% 47%, rgba(111, 38, 12, .24), transparent 64%),
+    radial-gradient(ellipse at 50% 50%, rgba(3, 8, 13, .7), rgba(0, 2, 5, .94));
+  backdrop-filter: blur(12px) saturate(1.18);
+}
+
+.dial-card {
+  position: relative;
+  width: min(460px, 97vw);
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 10px 12px 12px;
+  border-radius: 27px;
+  border: 1px solid rgba(227, 155, 101, .3);
+  background:
+    linear-gradient(180deg, rgba(255, 235, 208, .055), transparent 9%),
+    radial-gradient(ellipse at 50% 18%, rgba(116, 47, 18, .22), transparent 52%),
+    linear-gradient(145deg, rgba(12, 18, 24, .98), rgba(1, 5, 9, .99));
+  box-shadow:
+    0 48px 120px rgba(0, 0, 0, .88),
+    0 0 0 3px rgba(0, 3, 6, .8),
+    0 0 0 4px rgba(130, 76, 45, .24),
+    inset 0 1px 0 rgba(255, 232, 202, .16),
+    inset 0 -24px 58px rgba(0, 0, 0, .64);
+  scrollbar-width: none;
+}
+.dial-card::-webkit-scrollbar { display: none; }
+.dial-card[data-tier="flame"] { border-color: rgba(255, 151, 74, .46); box-shadow: 0 48px 120px rgba(0,0,0,.88), 0 0 0 3px rgba(0,3,6,.8), 0 0 0 4px rgba(173,88,38,.34), 0 0 44px rgba(255,91,24,.12), inset 0 1px 0 rgba(255,236,210,.19); }
+.dial-card[data-tier="furnace"] { border-color: rgba(255, 213, 151, .64); box-shadow: 0 48px 120px rgba(0,0,0,.9), 0 0 0 3px rgba(0,3,6,.82), 0 0 0 4px rgba(226,137,64,.42), 0 0 62px rgba(255,108,28,.22), inset 0 1px 0 rgba(255,248,232,.28); }
+
+.dial-kicker {
+  color: #d79a68;
+  font: 800 8px/1 "Bahnschrift", "Arial Narrow", sans-serif;
+  letter-spacing: .24em;
+}
+.dial-title {
+  margin: 3px 0 7px;
+  color: #f5e8db;
+  font: 750 14px/1 "Bahnschrift", "Arial Narrow", sans-serif;
+  letter-spacing: .2em;
+  text-shadow: 0 0 18px rgba(255, 138, 67, .22);
+}
+
+.dial-stage {
+  position: relative;
+  width: min(420px, max(250px, calc(66.667dvh - 120px)), calc(96vw - 24px));
+  height: auto;
+  aspect-ratio: 2 / 3;
+  margin: 0 auto;
+  border-radius: 22px;
+  overflow: hidden;
+  isolation: isolate;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+  background: #02070c;
+  box-shadow: 0 24px 58px rgba(0,0,0,.64), inset 0 0 0 1px rgba(255,216,178,.1);
+}
+.dial-stage:focus-visible { box-shadow: 0 24px 58px rgba(0,0,0,.64), 0 0 0 2px rgba(255, 188, 116, .7), 0 0 32px rgba(255, 112, 42, .22); }
+
+.dial-art {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(1.006);
+  transition: opacity .42s ease, filter .42s ease;
+}
+.dial-stage[data-tier="ember"] .dial-art-ember,
+.dial-stage[data-tier="flame"] .dial-art-flame,
+.dial-stage[data-tier="furnace"] .dial-art-furnace { opacity: 1; }
+.dial-stage[data-tier="ember"] .dial-art-ember { filter: contrast(1.04) saturate(1.05); }
+.dial-stage[data-tier="flame"] .dial-art-flame { filter: contrast(1.04) saturate(1.08); }
+.dial-stage[data-tier="furnace"] .dial-art-furnace { filter: contrast(1.03) saturate(1.09); }
+
+/* Exact live labels sit in the blank engraved plaques rendered into the artifact. */
+.dial-station {
+  position: absolute;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(1, 4, 7, .16);
+  color: #c5a788;
+  font: 800 clamp(7px, 2.35vw, 12px)/1 "Bahnschrift", "Arial Narrow", sans-serif;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 2px #000, 0 0 6px #000;
+  cursor: pointer;
+  transition: color .2s ease, background .2s ease, box-shadow .2s ease, transform .15s ease;
+}
+.dial-station:hover { color: #ffe0b9; background: rgba(73, 32, 13, .38); }
+.dial-station:active { transform: translateY(1px); }
+.dial-station[aria-current="true"] {
+  color: #fff4dc;
+  background: radial-gradient(ellipse, rgba(255, 128, 42, .34), rgba(64, 20, 7, .34) 72%);
+  box-shadow: inset 0 0 14px rgba(255, 133, 42, .32), 0 0 13px rgba(255, 104, 24, .22);
+  text-shadow: 0 1px 2px #000, 0 0 8px #ff8f38, 0 0 15px rgba(255, 83, 20, .7);
+}
+.dial-station-ember { left: 9.4%; top: 27.1%; width: 15.8%; height: 5.4%; }
+.dial-station-flame { left: 39.4%; top: 8.8%; width: 21.2%; height: 5.1%; }
+.dial-station-furnace { left: 76.5%; top: 27.1%; width: 15.8%; height: 5.4%; }
+
+/* A radioactive-tube pointer with a white-hot core; geometry stays live and genuinely rotates. */
+.dial-knob {
+  position: absolute;
+  z-index: 6;
+  inset: auto;
+  left: 48%;
+  top: 30.8%;
+  width: 4%;
+  height: 27.2%;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+  transform-origin: 50% 92.5%;
+  cursor: grab;
+  transition: transform .42s cubic-bezier(.2, .85, .2, 1), filter .35s ease;
+}
+.dial-knob:active { cursor: grabbing; }
+.dial-rod {
+  position: absolute;
+  left: 22%; top: 4%; bottom: 7%; width: 56%;
+  border: 1px solid rgba(255, 238, 204, .9);
+  border-radius: 999px;
+  background: linear-gradient(90deg, #7b1b09 0, #ff6a1c 18%, #fff8d9 48%, #ffd36f 63%, #e43a0c 100%);
+  box-shadow: 0 0 3px #fff, 0 0 8px #ffbe65, 0 0 17px #ff5d1b, 0 0 30px rgba(255,52,7,.62), inset 0 0 3px #fff;
+}
+.dial-tip {
+  position: absolute;
+  left: 50%; top: -1%; width: 160%; aspect-ratio: 1;
+  transform: translateX(-50%) rotate(45deg);
+  border: 1px solid #fff5d6;
+  background: radial-gradient(circle at 34% 30%, #fff, #ffe89b 21%, #ff8f2d 48%, #8f1b08 78%);
+  box-shadow: 0 0 5px #fff, 0 0 14px #ff8c2e, 0 0 25px rgba(255,65,14,.7);
+}
+.dial-hub {
+  position: absolute;
+  left: 50%; top: 92.5%; width: 290%; aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1px solid rgba(255, 218, 175, .8);
+  background:
+    radial-gradient(circle at 36% 29%, #fff6d2 0 5%, #ffad4e 9%, #67230f 18%, #17100d 37%, #9c5329 41%, #21150f 56%, #050505 72%),
+    conic-gradient(#ffe0ad, #6d3015, #e89951, #31160d, #ffe0ad);
+  box-shadow: 0 0 7px #ffb75f, 0 0 17px rgba(255,83,20,.62), 0 7px 13px rgba(0,0,0,.75), inset 0 1px 1px rgba(255,255,255,.64);
+}
+.dial-stage[data-tier="ember"] .dial-knob { filter: brightness(.8) saturate(.8); }
+.dial-stage[data-tier="furnace"] .dial-knob { filter: brightness(1.2) saturate(1.14) drop-shadow(0 0 10px rgba(255,164,64,.72)); }
+
+/* Reflection is above the live pointer, making the rod read as sealed beneath the convex dome. */
+.dial-glass-live {
+  position: absolute;
+  z-index: 7;
+  left: 7.5%; right: 7.5%; top: 16.8%; height: 58.5%;
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 37% 18% at 37% 18%, rgba(255,255,255,.18), transparent 72%),
+    linear-gradient(116deg, transparent 0 29%, rgba(235,249,255,.05) 36%, rgba(255,255,255,.15) 40%, transparent 47% 100%);
+  mix-blend-mode: screen;
+  filter: blur(.25px);
+  opacity: .68;
+}
+
+.dial-forge-mode {
+  position: absolute;
+  z-index: 10;
+  left: 70.3%; top: 79.3%; width: 21.8%; height: 11.1%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid rgba(207, 142, 89, .22);
+  border-radius: 8px;
+  background: radial-gradient(ellipse at 50% 20%, rgba(121,59,25,.16), rgba(1,5,8,.48));
+  color: #d2b28e;
+  font: 900 clamp(7px, 2.1vw, 11px)/1 "Bahnschrift", "Arial Narrow", sans-serif;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 2px #000;
+  cursor: pointer;
+  transition: color .22s ease, background .22s ease, border-color .22s ease, box-shadow .22s ease, transform .1s ease;
+}
+.dial-forge-mode small { color: #776352; font-size: .68em; letter-spacing: .15em; transition: color .2s ease; }
+.dial-forge-mode:hover { color: #ffe4bd; border-color: rgba(255,184,105,.44); }
+.dial-forge-mode:active { transform: translateY(1px) scale(.985); }
+.dial-card[data-forge="on"] .dial-forge-mode {
+  color: #fff9e7;
+  border-color: rgba(255, 225, 168, .86);
+  background: radial-gradient(ellipse at 50% 28%, rgba(255,232,173,.38), rgba(255,120,32,.3) 37%, rgba(76,21,6,.74) 76%);
+  box-shadow: inset 0 0 16px rgba(255,191,91,.48), 0 0 5px #fff2c9, 0 0 17px #ff9a3d, 0 0 34px rgba(255,67,14,.66);
+  text-shadow: 0 0 6px #fff, 0 0 13px #ff8f32;
+}
+.dial-card[data-forge="on"] .dial-forge-mode small { color: #fff0c9; }
+.dial-card[data-forge="on"]::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 22px;
+  pointer-events: none;
+  box-shadow: inset 0 0 36px rgba(255, 95, 18, .13);
+}
+
+.dial-readout { margin: 7px 2px 0; min-height: 48px; }
+.dial-tier-name { font-size: 18px; }
+.dial-tier-desc { margin-top: 3px; font-size: 10.5px; }
+.dial-cost { margin-top: 4px; font-size: 8.5px; }
+.dial-scale { display: none; }
+.dial-done {
+  margin-top: 7px;
+  padding: 10px;
+  border-radius: 10px;
+  color: #241006;
+  background: linear-gradient(180deg, #ffe2b0, #ef9b50 54%, #b95724);
+  border-color: rgba(255, 213, 157, .72);
+  box-shadow: 0 4px 17px rgba(255,105,30,.24), inset 0 1px 0 rgba(255,255,255,.6), inset 0 -3px 7px rgba(75,20,5,.3);
+}
+
+.dial-spark { z-index: 5; left: 49%; top: 59%; width: 3px; height: 3px; }
+.dial-card[data-tier="ember"] .dial-spark { display: none; }
+.dial-card[data-tier="flame"] .dial-spark { animation-duration: 1.7s; }
+.dial-card.forge-pulse { animation: forge-artifact-pulse .58s ease-out; }
+@keyframes forge-artifact-pulse {
+  0% { filter: brightness(1); }
+  34% { filter: brightness(1.28) saturate(1.16); }
+  100% { filter: brightness(1); }
+}
+
+.forge-trigger[data-forge="on"]::after {
+  content: "";
+  position: absolute;
+  right: 3px; top: 3px;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #fff3c4;
+  box-shadow: 0 0 4px #fff, 0 0 10px #ff9f42, 0 0 18px #ff4d14;
+}
+
+@media (max-width: 520px) {
+  .dial-card { padding: 8px 9px 9px; border-radius: 22px; }
+  .dial-kicker { font-size: 7px; }
+  .dial-title { margin-bottom: 5px; font-size: 12px; }
+  .dial-readout { min-height: 43px; }
+  .dial-tier-name { font-size: 16px; }
+  .dial-tier-desc { font-size: 9.5px; line-height: 1.3; }
+  .dial-done { margin-top: 5px; padding: 9px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dial-art, .dial-knob, .dial-forge-mode { transition: none !important; }
+  .dial-card.forge-pulse { animation: none !important; }
+}
