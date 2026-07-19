@@ -45,6 +45,7 @@ import { createAccessVerifier } from "./accessjwt.mjs";
 import { createImagesFeature } from "./images.mjs";
 import { shapeCloudParams, paramRetryAdjust, TOOL_CAP } from "./cloudparams.mjs";
 import { createChatSync } from "./chatsync.mjs";
+import { unkeptIntent, intentNudge } from "./intentguard.mjs";
 import { createGoogleProvider } from "./google.mjs";
 import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
@@ -1302,6 +1303,15 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
   // model's JUDGMENT (the code carve-out is the only hard wall). Set 2026-07-12. Tool-less turns
   // skip them along with the file/project doctrine: no hands, no hands-rules.
   if (withTools) {
+  // THE KEPT PROMISE (Fred, 2026-07-19). Stated first because it is the product's core claim: a
+  // model that announces work and then stops has failed the user more completely than one that
+  // simply says it cannot help. The server enforces this too (intentguard.mjs), but a model told
+  // the rule up front rarely has to be corrected after the fact.
+  s += "\n\nTHE KEPT PROMISE (before every other rule):\n" + [
+    "- Never end a turn on an intention. If you say you will look something up, read a file, check a project, or take any other action, you must DO IT IN THE SAME TURN by calling the tool, before you stop.",
+    "- Do not narrate what you are about to do and then stop. Either call the tool now, or answer now with what you already know.",
+    "- If you cannot do the thing (no tool, no access, no permission), say so plainly in one line and give your best answer with what you have. That is a kept turn. A promise with nothing behind it is not.",
+  ].join("\n");
   s += "\n\nOPERATING STANDARDS (always in force):\n" + [
     "1. Reversibility before speed. Before any write, overwrite, or delete, make sure an undo exists first (git commit or stash for tracked files, a timestamped copy for untracked ones). When two routes reach the same result, take the reversible one.",
     "2. Company and customer data. Never add to, delete, or change data that a company or a paying customer has entered and wants to keep, and never touch the backups that download to the mini-PC, ever. You MAY operate the platforms Fred uses (Railway, Supabase, Vercel, GitHub): read them to inform him, change configuration and environment variables, monitor deploys, and provision new databases. If a fix appears to need a change to customer data (a broken table, a bad row), do not make it. State the exact change and why, then let Fred decide; he will usually route that work elsewhere.",
@@ -3014,7 +3024,7 @@ async function handleChat(req, res) {
       const CONT_MAX = 16;
       // Seamless-continuation nudge (user role: agent-tuned models weight a trailing user turn highest).
       const CONTINUE_NUDGE = "[Dominion system notice — not Fred] Your reply was cut off at the output-length limit before it finished. Continue from the EXACT point you stopped. Do not repeat any earlier text, do not add a preface, recap, or apology, do not restate the last line — resume mid-sentence if that is where you stopped and write straight through to the natural end of the full response.";
-      let concludeNudged = false, emptyRetried = false, lastReasoning = "";
+      let concludeNudged = false, emptyRetried = false, intentNudged = false, lastReasoning = "", promisePrefix = "";
 
       for (let round = 0; round < CLOUD_MAX_ROUNDS && !aborted; round++) {
         roundsUsed = round + 1;
@@ -3150,8 +3160,9 @@ async function handleChat(req, res) {
           continue;   // feed the tool results back for the next round
         }
 
-        // Final answer for this turn (no tool calls this round).
-        answer = (or.content || "");
+        // Final answer for this turn (no tool calls this round). A promise kept after the guard
+        // fired carries its opening line with it (see promisePrefix below).
+        answer = promisePrefix + (or.content || "");
         if (or.reasoning) lastReasoning = or.reasoning;
         // No-truncation: if the model stopped ONLY because it hit the output cap (finish_reason
         // "length"), resume seamlessly and keep streaming until it reaches a natural stop or the
@@ -3181,6 +3192,27 @@ async function handleChat(req, res) {
           emptyRetried = true;
           messages.push({ role: "user", content: "[Dominion system notice — not Fred] Your last response contained no visible text. Write your final answer now as plain text." });
           continue;
+        }
+        // THE KEPT-PROMISE GUARD (Fred, 2026-07-19). A turn may not end on "let me go look at that"
+        // with nothing done. The three older guards test the SHAPE of a reply (truncated, empty,
+        // out of tool budget); this one reads its MEANING, because a broken promise arrives with a
+        // perfectly healthy shape: real text, clean stop, no tool calls. One nudge per turn.
+        if (!intentNudged && answer && round + 1 < CLOUD_MAX_ROUNDS && !concludePhase) {
+          const intent = unkeptIntent(answer, { toolsAvailable: !!(cloudTools && cloudTools.length) });
+          if (intent.unkept) {
+            intentNudged = true;
+            console.log(`[dominion-ai] kept-promise guard fired on ${cloudModel}: "${intent.promise.slice(0, 90)}"`);
+            messages.push({ role: "assistant", content: answer });
+            messages.push({ role: "user", content: intentNudge(intent.promise) });
+            // The promise is already on the user's screen, so it STAYS: what follows reads as the
+            // model saying what it will do and then doing it. Keeping it also keeps the saved
+            // transcript identical to what was displayed (the separator is streamed too, so the
+            // stored answer and the visible answer match byte for byte).
+            promisePrefix = answer + "\n\n";
+            sse({ type: "token", delta: "\n\n" });
+            working("acting");
+            continue;
+          }
         }
         break;
       }
@@ -3236,7 +3268,7 @@ async function handleChat(req, res) {
       if (w.waitedMs > 1500) console.log(`[dominion-ai] heavy GPU warmed in ${Math.round(w.waitedMs / 1000)}s`);
     }
 
-    let last = null;
+    let last = null, intentNudgedLocal = false, localPromisePrefix = "";
     for (let round = 0; round < MAX_ROUNDS && !aborted; round++) {
       roundsUsed = round + 1;
       // heartbeat phase: think-less runs (and post-tool rounds) go straight to writing
@@ -3335,12 +3367,35 @@ async function handleChat(req, res) {
         continue;
       }
 
-      // final answer — stream it out in small chunks for a live feel
-      const answer = stripThink(msg.content) || "(no response)";
+      // THE KEPT-PROMISE GUARD on the local path (same rule as the cloud loop above): a turn may
+      // not end on "let me go look at that" with nothing done. One nudge per turn, and only while
+      // a round remains to actually keep the promise in.
+      const localText = stripThink(msg.content);
+      if (!intentNudgedLocal && localText && round + 1 < MAX_ROUNDS && !opts.noTools) {
+        const intent = unkeptIntent(localText, { toolsAvailable: true });
+        if (intent.unkept) {
+          intentNudgedLocal = true;
+          console.log(`[dominion-ai] kept-promise guard fired on ${model}: "${intent.promise.slice(0, 90)}"`);
+          messages.push({ role: "assistant", content: localText });
+          messages.push({ role: "user", content: intentNudge(intent.promise) });
+          // Show the promise, then the keeping of it (the separator is streamed so the saved
+          // transcript matches the screen exactly).
+          for (let i = 0; i < localText.length && !aborted; i += 28) { sse({ type: "token", delta: localText.slice(i, i + 28) }); await sleep(8); }
+          sse({ type: "token", delta: "\n\n" });
+          localPromisePrefix = localText + "\n\n";
+          continue;
+        }
+      }
+
+      // final answer — stream it out in small chunks for a live feel. `answer` carries the whole
+      // turn (so the saved transcript is complete), but only the NEW text is streamed: anything the
+      // guard already put on screen must not be sent twice.
+      const fresh = localText || "(no response)";
+      const answer = localPromisePrefix + fresh;
       const size = 28;
-      for (let i = 0; i < answer.length && !aborted; i += size) {
-        sse({ type: "token", delta: answer.slice(i, i + size) });
-        if (i + size < answer.length) await sleep(8);
+      for (let i = 0; i < fresh.length && !aborted; i += size) {
+        sse({ type: "token", delta: fresh.slice(i, i + size) });
+        if (i + size < fresh.length) await sleep(8);
       }
       if (aborted) break;   // stopped mid-stream -> fall through to the interrupted log, NOT "done"
       // Phase 4: in Draft mode, a generated document is auto-saved as a versioned artifact
