@@ -33,8 +33,8 @@ Process follows the highest tier a move touches, per move.
 | A2 | A third reveal can transform the same four shell elements without fighting the existing two | `[assumed]` | Build Phase 1, verify in real Chrome over CDP (preview pane cannot judge motion) |
 | A3 | The service worker can fetch /ide/jobs through Cloudflare Access when woken by a push | `[assumed]` | UNVERIFIED and load-bearing: the payload-free design means a wake-up with no readable state produces NO notification at all. Probe on Fred's Pixel before guest exposure |
 | A4 | Per-user Forge nodes stay connected long enough for multi-move builds | `[assumed]` | Phase 4.9 node-loss handling makes this survivable either way |
-| A5 | Provider implicit caching will actually pay once prefixes are byte-stable | `[assumed]` | Measure cache hitPct in usage.jsonl before and after Phase 5.2 |
-| A6 | 200-file scaffold cap and 60s per-file dispatch are adequate for real app scaffolds | `[assumed]` | Time a real scaffold in Phase 5.3; batch if it drags |
+| A5 | Provider implicit caching will pay once prefixes are byte-stable | `[assumed]` | The prefix is now a frozen constant and a test asserts it is byte-identical across moves. Whether providers actually credit it is still UNMEASURED: compare cache hitPct in usage.jsonl once real builds run |
+| A6 | Writing files one dispatch at a time is fast enough | `[assumed]` | The engine writes per file through the node rather than via scaffold_project, so the 200-file cap does not apply, but per-file latency is UNMEASURED against a real node. Time it during the wiring step |
 | A7 | Owner has exactly one node connected during IDE work | `[guessed]` | Phase 8.4 pins the node per workspace, removing the guess |
 
 ## Abort conditions (stop and escalate to Fred)
@@ -97,7 +97,7 @@ rather than being guessed silently. Done is not declared with OPEN high-impact i
 | 2 Workspace + job spine | DONE | `idejobs.mjs` disk-journalled durable spine (replay, reattach, restart recovery, per-user multi-job registry) + `ide.mjs` workspace registry/prefs/gate stack + `/ide/*` routes + `isProtectedPath` carve-out on roots. 31/31 suites. Verified live: a job COMPLETED with zero clients attached then replayed 8 events; a container killed mid-job came back sealed `interrupted`, never "running" |
 | 3 Router + Assignment Board | DONE | `iderouter.mjs` deterministic table (extension + folder + keyword, confidence bands, cheap tiebreaker only when ambiguous, degrades to the free answer on failure) + Assignment Board UI + live route preview + `POST /ide/route/preview`. Verified live: design work reaches gpt-5.6-terra, images reach Dominion Forge, grunt work reaches the cheap tier, each with its reason |
 | 4 Background persistence + callback | DONE | `idepush.mjs` (VAPID ES256, payload-free wake-ups, escalation policy, per-device subs) + sw push/notificationclick + status rail visible on the CHAT surface + reattach triad + pause-and-ask with structured one-tap answers + node/account-aware escalation. 36/36 suites. Verified live: a build asked, sat frozen spending nothing with nobody attached, was answered from another client, and finished itself; a real VAPID-signed push went to Google and the dead device was auto-pruned |
-| 5 Build engine | not started | |
+| 5 Build engine | CORE DONE, WIRING PENDING | `ideengine.mjs`: smallness check, blueprint parsing, manifest context, frozen cacheable prefix, snapshot-before-write, carve-out pre-scan with a readable refusal, discovered verify command, one repair round, budget stop-before-overspend, meter-once-on-finally. 18 engine tests, 37 suites total, all with injected fakes. REMAINING: wire a real `build` job kind to cloudChatStream + a live hands node and run it against a real project |
 | 6 Two lenses | not started | |
 | 7 Scale tier | not started | |
 | 8 Hardening + guest rollout | not started | |
