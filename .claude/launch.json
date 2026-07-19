@@ -12,6 +12,12 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["devboot.mjs"],
       "port": 8095
+    },
+    {
+      "name": "forge-images-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["devboot-images.mjs"],
+      "port": 8288
     }
   ]
 }

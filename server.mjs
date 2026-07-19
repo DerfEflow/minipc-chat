@@ -42,6 +42,7 @@ import { createUsersStore } from "./tenancy.mjs";
 import { createTenantResolver, filterToolDefs, FORGE_TOOLS } from "./tenantstores.mjs";
 import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors.mjs";
 import { createAccessVerifier } from "./accessjwt.mjs";
+import { createImagesFeature } from "./images.mjs";
 import { createGoogleProvider } from "./google.mjs";
 import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
@@ -1547,6 +1548,22 @@ function meterOcr(T, costUsd) {
     }
   } catch {}
 }
+
+// Dominion Forge Images (images.mjs): OpenAI image generation + Batch API, riding the same
+// wall/metering rails as OCR. Pixels are never stored server-side — the device gallery owns them.
+const imagesFeature = createImagesFeature({
+  key: () => OPENAI_KEY,
+  apiBase: cfgGet("OPENAI_IMAGES_BASE", "https://api.openai.com"),
+  model: cfgGet("DOMINION_IMAGE_MODEL", "gpt-image-1.5"),
+  dataDir: dataPath("images"),
+  resolveTenant,
+  screenContent,
+  meter: (T, costUsd) => meterOcr(T, costUsd),
+  canChat: (email) => billing.canChat(email),
+  billingAccount: (email) => billing.account(email),
+  logUsage,
+  log: (m) => console.log("[dominion-ai] " + m),
+});
 
 async function handleOcr(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
@@ -3285,6 +3302,12 @@ const server = http.createServer(async (req, res) => {
     if (path === "/connectors" || path.startsWith("/connectors/")) return handleConnectors(req, res, u);
 
     if (path === "/api/ocr" && req.method === "POST") return handleOcr(req, res);
+    if (path === "/api/images/config" && req.method === "GET") return imagesFeature.handleConfig(req, res);
+    if (path === "/api/images/generate" && req.method === "POST") return imagesFeature.handleGenerate(req, res);
+    if (path === "/api/images/batch" && req.method === "POST") return imagesFeature.handleBatchCreate(req, res);
+    if (path === "/api/images/batches" && req.method === "GET") return imagesFeature.handleBatchList(req, res);
+    if (path.startsWith("/api/images/batch/") && path.endsWith("/cancel") && req.method === "POST") return imagesFeature.handleBatchCancel(req, res, u);
+    if (path.startsWith("/api/images/batch/") && req.method === "GET") return imagesFeature.handleBatchGet(req, res, u);
     if (path === "/api/voice/transcribe" && req.method === "POST") return handleVoiceTranscribe(req, res);
     if (path === "/api/voice/tts" && req.method === "POST") return handleVoiceTts(req, res);
 
