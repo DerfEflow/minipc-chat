@@ -1,0 +1,203 @@
+/*
+ * Dominion AI — the feature map (Fred, 2026-07-19).
+ *
+ * THE PROBLEM: a user asks "make me an image" and the model tries to describe one, or says it
+ * cannot, when Dominion has a whole image studio one tap away. Ask any model where a feature lives
+ * and it invents an answer, because nothing ever told it what this app can do or where the controls
+ * are. Every model should be able to answer "what can this do, how do I use it, where is it".
+ *
+ * THE SHAPE, per Fred's instruction that this must not bloat every call: the INDEX below is small
+ * enough to ride every turn (roughly 200 tokens) and carries the two facts that matter most, what
+ * exists and where it is. The DETAIL is fetched on demand through the app_help tool, so the long
+ * copy costs nothing until someone actually asks.
+ *
+ * ACCURACY IS THE WHOLE VALUE. A confidently wrong location is worse than no answer, so `where`
+ * strings were read off the live interface rather than remembered. When the UI moves, this file
+ * moves with it: it is the single source of truth that both the prompt and the help tool read, and
+ * a weekly audit checks it against the shipped interface.
+ */
+
+export const FEATURES = [
+  {
+    id: "images",
+    brief: "generate images",
+    aliases: ["image", "images", "picture", "photo", "art", "draw", "generate image", "image generation", "forge images", "make an image"],
+    name: "Dominion Forge Images",
+    where: "the picture button in the message bar, bottom left next to the paperclip and the flame",
+    what: "Generates images. The whole interface slides to the right and the image studio takes the screen.",
+    how: [
+      "Tap the picture button in the message bar. The interface slides right and Forge Images opens.",
+      "Type what you want in CREATIVE DIRECTIVE. REFINE rewrites a rough idea into a fuller prompt.",
+      "Pick RENDER FIDELITY (Low, Medium, High) and FRAME GEOMETRY (Square, Portrait, Landscape). The panel shows the token and cost estimate for the exact settings chosen.",
+      "IGNITE THE FORGE generates it now. Turning on BATCH FOUNDRY instead queues prompts and runs them at half price within 24 hours.",
+      "Finished images land in YOUR FORGED VISIONS, the vault on the right, where they can be opened, favorited, searched and downloaded.",
+      "Add reference plates (up to 10 images) to steer the look of an immediate forge.",
+    ],
+    notes: "Images are stored on the user's own device, never in the cloud. The back arrow or the close button returns to chat.",
+  },
+  {
+    id: "forge-dial",
+    brief: "effort and tool gate",
+    aliases: ["dial", "effort", "ember", "flame", "furnace", "forge mode", "thinking level", "reasoning effort"],
+    name: "The Forge dial (effort) and Forge Mode",
+    where: "the flame button in the message bar, bottom left",
+    what: "Sets how hard the model thinks, and separately whether it may use tools.",
+    how: [
+      "Tap the flame. The interface slides to the LEFT and the dial takes the screen.",
+      "Ember is the everyday floor, Flame is fuller reasoning, Furnace applies the whole framework and is slowest and most expensive.",
+      "FORGE MODE is a separate switch on the same panel: it is the gate that lets the assistant use its tools and act rather than only answer.",
+      "Seal Setting, the back arrow, or Escape returns to chat. The setting persists.",
+    ],
+  },
+  {
+    id: "attachments",
+    brief: "send files and photos",
+    aliases: ["attach", "attachment", "upload", "paperclip", "pdf", "word file", "spreadsheet file", "send a file", "photo upload"],
+    name: "Attachments",
+    where: "the paperclip in the message bar",
+    what: "Send pictures, PDFs, Word documents, spreadsheets and text files into the conversation.",
+    how: [
+      "Tap the paperclip and choose files.",
+      "PDFs, Word and Excel files are read on the device and their text rides along, so they work with every model.",
+      "A scanned PDF or a photo of a document is transcribed automatically when the chosen model cannot see images.",
+    ],
+  },
+  {
+    id: "documents",
+    brief: "make Word/PDF/Excel files",
+    aliases: ["document", "word", "docx", "pdf", "excel", "xlsx", "csv", "downloadable document", "create a document", "download a document", "export"],
+    name: "Documents and downloads",
+    where: "ask in chat; finished files appear as a Download button under the answer, and live in Artifacts",
+    what: "Creates real Word, PDF, Excel and CSV files from a conversation.",
+    how: [
+      "Ask for a document, for example: make that a Word document, or turn this into a PDF.",
+      "A Download button appears under the answer. Tap it and the file saves to the device.",
+      "Every document is also kept in Artifacts, where it can be reopened and downloaded again in any format.",
+    ],
+  },
+  {
+    id: "artifacts",
+    brief: "document library",
+    aliases: ["artifact", "artifacts", "library", "saved documents", "my documents"],
+    name: "Artifacts",
+    where: "the document button in the header controls",
+    what: "The library of documents the assistant has produced, with full version history.",
+    how: [
+      "Open Artifacts from the header. Each row has Open, PDF and Word buttons.",
+      "Open shows the whole document, its versions, and a Download row offering PDF, Word, Excel, CSV, Markdown, text, HTML and JSON.",
+      "Revise, compare versions, mark final, or request a review from inside the document.",
+    ],
+  },
+  {
+    id: "voice",
+    brief: "talk and listen",
+    aliases: ["voice", "speak", "microphone", "mic", "read aloud", "speech", "tts", "dictate"],
+    name: "Voice",
+    where: "the microphone and speaker buttons in the message bar",
+    what: "Speak instead of typing, and have answers read aloud.",
+    how: [
+      "Tap the microphone, speak, tap it again to send.",
+      "The speaker toggle reads every answer aloud as it arrives. Each answer also has its own speak button.",
+    ],
+  },
+  {
+    id: "memory",
+    brief: "durable facts",
+    aliases: ["memory", "remember", "recall", "saved facts"],
+    name: "Memory",
+    where: "the memory button in the header controls",
+    what: "Durable facts and preferences the assistant carries between conversations.",
+    how: [
+      "Add a fact directly in the Memory panel, or ask the assistant to remember something.",
+      "Approve, pin, edit, archive or delete anything it has saved.",
+    ],
+  },
+  {
+    id: "chat-sync",
+    brief: "chats on every device",
+    aliases: ["chat sync", "sync", "across devices", "phone and laptop", "continue on another device", "history sync"],
+    name: "Chats across devices",
+    where: "automatic, no control needed",
+    what: "Conversations follow the account between phone and computer.",
+    how: [
+      "Start on one device and continue on another. Chats sync when the app opens, when it returns to the foreground, and while it is open.",
+      "Deleting a chat on one device removes it from the others.",
+      "Image attachments do not travel between devices; their text does.",
+    ],
+  },
+  {
+    id: "models",
+    brief: "engine, mode, privacy",
+    aliases: ["model", "models", "operating mode", "mode", "privacy", "private", "trusted", "model picker", "which model"],
+    name: "Model, Operating Mode and Privacy",
+    where: "the three controls in the header, next to the Dominion name",
+    what: "Which model answers, how it works, and where the conversation is allowed to go.",
+    how: [
+      "Model picks the engine. Operating Mode sets the discipline (Fast, Normal, Deep Think, Long Context, Draft, Tool, Mentor, As Fred).",
+      "Privacy: Normal allows every provider, Trusted restricts to OpenAI and Anthropic direct plus local, Private uses the local model only.",
+      "A privacy setting is never silently overridden. A disallowed choice is refused and explained.",
+    ],
+  },
+  {
+    id: "tools",
+    brief: "what it did",
+    aliases: ["tool activity", "tools", "tool log", "actions", "what did you do"],
+    name: "Tool activity",
+    where: "the tools button in the header controls",
+    what: "The record of every action the assistant has taken, with what it ran and what came back.",
+    how: ["Open it from the header, or tap the tool line under any answer to see just that message's actions."],
+  },
+  {
+    id: "mentor",
+    brief: "critique and review",
+    aliases: ["mentor", "critique", "review", "improvement", "evals"],
+    name: "Mentor and improvement",
+    where: "the mentor button in the header controls",
+    what: "Independent critique of answers, plus the failure ledger, evaluations and prompt rules.",
+    how: ["Use Critique on any answer for a review, or open the panel for the ledger, evals and active rules."],
+  },
+  {
+    id: "setup",
+    brief: "account, credits, connectors",
+    aliases: ["setup", "connectors", "credits", "billing", "payment", "account", "integrations", "github", "stripe"],
+    name: "Setup, connectors and credits",
+    where: "the Setup button at the bottom of the conversation sidebar",
+    what: "Account, credits and billing, and the connectors that give the assistant reach into other services.",
+    how: [
+      "Open the sidebar with the menu button, then Setup at the bottom.",
+      "Credits and payment live here, as do connectors such as GitHub, Supabase, Stripe, Railway and Zapier.",
+    ],
+  },
+];
+
+/** The compact index that rides every turn. Name plus location only: enough to point correctly,
+ *  cheap enough to send always. The `what` copy stays behind app_help where it costs nothing. */
+export function featureIndex() {
+  return FEATURES.map((f) => `- ${f.name} (${f.brief}): ${f.where}`).join("\n");
+}
+
+// Queries arrive as "chat sync", "chat-sync", "image generation", "make a picture". Flatten
+// punctuation so a hyphen never decides whether a user gets an answer.
+const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+/** Full detail for one feature, for the app_help tool. Matches on id, name, alias or keyword. */
+export function featureHelp(topic) {
+  const q = norm(topic);
+  const render = (f) => [
+    f.name,
+    "WHERE: " + f.where,
+    "WHAT: " + f.what,
+    "HOW:",
+    ...f.how.map((h) => "  - " + h),
+    f.notes ? "NOTE: " + f.notes : "",
+  ].filter(Boolean).join("\n");
+
+  if (!q || q === "all" || q === "everything") return FEATURES.map(render).join("\n\n");
+  const hit = FEATURES.find((f) => norm(f.id) === q || norm(f.name) === q || (f.aliases || []).some((a) => norm(a) === q))
+    || FEATURES.find((f) => (f.aliases || []).some((a) => q.includes(norm(a)) || norm(a).includes(q)))
+    || FEATURES.find((f) => norm(f.name).includes(q) || q.includes(norm(f.id)))
+    || FEATURES.find((f) => norm(f.what + " " + f.how.join(" ")).includes(q));
+  if (hit) return render(hit);
+  return "No feature matches \"" + topic + "\". The features are: " + FEATURES.map((f) => f.name).join(", ") +
+    ". Ask for one of those, or for \"all\".";
+}

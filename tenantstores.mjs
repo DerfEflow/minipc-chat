@@ -26,6 +26,8 @@ export const SAFE_TOOLS = new Set([
   "create_docx", "create_pdf", "create_spreadsheet", "search_artifacts", "compare_artifacts",
   "remember", "recall_memory", "update_memory", "save_lesson", "request_review",
   "search_chats", "retrieve_context_pack",
+  // Every user, paying or not, gets to ask this app how it works and where its controls are.
+  "app_help",
   // NOTE: search_persona is DELIBERATELY absent. Non-owners never read the corpus CONTENTS. They get
   // only titles + a summary of what it contributes (via a read-only panel), and the "As Fred" voice
   // is shaped by the distilled profile summary, never by injecting Fred's raw writing. (Fred, 2026-07-16)

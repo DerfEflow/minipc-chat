@@ -46,6 +46,7 @@ import { createImagesFeature } from "./images.mjs";
 import { shapeCloudParams, paramRetryAdjust, TOOL_CAP } from "./cloudparams.mjs";
 import { createChatSync } from "./chatsync.mjs";
 import { unkeptIntent, intentNudge } from "./intentguard.mjs";
+import { featureIndex, featureHelp } from "./features.mjs";
 import { createGoogleProvider } from "./google.mjs";
 import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
@@ -684,6 +685,23 @@ async function logUsage(entry) {
 }
 const estTokens = (chars) => Math.ceil((chars || 0) / 4);
 
+// A produced document must reach the user as a BUTTON, not as a sentence the model may or may not
+// remember to write (Fred, 2026-07-19: he asked several times for a downloadable document and got
+// an artifact id and a server path instead). Every document tool's result carries
+// "Download: /exports/<file>" from describeExportResult; the moment one appears, the turn emits a
+// file event and the client renders a real download control. The model's prose stops being the
+// delivery mechanism, which is the whole point: the file arrives whether or not it mentions it.
+const EXPORT_URL_RE = /Download:\s*(\/exports\/[^\s)"']+)/;
+function emitFileIfAny(result, sse) {
+  try {
+    const m = EXPORT_URL_RE.exec(String(result || ""));
+    if (!m) return;
+    const url = m[1];
+    const name = decodeURIComponent(url.slice("/exports/".length));
+    sse({ type: "file", name, url });
+  } catch {}
+}
+
 // ==== Chat attachments (pictures + text files) =================================================
 // Wire shape (additive; absent = every path byte-identical to before): user turns may carry
 //   attachments: [{ kind:"image", name, mime, dataUrl } | { kind:"text", name, text }]
@@ -1287,6 +1305,14 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
     "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is " + new Date().toISOString().slice(0, 10) + ".",
     "Keep replies concise, direct, and honest. Never fabricate facts, quotes, sources, or events.",
   ].join(" ");
+  // THIS APP'S OWN FEATURES (Fred, 2026-07-19). Every model should be able to answer "what can this
+  // do, how do I use it, where is it" and, when a request matches a dedicated feature, point at the
+  // control instead of improvising. The index is deliberately small so it can ride every turn; the
+  // long copy lives behind the app_help tool and costs nothing until someone asks.
+  s += "\n\nDOMINION'S OWN FEATURES (this app, the one the user is in right now):\n" + featureIndex() +
+    "\n\nUsing this: when the user asks how to do something here, where a control is, or what this app can do, answer from the list above and name the exact control. When a request is what a dedicated feature is FOR (an image, a document, a file to read, speaking aloud), point them to it in one line before or instead of improvising: say what to tap. Never invent a control, a menu, or a location that is not listed above; if it is not listed, say plainly that you are not sure it exists here." +
+    (withTools ? " For step-by-step detail on any feature, call app_help with the feature name." : "");
+
   // HOUSE STYLE — Fred's response-format rules (2026-07-18), always in force, every model.
   s += "\n\nHOUSE STYLE (always in force, all replies):\n" + [
     "- No asterisks for emphasis or as separators unless the user explicitly asks for that formatting. Asterisks only for proper grammatical purposes. Carry emphasis with word choice and structure. (When writing content for the document-creation tools, markdown IS the correct format and stays.)",
@@ -3153,6 +3179,7 @@ async function handleChat(req, res) {
             if ((name === "run_python_sandbox" || name === "forge_send") && !failed) executedCodeThisTurn = true;
             if (name === "export_artifact" && !failed) exportedThisTurn = true;
             sse({ type: "tool", name, runId, cls, status: failed ? "failed" : "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
+            emitFileIfAny(result, sse);   // a produced document becomes a real download button
             await logToolRun({ ts: callStartedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", states: life.states, confirmedByUser: gate.confirmedByUser, autoApproved: gate.autoApproved || undefined, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model: cloudModel });
             toolMsg(String(result).slice(0, 8000));
             toolSummaries.push(name + " · " + (failed ? "failed" : "succeeded"));
@@ -3360,6 +3387,7 @@ async function handleChat(req, res) {
           if ((name === "run_python_sandbox" || name === "forge_send") && !failed) executedCodeThisTurn = true;   // code went live → review trigger
           if (name === "export_artifact" && !failed) exportedThisTurn = true;                                     // export happened → review trigger
           sse({ type: "tool", name, runId, cls, status: failed ? "failed" : "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
+          emitFileIfAny(result, sse);   // a produced document becomes a real download button
           await logToolRun({ ts: startedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", states: life.states, confirmedByUser: gate.confirmedByUser, autoApproved: gate.autoApproved || undefined, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model });
           messages.push({ role: "tool", tool_name: name, content: String(result).slice(0, 8000) });
           toolSummaries.push(name + " · " + (failed ? "failed" : "succeeded"));
