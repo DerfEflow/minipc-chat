@@ -46,6 +46,37 @@ export const DEFAULT_ASSIGNMENTS = {
   review: "",
 };
 
+/*
+ * One-click presets. The board is still fully manual; these are just the two starting points
+ * worth having on tap.
+ *
+ * KIMI (Fred, 2026-07-19): Kimi K3 takes BOTH the engineering and the design-and-layout work.
+ * At $3/$15 against Sol's $5/$30 with a 1M context that is a genuinely strong trade.
+ *
+ * Two things this preset deliberately does NOT do:
+ *   - It leaves mechanical work on the cheap model. Kimi K3's reasoning is MANDATORY at "max"
+ *     (models.catalog.mjs), so every call pays for reasoning tokens. That is what you want on
+ *     hard problems and pure waste on renaming a file or bumping a version.
+ *   - It does not touch visual design. Kimi K3 reads images; it cannot draw one. Pictures stay
+ *     with the image engine, which is also what Fred asked for.
+ */
+export const PRESETS = [
+  {
+    id: "balanced",
+    label: "Balanced",
+    blurb: "Design to GPT-5.6 Terra, engineering to your main model, grunt work kept cheap.",
+    assignments: { design_code: "openai/gpt-5.6-terra", build_code: "", mechanical: "deepseek/deepseek-v4-flash", review: "" },
+  },
+  {
+    id: "kimi",
+    label: "Kimi K3 for code and design",
+    blurb: "One frontier reasoner for both the engineering and the look. Pictures still come from Dominion Forge, and renames stay on the cheap model.",
+    assignments: { design_code: "moonshotai/kimi-k3", build_code: "moonshotai/kimi-k3", mechanical: "deepseek/deepseek-v4-flash", review: "moonshotai/kimi-k3" },
+  },
+];
+
+export const presetById = (id) => PRESETS.find((p) => p.id === String(id || "")) || null;
+
 // Confidence bands, same shape as server.mjs routeDecision.
 export const CONF_STRONG = 0.9, CONF_OK = 0.7, CONF_WEAK = 0.5;
 export const CLASSIFIER_THRESHOLD = 0.7;   // below this, ask the cheap classifier

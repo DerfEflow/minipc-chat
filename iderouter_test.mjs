@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   classifyMove, classifyMoveSmart, resolveAssignments, routeMove,
   TASK_CLASSES, DEFAULT_ASSIGNMENTS, IMAGE_ENGINE, CLASSIFIER_THRESHOLD, CLASS_INFO,
+  PRESETS, presetById,
 } from "./iderouter.mjs";
 
 let passed = 0, failed = 0;

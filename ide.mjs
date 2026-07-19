@@ -15,7 +15,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { routeMove, CLASS_INFO, TASK_CLASSES, DEFAULT_ASSIGNMENTS, IMAGE_ENGINE } from "./iderouter.mjs";
+import { routeMove, CLASS_INFO, TASK_CLASSES, DEFAULT_ASSIGNMENTS, IMAGE_ENGINE, PRESETS } from "./iderouter.mjs";
 import { createPushStore } from "./idepush.mjs";
 
 export const IDE_MODE_DEFAULT = "owner";
@@ -257,7 +257,7 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
         limits: { maxWorkspaces: MAX_WORKSPACES },
         // Everything the Assignment Board needs to paint itself. Prices and availability come from
         // the existing GET /api/models, so there is one catalog, not two.
-        routing: { classes: CLASS_INFO, order: TASK_CLASSES, defaults: DEFAULT_ASSIGNMENTS, imageEngine: IMAGE_ENGINE },
+        routing: { classes: CLASS_INFO, order: TASK_CLASSES, defaults: DEFAULT_ASSIGNMENTS, imageEngine: IMAGE_ENGINE, presets: PRESETS },
       });
     },
 
@@ -356,8 +356,15 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
      */
     previewRoute(T, body) {
       const blocked = wall(T); if (blocked) return blocked;
-      const ws = body && body.workspaceId ? storeFor(T).get(String(body.workspaceId)) : null;
-      const stored = (ws && ws.assignments) || {};
+      const store = storeFor(T);
+      const ws = body && body.workspaceId ? store.get(String(body.workspaceId)) : null;
+      // Same precedence the board itself uses: a workspace's own assignments win, otherwise the
+      // account-level ones set before any workspace existed. Reading only the workspace made the
+      // preview answer with defaults while the board displayed something else, which is worse than
+      // no preview at all: it shows a decision the engine would not actually make.
+      const stored = (ws && ws.assignments && Object.keys(ws.assignments).length)
+        ? ws.assignments
+        : ((store.prefs() || {}).assignments || {});
       const decision = routeMove(
         { title: body && body.title, description: body && body.description, files: (body && body.files) || [] },
         stored,

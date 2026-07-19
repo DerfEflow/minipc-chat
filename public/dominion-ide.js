@@ -128,6 +128,10 @@
       + '<option value="">Off: use the board below</option></select>'
       + '<span class="hint">Pictures still come from Dominion Forge.</span>';
 
+    const presets = document.createElement("div");
+    presets.className = "ide-presets";
+    presets.id = "ide-presets";
+
     const cards = document.createElement("div");
     cards.className = "ide-cards";
     cards.id = "ide-cards";
@@ -138,8 +142,34 @@
       + 'placeholder="Try it: describe a job, for example &quot;restyle the hero section&quot;" />'
       + '<div class="ide-verdict" id="ide-verdict"></div>';
 
-    board.append(head, allInOne, cards, probe);
+    board.append(head, presets, allInOne, cards, probe);
     return board;
+  }
+
+  // One-click starting points. The board underneath stays fully manual; a preset just fills it in.
+  function renderPresets() {
+    const host = $("#ide-presets");
+    if (!host || !state.routing) return;
+    host.textContent = "";
+    for (const preset of (state.routing.presets || [])) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "ide-preset";
+      b.innerHTML = '<span class="p-label"></span><span class="p-blurb"></span>';
+      b.querySelector(".p-label").textContent = preset.label;
+      b.querySelector(".p-blurb").textContent = preset.blurb;
+      b.addEventListener("click", () => {
+        // A preset turns All-In-One off: they are two different answers to the same question, and
+        // leaving both on would show a board that is not actually driving anything.
+        state.allInOne = "";
+        const all = $("#ide-allinone");
+        if (all) all.value = "";
+        state.assignments = { ...state.assignments, ...preset.assignments };
+        renderBoard();
+        saveAssignments();
+      });
+      host.append(b);
+    }
   }
 
   // Paint the cards from the server's routing description plus the live model catalog.
@@ -203,6 +233,7 @@
       cards.append(card);
     }
     fillModelOptions($("#ide-allinone"), state.allInOne || "", true);
+    renderPresets();
   }
 
   /*
