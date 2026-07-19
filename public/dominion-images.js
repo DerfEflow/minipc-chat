@@ -751,6 +751,7 @@
   // ---------- open/close (the slide) ----------
   function openPanel() {
     if (window.closeForgeDial) window.closeForgeDial();   // one reveal at a time
+    if (window.closeIdeMode) window.closeIdeMode();       // ...including Dominion Works
     if (!$("#dfi-root")) buildPanel();
     state.open = true;
     document.body.classList.add("dfi-anim");

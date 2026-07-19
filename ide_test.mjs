@@ -1,12 +1,12 @@
 /*
- * Dominion Works (IDE mode) self-test — run with: node ide_test.mjs
+ * Dominion Works (IDE mode) self-test. Run with: node ide_test.mjs
  * Phase 0 scope: the exposure gate only (pure function, no server needed).
  * Proves:
  *   1. the default is owner-only, so shipping every later phase to the LIVE container keeps the
  *      unfinished build surface invisible to guests (Fred's ruling 2026-07-19)
  *   2. "all"/"1" opens it to signed-in users but NEVER to anon
  *   3. "off"/"0" closes it to everyone including the owner
- *   4. an unreadable/garbage value FAILS CLOSED to owner-only — a typo in a Railway env var must
+ *   4. an unreadable/garbage value FAILS CLOSED to owner-only, because a typo in a Railway env var must
  *      never widen exposure
  */
 import assert from "node:assert/strict";

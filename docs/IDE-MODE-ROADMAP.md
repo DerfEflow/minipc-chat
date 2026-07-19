@@ -351,7 +351,7 @@ notificationclick handler at all (sw.js has install/activate/fetch only).
 10. A paused job costs nothing. Waiting for a human must accrue zero spend, and the wait must be
    announced, never silent.
 
-## LOCKED rulings (Fred approved 2026-07-19) — do not re-litigate
+## LOCKED rulings (Fred approved 2026-07-19), do not re-litigate
 
 1. **Themed name: Dominion Works.** The drawer row still reads "IDE Mode" so anyone can find it;
    the reveal's own title is Dominion Works. "Foundry" was rejected because Batch Foundry already

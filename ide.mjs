@@ -16,9 +16,9 @@ export const IDE_MODE_DEFAULT = "owner";
 
 /*
  * Parse an IDE_MODE value into a gate.
- *   "owner" (default) — Fred only
- *   "all" | "1"       — every signed-in user (anon is never allowed)
- *   "off" | "0"       — nobody
+ *   "owner" (default): Fred only
+ *   "all" | "1":      every signed-in user (anon is never allowed)
+ *   "off" | "0":      nobody
  *
  * An unrecognized value falls back to owner-only. A flag we cannot read must never WIDEN
  * exposure: the failure mode of a typo in a Railway env var is "Fred still sees it", never

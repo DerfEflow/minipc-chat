@@ -1,0 +1,270 @@
+/* ============================================================================================
+   Dominion Works (IDE mode). Phase 1: the toggle and the third reveal.
+   SOW docs/IDE-MODE-ROADMAP.md · build pack docs/IDE-MODE-BUILD.md
+
+   MOTION (Fred's ruling 2026-07-19): a stage lift. Left belongs to the Forge dial, right to Forge
+   Images, so the works travel VERTICALLY. The shell lifts away through the top and the works rise
+   from below into its place: one continuous upward travel, the way a theater stage lift or a tool
+   magazine changes a set. Same 0.45s cubic-bezier(0.32,0.72,0.28,1) as the other two reveals so
+   all three feel like one machine.
+
+   The transform context on the shell exists ONLY while .ide-anim is on, because a transformed
+   ancestor breaks position:fixed for its descendants (the same reason the dial and Forge Images
+   scope theirs). #ide-root therefore lives at BODY level, never inside #neural-glass.
+   ============================================================================================ */
+
+/* Hidden until the reveal is armed; without this the panel would eat clicks while off-screen. */
+body:not(.ide-anim) #ide-root { display: none; }
+
+body.ide-anim #sidebar,
+body.ide-anim #commandbar,
+body.ide-anim #neural-glass,
+body.ide-anim #overlay {
+  transition: transform 0.45s cubic-bezier(0.32, 0.72, 0.28, 1);
+  will-change: transform;
+}
+body.ide-open #sidebar,
+body.ide-open #commandbar,
+body.ide-open #neural-glass,
+body.ide-open #overlay {
+  transform: translateY(-112vh);
+  pointer-events: none;
+}
+
+#ide-root {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  transform: translateY(104vh);
+  transition: transform 0.45s cubic-bezier(0.32, 0.72, 0.28, 1);
+  will-change: transform;
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(120% 80% at 50% -10%, rgba(118, 255, 104, .05), transparent 60%),
+    linear-gradient(180deg, var(--abyss) 0%, var(--void) 55%, #000 100%);
+  color: var(--ink);
+  overflow: hidden;
+}
+body.ide-open #ide-root { transform: none; }
+
+/* Machined deck plate: the works sit on a surface with mass, not on a flat page. */
+#ide-root::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(90deg, rgba(157, 218, 255, .035) 0 1px, transparent 1px 96px),
+    repeating-linear-gradient(0deg, rgba(157, 218, 255, .028) 0 1px, transparent 1px 96px);
+  mask-image: radial-gradient(120% 90% at 50% 0%, #000 20%, transparent 78%);
+  opacity: .7;
+}
+/* Energy seam along the lift line: the works arrive lit from the seam they rose through. */
+#ide-root::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 2px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(118, 255, 104, .5), transparent);
+  box-shadow: 0 0 18px rgba(118, 255, 104, .35);
+  opacity: .55;
+}
+
+/* ---------- command rail (back / title / close) ---------------------------------------- */
+.ide-rail {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--glass-line);
+  background: linear-gradient(180deg, rgba(10, 27, 45, .82), rgba(3, 8, 18, .5));
+  box-shadow: 0 18px 40px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(225, 247, 255, .1);
+  backdrop-filter: blur(14px) saturate(1.15);
+}
+.ide-rail-btn {
+  width: 42px; height: 42px;
+  flex: 0 0 auto;
+  display: grid; place-items: center;
+  border-radius: 11px;
+  cursor: pointer;
+  color: var(--ink-soft);
+  border: 1px solid var(--glass-line);
+  background: linear-gradient(180deg, rgba(14, 33, 54, .9), rgba(4, 11, 20, .95));
+  box-shadow:
+    inset 0 1px 0 rgba(225, 247, 255, .16),
+    inset 0 -2px 6px rgba(0, 0, 0, .6),
+    0 6px 16px rgba(0, 0, 0, .5);
+  transition: transform .12s ease, color .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+.ide-rail-btn:hover { color: var(--copper-hot); border-color: rgba(185, 107, 50, .55); }
+.ide-rail-btn:active { transform: translateY(1px); box-shadow: inset 0 2px 8px rgba(0, 0, 0, .7); }
+.ide-rail-btn svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.9;
+  stroke-linecap: round; stroke-linejoin: round; }
+
+.ide-rail-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; margin-right: auto; }
+.ide-rail-title .t {
+  font-size: 15px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--ink);
+  text-shadow: 0 0 18px rgba(131, 221, 255, .28);
+}
+.ide-rail-title .s {
+  font-size: 11px; letter-spacing: .1em; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Live state lamp: green is energy and state, never decoration. */
+.ide-lamp {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 13px 7px 11px;
+  border-radius: 999px;
+  font-size: 11px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--ink-soft);
+  border: 1px solid var(--glass-line);
+  background: linear-gradient(180deg, rgba(10, 27, 45, .8), rgba(3, 9, 17, .9));
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .12), inset 0 -2px 6px rgba(0, 0, 0, .5);
+}
+.ide-lamp i {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--energy);
+  box-shadow: 0 0 10px var(--energy), 0 0 22px rgba(118, 255, 104, .55);
+}
+.ide-lamp[data-state="idle"] i { background: var(--muted); box-shadow: none; }
+
+/* ---------- stage --------------------------------------------------------------------- */
+.ide-stage {
+  position: relative;
+  z-index: 2;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 32px 22px 48px;
+}
+.ide-empty { max-width: 640px; text-align: center; display: grid; gap: 18px; justify-items: center; }
+.ide-empty-core {
+  width: 84px; height: 84px;
+  display: grid; place-items: center;
+  border-radius: 22px;
+  border: 1px solid rgba(185, 107, 50, .38);
+  background:
+    radial-gradient(60% 60% at 50% 30%, rgba(185, 107, 50, .22), transparent 70%),
+    linear-gradient(180deg, rgba(14, 33, 54, .92), rgba(3, 10, 19, .96));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 193, 138, .3),
+    inset 0 -4px 12px rgba(0, 0, 0, .7),
+    0 16px 40px rgba(0, 0, 0, .6);
+}
+.ide-empty-core svg { width: 40px; height: 40px; fill: none; stroke: var(--copper-hot);
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.ide-empty h2 {
+  margin: 0; font-size: 19px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--ink);
+}
+.ide-empty p { margin: 0; font-size: 14px; line-height: 1.65; color: var(--ink-soft); }
+.ide-empty .note {
+  font-size: 12px; color: var(--muted); letter-spacing: .04em;
+  border-top: 1px solid var(--glass-line); padding-top: 14px; max-width: 520px;
+}
+
+/* ---------- drawer toggle row --------------------------------------------------------- */
+/* Hidden by default: guests never see it until the server says ideMode is allowed (Phase 8). */
+#sb-ide { display: none; }
+#sb-ide.on { display: flex; }
+#sb-ide {
+  width: 100%;
+  align-items: center;
+  gap: 11px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  cursor: pointer;
+  text-align: left;
+  border-radius: 12px;
+  color: var(--ink-soft);
+  border: 1px solid var(--glass-line);
+  background: linear-gradient(180deg, rgba(11, 28, 46, .8), rgba(3, 10, 19, .92));
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .1), inset 0 -2px 7px rgba(0, 0, 0, .55);
+  transition: color .18s ease, border-color .18s ease, box-shadow .18s ease;
+  font: inherit;
+}
+#sb-ide:hover { color: var(--ink); border-color: rgba(185, 107, 50, .5); }
+#sb-ide .ide-row-glyph { width: 19px; height: 19px; flex: 0 0 auto; fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+#sb-ide .ide-row-label { flex: 1 1 auto; font-size: 13px; letter-spacing: .05em; }
+/* The switch reads as a physical throw, seated in a recessed cavity. */
+#sb-ide .ide-switch {
+  flex: 0 0 auto;
+  width: 40px; height: 22px;
+  border-radius: 999px;
+  position: relative;
+  border: 1px solid rgba(157, 218, 255, .22);
+  background: linear-gradient(180deg, rgba(0, 0, 0, .7), rgba(6, 17, 29, .9));
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, .8);
+  transition: border-color .2s ease, background .2s ease;
+}
+#sb-ide .ide-switch::after {
+  content: "";
+  position: absolute; top: 2px; left: 2px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: linear-gradient(180deg, #d8e6f2, #8fa6b8);
+  box-shadow: 0 2px 5px rgba(0, 0, 0, .7), inset 0 1px 0 rgba(255, 255, 255, .55);
+  transition: transform 0.28s cubic-bezier(0.32, 0.72, 0.28, 1), background 0.2s ease;
+}
+#sb-ide[aria-pressed="true"] { color: var(--ink); border-color: rgba(118, 255, 104, .34); }
+#sb-ide[aria-pressed="true"] .ide-switch {
+  border-color: rgba(118, 255, 104, .5);
+  background: linear-gradient(180deg, rgba(24, 62, 30, .95), rgba(8, 26, 12, .95));
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, .7), 0 0 14px rgba(118, 255, 104, .28);
+}
+#sb-ide[aria-pressed="true"] .ide-switch::after {
+  transform: translateX(18px);
+  background: linear-gradient(180deg, var(--energy-hot), var(--energy));
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .7), 0 0 12px rgba(118, 255, 104, .8);
+}
+
+/* ---------- composer trigger ---------------------------------------------------------- */
+#ide-trigger { display: none; }
+#ide-trigger.on { display: grid; }
+#ide-trigger {
+  width: 38px; height: 38px;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 11px;
+  cursor: pointer;
+  color: var(--ink-soft);
+  border: 1px solid var(--glass-line);
+  background: linear-gradient(180deg, rgba(13, 31, 51, .9), rgba(4, 11, 20, .95));
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .14), inset 0 -2px 6px rgba(0, 0, 0, .6);
+  transition: color .18s ease, border-color .18s ease, box-shadow .18s ease, transform .12s ease;
+}
+#ide-trigger:hover { color: var(--copper-hot); border-color: rgba(185, 107, 50, .55); }
+#ide-trigger:active { transform: translateY(1px); }
+#ide-trigger svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8;
+  stroke-linecap: round; stroke-linejoin: round; }
+#ide-trigger[data-ide="on"] {
+  color: var(--energy-hot);
+  border-color: rgba(118, 255, 104, .45);
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .14), 0 0 14px rgba(118, 255, 104, .3);
+}
+
+@media (max-width: 720px) {
+  .ide-rail { padding: 11px 13px; gap: 10px; }
+  .ide-rail-title .t { font-size: 13px; letter-spacing: .12em; }
+  .ide-rail-title .s { display: none; }
+  .ide-lamp { padding: 6px 10px 6px 9px; font-size: 10px; }
+  .ide-stage { padding: 24px 16px 36px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.ide-anim #sidebar,
+  body.ide-anim #commandbar,
+  body.ide-anim #neural-glass,
+  body.ide-anim #overlay,
+  #ide-root,
+  #sb-ide .ide-switch::after { transition: none; }
+}

@@ -126,6 +126,7 @@
   function openDial() {
     if (dialRoot) return;                       // already open
     if (window.closeForgeImages) window.closeForgeImages();   // one reveal at a time
+    if (window.closeIdeMode) window.closeIdeMode();           // ...including Dominion Works
     const cur = getTier();
     let forgeOn = getForgeMode();
 

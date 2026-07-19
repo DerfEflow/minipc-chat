@@ -16,6 +16,7 @@
 <link rel="stylesheet" href="/dominion-vault.css?v=1" />
 <link rel="stylesheet" href="/dominion-forge.css?v=3" />
 <link rel="stylesheet" href="/dominion-images.css?v=3" />
+<link rel="stylesheet" href="/dominion-ide.css?v=1" />
 </head>
 <body>
   <video id="bgvideo" autoplay muted loop playsinline preload="auto" poster="/icons/dominion-core-512-v1.png">
@@ -114,6 +115,13 @@
       <input id="chatsearch" type="search" placeholder="Search conversations…" autocomplete="off" />
     </div>
     <div id="chatlist"></div>
+    <!-- Dominion Works toggle. Hidden until GET /account reports ideMode:true, so guests see
+         nothing at all until Phase 8 flips the server gate. -->
+    <button id="sb-ide" type="button" aria-pressed="false" title="Turn the Dominion Works build surface on or off">
+      <svg class="ide-row-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></svg>
+      <span class="ide-row-label">IDE Mode</span>
+      <span class="ide-switch" aria-hidden="true"></span>
+    </button>
     <button id="sb-setup" class="sb-setup" type="button" title="Connectors, credits, and account setup">
       <span class="sb-setup-core" aria-hidden="true"></span><span>Setup · Connectors &amp; Credits</span>
     </button>
@@ -413,6 +421,7 @@
 
   <script src="/dominion-forge.js?v=3"></script>
   <script src="/dominion-images.js?v=3" defer></script>
+  <script src="/dominion-ide.js?v=1" defer></script>
   <script src="/app.js?v=44"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=3" defer></script>
