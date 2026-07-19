@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="/dominion-ui.css?v=39" />
 <link rel="stylesheet" href="/dominion-tenant.css?v=6" />
 <link rel="stylesheet" href="/dominion-vault.css?v=1" />
+<link rel="stylesheet" href="/dominion-forge.css?v=1" />
 </head>
 <body>
   <video id="bgvideo" autoplay muted loop playsinline preload="auto" poster="/icons/dominion-core-512-v1.png">
@@ -257,6 +258,17 @@
           <button id="attach" class="mic attach" title="Attach a picture or file" aria-label="Attach a picture or file">
             <svg class="glyph"><use href="#i-attach"></use></svg>
           </button>
+          <button id="forge-trigger" class="forge-trigger" data-tier="ember" title="Forge intensity — Ember / Flame / Furnace" aria-label="Open the Forge intensity dial">
+            <svg viewBox="0 0 24 26" aria-hidden="true">
+              <defs>
+                <linearGradient id="ft-g" x1="0" y1="1" x2="0" y2="0">
+                  <stop offset="0" stop-color="#ff5a1e"/><stop offset=".6" stop-color="#ff9a3a"/><stop offset="1" stop-color="#ffd07a"/>
+                </linearGradient>
+              </defs>
+              <path fill="url(#ft-g)" d="M12 1c1.6 5.6 7 8 7 14a7 7 0 0 1-14 0C5 10 9 10 9 6c0-2.4-.8-3.6 3-5z"/>
+              <path fill="#ffe9c4" d="M12 10c.9 3 4 4.5 4 8a4 4 0 0 1-8 0c0-2.7 2.4-3.4 2.4-6 0-1 .6-1.6 1.6-2z"/>
+            </svg>
+          </button>
         </div>
         <textarea id="input" rows="1" placeholder="Give Dominion a directive…" autocomplete="off"></textarea>
         <button id="speak" class="mic" title="Speak answers aloud (off)" aria-label="Toggle spoken answers">
@@ -391,7 +403,8 @@
     </div>
   </div>
 
-  <script src="/app.js?v=40"></script>
+  <script src="/dominion-forge.js?v=1"></script>
+  <script src="/app.js?v=41"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=3" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>

@@ -1,0 +1,298 @@
+/*
+ * Dominion AI — Forge dial + universal text editor.
+ *
+ * Two machined controls, one material language (see docs/DOMINION-VISUAL-NORTH-STAR.md):
+ *   .dfe-*  — the half-screen text editor that replaces every native prompt() typing box.
+ *   .dial-* — the Ember/Flame/Furnace rotary, revealed on demand from the composer.
+ *
+ * Fire lives in copper/amber/white so it stays distinct from the green ENERGY system; green is
+ * reserved for state and activity per the north star. Everything is dimensional: bevels, recessed
+ * cavities, specular catches, deep shadow. No flat rectangles, no generic gradients.
+ */
+
+/* ============================ universal text editor ============================ */
+
+.dfe-scrim {
+  position: fixed; inset: 0; z-index: 1400;
+  display: grid; place-items: center; padding: 20px;
+  background: radial-gradient(120% 90% at 50% 0%, rgba(4, 12, 18, .62), rgba(1, 3, 6, .84));
+  backdrop-filter: blur(9px) saturate(1.1);
+  opacity: 0; transition: opacity .18s ease;
+}
+.dfe-scrim.in { opacity: 1; }
+
+.dfe-panel {
+  width: min(660px, 95vw);
+  display: flex; flex-direction: column;
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(20, 30, 38, .96), rgba(6, 12, 17, .98)),
+    radial-gradient(140% 120% at 50% -10%, rgba(255, 193, 138, .10), transparent 60%);
+  border: 1px solid rgba(141, 204, 239, .16);
+  box-shadow:
+    0 42px 90px rgba(0, 0, 0, .66),
+    0 2px 0 rgba(255, 255, 255, .05) inset,
+    0 -24px 60px rgba(1, 4, 7, .7) inset,
+    0 0 0 1px rgba(0, 0, 0, .5);
+  transform: translateY(10px) scale(.985); opacity: 0;
+  transition: transform .2s cubic-bezier(.2, .8, .25, 1), opacity .2s ease;
+}
+.dfe-scrim.in .dfe-panel { transform: none; opacity: 1; }
+
+.dfe-head {
+  padding: 16px 18px 10px;
+  border-bottom: 1px solid rgba(141, 204, 239, .1);
+  background: linear-gradient(180deg, rgba(255, 193, 138, .05), transparent);
+}
+.dfe-kicker {
+  color: #d59b6e; font-size: 9px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase;
+}
+.dfe-title {
+  margin: 5px 0 0; color: #eff6fb; font-size: 17px; line-height: 1.18; font-weight: 700; letter-spacing: .02em;
+}
+.dfe-hint { margin: 6px 0 0; color: #7f95a6; font-size: 11px; line-height: 1.4; }
+
+.dfe-body { padding: 14px 18px; }
+.dfe-field {
+  width: 100%; box-sizing: border-box;
+  font: 400 11pt/1.62 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #e9f4fc;
+  background:
+    linear-gradient(180deg, rgba(2, 6, 10, .92), rgba(3, 9, 13, .8));
+  border: 1px solid rgba(141, 204, 239, .2);
+  border-radius: 11px;
+  padding: 13px 14px;
+  resize: vertical;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, .5) inset, 0 0 0 1px rgba(0, 0, 0, .4);
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.dfe-field::placeholder { color: #566b7c; }
+.dfe-field:focus {
+  border-color: rgba(118, 255, 104, .45);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, .5) inset, 0 0 0 1px rgba(118, 255, 104, .18), 0 0 22px rgba(118, 255, 104, .1);
+}
+.dfe-field.multi { min-height: 46vh; }
+.dfe-field.single { min-height: 0; }
+
+.dfe-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 18px 16px;
+}
+.dfe-count { color: #5f7484; font-size: 10px; letter-spacing: .04em; margin-right: auto; font-variant-numeric: tabular-nums; }
+.dfe-btn {
+  font: 600 12px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .05em;
+  padding: 11px 18px; border-radius: 10px; cursor: pointer; border: 1px solid transparent;
+  transition: transform .1s ease, box-shadow .15s ease, background .15s ease, border-color .15s ease;
+}
+.dfe-btn:active { transform: translateY(1px); }
+.dfe-cancel {
+  color: #a7b9c6; background: rgba(1, 9, 15, .6); border-color: rgba(141, 204, 239, .18);
+}
+.dfe-cancel:hover { color: #d9e7f0; border-color: rgba(141, 204, 239, .3); }
+.dfe-save {
+  color: #06210b; font-weight: 800;
+  background: linear-gradient(180deg, #a6ff96, #5fe06a);
+  border-color: rgba(118, 255, 104, .5);
+  box-shadow: 0 4px 16px rgba(95, 224, 106, .28), 0 1px 0 rgba(255, 255, 255, .4) inset;
+}
+.dfe-save:hover { box-shadow: 0 6px 22px rgba(95, 224, 106, .42), 0 1px 0 rgba(255, 255, 255, .5) inset; }
+.dfe-kbd { color: #6a8090; font-size: 9px; letter-spacing: .04em; margin-left: 2px; }
+
+/* ============================ forge reveal trigger ============================ */
+
+.forge-trigger {
+  position: relative;
+  display: grid; place-items: center;
+  width: 40px; height: 40px; flex: 0 0 auto;
+  border-radius: 11px; cursor: pointer;
+  background: linear-gradient(180deg, rgba(26, 20, 16, .9), rgba(10, 7, 5, .95));
+  border: 1px solid rgba(255, 160, 90, .22);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .5), 0 1px 0 rgba(255, 200, 150, .08) inset;
+  transition: border-color .18s ease, box-shadow .25s ease, transform .1s ease;
+}
+.forge-trigger:active { transform: translateY(1px); }
+.forge-trigger svg { width: 20px; height: 22px; display: block; position: relative; z-index: 2; }
+/* the trigger's own glow reflects the CURRENT tier at a glance, without opening the dial */
+.forge-trigger[data-tier="ember"]   { box-shadow: 0 2px 8px rgba(0,0,0,.5), 0 0 10px rgba(255,138,74,.16), 0 1px 0 rgba(255,200,150,.08) inset; border-color: rgba(255,150,90,.28); }
+.forge-trigger[data-tier="flame"]   { box-shadow: 0 2px 10px rgba(0,0,0,.5), 0 0 16px rgba(255,150,60,.4),  0 1px 0 rgba(255,210,160,.12) inset; border-color: rgba(255,170,80,.5); }
+.forge-trigger[data-tier="furnace"] { box-shadow: 0 2px 12px rgba(0,0,0,.5), 0 0 26px rgba(255,180,90,.6),  0 0 46px rgba(255,120,50,.3), 0 1px 0 rgba(255,230,190,.2) inset; border-color: rgba(255,200,120,.7); }
+
+/* ============================ the dial popover ============================ */
+
+.dial-scrim {
+  position: fixed; inset: 0; z-index: 1380;
+  display: grid; place-items: end center; padding: 0 0 96px;
+  background: radial-gradient(90% 60% at 50% 100%, rgba(6, 10, 14, .5), rgba(1, 3, 6, .78));
+  backdrop-filter: blur(6px);
+  opacity: 0; transition: opacity .2s ease;
+}
+.dial-scrim.in { opacity: 1; }
+@media (max-width: 640px) { .dial-scrim { place-items: center; padding: 20px; } }
+
+.dial-card {
+  width: min(340px, 92vw);
+  padding: 22px 22px 18px;
+  border-radius: 20px;
+  background:
+    radial-gradient(120% 100% at 50% 0%, rgba(40, 26, 18, .5), transparent 55%),
+    linear-gradient(180deg, rgba(22, 26, 30, .97), rgba(7, 10, 14, .98));
+  border: 1px solid rgba(255, 170, 100, .18);
+  box-shadow:
+    0 40px 90px rgba(0, 0, 0, .7),
+    0 1px 0 rgba(255, 220, 180, .08) inset,
+    0 -30px 70px rgba(2, 4, 7, .8) inset;
+  transform: translateY(16px) scale(.97); opacity: 0;
+  transition: transform .24s cubic-bezier(.2, .85, .25, 1), opacity .22s ease;
+  text-align: center;
+}
+.dial-scrim.in .dial-card { transform: none; opacity: 1; }
+
+.dial-kicker { color: #d59b6e; font-size: 9px; font-weight: 800; letter-spacing: .18em; text-transform: uppercase; }
+.dial-title { margin: 4px 0 18px; color: #f2ede8; font-size: 15px; font-weight: 720; letter-spacing: .06em; text-transform: uppercase; }
+
+/* --- the knob assembly --- */
+.dial-stage {
+  position: relative; width: 210px; height: 210px; margin: 0 auto;
+  touch-action: none; user-select: none;
+}
+/* backlight: the radiant heat behind the knob. Intensity + hue ramp per tier via data-tier. */
+.dial-glow {
+  position: absolute; inset: -14px; border-radius: 50%;
+  pointer-events: none; filter: blur(6px);
+  transition: opacity .4s ease, background .4s ease;
+}
+.dial-bezel {
+  position: absolute; inset: 0; border-radius: 50%;
+  background:
+    conic-gradient(from 0deg, rgba(255,255,255,.05), rgba(0,0,0,.35), rgba(255,255,255,.05), rgba(0,0,0,.35), rgba(255,255,255,.05)),
+    radial-gradient(circle at 50% 38%, #3a3027, #1a1512 60%, #0c0908 100%);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, .6),
+    0 2px 2px rgba(255, 220, 180, .12) inset,
+    0 -14px 28px rgba(0, 0, 0, .7) inset,
+    0 0 0 1px rgba(0, 0, 0, .6);
+}
+/* tick ring */
+.dial-ticks { position: absolute; inset: 12px; border-radius: 50%; pointer-events: none; }
+.dial-ticks::before {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  background: repeating-conic-gradient(from -90deg, rgba(255, 200, 150, .22) 0 1deg, transparent 1deg 10deg);
+  -webkit-mask: radial-gradient(circle, transparent 84px, #000 85px, #000 92px, transparent 93px);
+          mask: radial-gradient(circle, transparent 84px, #000 85px, #000 92px, transparent 93px);
+}
+/* the rotating knob */
+.dial-knob {
+  position: absolute; inset: 26px; border-radius: 50%; cursor: grab;
+  background:
+    radial-gradient(circle at 50% 30%, #6a5847, #3d3227 42%, #221b15 78%, #140f0c 100%),
+    conic-gradient(from 0deg, rgba(255,255,255,.12), rgba(0,0,0,.28) 25%, rgba(255,255,255,.1) 50%, rgba(0,0,0,.28) 75%, rgba(255,255,255,.12));
+  background-blend-mode: overlay, normal;
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, .6),
+    0 2px 1px rgba(255, 225, 190, .25) inset,
+    0 -10px 22px rgba(0, 0, 0, .6) inset;
+  transition: transform .32s cubic-bezier(.18, .9, .2, 1.08);
+}
+.dial-knob:active { cursor: grabbing; }
+/* the pointer notch machined into the knob rim */
+.dial-knob::after {
+  content: ""; position: absolute; left: 50%; top: 9px; transform: translateX(-50%);
+  width: 5px; height: 24px; border-radius: 3px;
+  background: linear-gradient(180deg, #ffd9a8, #ff8a4a);
+  box-shadow: 0 0 10px rgba(255, 150, 70, .8), 0 0 20px rgba(255, 120, 50, .5);
+}
+
+/* --- the flame core, animated per tier --- */
+.dial-core {
+  position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
+}
+.dial-flame {
+  width: 58px; height: 72px; transform-origin: 50% 90%;
+  filter: drop-shadow(0 0 8px rgba(255, 140, 60, .7));
+  transition: transform .4s ease, filter .4s ease, opacity .4s ease;
+}
+.dial-flame .f-outer { fill: url(#fg-outer); }
+.dial-flame .f-inner { fill: url(#fg-inner); }
+.dial-flame .f-core  { fill: #fff6e8; }
+
+/* ember particles (furnace only) */
+.dial-spark {
+  position: absolute; bottom: 84px; left: 50%; width: 3px; height: 3px; border-radius: 50%;
+  background: #ffcf8f; box-shadow: 0 0 6px rgba(255, 180, 90, .9);
+  opacity: 0; pointer-events: none;
+}
+
+/* ---- per-tier state ---- */
+.dial-stage[data-tier="ember"]   .dial-glow { background: radial-gradient(circle, rgba(255,120,50,.28), transparent 62%); opacity: .5; }
+.dial-stage[data-tier="flame"]   .dial-glow { background: radial-gradient(circle, rgba(255,150,55,.55), rgba(255,90,40,.2) 55%, transparent 70%); opacity: .85; }
+.dial-stage[data-tier="furnace"] .dial-glow { background: radial-gradient(circle, rgba(255,235,190,.7), rgba(255,140,50,.5) 45%, rgba(255,70,30,.25) 68%, transparent 80%); opacity: 1; }
+
+.dial-stage[data-tier="ember"]   .dial-flame { transform: scale(.62); opacity: .78; filter: drop-shadow(0 0 5px rgba(255,120,50,.5)); animation: flame-smolder 3.4s ease-in-out infinite; }
+.dial-stage[data-tier="flame"]   .dial-flame { transform: scale(.92); opacity: .95; filter: drop-shadow(0 0 10px rgba(255,150,60,.75)); animation: flame-flicker 1.5s ease-in-out infinite; }
+.dial-stage[data-tier="furnace"] .dial-flame { transform: scale(1.18); opacity: 1; filter: drop-shadow(0 0 16px rgba(255,180,90,.95)) drop-shadow(0 0 30px rgba(255,110,50,.6)); animation: flame-roar .5s ease-in-out infinite; }
+
+.dial-stage[data-tier="furnace"] .dial-spark { animation: spark-rise 1.1s ease-out infinite; }
+.dial-stage[data-tier="furnace"] .dial-spark.s2 { animation-delay: .35s; left: 44%; }
+.dial-stage[data-tier="furnace"] .dial-spark.s3 { animation-delay: .7s;  left: 56%; }
+
+@keyframes flame-smolder { 0%,100% { transform: scale(.62) translateY(0); } 50% { transform: scale(.66) translateY(-1px); } }
+@keyframes flame-flicker {
+  0%,100% { transform: scale(.92) skewX(0deg); }
+  30% { transform: scale(.96) skewX(-2.5deg); }
+  60% { transform: scale(.89) skewX(2deg); }
+}
+@keyframes flame-roar {
+  0%,100% { transform: scale(1.18) skewX(0deg) translateY(0); }
+  25% { transform: scale(1.24) skewX(-3deg) translateY(-2px); }
+  55% { transform: scale(1.12) skewX(3deg) translateY(1px); }
+  80% { transform: scale(1.2) skewX(-1.5deg); }
+}
+@keyframes spark-rise {
+  0%   { opacity: 0; transform: translateY(0) translateX(0) scale(1); }
+  15%  { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-70px) translateX(var(--drift, 6px)) scale(.4); }
+}
+
+/* --- the tier readout + labels --- */
+.dial-readout { margin: 16px 0 2px; min-height: 40px; }
+.dial-tier-name {
+  font-size: 20px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
+  transition: color .3s ease, text-shadow .3s ease;
+}
+.dial-stage[data-tier] ~ .dial-readout .dial-tier-name { color: #ffb877; }
+.dial-card[data-tier="ember"]   .dial-tier-name { color: #ff9a5c; text-shadow: 0 0 12px rgba(255,120,50,.4); }
+.dial-card[data-tier="flame"]   .dial-tier-name { color: #ffb063; text-shadow: 0 0 16px rgba(255,150,60,.6); }
+.dial-card[data-tier="furnace"] .dial-tier-name { color: #ffe0b0; text-shadow: 0 0 20px rgba(255,180,90,.85); }
+.dial-tier-desc { margin: 5px 0 0; color: #8a9aa8; font-size: 11px; line-height: 1.45; padding: 0 6px; }
+.dial-cost { display: inline-block; margin-top: 7px; font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: #c98f63; font-weight: 700; }
+
+.dial-scale { display: flex; justify-content: space-between; gap: 6px; margin: 16px 4px 4px; }
+.dial-step {
+  flex: 1; padding: 7px 0; border-radius: 8px; cursor: pointer;
+  font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+  color: #6f8391; background: rgba(2, 8, 12, .6); border: 1px solid rgba(141, 204, 239, .1);
+  transition: color .2s ease, border-color .2s ease, background .2s ease;
+}
+.dial-step[aria-current="true"] {
+  color: #ffdcb0; border-color: rgba(255, 170, 90, .5);
+  background: linear-gradient(180deg, rgba(255, 140, 60, .16), rgba(255, 90, 40, .05));
+  box-shadow: 0 0 14px rgba(255, 130, 55, .25) inset;
+}
+.dial-done {
+  margin-top: 16px; width: 100%;
+  font: 700 12px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .08em;
+  padding: 12px; border-radius: 11px; cursor: pointer;
+  color: #1a0f07; background: linear-gradient(180deg, #ffc98a, #ff9247);
+  border: 1px solid rgba(255, 180, 110, .6);
+  box-shadow: 0 4px 16px rgba(255, 130, 60, .3), 0 1px 0 rgba(255, 230, 200, .5) inset;
+  transition: transform .1s ease, box-shadow .18s ease;
+}
+.dial-done:active { transform: translateY(1px); }
+
+/* reduced motion: keep the light, drop the movement */
+@media (prefers-reduced-motion: reduce) {
+  .dial-flame { animation: none !important; }
+  .dial-spark { display: none; }
+  .dfe-scrim, .dfe-panel, .dial-scrim, .dial-card { transition: opacity .12s ease; transform: none; }
+}

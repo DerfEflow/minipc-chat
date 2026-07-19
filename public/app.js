@@ -145,7 +145,7 @@ function deleteChat(id) {
   fetch("/chatlog/forget", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
   chats = chats.filter((c) => c.id !== id); if (curId === id) curId = (chats[0] && chats[0].id) || null; if (!curId) { newChat(); return; } save(); renderAll();
 }
-function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = prompt("Rename chat", c.title); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); } }
+async function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = await askText({ kicker: "Conversation", title: "Rename chat", multiline: false, value: c.title, maxlen: 60, saveLabel: "Rename" }); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); } }
 
 // ---------- sidebar ----------
 const openSidebar = () => { sidebar.classList.add("open"); overlay.classList.add("show"); document.body.classList.add("rail-open"); };
@@ -286,16 +286,18 @@ function toggleCtxDetail(turn, anchor, ci) {
 async function saveLesson(i) {
   const c = cur(); if (!c || !c.messages[i]) return;
   const answer = c.messages[i].content, orig = precedingUser(c, i);
-  const kind = (prompt("Save lesson as — failure, eval, or rule:", "failure") || "").trim().toLowerCase();
+  const kind = (await askText({ kicker: "Teach Dominion", title: "Save this lesson as…", multiline: false, value: "failure",
+    hint: "Type one: failure (log what went wrong), eval (a re-runnable test), or rule (a standing instruction).", saveLabel: "Continue" }) || "").trim().toLowerCase();
   if (!kind) return;
   if (kind.startsWith("f")) {
-    const note = prompt("The lesson — what should have happened instead:", ""); if (note == null) return;
+    const note = await askText({ kicker: "Failure ledger", title: "The lesson", placeholder: "What should have happened instead…",
+      hint: "This is filed against the answer above so the model learns from it." }); if (note == null) return;
     const r = await aApi("/ledger", { category: "manual", severity: "low", originalRequest: orig.slice(0, 2000), flawedOutput: answer.slice(0, 4000), correctedOutput: note.trim(), detectedBy: "user" });
     alert(r.item ? "Lesson logged to the failure ledger." : "Ledger: " + (r.error || "failed"));
   } else if (kind.startsWith("e")) {
     await convertToEval(i);
   } else if (kind.startsWith("r")) {
-    const t = prompt("Rule (a compact instruction the assistant should follow):", ""); if (t == null || !t.trim()) return;
+    const t = await askText({ kicker: "Standing rule", title: "A rule the assistant should follow", placeholder: "A compact instruction…" }); if (t == null || !t.trim()) return;
     const r = await aApi("/rules", { content: t.trim(), scope: "global", status: "candidate" });
     alert(r.item ? "Saved as a candidate rule — test/activate it in Mentor & Improvement." : "Rule: " + (r.error || "failed"));
   } else alert("Unknown kind — use failure, eval, or rule.");
@@ -304,7 +306,7 @@ async function saveLesson(i) {
 async function convertToEval(i) {
   const c = cur(); if (!c || !c.messages[i]) return;
   const orig = precedingUser(c, i) || c.messages[i].content;
-  const exp = prompt("Expected behavior (what a good answer must do):", ""); if (exp == null) return;
+  const exp = await askText({ kicker: "Evaluation", title: "Expected behavior", placeholder: "What a good answer must do…" }); if (exp == null) return;
   const r = await aApi("/evals", { title: orig.replace(/\s+/g, " ").slice(0, 80), input: orig.slice(0, 4000), expectedBehavior: exp, source: "manual" });
   alert(r.item ? "Eval case saved — run it from Mentor & Improvement." : "Eval: " + (r.error || "failed"));
 }
@@ -838,6 +840,10 @@ async function streamReply(c) {
         temperature: settings.temperature,
         confirmTools: !!settings.confirmTools,
         chatId: c.id,
+        // Forge dial (ember/flame/furnace). forgeTierValue() returns "" at Ember, so the field is
+        // omitted entirely and the turn is byte-identical to pre-dial behavior. Only flame/furnace
+        // ride the wire.
+        ...(window.forgeTierValue && window.forgeTierValue() ? { forgeMode: window.forgeTierValue() } : {}),
       }),
     });
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
@@ -992,8 +998,8 @@ function renderMemory(items) {
     if (m.status === "pending") acts.append(mkAct("Approve", () => memUpdate(m.id, { action: "approve" })), mkAct("Reject", () => memUpdate(m.id, { action: "reject" })));
     acts.append(
       mkAct(m.pinned ? "Unpin" : "Pin", () => memUpdate(m.id, { action: m.pinned ? "unpin" : "pin" })),
-      mkAct("Edit", () => { const t = prompt("Edit memory", m.content); if (t != null && t.trim()) memUpdate(m.id, { content: t.trim() }); }),
-      mkAct("→ Eval", async (ev) => { const exp = prompt("Expected behavior (what a good answer must do):", ""); if (exp == null) return; await aApi("/evals", { title: m.content.slice(0, 80), input: m.content, expectedBehavior: exp, source: "manual" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }),
+      mkAct("Edit", async () => { const t = await askText({ kicker: "Memory", title: "Edit memory", value: m.content }); if (t != null && t.trim()) memUpdate(m.id, { content: t.trim() }); }),
+      mkAct("→ Eval", async (ev) => { const exp = await askText({ kicker: "Evaluation", title: "Expected behavior", placeholder: "What a good answer must do…" }); if (exp == null) return; await aApi("/evals", { title: m.content.slice(0, 80), input: m.content, expectedBehavior: exp, source: "manual" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }),
       mkAct("→ Rule", async (ev) => { await aApi("/rules", { content: m.content, scope: "global", status: "candidate" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }),
       // F3 (item 28, spec 616): the 8th inbox action — convert a memory into a retrieval-scope note
       // (guides what gets looked up; mirrors → Rule with scope:"retrieval").
@@ -1256,11 +1262,11 @@ async function showDiff(id, from, to) {
   (d.diff || "(no diff)").split("\n").forEach((l) => { const ln = document.createElement("div"); if (l[0] === "+") ln.className = "add"; else if (l[0] === "-") ln.className = "del"; ln.textContent = l; box.appendChild(ln); });
   const old = adetail.querySelector(".adiff"); if (old) old.remove(); adetail.appendChild(box); box.scrollIntoView();
 }
-async function reviseArtifact(a) { const t = prompt("Revise — the full new content:", a.content); if (t != null && t.trim()) { await aApi("/artifacts/version", { id: a.id, content: t }); openArtifact(a.id); } }
+async function reviseArtifact(a) { const t = await askText({ kicker: "Artifact", title: "Revise — the full new content", value: a.content, saveLabel: "Save version", hint: "Edit freely. Saving creates a new version; earlier ones are kept." }); if (t != null && t.trim()) { await aApi("/artifacts/version", { id: a.id, content: t }); openArtifact(a.id); } }
 // Export safety (spec, E2): the SERVER gate runs the seven checks — docx/pdf/xlsx/csv now export
 // natively. Sensitive-data detection blocks until explicitly overridden; other warnings ride along.
 async function exportArtifact(a) {
-  const f = prompt("Export format (md, txt, json, html, docx, pdf, xlsx, csv):", "md"); if (f == null) return;
+  const f = await askText({ kicker: "Export", title: "Export format", multiline: false, value: "md", saveLabel: "Export", hint: "One of: md, txt, json, html, docx, pdf, xlsx, csv." }); if (f == null) return;
   if (!a.mentorReviewed && !confirm("This artifact hasn't been mentor-reviewed. Export anyway?")) return;
   let r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim() });
   if (r.blocked === "sensitive_data") {
@@ -1285,12 +1291,12 @@ async function transformArt(id, kind) {
   if (r.item) openArtifact(r.item.id); else { note.remove(); alert("Transform: " + (r.error || "failed")); }
 }
 async function setArtStatus(id, status) { await aApi("/artifacts/update", { id, status }); openArtifact(id); }
-async function renameArt(a) { const t = prompt("Rename artifact:", a.title); if (t != null && t.trim()) { await aApi("/artifacts/update", { id: a.id, title: t.trim() }); openArtifact(a.id); } }
+async function renameArt(a) { const t = await askText({ kicker: "Artifact", title: "Rename artifact", multiline: false, value: a.title, saveLabel: "Rename" }); if (t != null && t.trim()) { await aApi("/artifacts/update", { id: a.id, title: t.trim() }); openArtifact(a.id); } }
 async function reviewArtifact(id) { const note = document.createElement("div"); note.className = "areview"; note.textContent = "Reviewing with the local model (≈20s)…"; adetail.appendChild(note); await aApi("/artifacts/review", { id }); openArtifact(id); }
 async function delArt(id) { await aApi("/artifacts/delete", { id }); showArtifactList(); }
 async function saveAsArtifact(content) {
   const guess = (String(content).split("\n").find((l) => l.trim()) || "Document").replace(/^#+\s*/, "").replace(/[*_`]/g, "").slice(0, 60);
-  const t = prompt("Save as artifact — title:", guess); if (t == null) return;
+  const t = await askText({ kicker: "Artifact", title: "Save as artifact — title", multiline: false, value: guess, saveLabel: "Save" }); if (t == null) return;
   const r = await aApi("/artifacts", { title: t || "Document", content, type: "markdown" });
   if (r.item) { openArtifacts(); openArtifact(r.item.id); }
 }
@@ -1381,7 +1387,7 @@ function renderPrompt(p) {
   const acts = document.createElement("div"); acts.className = "macts";
   acts.append(
     mkAct(p.active ? "Deactivate" : "Activate", async () => { if (p.active) await aApi("/prompts/update", { id: p.id, active: false }); else await aApi("/prompts/activate", { id: p.id }); loadImprove(); }),
-    mkAct("New version", async () => { const t = prompt("New version of \"" + p.name + "\":", p.content); if (t == null || !t.trim()) return; const why = prompt("Reason for the change:", "") || ""; await aApi("/prompts", { name: p.name, scope: p.scope, content: t.trim(), changeReason: why }); loadImprove(); }),
+    mkAct("New version", async () => { const t = await askText({ kicker: "Prompt", title: "New version of “" + p.name + "”", value: p.content, saveLabel: "Next →" }); if (t == null || !t.trim()) return; const why = await askText({ kicker: "Prompt", title: "Reason for the change", multiline: false, placeholder: "Optional…", saveLabel: "Save version" }) || ""; await aApi("/prompts", { name: p.name, scope: p.scope, content: t.trim(), changeReason: why }); loadImprove(); }),
     mkAct("Delete", () => fUpdate("/prompts/delete", { id: p.id })),
   );
   it.append(top, c, acts); return it;
@@ -1446,15 +1452,15 @@ async function fUpdate(path, body) { await aApi(path, body); loadImprove(); }
 async function addImprove() {
   const v = (iadd.value || "").trim(); if (!v) return;
   if (itab === "ledger") await aApi("/ledger", { category: "manual", severity: "low", originalRequest: v, detectedBy: "user" });
-  else if (itab === "evals") { const exp = prompt("Expected behavior (what a good answer must do):", ""); await aApi("/evals", { title: v.slice(0, 80), input: v, expectedBehavior: exp || "", source: "manual" }); }
+  else if (itab === "evals") { const exp = await askText({ kicker: "Evaluation", title: "Expected behavior", placeholder: "What a good answer must do…" }); await aApi("/evals", { title: v.slice(0, 80), input: v, expectedBehavior: exp || "", source: "manual" }); }
   else if (itab === "prompts") {
-    const name = prompt("Prompt name (same name = new version of that prompt):", "house-style"); if (name == null) return;
-    const scope = prompt("Scope (global, mode, tool, mentor, router):", "global") || "global";
-    const why = prompt("Reason for this prompt:", "") || "";
+    const name = await askText({ kicker: "Prompt", title: "Prompt name", multiline: false, value: "house-style", hint: "Same name = a new version of that prompt.", saveLabel: "Next →" }); if (name == null) return;
+    const scope = await askText({ kicker: "Prompt", title: "Scope", multiline: false, value: "global", hint: "One of: global, mode, tool, mentor, router.", saveLabel: "Next →" }) || "global";
+    const why = await askText({ kicker: "Prompt", title: "Reason for this prompt", multiline: false, placeholder: "Optional…", saveLabel: "Save" }) || "";
     await aApi("/prompts", { name: name.trim() || "unnamed", scope: scope.trim(), content: v, changeReason: why });
   }
   else if (itab === "finetune") {
-    const ideal = prompt("Ideal output (what the model SHOULD produce for this input):", ""); if (ideal == null) return;
+    const ideal = await askText({ kicker: "Finetune", title: "Ideal output", placeholder: "What the model SHOULD produce for this input…" }); if (ideal == null) return;
     await aApi("/finetune", { input: v, idealOutput: ideal, source: "user_authored_instruction" });
   }
   else await aApi("/rules", { content: v, scope: "global", status: "candidate" });
