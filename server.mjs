@@ -43,6 +43,7 @@ import { createTenantResolver, filterToolDefs, FORGE_TOOLS } from "./tenantstore
 import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors.mjs";
 import { createAccessVerifier } from "./accessjwt.mjs";
 import { createImagesFeature } from "./images.mjs";
+import { shapeCloudParams, paramRetryAdjust, TOOL_CAP } from "./cloudparams.mjs";
 import { createGoogleProvider } from "./google.mjs";
 import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
@@ -471,16 +472,22 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
       if (m.role === "tool" && m.tool_call_id) o.tool_call_id = m.tool_call_id;
       return o;
     });
+    // Per-provider request shaping (cloudparams.mjs): temperature omitted for OpenAI's fixed-temp
+    // gpt-5/o family, clamped to Anthropic's 0..1 or the OpenAI-dialect 0..2 elsewhere; tool defs
+    // capped at 128 (OpenAI's hard limit — box tools are listed first, so the cap sheds tail-end
+    // connector tools, never core capability). Live user errors 2026-07-19 drove both rules.
+    const shaped = shapeCloudParams({ provider, directId, temperature: opts.temperature, tools: Array.isArray(opts.tools) && opts.tools.length ? opts.tools : null });
     const payload = { model: directId, messages: msgs, stream: true };
-    if (typeof opts.temperature === "number") payload.temperature = opts.temperature;
+    if (typeof shaped.temperature === "number") payload.temperature = shaped.temperature;
     // LIVE-verified 2026-07-12: native-OpenAI models reject max_tokens ("use max_completion_tokens").
     // OpenRouter translates this itself and DeepSeek accepts max_tokens, so only openai differs.
     // (Per the GPT-5.x token-starvation lesson: reasoning eats this budget — keep it generous.)
     if (typeof opts.num_predict === "number") payload[provider === "openai" ? "max_completion_tokens" : "max_tokens"] = opts.num_predict;
     // Phase B: attach this box's tool schemas (already OpenAI function format) so tool-capable
     // cloud models can drive the same tools the local model uses.
-    if (Array.isArray(opts.tools) && opts.tools.length) {
-      payload.tools = opts.tools;
+    if (shaped.tools) {
+      payload.tools = shaped.tools;
+      if (shaped.toolsDropped) console.log(`[dominion-ai] tool defs capped at ${shaped.tools.length} for ${directId} (${shaped.toolsDropped} dropped — provider limit)`);
       // opts.toolChoice="none" = conclusion rounds: schemas stay visible (agent models get confused
       // when tools vanish mid-conversation) but the API hard-blocks further calls.
       if (opts.toolChoice) payload.tool_choice = opts.toolChoice;
@@ -498,28 +505,49 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     // OpenAI/DeepSeek use stream_options.include_usage. Set whichever this provider understands.
     if (cfg.wantUsage) payload.usage = { include: true };
     else payload.stream_options = { include_usage: true };
-    const data = JSON.stringify(payload);
+    const providerLabel = cfg.label;
+    const mod = u.protocol === "https:" ? https : http;
+    let settled = false;
+    let currentReq = null;
+    const done = (r) => {
+      if (settled) return; settled = true;
+      if (shaped.toolsDropped && r && typeof r === "object") r.toolsDropped = shaped.toolsDropped;
+      resolve(r);
+    };
+    // One attempt = one HTTP request with its own stream state. On a 400 that NAMES a parameter
+    // (temperature, max_tokens naming, reasoning_effort, tools length), paramRetryAdjust builds a
+    // corrected payload and we resend exactly once — a rejected request bills nothing, and this net
+    // catches provider quirks the shaping table hasn't met yet. The adjustment is logged so the
+    // permanent rule can be added to cloudparams.mjs.
+    const send = (body, canRetry) => {
+    const data = JSON.stringify(body);
     const headers = {
       authorization: "Bearer " + KEY,
       "content-type": "application/json",
       "content-length": Buffer.byteLength(data),
       ...cfg.extraHeaders,
     };
-    const providerLabel = cfg.label;
-    const mod = u.protocol === "https:" ? https : http;
-    let content = "", reasoning = "", usage = null, buf = "", settled = false, finishReason = "";
+    let content = "", reasoning = "", usage = null, buf = "", finishReason = "";
     // Streamed tool calls arrive as indexed fragments (id/name once, arguments in pieces) —
     // accumulate per index and reassemble into full {id, type, function:{name, arguments}} objects.
     const toolCallAcc = [];
-    const done = (r) => { if (settled) return; settled = true; resolve(r); };
     const req = mod.request(
       { method: "POST", hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80), path: u.pathname + u.search, headers, timeout: 180000 },
       (resp) => {
         if (resp.statusCode && resp.statusCode >= 400) {
           let errBuf = ""; resp.on("data", (d) => (errBuf += d));
           resp.on("end", () => {
-            let msg = providerLabel + " returned HTTP " + resp.statusCode;
-            try { const j = JSON.parse(errBuf); if (j && j.error && j.error.message) msg = providerLabel + ": " + j.error.message; } catch {}
+            let raw = "";
+            try { const j = JSON.parse(errBuf); if (j && j.error && j.error.message) raw = j.error.message; } catch {}
+            if (resp.statusCode === 400 && canRetry && !settled) {
+              const adj = paramRetryAdjust(body, raw);
+              if (adj) {
+                console.log(`[dominion-ai] param retry (${providerLabel} · ${directId}): ${adj.note}`);
+                send(adj.payload, false);
+                return;
+              }
+            }
+            const msg = raw ? providerLabel + ": " + raw : providerLabel + " returned HTTP " + resp.statusCode;
             done({ ok: false, status: resp.statusCode, error: msg });
           });
           return;
@@ -570,10 +598,13 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
         resp.on("error", (e) => done({ ok: false, error: providerLabel + " stream error: " + String(e.message) }));
       }
     );
-    if (opts.signal) opts.signal.addEventListener("abort", () => { try { req.destroy(); } catch {} done({ ok: false, aborted: true, error: "stopped" }); }, { once: true });
+    currentReq = req;
     req.on("error", (e) => done({ ok: false, error: "Couldn't reach " + providerLabel + ": " + String(e.message) + ". Local Qwen still works." }));
     req.on("timeout", () => { try { req.destroy(); } catch {} done({ ok: false, error: providerLabel + " timed out. Try again or use Local Qwen." }); });
     req.write(data); req.end();
+    };
+    if (opts.signal) opts.signal.addEventListener("abort", () => { try { currentReq && currentReq.destroy(); } catch {} done({ ok: false, aborted: true, error: "stopped" }); }, { once: true });
+    send(payload, true);
   });
 }
 
@@ -2782,6 +2813,16 @@ async function handleChat(req, res) {
       // runtime gate below for a hallucinated name that was never offered.
       const idWall = toolWallFor(req.dominionIdentity && req.dominionIdentity.source);
       if (cloudTools && idWall) cloudTools = cloudTools.filter((d) => !idWall.has(d && d.function && d.function.name));
+      // Provider function-tool ceiling (OpenAI enforces exactly 128; nobody sensible needs more).
+      // Box tools sit first and connector tools follow in stable sorted order, so the cap sheds
+      // the alphabetical tail of connector tools and NEVER core capability. Logged out loud —
+      // a silently thinner toolbox reads as "covered" when it isn't. (2026-07-19: 55 box tools
+      // + five connectors = 198 defs, and every OpenAI-direct tool turn 400'd on the length.)
+      if (cloudTools && cloudTools.length > TOOL_CAP) {
+        const dropped = cloudTools.length - TOOL_CAP;
+        cloudTools = cloudTools.slice(0, TOOL_CAP);
+        console.log(`[dominion-ai] tool defs: offering ${TOOL_CAP} of ${TOOL_CAP + dropped} to ${cloudModel} (${dropped} connector tool(s) past the provider cap dropped)`);
+      }
       let inTokTotal = 0, outTokTotal = 0, costTotal = 0, sawCost = false, sawTok = false;
       // PROMPT-CACHE VISIBILITY (Fred, 2026-07-19). Every model in the catalog prices cache READS
       // far below fresh prompt tokens (deepseek-v4-pro is ~120x cheaper), and the DeepSeek/Kimi/Qwen
