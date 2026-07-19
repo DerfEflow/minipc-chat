@@ -24,6 +24,9 @@ const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"
 const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
       LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1",
       LS_PMODE = "dominion.privacy-mode.v1";
+// Live turns are now a PER-CHAT map ({ [chatId]: {jobId, eventIndex} }) so runs in several chats can
+// stream in the background at once. LS_LIVEJOB_OLD is the legacy single-job key, migrated once.
+const LS_LIVEJOBS = "dominion.livejobs.v1", LS_LIVEJOB_OLD = "dominion.livejob";
 
 // ---- Phase 2 privacy modes (Fred's hard allow-list; the SERVER enforces, this mirrors it) ----
 // normal = all providers + local · trusted = OpenAI/Anthropic direct + local · private = local only.
@@ -63,7 +66,14 @@ const PRESETS = {
   code: "You are a precise coding assistant: give exact, runnable specifics; for real file changes use forge_send with complete instructions.",
 };
 
-let chats = [], curId = null, busy = false, aborter = null, chatQuery = "";
+let chats = [], curId = null, aborter = null, chatQuery = "";
+// Per-chat live turns (persisted). An entry means that chat has a run generating server-side right
+// now; it survives chat switches, minimize, reload, and — via the durable store — server restarts.
+let liveJobs = {};
+// "busy" is now per-chat: does THIS chat have a live run? The composer, Stop button, and the
+// Continue/Regenerate actions all key off the chat on screen, so other chats keep streaming freely.
+const busyFor = (id) => !!liveJobs[id];
+const anyBusy = () => Object.keys(liveJobs).length > 0;
 let settings = { persona: "default", personaCustom: "", temperature: 0.7, confirmTools: false, privacy: "redacted_external" };
 let pendingAtt = [];   // attachments staged in the composer for the NEXT send
 
@@ -117,6 +127,7 @@ function load() {
   try { const s = JSON.parse(localStorage.getItem(LS_SET) || "null"); if (s && typeof s === "object") settings = { ...settings, ...s }; } catch {}
   try { const m = localStorage.getItem(LS_MODE); if (m && modeSel) modeSel.value = m; } catch {}
   try { const p = localStorage.getItem(LS_PMODE); if (p && privacyModeSel) privacyModeSel.value = p; } catch {}
+  loadLiveJobs();
 }
 // ---------- cross-device sync (Fred, 2026-07-19: start on the phone, continue on the laptop) ----------
 // Conversations used to live only in this browser's localStorage, so every device was an island.
@@ -176,6 +187,7 @@ function mergeIncoming(incoming, deleted) {
     if ((local.updatedAt || 0) > (d.deletedAt || 0)) continue;   // edited here after the delete elsewhere
     chats = chats.filter((c) => c.id !== d.id);
     delete syncState.pushed[d.id];
+    if (liveJobs[d.id]) { delete liveJobs[d.id]; persistLiveJobs(); }   // no phantom running-dot on a synced-away chat
     changedAny = true;
     if (d.id === curId) changedCur = true;
   }
@@ -183,7 +195,9 @@ function mergeIncoming(incoming, deleted) {
 }
 
 async function syncNow() {
-  if (syncOff || syncing || busy) return;         // never mutate the transcript mid-stream
+  // never mutate the transcript mid-stream — `anyBusy()` is the per-chat successor to the old global
+  // `busy` flag, so a run generating in ANY chat still pauses sync just as before.
+  if (syncOff || syncing || anyBusy()) return;
   syncing = true;
   try {
     for (let round = 0; round < 12; round++) {
@@ -206,7 +220,8 @@ async function syncNow() {
       const goneIds = (j.rejected || []).filter((x) => x && x.reason === "deleted").map((x) => x.id);
       if (goneIds.length) {
         chats = chats.filter((c) => !goneIds.includes(c.id));
-        for (const id of goneIds) delete syncState.pushed[id];
+        for (const id of goneIds) { delete syncState.pushed[id]; if (liveJobs[id]) delete liveJobs[id]; }
+        persistLiveJobs();
       }
       syncState.deletes = syncState.deletes.filter((d) => !dels.some((x) => x.id === d.id));
 
@@ -243,6 +258,16 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) sche
 window.addEventListener("online", () => scheduleSync(600));
 setInterval(() => { if (!document.hidden) syncNow(); }, 60000);
 
+// Restore the per-chat live-job map, migrating the legacy single-job key one last time (then drop it).
+function loadLiveJobs() {
+  try { const m = JSON.parse(localStorage.getItem(LS_LIVEJOBS) || "null"); if (m && typeof m === "object") liveJobs = m; } catch {}
+  try {
+    const old = JSON.parse(localStorage.getItem(LS_LIVEJOB_OLD) || "null");
+    if (old && old.jobId && old.chatId && !liveJobs[old.chatId]) liveJobs[old.chatId] = { jobId: old.jobId, eventIndex: old.eventIndex || 0 };
+    localStorage.removeItem(LS_LIVEJOB_OLD);
+  } catch {}
+}
+const persistLiveJobs = () => { try { localStorage.setItem(LS_LIVEJOBS, JSON.stringify(liveJobs)); } catch {} };
 const cur = () => chats.find((c) => c.id === curId);
 const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); const base = u ? (u.content || (Array.isArray(u.attachments) && u.attachments[0] && ("📎 " + u.attachments[0].name)) || "") : "New chat"; return String(base).replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
 const resolvePersona = () => settings.persona === "custom" ? (settings.personaCustom || "") : (PRESETS[settings.persona] || "");
@@ -256,7 +281,7 @@ function summarizeLeft(id) {
   if (!c || c.messages.length < 4) return;
   fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
 }
-function newChat() { if (busy) return; const prev = curId; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); }
+function newChat() { const prev = curId; detachCurrentSession(); const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); }
 // Fresh-start ignition: a quick green scan-sweep over the chat surface as the rail closes.
 function igniteChatSurface() {
   const surf = document.getElementById("neural-glass") || document.body;
@@ -264,7 +289,10 @@ function igniteChatSurface() {
   surf.classList.add("nc-ignite");
   setTimeout(() => surf.classList.remove("nc-ignite"), 1000);
 }
-function switchChat(id) { if (busy) return; const prev = curId; curId = id; save(); renderAll(); scroll(true); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); }
+// Switching chats no longer blocks on a running turn: the run keeps generating server-side and its
+// per-chat liveJobs entry persists. We tear down the on-screen streaming session (WITHOUT stopping
+// the server job), render the target chat, then reattach if IT has a live run.
+function switchChat(id) { if (id === curId) { closeSidebar(); return; } const prev = curId; detachCurrentSession(); curId = id; save(); renderAll(); scroll(true); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); }
 function deleteChat(id) {
   // True forget: also erase the server's transcript copy + any episodic memory distilled from this
   // chat, so cross-chat retrieval can never resurrect it (fire-and-forget; nothing breaks offline).
@@ -302,8 +330,9 @@ function renderSidebar() {
   const q = chatQuery.trim().toLowerCase();
   for (const c of [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) {
     if (q && !(c.title || "").toLowerCase().includes(q) && !c.messages.some((m) => (m.content || "").toLowerCase().includes(q))) continue;
-    const row = document.createElement("div"); row.className = "ci" + (c.id === curId ? " active" : "");
+    const row = document.createElement("div"); row.className = "ci" + (c.id === curId ? " active" : "") + (busyFor(c.id) ? " running" : "");
     const ttl = document.createElement("div"); ttl.className = "ttl"; ttl.textContent = c.title || "New chat"; ttl.onclick = () => switchChat(c.id);
+    if (busyFor(c.id)) { const dot = document.createElement("span"); dot.className = "runrun"; dot.title = "A run is generating in this chat"; ttl.prepend(dot); }
     const meta = document.createElement("span"); meta.className = "meta";
     meta.textContent = (c.lastMode && MODE_LABEL[c.lastMode] ? MODE_LABEL[c.lastMode] + " · " : "") + (c.updatedAt ? relTime(c.updatedAt) : "");
     const ren = document.createElement("span"); ren.className = "x"; ren.textContent = "✎"; ren.title = "Rename"; ren.onclick = (e) => { e.stopPropagation(); renameChat(c.id); };
@@ -401,7 +430,7 @@ function renderMsg(m, i, isLastAi) {
     acts.appendChild(mkAct("🔎", () => critiqueMessage(i, "hallucination_check"), "Hallucination check"));
     acts.appendChild(mkAct("💡", () => saveLesson(i), "Save lesson"));
     acts.appendChild(mkAct("🧪", () => convertToEval(i), "Convert to eval"));
-    if (isLastAi && !busy) { acts.appendChild(mkAct("Continue", () => continueLast())); acts.appendChild(mkAct("Regenerate", () => regenerate())); }
+    if (isLastAi && !busyFor(curId)) { acts.appendChild(mkAct("Continue", () => continueLast())); acts.appendChild(mkAct("Regenerate", () => regenerate())); }
   }
   turn.appendChild(acts); wrap.appendChild(turn);
 }
@@ -452,7 +481,7 @@ function renderAll() {
     let lastAi = -1; for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { lastAi = i; break; }
     c.messages.forEach((m, i) => renderMsg(m, i, i === lastAi));
   }
-  renderSidebar(); scroll();
+  renderSidebar(); syncComposer(); scroll();
 }
 function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px"; }
 function showErr(t) { document.querySelector(".err")?.remove(); const e = document.createElement("div"); e.className = "err"; e.textContent = t; wrap.appendChild(e); scroll(); }
@@ -793,20 +822,42 @@ function openImageFull(dataUrl) {
 }
 
 // ---------- agent loop over SSE ----------
-function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send"; if (on && typeof hideCostChip === "function") hideCostChip(); }
+// The Send/Stop button reflects the CHAT ON SCREEN: it shows Stop only while THIS chat has a live
+// run. Background chats keep streaming; their state shows as a sidebar dot, not this button.
+function syncComposer() {
+  const on = busyFor(curId);
+  sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send";
+  if (on && typeof hideCostChip === "function") hideCostChip();
+}
 
-// ---- durable live turn (PWA suspend/resume) ----
+// ---- durable live turn (suspend/resume + long runs + concurrency) ----
 // The server buffers every /chat turn as a JOB ({type:"job"} is the first SSE event) and keeps
-// generating even if this socket dies (phone switched apps). We track the live turn here; when the
-// stream drops mid-answer we reattach via GET /chat/attach?job=<id>&from=<eventIndex> and catch up
-// — mid-stream into the same bubble, or straight to the finished answer. Stop is now a server call.
-const LS_LIVEJOB = "dominion.livejob";
-let liveJob = null;        // { jobId, eventIndex, chatId } — the in-flight turn
-let liveSession = null;    // UI + parser state for the in-flight turn (null after finalize/reload)
+// generating even if this socket dies (phone switched apps), for as long as the run takes — the
+// durable store means it even survives a server restart. `liveJobs[chatId]` (persisted) tracks each
+// in-flight run; `liveJob` points at whichever one the ON-SCREEN reader is currently consuming.
+// When the stream drops we reattach via GET /chat/attach?job=<id>&from=<eventIndex> and catch up —
+// mid-stream into the same bubble, straight to the finished answer, or (after a restart) into the
+// preserved partial + a Continue affordance. Stop is a server call. Only the on-screen chat gets a
+// streaming DOM bubble; background runs are merged when you open them or on the next reconcile.
+let liveJob = null;        // pointer into liveJobs[...] for the on-screen reader (or null)
+let liveSession = null;    // UI + parser state for the on-screen in-flight turn (null when detached/idle)
 let readerActive = false;  // an SSE reader (original or reattach) is currently consuming
 let reattachTimer = null, reattachTries = 0;
-const persistLiveJob = () => { try { if (liveJob) localStorage.setItem(LS_LIVEJOB, JSON.stringify(liveJob)); } catch {} };
-const clearLiveJob = () => { liveJob = null; try { localStorage.removeItem(LS_LIVEJOB); } catch {} };
+// Tear down the on-screen streaming session WITHOUT stopping the server job (used on chat switch):
+// abort the local reader, drop the DOM session, but leave liveJobs[...] intact so the run is picked
+// back up on return. The AbortError this triggers is recognized as a detach, not a stop.
+function detachCurrentSession() {
+  if (reattachTimer) { clearTimeout(reattachTimer); reattachTimer = null; }
+  reattachTries = 0;
+  if (liveSession) liveSession.detached = true;
+  try { if (aborter) aborter.abort(); } catch {}
+  liveSession = null; liveJob = null; readerActive = false;
+}
+const collectJob = (jobId) => { if (jobId) fetch("/chat/collect", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jobId }) }).catch(() => {}); };
+// Jobs whose result we've already merged into local history THIS session. Guards the narrow window
+// where an on-screen finalize and a boot reconcile both race to deliver the same run before the
+// server-side `collected` flag becomes visible; across reloads the `collected` flag itself guards.
+const mergedJobs = new Set();
 
 // One in-progress AI bubble + all per-turn parser state. Used by BOTH the original /chat stream
 // and any /chat/attach reattach — the same session keeps accumulating into the same bubble.
@@ -819,7 +870,8 @@ function newSession(c) {
   const live = document.createElement("div"); live.className = "bubble think cursor"; live.textContent = "Dominion AI is working…";
   inner.append(tools, live); row.appendChild(inner); wrap.appendChild(row); scroll();
   const st = { c, inner, tools, live, chips: [], raw: "", ctxEl: null, ctxItems: null, doneMeta: null,
-               mentorCritique: null, done: false, stopped: false, gone: false, errMsg: "", warm: 0 };
+               mentorCritique: null, done: false, stopped: false, gone: false, errMsg: "", warm: 0,
+               jobId: "", detached: false };
   st.warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "Dominion AI is working… (first reply can take ~20s)"; scroll(); } }, 6000);
   return st;
 }
@@ -830,7 +882,20 @@ function newSession(c) {
 function processEvent(st, ev) {
   const { inner, tools, live, chips } = st;
   if (ev.type === "job") {
-    liveJob = { jobId: ev.id, eventIndex: 0, chatId: st.c.id }; persistLiveJob();
+    st.jobId = ev.id;
+    liveJobs[st.c.id] = liveJob = { jobId: ev.id, eventIndex: 0 }; persistLiveJobs();
+    renderSidebar();   // show the running dot the moment the job id lands
+  } else if (ev.type === "reset") {
+    // Server is about to re-send this turn from scratch (the resume cursor fell off its RAM tail, or
+    // it's a post-restart DB replay): wipe the partial bubble so the replayed events rebuild it
+    // cleanly with no duplicated text.
+    st.raw = ""; chips.length = 0; tools.innerHTML = "";
+    if (st.ctxEl) { st.ctxEl.remove(); st.ctxEl = null; st.ctxItems = null; }
+    live.classList.add("think"); live.textContent = "Dominion AI is working…";
+  } else if (ev.type === "cursor") {
+    // Authoritative resume index after a compacted replay — adopt it absolutely so the live-tail
+    // that follows lines up (readSse skips its usual ++ for this event).
+    if (liveJob) { liveJob.eventIndex = ev.seq | 0; persistLiveJobs(); }
   } else if (ev.type === "route") {
     // Model/mode intentionally NOT shown — the in-progress bubble just says "Dominion AI is working".
   } else if (ev.type === "context") {
@@ -914,9 +979,12 @@ async function readSse(res, st) {
       const s = line.trim(); if (!s.startsWith("data:")) continue;
       let ev; try { ev = JSON.parse(s.slice(5).trim()); } catch { continue; }
       processEvent(st, ev);
-      if (liveJob && liveJob.jobId) {
+      // `cursor` sets the resume index absolutely (handled in processEvent); every other buffered
+      // event advances it by one. `reset`/`cursor` are attach-only framing, never in the RAM buffer,
+      // so they don't count toward the index.
+      if (liveJob && liveJob.jobId && ev.type !== "cursor" && ev.type !== "reset") {
         liveJob.eventIndex++;
-        if (ev.type !== "token" || liveJob.eventIndex % 25 === 0) persistLiveJob();
+        if (ev.type !== "token" || liveJob.eventIndex % 25 === 0) persistLiveJobs();
       }
     }
   }
@@ -943,8 +1011,13 @@ function finalizeSession(st) {
     const last = c.messages[c.messages.length - 1];
     if (last && last.role === "user") { c.messages.pop(); input.value = last.content; autosize(); }
   }
-  clearLiveJob(); liveSession = null;
-  setBusy(false); aborter = null; renderAll();
+  // Clear this chat's live-job entry and tell the server we've merged the result (starts the
+  // collected-retention clock; also the idempotency guard against a reconcile re-delivering it).
+  const finishedJobId = st.jobId || (liveJobs[c.id] && liveJobs[c.id].jobId) || "";
+  delete liveJobs[c.id]; persistLiveJobs();
+  if ((st.done || st.stopped || st.gone) && finishedJobId) { mergedJobs.add(finishedJobId); collectJob(finishedJobId); }
+  if (liveSession === st) { liveSession = null; liveJob = null; }
+  aborter = null; renderAll();
   if (st.errMsg) showErr(st.errMsg);
   // Access-code / credits gate: show the message, then take them to the Setup page that fixes it.
   if (st.gateCode) setTimeout(() => { location.href = "/setup"; }, 2500);
@@ -957,7 +1030,10 @@ function finalizeSession(st) {
 
 async function streamReply(c) {
   const st = liveSession = newSession(c);
-  setBusy(true); aborter = new AbortController();
+  // Provisional entry so THIS chat reads as busy the instant we send, before the job id arrives
+  // (the real jobId fills in on the {type:"job"} event). Keeps a double-tap from firing two turns.
+  liveJobs[c.id] = liveJob = { jobId: "", eventIndex: 0 }; persistLiveJobs();
+  syncComposer(); aborter = new AbortController();
   let netErr = "";
   readerActive = true;
   try {
@@ -987,38 +1063,51 @@ async function streamReply(c) {
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
     await readSse(res, st);
   } catch (e) {
+    if (st.detached) return;   // switched away mid-stream: the run lives on server-side, we just let go
     if (e.name === "AbortError") st.stopped = true;   // legacy local stop (no jobId had arrived yet)
     else netErr = e.message || "network error";
   } finally { readerActive = false; }
+  if (st.detached) return;
   if (!st.done && !st.stopped && !st.gone && !st.errMsg && liveJob && liveJob.jobId) {
     // The stream died mid-turn but the job survives server-side (phone suspended, wifi blip):
     // do NOT render the retry/error state — reattach and catch up (backoff + on next visible).
     scheduleReattach();
     return;
   }
-  if (!st.done && !st.stopped && !st.gone && !st.errMsg) st.errMsg = "Chat failed: " + (netErr || "connection lost") + " — tap send to retry.";
+  if (!st.done && !st.stopped && !st.gone && !st.errMsg) {
+    // No jobId ever arrived (the POST itself failed) — there is nothing to reattach to. Drop the
+    // provisional busy entry so the chat isn't stuck showing Stop, and surface the retry.
+    delete liveJobs[c.id]; persistLiveJobs();
+    st.errMsg = "Chat failed: " + (netErr || "connection lost") + " — tap send to retry.";
+  }
   finalizeSession(st);
 }
 
-// ---- reattach: resume the live turn after a suspend/reload ----
-const REATTACH_DELAYS = [1000, 3000, 10000];
+// ---- reattach: resume a live turn after suspend / reload / restart ----
+// Backoff climbs then holds at 30s and repeats FOREVER — a run we know is live is never abandoned
+// on the client's say-so; only a server verdict (done/stopped/gone/error) ends it. Retries pause
+// while the tab is hidden (no point hammering a backgrounded PWA) and resume on visibilitychange.
+const REATTACH_DELAYS = [1000, 3000, 10000, 30000];
 function scheduleReattach(immediate) {
   if (!liveJob || !liveJob.jobId) return;
+  if (document.hidden && !immediate) return;   // the visibility handler re-arms us on return
   clearTimeout(reattachTimer);
   reattachTimer = setTimeout(attemptReattach, immediate ? 0 : REATTACH_DELAYS[Math.min(reattachTries, REATTACH_DELAYS.length - 1)]);
 }
 async function attemptReattach() {
   if (readerActive || !liveJob || !liveJob.jobId) return;
-  if (liveJob.chatId !== curId) return;   // reattach targets the chat on screen; boot/visible re-checks
+  if (!liveJobs[curId] || liveJobs[curId].jobId !== liveJob.jobId) return;   // only the on-screen chat's run
   let st = liveSession;
   if (!st) {
-    // The app was reloaded: rebuild the streaming bubble and replay from 0 — the partial text is
-    // reconstituted from the replayed token deltas.
+    // Fresh session (reload, or first open of a background chat): there's no retained partial to
+    // resume onto, so replay the whole turn from 0 — the token deltas reconstitute the text. (Only
+    // a session that KEPT its accumulated st.raw resumes from a mid-stream cursor.)
     const c = cur(); if (!c) return;
     st = liveSession = newSession(c);
+    st.jobId = liveJob.jobId;
     liveJob.eventIndex = 0;
   }
-  setBusy(true);
+  syncComposer();
   reattachTries++;
   readerActive = true;
   try {
@@ -1026,28 +1115,75 @@ async function attemptReattach() {
     if (!r.ok || !r.body) throw new Error("HTTP " + r.status);
     await readSse(r, st);
   } catch {} finally { readerActive = false; }
+  if (st.detached) return;
   if (st.done || st.stopped) return finalizeSession(st);
   if (st.gone) { st.errMsg = "That answer expired on the server — ask again."; return finalizeSession(st); }
   if (st.errMsg) return finalizeSession(st);
-  // Died again mid-tail — keep trying (1s/3s/10s… and on next visible); give up only after a while.
-  if (reattachTries >= 8) { st.errMsg = "Lost the server mid-answer and couldn't reattach — tap send to retry."; return finalizeSession(st); }
+  // Died again mid-tail — keep trying (1s/3s/10s/30s… and on next visible). No give-up: the run is
+  // still generating on the server, so we owe the user a reconnect however long it takes.
   scheduleReattach();
 }
-// Called on boot, visibilitychange→visible, pageshow, and chat switch: if a live job exists for the
-// chat on screen and no reader is consuming it, reattach immediately.
+// Called on boot, visibilitychange→visible, pageshow, and chat switch: if the chat on screen has a
+// live run and no reader is consuming it, reattach immediately.
 function maybeReattach() {
   if (readerActive) return;
-  if (!liveJob) { try { const j = JSON.parse(localStorage.getItem(LS_LIVEJOB) || "null"); if (j && j.jobId) liveJob = j; } catch {} }
-  if (!liveJob || liveJob.chatId !== curId) return;
+  const j = liveJobs[curId];
+  if (!j || !j.jobId) return;
+  liveJob = j;
   scheduleReattach(true);
+}
+// Reconcile local live-job state with the server's truth (boot + on return to the app). Adopts runs
+// this device didn't know about, and DELIVERS finished background runs into their chats even when
+// that chat isn't on screen — the whole point of "start it, walk away, come back to the answer".
+let reconcileBusy = false, lastReconcile = 0;
+async function reconcileJobs() {
+  if (reconcileBusy) return;
+  reconcileBusy = true;
+  try {
+    let jobs = [];
+    try { const r = await fetch("/chat/jobs", { cache: "no-store" }); if (r.ok) jobs = (await r.json()).jobs || []; } catch { return; }
+    let changed = false;
+    for (const j of jobs) {
+      if (!j.chatId) continue;
+      if (j.status === "running") {
+        if (!liveJobs[j.chatId]) { liveJobs[j.chatId] = { jobId: j.id, eventIndex: 0 }; changed = true; }
+      } else if (!j.collected) {
+        const c = chats.find((x) => x.id === j.chatId);
+        if (c) { if (await deliverResult(j.id, c)) changed = true; }
+      }
+    }
+    if (changed) { persistLiveJobs(); renderAll(); }
+    maybeReattach();
+  } finally { reconcileBusy = false; lastReconcile = Date.now(); }
+}
+// Merge a finished (or interrupted/orphaned) background run's result into its chat without opening
+// an SSE stream. Returns true if it changed anything. The on-screen live session is left to its own
+// finalize (which collects), so we never double-append.
+async function deliverResult(jobId, c) {
+  if (mergedJobs.has(jobId)) { if (liveJobs[c.id] && liveJobs[c.id].jobId === jobId) { delete liveJobs[c.id]; } return false; }
+  if (liveSession && liveSession.c.id === c.id) return false;
+  let r; try { const resp = await fetch("/chat/result?job=" + encodeURIComponent(jobId), { cache: "no-store" }); if (!resp.ok) return false; r = await resp.json(); } catch { return false; }
+  mergedJobs.add(jobId);
+  const text = stripThink(r.text || "");
+  if (text) {
+    const interrupted = r.status === "stopped" || r.status === "orphaned" || r.status === "error";
+    const msg = { role: "assistant", content: text };
+    if (r.meta && typeof r.meta === "object") { msg.meta = { ...r.meta }; if (r.meta.mode) c.lastMode = r.meta.mode; }
+    if (interrupted) { msg.meta = msg.meta || {}; msg.meta.interrupted = true; }
+    c.messages.push(msg); c.updatedAt = Date.now(); save();
+  }
+  if (liveJobs[c.id] && liveJobs[c.id].jobId === jobId) { delete liveJobs[c.id]; }
+  collectJob(jobId);
+  return true;
 }
 
 function send() {
-  if (busy) {
-    // Stop = a server-side call now (generation no longer dies with the socket). Falls back to the
-    // old local abort if the job id hasn't arrived yet or the POST can't get through.
-    if (liveJob && liveJob.jobId) {
-      fetch("/chat/stop", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jobId: liveJob.jobId }) })
+  if (busyFor(curId)) {
+    // Stop = a server-side call now (generation no longer dies with the socket), targeting THIS
+    // chat's run. Falls back to the local abort if the job id hasn't arrived yet or the POST fails.
+    const j = liveJobs[curId];
+    if (j && j.jobId) {
+      fetch("/chat/stop", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jobId: j.jobId }) })
         .catch(() => { if (aborter) aborter.abort(); });
     } else if (aborter) aborter.abort();
     return;
@@ -1065,18 +1201,18 @@ function send() {
   streamReply(c);
 }
 function regenerate() {
-  if (busy) return; const c = cur(); if (!c) return;
+  if (busyFor(curId)) return; const c = cur(); if (!c) return;
   for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { c.messages.splice(i, 1); break; }
   save(); renderAll(); streamReply(c);
 }
 // Pick up where a (possibly stopped) answer left off (spec: offer continuation after stop).
 function continueLast() {
-  if (busy) return; const c = cur(); if (!c) return;
+  if (busyFor(curId)) return; const c = cur(); if (!c) return;
   c.messages.push({ role: "user", content: "Continue exactly where you left off." });
   c.updatedAt = Date.now(); save(); renderAll(); streamReply(c);
 }
 function editUser(i) {
-  if (busy) return; const c = cur(); if (!c) return;
+  if (busyFor(curId)) return; const c = cur(); if (!c) return;
   input.value = c.messages[i].content;
   // Attachments come back to the staging strip with the text, so an edited resend keeps them.
   const att = c.messages[i].attachments;
@@ -1614,7 +1750,7 @@ function hideCostChip() { if (costChip) costChip.hidden = true; }
 async function updateEstimate() {
   if (!costChip) return;
   const text = input.value.trim();
-  if ((!text && !pendingAtt.length) || busy) { hideCostChip(); return; }
+  if ((!text && !pendingAtt.length) || busyFor(curId)) { hideCostChip(); return; }
   const c = cur();
   const history = c ? c.messages.map((m) => ({ role: m.role, content: m.content })) : [];
   history.push({ role: "user", content: text });
@@ -1632,7 +1768,7 @@ async function updateEstimate() {
     est = await r.json();
   } catch { if (seq === estSeq) hideCostChip(); return; }
   if (seq !== estSeq) return;                       // a newer keystroke already superseded this
-  if (busy || (!input.value.trim() && !pendingAtt.length)) { hideCostChip(); return; }
+  if (busyFor(curId) || (!input.value.trim() && !pendingAtt.length)) { hideCostChip(); return; }
   renderCostChip(est);
 }
 function renderCostChip(est) {
@@ -1756,12 +1892,15 @@ iaddbtn.addEventListener("click", addImprove);
 document.querySelectorAll(".itab").forEach((el) => el.addEventListener("click", () => setITab(el.dataset.tab)));
 personaSel.addEventListener("change", () => { personaCustom.hidden = personaSel.value !== "custom"; });
 tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.value; });
-// Durable-turn resume: coming back to the app (or reloading it) reattaches to an in-flight answer.
-document.addEventListener("visibilitychange", () => { if (!document.hidden) maybeReattach(); });
-window.addEventListener("pageshow", () => maybeReattach());
+// Durable-turn resume: coming back to the app reattaches the on-screen run AND reconciles with the
+// server (adopting runs from other devices, delivering finished background runs). Reconcile is
+// throttled so a rapid visible/hidden flicker doesn't spam /chat/jobs.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { maybeReattach(); if (Date.now() - lastReconcile > 10000) reconcileJobs(); } });
+window.addEventListener("pageshow", () => { maybeReattach(); reconcileJobs(); });
 
 load(); renderAll(); loadModels(); autosize();
 maybeReattach();   // an answer may still be generating server-side from before this (re)load
+reconcileJobs();   // adopt/deliver any runs the server knows about that this device doesn't
 // Pull whatever the other device did before this one was opened. A brand-new device (lastRev 0)
 // receives the whole account here, which is the phone-to-laptop handoff.
 scheduleSync(400);
@@ -1783,10 +1922,10 @@ async function checkVersion() {
     if (!r.ok) return;
     const { build } = await r.json();
     if (lastBuild === null) { lastBuild = build; return; }
-    if (build !== lastBuild) { if (busy) pendingReload = true; else doReload(); }
+    if (build !== lastBuild) { if (anyBusy()) pendingReload = true; else doReload(); }
   } catch {}
 }
-setInterval(() => { if (pendingReload && !busy) doReload(); else checkVersion(); }, 90000);
+setInterval(() => { if (pendingReload && !anyBusy()) doReload(); else checkVersion(); }, 90000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVersion(); });
 checkVersion();
 
@@ -1870,7 +2009,7 @@ async function micTap() {
       const j = await r.json().catch(() => null);
       if (!r.ok || !j || !j.text) { showErr((j && j.error) || "Transcription failed — try again."); return; }
       input.value = j.text; autosize();
-      if (!busy) send();   // straight through the normal flow: picked model, tools, the works
+      if (!busyFor(curId)) send();   // straight through the normal flow: picked model, tools, the works
     } finally { micBtn.classList.remove("busy"); micStatus(""); rec = null; input.placeholder = oldPlaceholder; }
   };
   rec.start();
