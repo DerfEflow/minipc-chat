@@ -208,9 +208,14 @@ export const MODELS = [
   { id: "thedrummer/cydonia-24b-v4.1", name: "Cydonia 24B v4.1", origin: "TheDrummer (community)",
     category: "Free-Thinking", params: "24B", paramsB: 24, inCost: 0.30, outCost: 0.50, ctx: 131072,
     specialty: "Characterful, unfiltered; sharp dialogue with no hand-wringing" },
-  { id: "cognitivecomputations/dolphin-mistral-24b-venice-edition:free", name: "Dolphin Mistral 24B", origin: "Cognitive Computations (Eric Hartford)",
-    category: "Free-Thinking", params: "24B", paramsB: 24, inCost: 0, outCost: 0, ctx: 32768,
-    specialty: "The classic de-censored Dolphin finetune — FREE to experiment" },
+  // OpenRouter retired the ":free" variant of this model on 2026-07-19; the paid id is the same
+  // model and every call to the old id 404s. Context is 128k, not the 32k the free tier carried.
+  // The free way to experiment now lives in Open & Trainable (Gemma 4 31B, genuinely $0), which is
+  // an honest home for it: nothing free on OpenRouter today is an uncensored finetune, so parking
+  // a mainstream aligned model in this category to keep a $0 slot would mislabel what it is.
+  { id: "cognitivecomputations/dolphin-mistral-24b-venice-edition", name: "Dolphin Mistral 24B", origin: "Cognitive Computations (Eric Hartford)",
+    category: "Free-Thinking", params: "24B", paramsB: 24, inCost: 0.20, outCost: 0.90, ctx: 128000,
+    specialty: "The classic de-censored Dolphin finetune, shipped by Venice as an uncensored build" },
 
   // ---- Vision / Multimodal ------------------------------------------------------------------
   { id: "minimax/minimax-m3", name: "MiniMax M3", origin: "MiniMax (Shanghai)",
