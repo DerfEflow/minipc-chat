@@ -1,0 +1,7 @@
+# Keep non-runtime files out of the deployed image (they are not read at runtime).
+# Verified: server.mjs and its modules never read docs/, tests, or snapshots.
+docs/
+.snapshots/
+.devdata/
+*_test.mjs
+*.output
