@@ -12,7 +12,7 @@
 <link rel="apple-touch-icon" href="/icons/dominion-core-180-v1.png" />
 <link rel="icon" href="/icons/dominion-core-192-v1.png" />
 <link rel="stylesheet" href="/dominion-ui.css?v=39" />
-<link rel="stylesheet" href="/dominion-tenant.css?v=3" />
+<link rel="stylesheet" href="/dominion-tenant.css?v=4" />
 <link rel="stylesheet" href="/dominion-vault.css?v=1" />
 </head>
 <body>
@@ -253,9 +253,11 @@
       <div id="attach-strip" class="attach-strip" hidden></div>
       <div id="attach-warn" class="attach-warn" hidden></div>
       <div class="bar">
-        <button id="attach" class="mic attach" title="Attach a picture or file" aria-label="Attach a picture or file">
-          <svg class="glyph"><use href="#i-attach"></use></svg>
-        </button>
+        <div id="bar-left" class="bar-left">
+          <button id="attach" class="mic attach" title="Attach a picture or file" aria-label="Attach a picture or file">
+            <svg class="glyph"><use href="#i-attach"></use></svg>
+          </button>
+        </div>
         <textarea id="input" rows="1" placeholder="Give Dominion a directive…" autocomplete="off"></textarea>
         <button id="speak" class="mic" title="Speak answers aloud (off)" aria-label="Toggle spoken answers">
           <svg class="glyph"><use href="#i-speaker"></use></svg>
@@ -391,7 +393,7 @@
 
   <script src="/app.js?v=39"></script>
   <script src="/dominion-ui.js?v=39"></script>
-  <script src="/dominion-tenant.js?v=2" defer></script>
+  <script src="/dominion-tenant.js?v=3" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>
 </body>
 </html>

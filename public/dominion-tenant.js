@@ -62,7 +62,11 @@
     state.toastRack.setAttribute("aria-live", "polite");
     state.toastRack.setAttribute("aria-atomic", "true");
 
-    state.layer.append(state.guide, state.overlay, state.toastRack);
+    // The Guide pill docks in the composer next to the paperclip (Fred, 2026-07-18) — a fixed
+    // floater kept colliding with the send arrow / input corner. Fallback: the floating layer.
+    const barLeft = document.getElementById("bar-left");
+    if (barLeft) { state.guide.classList.add("dt-guide-docked"); barLeft.append(state.guide); state.layer.append(state.overlay, state.toastRack); }
+    else state.layer.append(state.guide, state.overlay, state.toastRack);
     document.body.append(state.layer);
     document.addEventListener("keydown", handleKeydown);
   }

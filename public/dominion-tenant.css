@@ -361,3 +361,17 @@
   mix-blend-mode: screen;
 }
 @keyframes ncSweep { from { background-position: 0 -120%; opacity: 1; } to { background-position: 0 120%; opacity: 0; } }
+
+/* Guide pill, docked in the composer next to the paperclip (Fred, 2026-07-18). The fixed-floater
+   rules above still cover the fallback case; docked mode goes static and compact. */
+.bar-left { display: flex; align-items: flex-end; gap: 6px; min-width: 0; }
+.dt-guide-pill.dt-guide-docked {
+  position: static; right: auto; bottom: auto;
+  height: 43px; padding: 0 14px; border-radius: 12px; flex: 0 0 auto;
+}
+@media (max-width: 620px) {
+  .bar-left { grid-column: 1; grid-row: 2; justify-self: start; }
+  .dt-guide-pill.dt-guide-docked { bottom: auto; }
+}
+/* Docked pill never needs the rail-open fade (the drawer overlays the composer naturally). */
+.rail-open .dt-guide-pill.dt-guide-docked { opacity: 1; pointer-events: auto; }
