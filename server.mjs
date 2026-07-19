@@ -50,6 +50,7 @@ import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore } from "./forge.mjs";
+import { createIdeGate, IDE_MODE_DEFAULT } from "./ide.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
@@ -939,6 +940,12 @@ const tenants = createTenantResolver({ baseDir: DATA_DIR, embed: embedText,
 const OWNER_T = { role: "owner", isOwner: true, uid: "owner", email: OWNER_EMAIL, status: "active",
   memory, chatlog, chatsync, artifacts, flywheel, sandboxDir: CTX.sandboxDir, persona, ctxBase: CTX };
 const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
+// ---- Dominion Works (IDE mode). SOW: docs/IDE-MODE-ROADMAP.md, build pack: docs/IDE-MODE-BUILD.md.
+// Ships dark behind IDE_MODE so every phase can land in prod without exposing an unfinished build
+// surface. "owner" (default) = Fred only; "all"/"1" = every signed-in user; "off"/"0" = nobody.
+// Fred's ruling 2026-07-19: guests stay dark until Phase 8 (hardening), so the default is "owner".
+const ideGate = createIdeGate(cfgGet("IDE_MODE", IDE_MODE_DEFAULT));
+const ideAllowed = (T) => ideGate.allowed(T);
 // Cloudflare Access JWT verification: identity comes from a SIGNATURE, not from a hostname.
 // ACCESS_JWT=enforce requires a valid JWT (production); "prefer" verifies when present and falls
 // back to the header when absent (migration); "off" is header-only (devboot rig + tests).
@@ -1012,6 +1019,7 @@ async function handleAccount(req, res, u) {
   if (req.method === "GET" && p === "/account") {
     const out = { email: T.email, role: T.role, status: T.status, isOwner: T.isOwner, invited: !!T.invited,
       consented: !!T.consented, tutorialSeen: !!T.tutorialSeen, multiTenant: MULTI_TENANT,
+      ideMode: ideAllowed(T),
       pricing: billing.pricing, stripeConfigured: stripe.enabled, publishableKey: stripe.publishableKey };
     if (!T.isOwner && T.role === "credit") out.credits = billing.account(T.email);
     if (!T.isOwner && T.role === "sponsored") out.sponsored = { capUsd: T.sponsoredCapUsd, spentUsd: T.sponsoredSpentUsd || 0 };
