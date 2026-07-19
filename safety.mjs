@@ -48,13 +48,29 @@ const ILLICIT_DIRECT = /\b(child\s*trafficking|human\s*trafficking|money\s*laund
 const SEXUAL_GRAPHIC = /\b(porn\w*|pornography|nsfw|blow\s?jobs?|hand\s?jobs?|cum(?:shot|ming|s)?|masturbat\w*|orgasm\w*|ejaculat\w*|hentai|xxx|erotica|sex\s*scene|sexually\s*explicit|hardcore\s*sex|anal\s*sex|oral\s*sex|fellatio|cunniling\w*|deep\s*throat|gang\s?bang|threesome|bukkake)\b/i;
 const SEXUAL_GEN_REQUEST = /\b(write|writes|writing|describe|describing|generate|generating|compose|composing|create|creating|narrate|narrating|roleplay|role[-\s]?play|\brp\b|continue)\b[\s\S]{0,40}\b(sex\s*scene|sexual\s*(?:scene|encounter|act|acts)|explicit\s*(?:scene|content)|erotic\w*|making\s*love|intimate\s*scene|porn\w*|nude\s*scene)\b/i;
 
+// Proximity co-occurrence (2026-07-18): the minor+sexual test fires only when the two terms land
+// within the same passage (300 chars), so a long document that mentions children in one paragraph
+// and an unrelated broad-set term pages later does not read as CSAM (a 4KB Substack writing brief
+// tripped this). Real solicitations put the words together; 300 chars is a generous window and
+// stays on the conservative side. CSAM_DIRECT still blocks anywhere in the text, on its own.
+function nearCooccur(t, rxA, rxB, window = 300) {
+  const idx = (rx) => {
+    const out = []; const g = new RegExp(rx.source, rx.flags.includes("g") ? rx.flags : rx.flags + "g");
+    let m; while ((m = g.exec(t))) { out.push(m.index); if (g.lastIndex === m.index) g.lastIndex++; }
+    return out;
+  };
+  const as = idx(rxA); if (!as.length) return false;
+  const bs = idx(rxB); if (!bs.length) return false;
+  return as.some((a) => bs.some((b) => Math.abs(a - b) <= window));
+}
+
 // Screen the latest user turn. Returns { blocked, tier, category, reason }; blocked=false = allowed.
 export function screenContent(text, { isOwner = false } = {}) {
   const t = String(text || "");
   if (!t.trim()) return { blocked: false };
 
   // ---- ABSOLUTE (everyone, owner included, never overridable) ----
-  if (CSAM_DIRECT.test(t) || (MINOR.test(t) && SEXUAL_ANY.test(t))) {
+  if (CSAM_DIRECT.test(t) || nearCooccur(t, MINOR, SEXUAL_ANY)) {
     return { blocked: true, tier: "absolute", category: "minors",
       reason: "This request appears to involve sexual content with a minor. That is never permitted, for anyone. It has been refused and logged." };
   }
