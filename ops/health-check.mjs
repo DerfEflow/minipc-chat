@@ -33,6 +33,10 @@ const EXPECT = {
   railwayProjectId: "42e60c2b-26c9-4dda-8934-bff746e15896",
   suites: ["accessjwt_test.mjs", "connectors_test.mjs", "wave3_test.mjs"],
   catalogMaxAgeDays: 10,                         // weekly audit + boot audits; 10d means it stalled
+  stripeAccount: "acct_1TuPGJPDLRBaewfR",        // "DOMI AI APP". The wallet holds OTHER businesses'
+                                                 // Stripe keys; this pins us to the right one.
+  webhookUrl: "https://app.dominion.tools/webhooks/stripe",
+  backupMaxAgeHours: 36,                         // daily snapshot + slack for a missed run
 };
 
 const results = [];
@@ -217,7 +221,111 @@ function checkTenantWall() {
   }
 }
 
+// 5. Who can get through the front door. Cloudflare Access is the perimeter; the app's credit gate
+//    is the inner gate. This reports the perimeter shape, because it can widen without any code
+//    change and nothing else in the system would notice.
+async function checkAccessPolicy(w) {
+  if (!w.DOMINION_CF_DOORLIST_TOKEN) return warn("security", "access perimeter", "UNCHECKED — DOMINION_CF_DOORLIST_TOKEN not in wallet");
+  let ids;
+  try {
+    ids = JSON.parse(inContainer(`console.log(JSON.stringify({a:process.env.CF_ACCESS_ACCOUNT_ID||'',p:process.env.CF_ACCESS_APP_ID||''}));`).trim().split("\n").pop());
+  } catch (e) { return warn("security", "access perimeter", "UNCHECKED — " + String(e.message).slice(0, 60)); }
+
+  try {
+    const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${ids.a}/access/apps/${ids.p}/policies`,
+      { headers: { authorization: "Bearer " + w.DOMINION_CF_DOORLIST_TOKEN }, signal: AbortSignal.timeout(20000) });
+    const j = await r.json();
+    if (!j.success) return warn("security", "access perimeter", "UNCHECKED — CF API: " + JSON.stringify(j.errors).slice(0, 80));
+
+    for (const pol of j.result) {
+      const inc = pol.include || [];
+      const openToAll = inc.some((i) => i.everyone !== undefined);
+      const emails = inc.filter((i) => i.email && i.email.email).map((i) => i.email.email);
+      const domains = inc.filter((i) => i.email_domain).map((i) => i.email_domain.domain);
+      const svc = inc.filter((i) => i.service_token).length;
+
+      if (pol.decision === "non_identity") { ok("security", "service-token policy", `${pol.name}: ${svc} token(s)`); continue; }
+
+      if (openToAll) {
+        warn("security", "access perimeter", `policy "${pol.name}" includes EVERYONE — any email on earth can pass Cloudflare Access and the app auto-creates a "credit" user row for them. ` +
+          `The credit gate still blocks spend, and the tenant wall still blocks owner reach, so this is not a breach. But it means every pre-gate code path faces the open internet, ` +
+          `and the door-list automation in server.mjs (cfAllowEmail) is a no-op because individual emails add nothing to an everyone rule. ` +
+          `Confirm this is intended for open signup; if the app is meant to be invite-only, this is the hole.`);
+      } else {
+        ok("security", "access perimeter", `policy "${pol.name}": ${emails.length} email(s), ${domains.length} domain(s) — enumerated, not open`);
+      }
+    }
+  } catch (e) {
+    warn("security", "access perimeter", "UNCHECKED — " + String(e.message).slice(0, 80));
+  }
+}
+
 // ---------------------------------------------------------------- FEATURE
+
+// 6. Money path. A disabled or misrouted webhook means paid checkouts never credit the account —
+//    the customer is charged and gets nothing, which is the worst failure this app can have.
+async function checkStripe(w) {
+  const sk = w.DOMI_AI_LIVE_STRIPE_SECRET;
+  if (!sk) return warn("feature", "stripe webhook", "UNCHECKED — DOMI_AI_LIVE_STRIPE_SECRET not in wallet");
+  const H = { authorization: "Bearer " + sk };
+  try {
+    const acct = await (await fetch("https://api.stripe.com/v1/account", { headers: H, signal: AbortSignal.timeout(20000) })).json();
+    if (acct.error) return warn("feature", "stripe webhook", "UNCHECKED — " + acct.error.message.slice(0, 60));
+
+    // Guard against the wallet's generic Stripe keys, which belong to OTHER businesses.
+    acct.id === EXPECT.stripeAccount
+      ? ok("feature", "stripe account", `${acct.id} (${(acct.settings?.dashboard?.display_name) || "?"}) charges:${acct.charges_enabled}`)
+      : fail("feature", "stripe account", `key points at ${acct.id}, expected ${EXPECT.stripeAccount} — WRONG BUSINESS's Stripe account.`);
+    if (!acct.charges_enabled) fail("feature", "stripe charges enabled", "charges are DISABLED — customers cannot pay.");
+
+    const we = await (await fetch("https://api.stripe.com/v1/webhook_endpoints?limit=20", { headers: H, signal: AbortSignal.timeout(20000) })).json();
+    const mine = (we.data || []).filter((e) => e.url === EXPECT.webhookUrl);
+    if (!mine.length) return fail("feature", "stripe webhook", `no endpoint at ${EXPECT.webhookUrl} — paid checkouts will never credit accounts.`);
+
+    for (const e of mine) {
+      e.status === "enabled"
+        ? ok("feature", "stripe webhook", `${e.url} enabled · events: ${(e.enabled_events || []).join(", ")}`)
+        : fail("feature", "stripe webhook", `endpoint status is "${e.status}" — checkouts will not credit accounts.`);
+      // The server handles exactly checkout.session.completed (credit top-up model, no subscriptions).
+      // If subscriptions are ever added, customer.subscription.* and invoice.* must be added here too.
+      (e.enabled_events || []).includes("checkout.session.completed")
+        ? ok("feature", "stripe event coverage", "checkout.session.completed subscribed (matches the handler)")
+        : fail("feature", "stripe event coverage", "checkout.session.completed NOT subscribed — top-ups will silently never land.");
+    }
+  } catch (e) {
+    warn("feature", "stripe webhook", "UNCHECKED — " + String(e.message).slice(0, 80));
+  }
+}
+
+// 7. Restore points. The corpus lived in one place once; that is the failure cloudbackup.mjs exists
+//    to prevent. A stale snapshot dir means it has silently stopped.
+function checkBackups() {
+  try {
+    const b = JSON.parse(inContainer(`
+      const fs=require('fs');const p=require('path');
+      const dir=process.env.CLOUD_BACKUP_LOCAL_DIR||((process.env.DATA_DIR||'/data')+'/corpus-backups');
+      let newest=null,count=0;
+      try{ for(const f of fs.readdirSync(dir)){ const s=fs.statSync(p.join(dir,f)); if(!s.isFile())continue; count++;
+        if(!newest||s.mtimeMs>newest.mtimeMs) newest={name:f,mtimeMs:s.mtimeMs,size:s.size}; } }catch(e){}
+      console.log(JSON.stringify({dir,count,newest,node:process.env.CLOUD_BACKUP_NODE||'',rdir:process.env.CLOUD_BACKUP_DIR||''}));
+    `).trim().split("\n").pop());
+
+    if (!b.newest) return fail("feature", "backup freshness", `no snapshots in ${b.dir} — there are no restore points on the volume.`);
+    const ageH = (Date.now() - b.newest.mtimeMs) / 3600000;
+    const mb = (b.newest.size / 1048576).toFixed(1);
+    ageH <= EXPECT.backupMaxAgeHours
+      ? ok("feature", "backup freshness", `${b.count} snapshot(s), newest ${ageH.toFixed(1)}h old (${mb} MB)`)
+      : fail("feature", "backup freshness", `newest snapshot is ${ageH.toFixed(1)}h old (limit ${EXPECT.backupMaxAgeHours}h) — the daily backup has stopped.`);
+
+    // Off-box push is what makes it a real second location. Configured-but-offline is skipped
+    // honestly by design, so this is a WARN: worth knowing, not an outage.
+    b.node && b.rdir
+      ? ok("feature", "off-box backup target", `${b.node}:${b.rdir}`)
+      : warn("feature", "off-box backup target", "UNCONFIGURED — snapshots exist only on the Railway volume.");
+  } catch (e) {
+    warn("feature", "backup freshness", "UNCHECKED — " + String(e.message).slice(0, 80));
+  }
+}
 
 // 5. The app answers at all.
 async function checkLive() {
@@ -251,14 +359,50 @@ function checkCatalog() {
   }
 }
 
+// 8. The always-on watcher. ops/perimeter-probe.mjs runs on the mini-PC every 6h and appends a
+//    JSON line per run. Nobody watches that box, so read its log here: a perimeter failure at 3am
+//    on a Tuesday still lands in this report. A STALE log is itself a finding — it means the
+//    always-on check silently stopped, which is the failure mode of every unattended job.
+function checkPerimeterLog() {
+  try {
+    const raw = execFileSync("ssh", ["Fred@nucbox-k8-plus",
+      "powershell -NoProfile -Command \"if (Test-Path C:\\dominion-hands\\perimeter-log.jsonl) { Get-Content C:\\dominion-hands\\perimeter-log.jsonl -Tail 12 } else { '' }\""],
+      { encoding: "utf8", timeout: 60000, stdio: ["ignore", "pipe", "ignore"] });
+
+    const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("{"));
+    if (!lines.length) return warn("security", "perimeter probe (mini-PC)", "no log entries — the scheduled task may not be running.");
+
+    const runs = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const last = runs[runs.length - 1];
+    const ageH = (Date.now() - new Date(last.checkedAt).getTime()) / 3600000;
+    const bad = runs.filter((r) => !r.ok);
+
+    ageH <= 12
+      ? ok("security", "perimeter probe fresh", `last run ${ageH.toFixed(1)}h ago`)
+      : warn("security", "perimeter probe fresh", `last run ${ageH.toFixed(1)}h ago — the 6h task on the mini-PC has stopped.`);
+
+    bad.length === 0
+      ? ok("security", "perimeter intact (outside-in)", `${runs.length} recent run(s), all clean`)
+      : fail("security", "perimeter intact (outside-in)", `${bad.length} of ${runs.length} recent run(s) FAILED. Most recent failure: ` +
+          JSON.stringify(bad[bad.length - 1].results.filter((r) => r.level === "FAIL")).slice(0, 300));
+  } catch (e) {
+    warn("security", "perimeter probe (mini-PC)", "UNCHECKED — mini-PC unreachable: " + String(e.message).slice(0, 60));
+  }
+}
+
 // ---------------------------------------------------------------- report
 
+const W = wallet();
 await checkAccessConfig();
-await checkDomains(wallet());
+await checkDomains(W);
+await checkAccessPolicy(W);
 checkSuites();
 checkTenantWall();
 await checkLive();
 checkCatalog();
+await checkStripe(W);
+checkBackups();
+checkPerimeterLog();
 
 const fails = results.filter((r) => r.level === "FAIL");
 const warns = results.filter((r) => r.level === "WARN");
