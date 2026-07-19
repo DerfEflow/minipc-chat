@@ -45,6 +45,8 @@ import { createAccessVerifier } from "./accessjwt.mjs";
 import { createImagesFeature } from "./images.mjs";
 import { shapeCloudParams, paramRetryAdjust, TOOL_CAP } from "./cloudparams.mjs";
 import { createChatSync } from "./chatsync.mjs";
+import { unkeptIntent, intentNudge } from "./intentguard.mjs";
+import { featureIndex, featureHelp } from "./features.mjs";
 import { createGoogleProvider } from "./google.mjs";
 import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
@@ -673,6 +675,23 @@ async function logUsage(entry) {
   } catch {}
 }
 const estTokens = (chars) => Math.ceil((chars || 0) / 4);
+
+// A produced document must reach the user as a BUTTON, not as a sentence the model may or may not
+// remember to write (Fred, 2026-07-19: he asked several times for a downloadable document and got
+// an artifact id and a server path instead). Every document tool's result carries
+// "Download: /exports/<file>" from describeExportResult; the moment one appears, the turn emits a
+// file event and the client renders a real download control. The model's prose stops being the
+// delivery mechanism, which is the whole point: the file arrives whether or not it mentions it.
+const EXPORT_URL_RE = /Download:\s*(\/exports\/[^\s)"']+)/;
+function emitFileIfAny(result, sse) {
+  try {
+    const m = EXPORT_URL_RE.exec(String(result || ""));
+    if (!m) return;
+    const url = m[1];
+    const name = decodeURIComponent(url.slice("/exports/".length));
+    sse({ type: "file", name, url });
+  } catch {}
+}
 
 // ==== Chat attachments (pictures + text files) =================================================
 // Wire shape (additive; absent = every path byte-identical to before): user turns may carry
@@ -1376,6 +1395,14 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
     "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is " + new Date().toISOString().slice(0, 10) + ".",
     "Keep replies concise, direct, and honest. Never fabricate facts, quotes, sources, or events.",
   ].join(" ");
+  // THIS APP'S OWN FEATURES (Fred, 2026-07-19). Every model should be able to answer "what can this
+  // do, how do I use it, where is it" and, when a request matches a dedicated feature, point at the
+  // control instead of improvising. The index is deliberately small so it can ride every turn; the
+  // long copy lives behind the app_help tool and costs nothing until someone asks.
+  s += "\n\nDOMINION'S OWN FEATURES (this app, the one the user is in right now):\n" + featureIndex() +
+    "\n\nUsing this: when the user asks how to do something here, where a control is, or what this app can do, answer from the list above and name the exact control. When a request is what a dedicated feature is FOR (an image, a document, a file to read, speaking aloud), point them to it in one line before or instead of improvising: say what to tap. Never invent a control, a menu, or a location that is not listed above; if it is not listed, say plainly that you are not sure it exists here." +
+    (withTools ? " For step-by-step detail on any feature, call app_help with the feature name." : "");
+
   // HOUSE STYLE — Fred's response-format rules (2026-07-18), always in force, every model.
   s += "\n\nHOUSE STYLE (always in force, all replies):\n" + [
     "- No asterisks for emphasis or as separators unless the user explicitly asks for that formatting. Asterisks only for proper grammatical purposes. Carry emphasis with word choice and structure. (When writing content for the document-creation tools, markdown IS the correct format and stays.)",
@@ -1392,6 +1419,15 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
   // model's JUDGMENT (the code carve-out is the only hard wall). Set 2026-07-12. Tool-less turns
   // skip them along with the file/project doctrine: no hands, no hands-rules.
   if (withTools) {
+  // THE KEPT PROMISE (Fred, 2026-07-19). Stated first because it is the product's core claim: a
+  // model that announces work and then stops has failed the user more completely than one that
+  // simply says it cannot help. The server enforces this too (intentguard.mjs), but a model told
+  // the rule up front rarely has to be corrected after the fact.
+  s += "\n\nTHE KEPT PROMISE (before every other rule):\n" + [
+    "- Never end a turn on an intention. If you say you will look something up, read a file, check a project, or take any other action, you must DO IT IN THE SAME TURN by calling the tool, before you stop.",
+    "- Do not narrate what you are about to do and then stop. Either call the tool now, or answer now with what you already know.",
+    "- If you cannot do the thing (no tool, no access, no permission), say so plainly in one line and give your best answer with what you have. That is a kept turn. A promise with nothing behind it is not.",
+  ].join("\n");
   s += "\n\nOPERATING STANDARDS (always in force):\n" + [
     "1. Reversibility before speed. Before any write, overwrite, or delete, make sure an undo exists first (git commit or stash for tracked files, a timestamped copy for untracked ones). When two routes reach the same result, take the reversible one.",
     "2. Company and customer data. Never add to, delete, or change data that a company or a paying customer has entered and wants to keep, and never touch the backups that download to the mini-PC, ever. You MAY operate the platforms Fred uses (Railway, Supabase, Vercel, GitHub): read them to inform him, change configuration and environment variables, monitor deploys, and provision new databases. If a fix appears to need a change to customer data (a broken table, a bad row), do not make it. State the exact change and why, then let Fred decide; he will usually route that work elsewhere.",
@@ -1857,6 +1893,11 @@ async function handleVoiceTts(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   if (!OPENAI_KEY) return json(503, { error: "Voice needs the OpenAI key in the box's .env (OPEN_AI_DOMINION_UI_APIKEY)." });
   const b = await readJsonBody(req);
+  // 4000 is a guard on ONE REQUEST (OpenAI's speech endpoint takes 4096), not a limit on how much
+  // of an answer can be spoken. The client sends a long answer as a queue of ~450-character chunks,
+  // so this should never fire; if it ever does, the chunker upstream is broken. Do not treat this
+  // number as the spoken-length budget: capping the answer here is the bug we removed on
+  // 2026-07-19, where long replies were cut mid-sentence with nothing said about it.
   const text = b && typeof b.text === "string" ? b.text.trim().slice(0, 4000) : "";
   if (!text) return json(400, { error: "No text to speak." });
   // Per-request voice/instructions win over the box defaults, so the Settings picker is a real
@@ -2972,7 +3013,7 @@ async function handleChat(req, res) {
       const CONT_MAX = 16;
       // Seamless-continuation nudge (user role: agent-tuned models weight a trailing user turn highest).
       const CONTINUE_NUDGE = "[Dominion system notice — not Fred] Your reply was cut off at the output-length limit before it finished. Continue from the EXACT point you stopped. Do not repeat any earlier text, do not add a preface, recap, or apology, do not restate the last line — resume mid-sentence if that is where you stopped and write straight through to the natural end of the full response.";
-      let concludeNudged = false, emptyRetried = false, lastReasoning = "";
+      let concludeNudged = false, emptyRetried = false, intentNudged = false, lastReasoning = "", promisePrefix = "";
 
       for (let round = 0; round < CLOUD_MAX_ROUNDS && !aborted; round++) {
         roundsUsed = round + 1;
@@ -3101,6 +3142,7 @@ async function handleChat(req, res) {
             if ((name === "run_python_sandbox" || name === "forge_send") && !failed) executedCodeThisTurn = true;
             if (name === "export_artifact" && !failed) exportedThisTurn = true;
             sse({ type: "tool", name, runId, cls, status: failed ? "failed" : "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
+            emitFileIfAny(result, sse);   // a produced document becomes a real download button
             await logToolRun({ ts: callStartedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", states: life.states, confirmedByUser: gate.confirmedByUser, autoApproved: gate.autoApproved || undefined, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model: cloudModel });
             toolMsg(String(result).slice(0, 8000));
             toolSummaries.push(name + " · " + (failed ? "failed" : "succeeded"));
@@ -3108,8 +3150,9 @@ async function handleChat(req, res) {
           continue;   // feed the tool results back for the next round
         }
 
-        // Final answer for this turn (no tool calls this round).
-        answer = (or.content || "");
+        // Final answer for this turn (no tool calls this round). A promise kept after the guard
+        // fired carries its opening line with it (see promisePrefix below).
+        answer = promisePrefix + (or.content || "");
         if (or.reasoning) lastReasoning = or.reasoning;
         // No-truncation: if the model stopped ONLY because it hit the output cap (finish_reason
         // "length"), resume seamlessly and keep streaming until it reaches a natural stop or the
@@ -3139,6 +3182,27 @@ async function handleChat(req, res) {
           emptyRetried = true;
           messages.push({ role: "user", content: "[Dominion system notice — not Fred] Your last response contained no visible text. Write your final answer now as plain text." });
           continue;
+        }
+        // THE KEPT-PROMISE GUARD (Fred, 2026-07-19). A turn may not end on "let me go look at that"
+        // with nothing done. The three older guards test the SHAPE of a reply (truncated, empty,
+        // out of tool budget); this one reads its MEANING, because a broken promise arrives with a
+        // perfectly healthy shape: real text, clean stop, no tool calls. One nudge per turn.
+        if (!intentNudged && answer && round + 1 < CLOUD_MAX_ROUNDS && !concludePhase) {
+          const intent = unkeptIntent(answer, { toolsAvailable: !!(cloudTools && cloudTools.length) });
+          if (intent.unkept) {
+            intentNudged = true;
+            console.log(`[dominion-ai] kept-promise guard fired on ${cloudModel}: "${intent.promise.slice(0, 90)}"`);
+            messages.push({ role: "assistant", content: answer });
+            messages.push({ role: "user", content: intentNudge(intent.promise) });
+            // The promise is already on the user's screen, so it STAYS: what follows reads as the
+            // model saying what it will do and then doing it. Keeping it also keeps the saved
+            // transcript identical to what was displayed (the separator is streamed too, so the
+            // stored answer and the visible answer match byte for byte).
+            promisePrefix = answer + "\n\n";
+            sse({ type: "token", delta: "\n\n" });
+            working("acting");
+            continue;
+          }
         }
         break;
       }
@@ -3194,7 +3258,7 @@ async function handleChat(req, res) {
       if (w.waitedMs > 1500) console.log(`[dominion-ai] heavy GPU warmed in ${Math.round(w.waitedMs / 1000)}s`);
     }
 
-    let last = null;
+    let last = null, intentNudgedLocal = false, localPromisePrefix = "";
     for (let round = 0; round < MAX_ROUNDS && !aborted; round++) {
       roundsUsed = round + 1;
       // heartbeat phase: think-less runs (and post-tool rounds) go straight to writing
@@ -3286,6 +3350,7 @@ async function handleChat(req, res) {
           if ((name === "run_python_sandbox" || name === "forge_send") && !failed) executedCodeThisTurn = true;   // code went live → review trigger
           if (name === "export_artifact" && !failed) exportedThisTurn = true;                                     // export happened → review trigger
           sse({ type: "tool", name, runId, cls, status: failed ? "failed" : "done", preview: String(result).replace(/\s+/g, " ").slice(0, 120) });
+          emitFileIfAny(result, sse);   // a produced document becomes a real download button
           await logToolRun({ ts: startedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", states: life.states, confirmedByUser: gate.confirmedByUser, autoApproved: gate.autoApproved || undefined, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model });
           messages.push({ role: "tool", tool_name: name, content: String(result).slice(0, 8000) });
           toolSummaries.push(name + " · " + (failed ? "failed" : "succeeded"));
@@ -3293,12 +3358,35 @@ async function handleChat(req, res) {
         continue;
       }
 
-      // final answer — stream it out in small chunks for a live feel
-      const answer = stripThink(msg.content) || "(no response)";
+      // THE KEPT-PROMISE GUARD on the local path (same rule as the cloud loop above): a turn may
+      // not end on "let me go look at that" with nothing done. One nudge per turn, and only while
+      // a round remains to actually keep the promise in.
+      const localText = stripThink(msg.content);
+      if (!intentNudgedLocal && localText && round + 1 < MAX_ROUNDS && !opts.noTools) {
+        const intent = unkeptIntent(localText, { toolsAvailable: true });
+        if (intent.unkept) {
+          intentNudgedLocal = true;
+          console.log(`[dominion-ai] kept-promise guard fired on ${model}: "${intent.promise.slice(0, 90)}"`);
+          messages.push({ role: "assistant", content: localText });
+          messages.push({ role: "user", content: intentNudge(intent.promise) });
+          // Show the promise, then the keeping of it (the separator is streamed so the saved
+          // transcript matches the screen exactly).
+          for (let i = 0; i < localText.length && !aborted; i += 28) { sse({ type: "token", delta: localText.slice(i, i + 28) }); await sleep(8); }
+          sse({ type: "token", delta: "\n\n" });
+          localPromisePrefix = localText + "\n\n";
+          continue;
+        }
+      }
+
+      // final answer — stream it out in small chunks for a live feel. `answer` carries the whole
+      // turn (so the saved transcript is complete), but only the NEW text is streamed: anything the
+      // guard already put on screen must not be sent twice.
+      const fresh = localText || "(no response)";
+      const answer = localPromisePrefix + fresh;
       const size = 28;
-      for (let i = 0; i < answer.length && !aborted; i += size) {
-        sse({ type: "token", delta: answer.slice(i, i + size) });
-        if (i + size < answer.length) await sleep(8);
+      for (let i = 0; i < fresh.length && !aborted; i += size) {
+        sse({ type: "token", delta: fresh.slice(i, i + size) });
+        if (i + size < fresh.length) await sleep(8);
       }
       if (aborted) break;   // stopped mid-stream -> fall through to the interrupted log, NOT "done"
       // Phase 4: in Draft mode, a generated document is auto-saved as a versioned artifact

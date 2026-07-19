@@ -298,6 +298,98 @@
     } else if (result === "cancel") showToast("Checkout canceled. No charge was made.", "neutral");
   }
 
+  // ---- What's new (Fred, 2026-07-19) ----------------------------------------------------------
+  // The release notes, shown once per release on a user's next sign-in. Bump RELEASE.version to
+  // announce the next one; the stored key is compared against it, so a new version shows again and
+  // a user who has already seen this one is left alone.
+  //
+  // Deliberately NOT shown to a brand new account. Someone who just finished consent and the
+  // tutorial has no "before" to compare against, so "what's new" is noise on day one. For them the
+  // version is stamped as seen silently, and the next release is the first one they are told about.
+  const RELEASE_LS = "dominion.releaseSeen.v1";
+  const RELEASE = {
+    version: "2026.07",
+    kicker: "Product update",
+    title: "What's new in Dominion",
+    standfirst: "A broad update across the whole assistant: the services it can reach, the work it can carry out, how hard it thinks, what it can make, and how it sounds when it speaks back.",
+    sections: [
+      { h: "Connectors", items: [
+        ["Zapier, Google Workspace, GitHub, Stripe", "Dominion can now work inside the accounts you already use, including a bridge to more than 6,000 apps through your own Zapier server."],
+        ["Supabase, Postgres, Railway, Cloudflare", "Your projects, tables, deploys and DNS, reachable from the chat."],
+        ["Your own connectors", "Any MCP server you have can be added by hand."],
+        ["Credentials stay yours", "Every secret is encrypted at rest with per-account keys and is never shown back to anyone."],
+      ] },
+      { h: "Image generation", items: [
+        ["A full image studio", "Generate on the current flagship image model at three quality settings, in square, portrait or landscape."],
+        ["Reference plates and Refine", "Attach up to ten reference images, and turn a rough line into fuller art direction before you spend anything."],
+        ["Batch Foundry at half rate", "Queue a batch for a fifty percent reduction, delivered within twenty-four hours, reconciled against real usage with overcharges returned as credits."],
+        ["The gallery is yours", "Finished images live on your device. Dominion keeps no cloud gallery of your work."],
+      ] },
+      { h: "Voice, in both directions", items: [
+        ["Talk to it", "Tap the microphone and speak. Your words reach the same model and the same tools as typing."],
+        ["Thirteen voices", "Pick one in Settings and audition it before you commit."],
+        ["It reads the whole answer", "Long replies used to stop partway with no explanation. They are now read from beginning to end, and speech starts on the first passage while the rest is still being made."],
+        ["Play, pause and stop", "A transport bar shows progress and lets you stop at any point."],
+      ] },
+      { h: "Ember, Flame and Furnace", items: [
+        ["A dial for how hard it thinks", "Ember is the everyday floor, Flame is for work with weight, Furnace applies the whole framework deliberately."],
+        ["Forge Mode is its own control", "Reasoning depth and machine reach were separated, so you can think deeply without engaging your machine."],
+      ] },
+      { h: "Wolfe Logic", items: [
+        ["The reasoning core, always on", "Every turn, on every model, is governed by the same discipline: truth before agreement, claims labelled and qualified, mechanism sought beneath the symptom."],
+        ["It will push back", "When certainty outruns the evidence, or agreement would preserve harm, Dominion is built to say so."],
+      ] },
+      { h: "Everywhere else", items: [
+        ["Fifty-five tools", "Word documents, PDFs and spreadsheets you can keep, working memory, live web reading, and your own private sandbox."],
+        ["Attachments that are read", "Pictures, PDFs, Word files and spreadsheets, extracted on your device, with text recognition for scans and photographs."],
+        ["A clearer interface", "Bigger type, more room, and panels that glide over a background that holds still."],
+        ["Start on one device, continue on another", "Conversations follow you between phone and desktop."],
+      ] },
+    ],
+    horizon: {
+      h: "Coming next: a full stack development environment",
+      body: "Editor, terminal, database, deployment and review in one place, with the assistant present at every step. It ships when it is genuinely good, so there is no date yet.",
+    },
+  };
+  const releaseSeen = () => { try { return localStorage.getItem(RELEASE_LS) === RELEASE.version; } catch { return true; } };
+  const releaseDone = () => { try { localStorage.setItem(RELEASE_LS, RELEASE.version); } catch {} };
+  const forceRelease = new URLSearchParams(window.location.search).has("whats-new");
+
+  function showReleaseNotes() {
+    ensureLayer();
+    const sheet = node("section", "dt-sheet dt-release");
+    sheet.setAttribute("role", "dialog");
+    sheet.setAttribute("aria-modal", "true");
+    sheet.setAttribute("aria-label", "What's new in Dominion");
+    const close = () => { releaseDone(); endDialog(); maybeShowInstall(); };
+    sheet.append(sheetHeader(RELEASE.kicker + " · " + RELEASE.version, RELEASE.title, close));
+
+    const body = node("div", "dt-release-body");
+    body.append(node("p", "dt-release-standfirst", RELEASE.standfirst));
+    for (const sec of RELEASE.sections) {
+      body.append(node("h3", "dt-release-head", sec.h));
+      const list = node("ul", "dt-release-list");
+      for (const [lead, text] of sec.items) {
+        const li = node("li", "");
+        li.append(node("b", "", lead), node("span", "", text));
+        list.append(li);
+      }
+      body.append(list);
+    }
+    const horizon = node("div", "dt-release-horizon");
+    horizon.append(node("b", "", RELEASE.horizon.h), node("span", "", RELEASE.horizon.body));
+    body.append(horizon);
+
+    const actions = node("div", "dt-consent-actions");
+    const ok = node("button", "dt-primary-button", "Got it");
+    ok.type = "button";
+    ok.addEventListener("click", close);
+    actions.append(ok);
+
+    sheet.append(body, actions);
+    beginDialog("release", sheet);
+  }
+
   // ---- One-time install prompt (shown after the tutorial, never while installed) ----
   const INSTALL_LS = "dominion.installNudge.v1";
   let installPrompt = null;
@@ -357,21 +449,34 @@
     await handleTopupQuery();
     if (!state.account.multiTenant) {
       state.guide.hidden = true;
+      if (maybeShowRelease()) return;      // owner/single-tenant sees it too
       maybeShowInstall();
       return;
     }
     if (!state.account.consented) {
       state.guide.hidden = true;
+      releaseDone();                       // brand new account: nothing to catch up on
       await showConsent();
       return;
     }
     if (!state.account.tutorialSeen) {
       state.guide.hidden = true;
+      releaseDone();                       // still onboarding, so the tutorial IS the news
       await showTutorial();
       return;
     }
     state.guide.hidden = false;
+    if (maybeShowRelease()) return;         // one dialog at a time: install nudge waits its turn
     maybeShowInstall();
+  }
+
+  // Returns true when the release dialog was opened, so the caller can hold back anything else
+  // that wants the screen. Stacking a install card behind a modal reads as a broken app.
+  function maybeShowRelease() {
+    if (releaseSeen() && !forceRelease) return false;
+    if (state.activeDialog) return false;
+    showReleaseNotes();
+    return true;
   }
 
   function init() {
@@ -380,5 +485,7 @@
     return state.initPromise;
   }
 
-  window.DominionTenant = Object.freeze({ init });
+  // showRelease is exported so the notes can be reopened after they are dismissed (and so they can
+  // be demonstrated on request). Appending ?whats-new to the URL forces them for the same reason.
+  window.DominionTenant = Object.freeze({ init, showRelease: () => { ensureLayer(); showReleaseNotes(); } });
 })();

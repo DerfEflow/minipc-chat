@@ -182,8 +182,20 @@
         price.className = "price";
         price.dataset.for = cls;
         card.append(sel, price);
-        sel.addEventListener("change", () => onAssign(cls, sel.value));
-        paintPrice(cls, sel.value);
+        // Paint through the element we already hold. Looking it up by selector here would find
+        // nothing, since the card is not in the document until the append below.
+        const setPrice = (v) => {
+          if (!v) { price.textContent = "Follows your main model."; return; }
+          const m = findModel(v);
+          price.textContent = m && m.priceLong ? m.priceLong : "";
+        };
+        setPrice(sel.value);
+        sel.addEventListener("change", () => {
+          state.assignments[cls] = sel.value;
+          setPrice(sel.value);
+          saveAssignments();
+        });
+        if (state.allInOne) sel.disabled = true;
       }
       cards.append(card);
     }
@@ -214,24 +226,12 @@
     sel.value = current || keep || "";
   }
 
-  function paintPrice(cls, modelId) {
-    const el = document.querySelector('.price[data-for="' + cls + '"]');
-    if (!el) return;
-    if (!modelId) { el.textContent = "Follows your main model."; return; }
-    const m = findModel(modelId);
-    el.textContent = m && m.priceLong ? m.priceLong : "";
-  }
 
   function findModel(id) {
     for (const g of state.catalog || []) for (const m of g.models) if (m.id === id) return m;
     return null;
   }
 
-  function onAssign(cls, value) {
-    state.assignments[cls] = value;
-    paintPrice(cls, value);
-    saveAssignments();
-  }
 
   // Assignments belong to the workspace. With no workspace yet they are held as the account's
   // starting point, so the board is usable before the first project exists.
@@ -277,23 +277,39 @@
     });
   }
 
-  // Pull the catalog once, shaped for the board. Prices come straight from the server's numbers.
+  /*
+   * Pull the catalog once, from the SAME GET /api/models the chat picker uses, so there is one
+   * price list rather than two. The payload is ALREADY grouped by category ({groups:[{category,
+   * models}]}), and `available` reports which providers actually have a key on this server.
+   * A model whose provider has no key is shown DISABLED with the reason, never hidden and never
+   * silently swapped, matching how the chat picker refuses instead of substituting.
+   */
   async function loadCatalog() {
     try {
       const r = await fetch("/api/models", { headers: { accept: "application/json" } });
       if (!r.ok) return;
       const data = await r.json();
-      const groups = new Map();
-      for (const m of (data.models || data || [])) {
-        if (!m || !m.id) continue;
-        const label = m.category || "Models";
-        if (!groups.has(label)) groups.set(label, []);
-        const inC = Number(m.inCost), outC = Number(m.outCost);
-        const priceShort = isFinite(inC) && isFinite(outC) ? "$" + inC + "/$" + outC : "";
-        const priceLong = priceShort ? "$" + inC + " in / $" + outC + " out per million tokens" : "";
-        groups.get(label).push({ id: m.id, name: m.name || m.id, priceShort, priceLong, unavailable: !!m.noKey });
-      }
-      state.catalog = [...groups.entries()].map(([label, models]) => ({ label, models }));
+      const avail = data && data.available && typeof data.available === "object" ? data.available : null;
+      const hasKey = (provider) => {
+        if (!avail) return true;                       // no report: assume usable rather than grey out the world
+        if (!(provider in avail)) return true;
+        return avail[provider] !== false;
+      };
+      const groups = Array.isArray(data && data.groups) ? data.groups : [];
+      state.catalog = groups.map((g) => ({
+        label: g.category || "Models",
+        models: (g.models || []).filter((m) => m && m.id).map((m) => {
+          const inC = Number(m.inCost), outC = Number(m.outCost);
+          const priced = isFinite(inC) && isFinite(outC);
+          return {
+            id: m.id,
+            name: m.name || m.id,
+            priceShort: priced ? "$" + inC + "/$" + outC : "",
+            priceLong: priced ? "$" + inC + " in / $" + outC + " out per million tokens" : "",
+            unavailable: !hasKey(m.provider),
+          };
+        }),
+      })).filter((g) => g.models.length);
     } catch {}
   }
 

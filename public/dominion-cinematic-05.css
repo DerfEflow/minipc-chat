@@ -60,3 +60,12 @@ body[data-online="false"] .brand-core i{background:#ff8a7c;box-shadow:0 0 8px #f
 }
 @media(hover:none){.neural-glass{transform:none}.glass-reflection{opacity:.11}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.neural-glass{transform:none}.glass-reflection{display:none}}
+
+/* Produced-document download control (Fred, 2026-07-19). A file the turn made, as a button you
+   can press, sitting with the answer that produced it rather than as a server path in prose. */
+.filechip{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;margin:8px 0 2px;padding:9px 14px;border:1px solid rgba(118,255,104,.34);border-radius:10px;color:#d8ffd0;background:linear-gradient(180deg,rgba(118,255,104,.10),rgba(0,10,6,.55));text-decoration:none;font-size:12.5px;font-weight:600;letter-spacing:.02em}
+.filechip:hover{border-color:rgba(118,255,104,.6);box-shadow:0 0 16px rgba(118,255,104,.16)}
+.filechip:active{transform:translateY(1px)}
+/* Per-row and per-document download rows in the artifact panel. */
+.aitem-acts,.aexports{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:7px}
+.aexports span{color:#7d94a5;font-size:11px;margin-right:2px}
