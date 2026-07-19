@@ -1220,8 +1220,12 @@ const reviewEngine = createReviewEngine({
 // C4: the formatting tools run on the LIGHT model through this hook (fast + cheap by design).
 CTX.lightChat = (messages, o = {}) => ollamaChat(LIGHT_MODEL, messages, { noTools: true, ...o });
 
-function systemPrompt(persona, modeFrag, wolfeTier = "ember") {
-  let s = [
+function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true } = {}) {
+  // Tool-less turns (as_fred voice work, chat-bench models) get a LEAN prompt: identity, house
+  // style, Wolfe Logic, mode, persona. The tool doctrine below is dead weight when no tool schemas
+  // ride the call (Fred's token rule, 2026-07-18: the Substack writer must not pay for machinery
+  // it cannot use), and it muddies pure voice work besides.
+  let s = withTools ? [
     "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is " + new Date().toISOString().slice(0, 10) + ".",
     "You run on his always-on mini-PC and you have real tools (hands). Use them when they help —",
     "don't just describe what could be done; do it. Prefer reading current state (e.g. deck_list_projects,",
@@ -1229,6 +1233,9 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember") {
     "Keep replies concise and direct. Don't fabricate file contents, project ids, or results — read them.",
     "Real code/file changes go through forge_send. The sandbox is your private scratch space for drafts/notes.",
     "When you finish a tool action, briefly confirm what you actually did.",
+  ].join(" ") : [
+    "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is " + new Date().toISOString().slice(0, 10) + ".",
+    "Keep replies concise, direct, and honest. Never fabricate facts, quotes, sources, or events.",
   ].join(" ");
   // HOUSE STYLE — Fred's response-format rules (2026-07-18), always in force, every model.
   s += "\n\nHOUSE STYLE (always in force, all replies):\n" + [
@@ -1243,7 +1250,9 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember") {
   // "As Fred" voice reason the way Fred does rather than echo his phrases.
   s += "\n\n" + wolfeLogic(wolfeTier);
   // Operating Standards — Fred's house rules for a broadly-permissioned agent. These inform the
-  // model's JUDGMENT (the code carve-out is the only hard wall). Set 2026-07-12.
+  // model's JUDGMENT (the code carve-out is the only hard wall). Set 2026-07-12. Tool-less turns
+  // skip them along with the file/project doctrine: no hands, no hands-rules.
+  if (withTools) {
   s += "\n\nOPERATING STANDARDS (always in force):\n" + [
     "1. Reversibility before speed. Before any write, overwrite, or delete, make sure an undo exists first (git commit or stash for tracked files, a timestamped copy for untracked ones). When two routes reach the same result, take the reversible one.",
     "2. Company and customer data. Never add to, delete, or change data that a company or a paying customer has entered and wants to keep, and never touch the backups that download to the mini-PC, ever. You MAY operate the platforms Fred uses (Railway, Supabase, Vercel, GitHub): read them to inform him, change configuration and environment variables, monitor deploys, and provision new databases. If a fix appears to need a change to customer data (a broken table, a bad row), do not make it. State the exact change and why, then let Fred decide; he will usually route that work elsewhere.",
@@ -1259,6 +1268,7 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember") {
     "• Length: never stop a document early to save space — produce the complete piece in the format requested. The system continues past output limits automatically, so write it in full.",
     "• Apps / code: when asked to build an app or project, lay out the WHOLE structure at once with scaffold_project — pass a root folder and a files array (each { path relative to root, content }). It creates every folder and file and returns the file tree. Show Fred the tree. Use forge_run to install/build/test and forge_read to inspect. For single-file edits use forge_write.",
   ].join("\n");
+  }
   // Versioned prompt overlays (spec PromptVersion): active global + mode-scope prompts append here.
   for (const p of [...flywheel.activePrompts("global"), ...flywheel.activePrompts("mode")]) s += "\n\n" + p.content;
   if (modeFrag) s += "\n\n" + modeFrag;
@@ -2591,7 +2601,7 @@ async function handleChat(req, res) {
   let ctxInfo;
   try { ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model }, T); }
   catch { ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" }; }
-  const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier) }];
+  const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier, { withTools: attachTools }) }];
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
   // Deck-orchestrator directive: injected server-side (the deck's 2000-char persona field is too
