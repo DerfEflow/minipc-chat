@@ -268,3 +268,103 @@ body.ide-open #ide-root { transform: none; }
   #ide-root,
   #sb-ide .ide-switch::after { transition: none; }
 }
+
+/* ---------- Assignment Board (Phase 3) ------------------------------------------------ */
+/* One card per kind of work. You set these once and stop thinking about models. */
+.ide-board { width: 100%; max-width: 940px; display: grid; gap: 16px; }
+.ide-board-head { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+.ide-board-head h2 {
+  margin: 0; font-size: 15px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--ink);
+}
+.ide-board-head p { margin: 0; font-size: 12.5px; color: var(--muted); flex: 1 1 240px; }
+
+/* All-In-One: the escape hatch for people who never want to think about this. */
+.ide-allinone {
+  display: flex; align-items: center; gap: 11px;
+  padding: 12px 14px; border-radius: 12px;
+  border: 1px solid var(--glass-line);
+  background: linear-gradient(180deg, rgba(11, 28, 46, .8), rgba(3, 10, 19, .92));
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .1), inset 0 -2px 7px rgba(0, 0, 0, .55);
+}
+.ide-allinone .lbl { font-size: 12.5px; color: var(--ink-soft); letter-spacing: .05em; }
+.ide-allinone .hint { font-size: 11.5px; color: var(--muted); margin-left: auto; }
+
+.ide-cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(268px, 1fr)); }
+.ide-card {
+  display: grid; gap: 9px;
+  padding: 15px 16px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--glass-line);
+  background:
+    radial-gradient(90% 70% at 50% -20%, rgba(157, 218, 255, .05), transparent 65%),
+    linear-gradient(180deg, rgba(12, 30, 49, .86), rgba(3, 10, 19, .95));
+  box-shadow:
+    inset 0 1px 0 rgba(225, 247, 255, .12),
+    inset 0 -3px 10px rgba(0, 0, 0, .6),
+    0 12px 30px rgba(0, 0, 0, .5);
+}
+.ide-card.is-image { border-color: rgba(185, 107, 50, .4); }
+.ide-card-top { display: flex; align-items: baseline; gap: 9px; }
+.ide-card-top .name {
+  font-size: 13px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--ink);
+}
+.ide-card-top .tag {
+  margin-left: auto; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted);
+}
+.ide-card .blurb { font-size: 12.5px; line-height: 1.55; color: var(--ink-soft); min-height: 2.6em; }
+.ide-card select {
+  width: 100%; font: inherit; font-size: 13px;
+  padding: 10px 11px; border-radius: 10px; cursor: pointer;
+  color: var(--ink);
+  border: 1px solid var(--glass-line);
+  background: linear-gradient(180deg, rgba(6, 17, 29, .95), rgba(2, 8, 15, .98));
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, .7);
+}
+.ide-card select:focus-visible { outline: 2px solid rgba(118, 255, 104, .5); outline-offset: 1px; }
+.ide-card select:disabled { cursor: not-allowed; color: var(--muted); }
+.ide-card .price { font-size: 11.5px; color: var(--muted); letter-spacing: .04em; min-height: 1.2em; }
+/* The image engine is named DOMINION FORGE and never by a provider model name. */
+.ide-card .engine-cell {
+  padding: 10px 11px; border-radius: 10px;
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--copper-hot);
+  border: 1px solid rgba(185, 107, 50, .42);
+  background: linear-gradient(180deg, rgba(43, 21, 10, .8), rgba(12, 6, 3, .92));
+  box-shadow: inset 0 1px 0 rgba(255, 193, 138, .22), inset 0 -2px 8px rgba(0, 0, 0, .65);
+}
+
+/* Route preview: type what you want, see where it would go and why, before spending anything. */
+.ide-probe { display: grid; gap: 10px; }
+.ide-probe input {
+  width: 100%; font: inherit; font-size: 13.5px;
+  padding: 12px 13px; border-radius: 11px;
+  color: var(--ink);
+  border: 1px solid var(--glass-line);
+  background: linear-gradient(180deg, rgba(6, 17, 29, .95), rgba(2, 8, 15, .98));
+  box-shadow: inset 0 2px 7px rgba(0, 0, 0, .7);
+}
+.ide-probe input::placeholder { color: var(--muted); }
+.ide-probe input:focus-visible { outline: 2px solid rgba(118, 255, 104, .45); outline-offset: 1px; }
+.ide-verdict {
+  display: none; align-items: center; gap: 11px; flex-wrap: wrap;
+  padding: 12px 14px; border-radius: 11px;
+  font-size: 12.5px; color: var(--ink-soft);
+  border: 1px solid var(--glass-line);
+  background: linear-gradient(180deg, rgba(10, 27, 45, .7), rgba(3, 9, 17, .88));
+}
+.ide-verdict.on { display: flex; }
+.ide-verdict .cls {
+  font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--energy);
+  padding: 4px 9px; border-radius: 999px;
+  border: 1px solid rgba(118, 255, 104, .35);
+  background: rgba(9, 32, 14, .7);
+}
+.ide-verdict .to { color: var(--ink); font-weight: 600; }
+.ide-verdict .why { color: var(--muted); flex: 1 1 100%; }
+
+@media (max-width: 720px) {
+  .ide-cards { grid-template-columns: 1fr; }
+  .ide-board-head p { flex-basis: 100%; }
+}

@@ -1072,6 +1072,7 @@ async function handleIde(req, res, u) {
 
   const body = (await readJsonBody(req)) || {};
   if (req.method === "POST" && path === "/ide/prefs") return send(ideFeature.setPrefs(T, body));
+  if (req.method === "POST" && path === "/ide/route/preview") return send(ideFeature.previewRoute(T, body));
   if (req.method === "POST" && path === "/ide/workspace") return send(ideFeature.createWorkspace(T, body));
   if (req.method === "POST" && path === "/ide/workspace/update") return send(ideFeature.updateWorkspace(T, body));
   if (req.method === "POST" && path === "/ide/workspace/delete") return send(ideFeature.removeWorkspace(T, body));

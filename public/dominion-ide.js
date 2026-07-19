@@ -18,7 +18,14 @@
 
   const ENGAGED_KEY = "dominion.ide.enabled.v1";
 
-  const state = { allowed: false, engaged: false, open: false };
+  const state = {
+    allowed: false, engaged: false, open: false,
+    routing: null,        // class labels/blurbs/defaults, from the server
+    catalog: [],          // the model list, from the SAME /api/models the chat picker uses
+    assignments: {},      // class -> model id ("" means follow the main model)
+    allInOne: "",         // one model for every text class, or "" for the board
+    workspaceId: "",      // assignments belong to a workspace once one exists
+  };
 
   const $ = (sel) => document.querySelector(sel);
   const readEngaged = () => {
@@ -73,25 +80,221 @@
     const stage = document.createElement("div");
     stage.className = "ide-stage";
     stage.id = "ide-stage";
-    // Honest empty state. This is scaffolding with the truth on it, never mock UI pretending to
-    // be a feature that does not exist yet.
-    stage.innerHTML = '<div class="ide-empty">'
-      + '<span class="ide-empty-core" aria-hidden="true">'
-      + '<svg viewBox="0 0 24 24"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></svg>'
-      + '</span>'
-      + '<h2>The works are open</h2>'
-      + '<p>This is where a build gets planned, assigned to models, and run on your own machine. '
-      + 'The shell, the toggle, and the motion are live now.</p>'
-      + '<p class="note">Phase 1 of 8 is in. Workspaces and the job spine land in Phase 2, model '
-      + 'assignment in Phase 3, and background builds that keep running after you close the app in '
-      + 'Phase 4. Nothing here bills you yet.</p>'
-      + '</div>';
+    stage.append(buildBoard());
 
     root.append(rail, stage);
     document.body.append(root);
 
     back.addEventListener("click", closePanel);
     close.addEventListener("click", closePanel);
+
+    renderBoard();
+    wireProbe();
+    const all = $("#ide-allinone");
+    if (all) all.addEventListener("change", () => {
+      state.allInOne = all.value;
+      // With one model driving everything, the per-class pickers stop being the operative control,
+      // so they are disabled rather than left looking live while being ignored.
+      for (const sel of document.querySelectorAll("#ide-cards select")) sel.disabled = !!state.allInOne;
+      saveAssignments();
+    });
+  }
+
+  /* ---------- Assignment Board (Phase 3) ------------------------------------------------
+   * You set the model per KIND of work, once. The router then decides which kind each move is,
+   * so nobody picks a model per message ever again. Design defaults to OpenAI; grunt work to
+   * something cheap; engineering to whatever you chose.
+   */
+  const CARD_ORDER = ["design_visual", "design_code", "build_code", "mechanical", "review"];
+
+  function buildBoard() {
+    const board = document.createElement("div");
+    board.className = "ide-board";
+    board.id = "ide-board";
+
+    const head = document.createElement("div");
+    head.className = "ide-board-head";
+    head.innerHTML = '<h2>Assignment Board</h2>'
+      + '<p>Set these once. Every job is sorted into one of these kinds automatically, and goes '
+      + 'where you said. You never pick a model per message.</p>';
+
+    const allInOne = document.createElement("div");
+    allInOne.className = "ide-allinone";
+    allInOne.innerHTML = '<span class="lbl">One model for everything</span>'
+      + '<select id="ide-allinone" aria-label="Use one model for every kind of work">'
+      + '<option value="">Off: use the board below</option></select>'
+      + '<span class="hint">Pictures still come from Dominion Forge.</span>';
+
+    const cards = document.createElement("div");
+    cards.className = "ide-cards";
+    cards.id = "ide-cards";
+
+    const probe = document.createElement("div");
+    probe.className = "ide-probe";
+    probe.innerHTML = '<input id="ide-probe-input" type="text" autocomplete="off" '
+      + 'placeholder="Try it: describe a job, for example &quot;restyle the hero section&quot;" />'
+      + '<div class="ide-verdict" id="ide-verdict"></div>';
+
+    board.append(head, allInOne, cards, probe);
+    return board;
+  }
+
+  // Paint the cards from the server's routing description plus the live model catalog.
+  function renderBoard() {
+    const cards = $("#ide-cards");
+    if (!cards || !state.routing) return;
+    const info = state.routing.classes || {};
+    const assigned = state.assignments || {};
+    cards.textContent = "";
+
+    for (const cls of CARD_ORDER) {
+      const meta = info[cls] || { label: cls, blurb: "" };
+      const card = document.createElement("div");
+      card.className = "ide-card" + (cls === "design_visual" ? " is-image" : "");
+
+      const top = document.createElement("div");
+      top.className = "ide-card-top";
+      top.innerHTML = '<span class="name"></span><span class="tag"></span>';
+      top.querySelector(".name").textContent = meta.label;
+      if (cls === "design_visual") top.querySelector(".tag").textContent = "always OpenAI";
+
+      const blurb = document.createElement("div");
+      blurb.className = "blurb";
+      blurb.textContent = meta.blurb || "";
+
+      card.append(top, blurb);
+
+      if (cls === "design_visual") {
+        // Brand lock: the image engine cell reads DOMINION FORGE, never a provider model name.
+        const cell = document.createElement("div");
+        cell.className = "engine-cell";
+        cell.textContent = "Dominion Forge";
+        const note = document.createElement("div");
+        note.className = "price";
+        note.textContent = "Images cannot come from a text model, so this one is fixed.";
+        card.append(cell, note);
+      } else {
+        const sel = document.createElement("select");
+        sel.dataset.cls = cls;
+        sel.setAttribute("aria-label", meta.label + " model");
+        fillModelOptions(sel, assigned[cls] || "");
+        const price = document.createElement("div");
+        price.className = "price";
+        price.dataset.for = cls;
+        card.append(sel, price);
+        sel.addEventListener("change", () => onAssign(cls, sel.value));
+        paintPrice(cls, sel.value);
+      }
+      cards.append(card);
+    }
+    fillModelOptions($("#ide-allinone"), state.allInOne || "", true);
+  }
+
+  /*
+   * Options come from the SAME catalog the chat picker uses (GET /api/models), so there is one
+   * price list, not two. Unavailable models are shown DISABLED with the reason, never hidden and
+   * never silently swapped, matching how the chat picker refuses rather than substitutes.
+   */
+  function fillModelOptions(sel, current, isAllInOne) {
+    if (!sel) return;
+    const keep = sel.value;
+    sel.textContent = "";
+    if (isAllInOne) sel.append(new Option("Off: use the board below", ""));
+    else sel.append(new Option("Use my main model", ""));
+    for (const g of state.catalog || []) {
+      const grp = document.createElement("optgroup");
+      grp.label = g.label;
+      for (const m of g.models) {
+        const o = new Option(m.name + (m.priceShort ? "  " + m.priceShort : ""), m.id);
+        if (m.unavailable) { o.disabled = true; o.text = m.name + "  (needs a provider key)"; }
+        grp.append(o);
+      }
+      sel.append(grp);
+    }
+    sel.value = current || keep || "";
+  }
+
+  function paintPrice(cls, modelId) {
+    const el = document.querySelector('.price[data-for="' + cls + '"]');
+    if (!el) return;
+    if (!modelId) { el.textContent = "Follows your main model."; return; }
+    const m = findModel(modelId);
+    el.textContent = m && m.priceLong ? m.priceLong : "";
+  }
+
+  function findModel(id) {
+    for (const g of state.catalog || []) for (const m of g.models) if (m.id === id) return m;
+    return null;
+  }
+
+  function onAssign(cls, value) {
+    state.assignments[cls] = value;
+    paintPrice(cls, value);
+    saveAssignments();
+  }
+
+  // Assignments belong to the workspace. With no workspace yet they are held as the account's
+  // starting point, so the board is usable before the first project exists.
+  function saveAssignments() {
+    const body = { assignments: { ...state.assignments, allInOne: state.allInOne || "" } };
+    const wsId = state.workspaceId;
+    const url = wsId ? "/ide/workspace/update" : "/ide/prefs";
+    const payload = wsId ? { id: wsId, patch: body } : { engaged: state.engaged, ...body };
+    fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) })
+      .catch(() => {});
+  }
+
+  // Live routing preview: type a job, see where it would go and why. Costs nothing: the server
+  // answers from the deterministic table and never calls a model for a preview.
+  let probeTimer = 0;
+  function wireProbe() {
+    const input = $("#ide-probe-input");
+    const out = $("#ide-verdict");
+    if (!input || !out) return;
+    input.addEventListener("input", () => {
+      clearTimeout(probeTimer);
+      const text = input.value.trim();
+      if (!text) { out.classList.remove("on"); return; }
+      probeTimer = setTimeout(async () => {
+        try {
+          const r = await fetch("/ide/route/preview", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: text, workspaceId: state.workspaceId || "" }),
+          });
+          if (!r.ok) return;
+          const v = await r.json();
+          const model = v.isImage ? "Dominion Forge"
+            : (findModel(v.model) ? findModel(v.model).name : (v.model || "your main model"));
+          out.textContent = "";
+          const cls = document.createElement("span"); cls.className = "cls"; cls.textContent = v.label;
+          const to = document.createElement("span"); to.className = "to"; to.textContent = model;
+          const arrow = document.createElement("span"); arrow.textContent = "handles this";
+          const why = document.createElement("span"); why.className = "why"; why.textContent = "Why: " + v.why + ".";
+          out.append(cls, arrow, to, why);
+          out.classList.add("on");
+        } catch {}
+      }, 260);
+    });
+  }
+
+  // Pull the catalog once, shaped for the board. Prices come straight from the server's numbers.
+  async function loadCatalog() {
+    try {
+      const r = await fetch("/api/models", { headers: { accept: "application/json" } });
+      if (!r.ok) return;
+      const data = await r.json();
+      const groups = new Map();
+      for (const m of (data.models || data || [])) {
+        if (!m || !m.id) continue;
+        const label = m.category || "Models";
+        if (!groups.has(label)) groups.set(label, []);
+        const inC = Number(m.inCost), outC = Number(m.outCost);
+        const priceShort = isFinite(inC) && isFinite(outC) ? "$" + inC + "/$" + outC : "";
+        const priceLong = priceShort ? "$" + inC + " in / $" + outC + " out per million tokens" : "";
+        groups.get(label).push({ id: m.id, name: m.name || m.id, priceShort, priceLong, unavailable: !!m.noKey });
+      }
+      state.catalog = [...groups.entries()].map(([label, models]) => ({ label, models }));
+    } catch {}
   }
 
   function openPanel() {
@@ -196,11 +399,27 @@
     // device has never set one. A device that HAS a stored preference keeps it: the person holding
     // this phone gets the last word over what some other device decided.
     try {
-      const r = await fetch("/ide/state", { headers: { accept: "application/json" } });
-      if (!r.ok) return;
-      const s = await r.json();
+      const [s] = await Promise.all([
+        fetch("/ide/state", { headers: { accept: "application/json" } }).then((r) => (r.ok ? r.json() : null)),
+        loadCatalog(),
+      ]);
+      if (!s) return;
+      state.routing = s.routing || null;
+      const ws = (s.workspaces || [])[0] || null;
+      state.workspaceId = ws ? ws.id : "";
+      const stored = (ws && ws.assignments) || (s.prefs && s.prefs.assignments) || {};
+      state.allInOne = stored.allInOne || "";
+      state.assignments = {};
+      for (const cls of CARD_ORDER) {
+        if (cls === "design_visual") continue;
+        state.assignments[cls] = typeof stored[cls] === "string"
+          ? stored[cls]
+          : ((s.routing && s.routing.defaults && s.routing.defaults[cls]) || "");
+      }
+      if ($("#ide-cards")) renderBoard();
+
       const deviceHasOpinion = (() => { try { return localStorage.getItem(ENGAGED_KEY) !== null; } catch { return false; } })();
-      if (!deviceHasOpinion && s && s.prefs && s.prefs.engaged === true) {
+      if (!deviceHasOpinion && s.prefs && s.prefs.engaged === true) {
         setEngaged(true, { reveal: false, push: false });
       }
     } catch {}

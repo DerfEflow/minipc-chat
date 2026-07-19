@@ -15,6 +15,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { routeMove, CLASS_INFO, TASK_CLASSES, DEFAULT_ASSIGNMENTS, IMAGE_ENGINE } from "./iderouter.mjs";
 
 export const IDE_MODE_DEFAULT = "owner";
 
@@ -75,7 +76,12 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
     try {
       const j = JSON.parse(readFileSync(file, "utf8"));
       return {
-        prefs: { engaged: !!(j && j.prefs && j.prefs.engaged) },
+        prefs: {
+          engaged: !!(j && j.prefs && j.prefs.engaged),
+          // Model assignments made before the first workspace exists, so the board is usable on
+          // day one and the first workspace inherits them.
+          assignments: (j && j.prefs && j.prefs.assignments && typeof j.prefs.assignments === "object") ? j.prefs.assignments : {},
+        },
         workspaces: Array.isArray(j && j.workspaces) ? j.workspaces : [],
       };
     } catch {
@@ -117,6 +123,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
     setPrefs(patch) {
       const s = read();
       if (patch && typeof patch.engaged === "boolean") s.prefs.engaged = patch.engaged;
+      if (patch && patch.assignments && typeof patch.assignments === "object") s.prefs.assignments = patch.assignments;
       write(s);
       return s.prefs;
     },
@@ -239,6 +246,9 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
         workspaces: store.list(),
         jobs: jobs.listFor(T.uid),
         limits: { maxWorkspaces: MAX_WORKSPACES },
+        // Everything the Assignment Board needs to paint itself. Prices and availability come from
+        // the existing GET /api/models, so there is one catalog, not two.
+        routing: { classes: CLASS_INFO, order: TASK_CLASSES, defaults: DEFAULT_ASSIGNMENTS, imageEngine: IMAGE_ENGINE },
       });
     },
 
@@ -248,7 +258,10 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
     setPrefs(T, body) {
       const blocked = wall(T); if (blocked) return blocked;
       const store = storeFor(T);
-      return ok({ prefs: store.setPrefs({ engaged: !!(body && body.engaged) }) });
+      return ok({ prefs: store.setPrefs({
+        engaged: !!(body && body.engaged),
+        assignments: body && body.assignments,
+      }) });
     },
 
     listWorkspaces(T) {
@@ -323,6 +336,33 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       // a stranger's job id gets the same answer as a nonexistent one.
       if (!job || job.uid !== T.uid) return err(404, "not_found", "Unknown or expired job.");
       return ok(jobs.stop(id));
+    },
+
+    /*
+     * POST /ide/route/preview {title, description, files, workspaceId}
+     * Answers "where would this go, and why" WITHOUT running anything or spending a cent. The
+     * deterministic table decides; no classifier is called here, because a preview that costs
+     * money the moment you type would defeat the purpose. It is what lets the surface show its
+     * reasoning up front rather than after the bill.
+     */
+    previewRoute(T, body) {
+      const blocked = wall(T); if (blocked) return blocked;
+      const ws = body && body.workspaceId ? storeFor(T).get(String(body.workspaceId)) : null;
+      const stored = (ws && ws.assignments) || {};
+      const decision = routeMove(
+        { title: body && body.title, description: body && body.description, files: (body && body.files) || [] },
+        stored,
+        { allInOne: stored.allInOne || "", fallback: (ws && ws.model) || (body && body.fallback) || "" },
+      );
+      return ok({
+        taskClass: decision.taskClass,
+        label: CLASS_INFO[decision.taskClass].label,
+        model: decision.model,
+        isImage: decision.isImage,
+        why: decision.why,
+        confidence: decision.confidence,
+        wouldAskClassifier: decision.needsClassifier,
+      });
     },
 
     // Ownership check for the SSE attach route, which the server wires to the raw response.
