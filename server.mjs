@@ -44,6 +44,7 @@ import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors
 import { createAccessVerifier } from "./accessjwt.mjs";
 import { createImagesFeature } from "./images.mjs";
 import { shapeCloudParams, paramRetryAdjust, TOOL_CAP } from "./cloudparams.mjs";
+import { createChatSync } from "./chatsync.mjs";
 import { createGoogleProvider } from "./google.mjs";
 import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
@@ -130,6 +131,11 @@ CTX.memory = memory;
 // Server-side rolling chat transcripts (retrieval index for search_chats + episodic summaries).
 const chatlog = createChatLog({ dir: cfgGet("CHATLOG_DIR", dataPath("chatlog")) });
 CTX.chatlog = chatlog;
+
+// Cross-device chat sync (Fred 2026-07-19): the faithful copy of conversations, so a chat started
+// on the phone continues on the laptop. Distinct from chatlog above, which truncates turns and
+// drops attachments because it exists to be SEARCHED, not to be restored.
+const chatsync = createChatSync({ dir: cfgGet("CHATSYNC_DIR", dataPath("chatsync")) });
 
 // Phase 4: artifact studio. Generated documents become versioned, editable artifacts.
 const ARTIFACT_DIR = cfgGet("ARTIFACT_DIR", dataPath("artifacts"));
@@ -929,9 +935,9 @@ const MULTI_TENANT = String(cfgGet("MULTI_TENANT", "0")) === "1";
 const OWNER_EMAIL = cfgGet("OWNER_EMAIL", "fredwolfe@gmail.com");
 const usersStore = createUsersStore({ dir: dataPath("tenants"), ownerEmail: OWNER_EMAIL });
 const tenants = createTenantResolver({ baseDir: DATA_DIR, embed: embedText,
-  globals: { memory, chatlog, artifacts, flywheel, sandboxDir: CTX.sandboxDir, ctx: CTX, persona }, users: usersStore });
+  globals: { memory, chatlog, chatsync, artifacts, flywheel, sandboxDir: CTX.sandboxDir, ctx: CTX, persona }, users: usersStore });
 const OWNER_T = { role: "owner", isOwner: true, uid: "owner", email: OWNER_EMAIL, status: "active",
-  memory, chatlog, artifacts, flywheel, sandboxDir: CTX.sandboxDir, persona, ctxBase: CTX };
+  memory, chatlog, chatsync, artifacts, flywheel, sandboxDir: CTX.sandboxDir, persona, ctxBase: CTX };
 const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
 // Cloudflare Access JWT verification: identity comes from a SIGNATURE, not from a hostname.
 // ACCESS_JWT=enforce requires a valid JWT (production); "prefer" verifies when present and falls
@@ -3397,19 +3403,62 @@ const server = http.createServer(async (req, res) => {
     // True forget (Fred 2026-07-12): deleting a chat on the phone must erase the SERVER's copy too —
     // the chatlog transcript AND any episodic memory distilled from it (source.referenceId = chatId).
     // Without this, cross-chat retrieval resurrects "deleted" conversations.
+    //
+    // TENANCY FIX 2026-07-19: this handler used the module-global chatlog/memory, so under
+    // MULTI_TENANT a guest's delete reached into the OWNER's stores (a no-op on their own copy, and
+    // a same-id collision would have touched Fred's). It now resolves the caller like every other
+    // panel. It also tombstones in chatsync, so a delete on one device propagates to the others
+    // instead of the next pull resurrecting the chat.
     if (path === "/chatlog/forget" && req.method === "POST") {
       const body = await readJsonBody(req);
       if (!body || !body.chatId) { res.writeHead(400, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "chatId required" })); }
-      const removedChats = chatlog.remove(String(body.chatId));
+      const T = resolveTenant(req);
+      if (T.role === "anon") { res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" }); return res.end(JSON.stringify({ error: "Sign in to use Dominion.", code: "no_identity" })); }
+      const tChatlog = T.chatlog, tMemory = T.memory, tSync = T.chatsync;
+      const chatId = String(body.chatId);
+      const removedChats = tChatlog ? tChatlog.remove(chatId) : 0;
       let removedMemories = 0;
       try {
-        for (const m of memory.list({})) {
-          if (m.source && m.source.referenceId === body.chatId) { memory.remove(m.id); removedMemories++; }
+        for (const m of tMemory.list({})) {
+          if (m.source && m.source.referenceId === chatId) { tMemory.remove(m.id); removedMemories++; }
         }
       } catch {}
-      console.log(`[dominion-ai] /chatlog/forget ${body.chatId} -> transcript=${removedChats} memories=${removedMemories}`);
+      let synced = null;
+      try { if (tSync) synced = tSync.remove(chatId, Number(body.deletedAt) || Date.now()); } catch {}
+      console.log(`[dominion-ai] /chatlog/forget ${chatId} -> transcript=${removedChats} memories=${removedMemories} sync=${synced ? synced.removed : "n/a"} · ${T.isOwner ? "owner" : T.email || T.uid}`);
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ forgotten: !!removedChats || removedMemories > 0, transcript: removedChats, memories: removedMemories }));
+      return res.end(JSON.stringify({ forgotten: !!removedChats || removedMemories > 0, transcript: removedChats, memories: removedMemories, rev: synced && synced.rev }));
+    }
+
+    // Cross-device chat sync (Fred 2026-07-19). GET pulls everything after a revision cursor;
+    // POST pushes this device's changed chats + deletes and returns the same pull in one round
+    // trip. Identity is required (a chat belongs to a person, not a browser) but invite/credits
+    // are NOT: syncing conversations you already own is not billable work.
+    if (path === "/chats/sync") {
+      const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+      const T = resolveTenant(req);
+      if (T.role === "anon") return json(401, { error: "Sign in to sync your chats.", code: "no_identity" });
+      if (T.status === "paused" || T.status === "locked") return json(403, { error: "Account " + T.status + ".", code: "account_" + T.status });
+      const store = T.chatsync;
+      if (!store) return json(503, { error: "Chat sync is not available for this account." });
+      if (req.method === "GET") {
+        const since = Number(u.searchParams.get("since")) || 0;
+        return json(200, { ...store.pull(since), limits: store.limits });
+      }
+      if (req.method === "POST") {
+        const raw = await readRawBody(req, 24 * 1024 * 1024);
+        if (raw === null) return json(413, { error: "request too large" });
+        let body; try { body = JSON.parse(raw.toString("utf8") || "{}"); } catch { return json(400, { error: "bad json" }); }
+        const result = store.push(body.chats, body.deletes);
+        const since = Number(body.since) || 0;
+        const changes = store.pull(since);
+        const truncated = result.accepted.filter((a) => a.truncated).length;
+        if (result.rejected.length || truncated) {
+          console.log(`[dominion-ai] chat sync (${T.isOwner ? "owner" : T.email || T.uid}): +${result.accepted.length} accepted, ${result.rejected.length} refused, ${truncated} truncated`);
+        }
+        return json(200, { ...changes, accepted: result.accepted, rejected: result.rejected });
+      }
+      return json(405, { error: "method not allowed" });
     }
 
     // The hands hub (Phase 1, MCP hands). Bearer-authed; 503 when HANDS_TOKEN is unset.

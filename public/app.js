@@ -106,6 +106,7 @@ function serializeChats(stripAll) {
 const save = () => {
   try { localStorage.setItem(LS_CHATS, serializeChats(false)); localStorage.setItem(LS_CUR, curId || ""); }
   catch { try { localStorage.setItem(LS_CHATS, serializeChats(true)); localStorage.setItem(LS_CUR, curId || ""); } catch {} }
+  scheduleSync();
 };
 const saveSettings = () => { try { localStorage.setItem(LS_SET, JSON.stringify(settings)); } catch {} };
 function load() {
@@ -117,6 +118,131 @@ function load() {
   try { const m = localStorage.getItem(LS_MODE); if (m && modeSel) modeSel.value = m; } catch {}
   try { const p = localStorage.getItem(LS_PMODE); if (p && privacyModeSel) privacyModeSel.value = p; } catch {}
 }
+// ---------- cross-device sync (Fred, 2026-07-19: start on the phone, continue on the laptop) ----------
+// Conversations used to live only in this browser's localStorage, so every device was an island.
+// The server now keeps a faithful per-account copy (chatsync.mjs) and this is the client half:
+// push what changed here, pull what changed elsewhere, merge by chat id.
+//
+// MERGE RULE: last-write-wins per chat on updatedAt, and STRICTLY greater to win, so a lossy echo
+// of our own push (the server strips image pixels) can never overwrite the fuller local copy.
+// Merging by id means a chat that exists only here is never destroyed by another device's push.
+//
+// PIXELS DO NOT TRAVEL. The server does not store image bytes (Fred's standing ruling: the service
+// does not pay to house user images), and a data URL per image would blow the request. They are
+// replaced with the same {kind:"image_ref"} placeholder the app already uses for its own older
+// chats, and the other device renders the honest "no longer stored on this device" note.
+const LS_SYNC = "dominion.sync.v1";
+let syncState = { lastRev: 0, pushed: {}, deletes: [] };
+try {
+  const s = JSON.parse(localStorage.getItem(LS_SYNC) || "null");
+  if (s && typeof s === "object") syncState = { lastRev: s.lastRev || 0, pushed: s.pushed || {}, deletes: Array.isArray(s.deletes) ? s.deletes : [] };
+} catch {}
+const saveSync = () => { try { localStorage.setItem(LS_SYNC, JSON.stringify(syncState)); } catch {} };
+let syncOff = false, syncing = false, syncTimer = null;
+
+function chatForPush(c) {
+  const messages = (c.messages || []).map((m) => {
+    if (!m.attachments || !m.attachments.length) return m;
+    return { ...m, attachments: m.attachments.map((a) => (a.kind === "image" && a.dataUrl ? { kind: "image_ref", name: a.name } : a)) };
+  });
+  return { id: c.id, title: c.title, updatedAt: c.updatedAt || 0, lastMode: c.lastMode, messages };
+}
+
+// Fold the server's changes into the local array. Returns what moved so the caller can decide
+// between a cheap sidebar repaint and a full transcript rebuild.
+function mergeIncoming(incoming, deleted) {
+  let changedAny = false, changedCur = false;
+  for (const inc of incoming || []) {
+    if (!inc || !inc.id) continue;
+    if (syncState.deletes.some((d) => d.id === inc.id && (d.deletedAt || 0) >= (inc.updatedAt || 0))) continue;  // deleted here, not yet pushed
+    const local = chats.find((c) => c.id === inc.id);
+    if (!local) {
+      chats.unshift({ id: inc.id, title: inc.title || "New chat", messages: inc.messages || [], updatedAt: inc.updatedAt || 0, lastMode: inc.lastMode });
+      changedAny = true;
+    } else if ((inc.updatedAt || 0) > (local.updatedAt || 0)) {
+      local.title = inc.title || local.title;
+      local.messages = inc.messages || [];
+      local.updatedAt = inc.updatedAt || 0;
+      local.lastMode = inc.lastMode;
+      changedAny = true;
+      if (local.id === curId) changedCur = true;
+    }
+    syncState.pushed[inc.id] = Math.max(syncState.pushed[inc.id] || 0, inc.updatedAt || 0);
+  }
+  for (const d of deleted || []) {
+    if (!d || !d.id) continue;
+    const local = chats.find((c) => c.id === d.id);
+    if (!local) continue;
+    if ((local.updatedAt || 0) > (d.deletedAt || 0)) continue;   // edited here after the delete elsewhere
+    chats = chats.filter((c) => c.id !== d.id);
+    delete syncState.pushed[d.id];
+    changedAny = true;
+    if (d.id === curId) changedCur = true;
+  }
+  return { changedAny, changedCur };
+}
+
+async function syncNow() {
+  if (syncOff || syncing || busy) return;         // never mutate the transcript mid-stream
+  syncing = true;
+  try {
+    for (let round = 0; round < 12; round++) {
+      const pending = chats.filter((c) => (c.updatedAt || 0) !== (syncState.pushed[c.id] || 0)).slice(0, 40);
+      const dels = syncState.deletes.slice(0, 40);
+      const r = await fetch("/chats/sync", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ since: syncState.lastRev, chats: pending.map(chatForPush), deletes: dels }),
+      });
+      if (r.status === 401 || r.status === 403) { syncOff = true; return; }   // not signed in: stay quiet
+      if (!r.ok) return;
+      const j = await r.json();
+
+      for (const a of j.accepted || []) {
+        const c = chats.find((x) => x.id === a.id);
+        if (c) syncState.pushed[a.id] = c.updatedAt || 0;
+      }
+      // A push refused as "deleted" means another device deleted this chat. Honor it here rather
+      // than leaving a ghost the user already threw away.
+      const goneIds = (j.rejected || []).filter((x) => x && x.reason === "deleted").map((x) => x.id);
+      if (goneIds.length) {
+        chats = chats.filter((c) => !goneIds.includes(c.id));
+        for (const id of goneIds) delete syncState.pushed[id];
+      }
+      syncState.deletes = syncState.deletes.filter((d) => !dels.some((x) => x.id === d.id));
+
+      const moved = mergeIncoming(j.chats, j.deleted);
+      // Anything still refused (stale losers) is marked at its current value so it does not spin.
+      for (const rj of j.rejected || []) {
+        const c = chats.find((x) => x.id === rj.id);
+        if (c) syncState.pushed[rj.id] = c.updatedAt || 0;
+      }
+      syncState.lastRev = j.rev || syncState.lastRev;
+      saveSync();
+
+      const changed = moved.changedAny || goneIds.length > 0;
+      if (changed) {
+        if (!curId || !chats.find((c) => c.id === curId)) curId = (chats[0] && chats[0].id) || null;
+        if (!curId) { newChat(); }
+        else {
+          try { localStorage.setItem(LS_CHATS, serializeChats(false)); localStorage.setItem(LS_CUR, curId || ""); } catch {}
+          if (moved.changedCur || goneIds.length) renderAll(); else renderSidebar();
+        }
+      }
+      const more = chats.some((c) => (c.updatedAt || 0) !== (syncState.pushed[c.id] || 0)) || syncState.deletes.length > 0;
+      if (!more) break;
+    }
+  } catch {} finally { syncing = false; }
+}
+function scheduleSync(delay = 2500) {
+  if (syncOff) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => syncNow(), delay);
+}
+// Coming back to the app is exactly when the other device's work should appear.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) scheduleSync(300); });
+window.addEventListener("online", () => scheduleSync(600));
+setInterval(() => { if (!document.hidden) syncNow(); }, 60000);
+
 const cur = () => chats.find((c) => c.id === curId);
 const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); const base = u ? (u.content || (Array.isArray(u.attachments) && u.attachments[0] && ("📎 " + u.attachments[0].name)) || "") : "New chat"; return String(base).replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
 const resolvePersona = () => settings.persona === "custom" ? (settings.personaCustom || "") : (PRESETS[settings.persona] || "");
@@ -142,7 +268,13 @@ function switchChat(id) { if (busy) return; const prev = curId; curId = id; save
 function deleteChat(id) {
   // True forget: also erase the server's transcript copy + any episodic memory distilled from this
   // chat, so cross-chat retrieval can never resurrect it (fire-and-forget; nothing breaks offline).
-  fetch("/chatlog/forget", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
+  const deletedAt = Date.now();
+  fetch("/chatlog/forget", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id, deletedAt }) }).catch(() => {});
+  // Queue a tombstone for sync as well, so the delete reaches the other devices even if the call
+  // above never lands (offline). The server treats both paths as the same idempotent tombstone.
+  syncState.deletes.push({ id, deletedAt });
+  delete syncState.pushed[id];
+  saveSync();
   chats = chats.filter((c) => c.id !== id); if (curId === id) curId = (chats[0] && chats[0].id) || null; if (!curId) { newChat(); return; } save(); renderAll();
 }
 async function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = await askText({ kicker: "Conversation", title: "Rename chat", multiline: false, value: c.title, maxlen: 60, saveLabel: "Rename" }); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); } }
@@ -1630,6 +1762,9 @@ window.addEventListener("pageshow", () => maybeReattach());
 
 load(); renderAll(); loadModels(); autosize();
 maybeReattach();   // an answer may still be generating server-side from before this (re)load
+// Pull whatever the other device did before this one was opened. A brand-new device (lastRev 0)
+// receives the whole account here, which is the phone-to-laptop handoff.
+scheduleSync(400);
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
 
 // ---- update watcher ----

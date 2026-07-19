@@ -12,6 +12,7 @@
 import { createMemoryStore } from "./memory.mjs";
 import { createArtifactStore } from "./artifacts.mjs";
 import { createChatLog } from "./chatlog.mjs";
+import { createChatSync } from "./chatsync.mjs";
 import { createFlywheel } from "./flywheel.mjs";
 import { join } from "node:path";
 
@@ -56,10 +57,14 @@ export function createTenantStores({ baseDir, uid, embed }) {
   const root = join(baseDir, "users", uid);
   const memory = createMemoryStore({ dir: join(root, "memory"), gating: "lax", embed });
   const chatlog = createChatLog({ dir: join(root, "chatlog") });
+  // Cross-device chat sync: the faithful copy of this user's conversations (chatlog above is the
+  // lossy retrieval index). Per-uid directory = a user's chats are reachable only through their own
+  // resolved tenant bundle.
+  const chatsync = createChatSync({ dir: join(root, "chatsync") });
   const artifacts = createArtifactStore({ dir: join(root, "artifacts") });
   const flywheel = createFlywheel({ dir: join(root, "flywheel") });
   const sandboxDir = join(root, "sandbox");
-  return { root, memory, chatlog, artifacts, flywheel, sandboxDir };
+  return { root, memory, chatlog, chatsync, artifacts, flywheel, sandboxDir };
 }
 
 // A resolver caches per-user store bundles and returns a tenant view for a request.
@@ -74,8 +79,9 @@ export function createTenantResolver({ baseDir, embed, globals, users }) {
   function resolve(req) {
     const id = users.identify(req);
     if (id.role === "owner") {
-      return { ...id, memory: globals.memory, chatlog: globals.chatlog, artifacts: globals.artifacts,
-        flywheel: globals.flywheel, sandboxDir: globals.sandboxDir, persona: globals.persona, ctxBase: globals.ctx };
+      return { ...id, memory: globals.memory, chatlog: globals.chatlog, chatsync: globals.chatsync,
+        artifacts: globals.artifacts, flywheel: globals.flywheel, sandboxDir: globals.sandboxDir,
+        persona: globals.persona, ctxBase: globals.ctx };
     }
     const s = id.role === "anon" ? null : storesFor(id);
     // Non-owner ctx: their stores + their sandbox + the SHARED persona (read-only) + owner secrets
@@ -85,8 +91,8 @@ export function createTenantResolver({ baseDir, embed, globals, users }) {
       lightChat: globals.ctx.lightChat,
       // Export through the CALLER's own artifact store so non-owners never touch the owner's artifacts.
       exportGated: (id, fmt, o) => globals.ctx.exportGated(id, fmt, o, s.artifacts) } : null;
-    return s ? { ...id, memory: s.memory, chatlog: s.chatlog, artifacts: s.artifacts, flywheel: s.flywheel,
-      sandboxDir: s.sandboxDir, persona: globals.persona, ctxBase } : { ...id, ctxBase: null };
+    return s ? { ...id, memory: s.memory, chatlog: s.chatlog, chatsync: s.chatsync, artifacts: s.artifacts,
+      flywheel: s.flywheel, sandboxDir: s.sandboxDir, persona: globals.persona, ctxBase } : { ...id, ctxBase: null };
   }
   return { resolve, storesFor, cache };
 }

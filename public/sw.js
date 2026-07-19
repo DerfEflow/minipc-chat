@@ -1,5 +1,5 @@
 // Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v59-voice-transport";
+const CACHE = "dominion-ai-v60-chat-sync";
 const SHELL = [
   "/",
   "/index.html",
@@ -9,7 +9,7 @@ const SHELL = [
   "/dominion-vault.css?v=1",
   "/dominion-images.css?v=3",
   "/dominion-images.js?v=3",
-  "/app.js?v=43",
+  "/app.js?v=44",
   "/dominion-ui.css?v=39",
   "/dominion-ui.js?v=39",
   "/dominion-cinematic.js?v=40",
@@ -48,7 +48,10 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   const dyn = ["/chat", "/memory", "/toolruns", "/tool-confirm", "/artifacts", "/mentor", "/ledger", "/evals", "/rules", "/prompts", "/persona", "/finetune", "/reviews", "/pipeline", "/tool-overlays",
-    "/account", "/billing", "/admin", "/forge", "/content", "/setup", "/connectors", "/api/images"];
+    "/account", "/billing", "/admin", "/forge", "/content", "/setup", "/connectors", "/api/images",
+    // "/chats" and "/chatlog" are NOT covered by "/chat": the match is exact-or-prefix-with-slash,
+    // so /chats/sync would otherwise be cached and served stale to the device that just synced.
+    "/chats", "/chatlog"];
   if (url.pathname.startsWith("/ollama") || dyn.some((b) => url.pathname === b || url.pathname.startsWith(b + "/"))) return;
   e.respondWith(
     fetch(e.request)
