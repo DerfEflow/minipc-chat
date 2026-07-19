@@ -2602,6 +2602,22 @@ async function handleChat(req, res) {
   try { ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model }, T); }
   catch { ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" }; }
   const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier, { withTools: attachTools }) }];
+  // Off-but-available connectors, by NAME only (Fred, 2026-07-19). Without this, a disabled
+  // connector is indistinguishable from a missing capability: the model has no schema for it, so
+  // it answers "I can't do that" and the user believes the app cannot, rather than that a switch
+  // is off. ~100 tokens buys an accurate answer; carrying the full schemas cost ~34,000.
+  // Placed high in the message list because it is stable between toggles, which keeps it inside
+  // the cacheable prefix. Variable content (learned rules, retrieved context) stays below it.
+  if (attachTools) {
+    try {
+      const off = connectors.disabledFor(T);
+      if (off.length) messages.push({ role: "system", content:
+        `Connectors currently OFF for this account: ${off.map((c) => c.needsSetup ? `${c.name} (not set up yet)` : c.name).join(", ")}. ` +
+        `You do not have their tools this turn. If the user asks for something one of them would do, say plainly that the connector is switched off, ` +
+        `and that they can turn it on in Setup > Connectors (the ones marked "not set up yet" also need their credentials entered there). ` +
+        `Never claim the capability does not exist, and never pretend to have used one.` });
+    } catch (e) { console.log("[connectors] disabled hint failed:", String(e && e.message || e).slice(0, 120)); }
+  }
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
   // Deck-orchestrator directive: injected server-side (the deck's 2000-char persona field is too
@@ -2691,7 +2707,17 @@ async function handleChat(req, res) {
       // only from the guest's own creds and the owner's per-connector guest flag; the owner's env
       // credentials never reach a non-owner under any code path).
       if (cloudTools) {
-        try { const cxDefs = await connectors.toolDefsFor(T); if (cxDefs.length) cloudTools = cloudTools.concat(cxDefs); }
+        try {
+          const cxDefs = await connectors.toolDefsFor(T);
+          // Sort by tool name before appending. Prompt caching is PREFIX matching: if the tool block
+          // is byte-identical turn to turn, the provider serves it from cache at a fraction of the
+          // price; if a single byte moves, the whole prefix re-bills at full rate. toolDefsFor walks
+          // connectors in registry order but each connector's own tools/list order is the remote
+          // server's business, and a transient listing failure drops a block entirely
+          // (connectors.mjs catch). Sorting makes the order OURS and therefore stable.
+          cxDefs.sort((a, b) => String(a.function.name).localeCompare(String(b.function.name)));
+          if (cxDefs.length) cloudTools = cloudTools.concat(cxDefs);
+        }
         catch (e) { console.log("[connectors] tool defs failed:", String(e && e.message || e).slice(0, 150)); }
       }
       // Orchestrator wall (see DECK_ORCHESTRATOR_BLOCKED): deck sessions lose the heavy write
@@ -2700,12 +2726,30 @@ async function handleChat(req, res) {
       const idWall = toolWallFor(req.dominionIdentity && req.dominionIdentity.source);
       if (cloudTools && idWall) cloudTools = cloudTools.filter((d) => !idWall.has(d && d.function && d.function.name));
       let inTokTotal = 0, outTokTotal = 0, costTotal = 0, sawCost = false, sawTok = false;
+      // PROMPT-CACHE VISIBILITY (Fred, 2026-07-19). Every model in the catalog prices cache READS
+      // far below fresh prompt tokens (deepseek-v4-pro is ~120x cheaper), and the DeepSeek/Kimi/Qwen
+      // families charge nothing to WRITE the cache. On 2026-07-18 a 40,640-token turn cost $0.018127,
+      // which is full freight to six decimal places — so nothing was being cached at all.
+      //
+      // Measure before optimising. These counters make cache behaviour observable in usage.jsonl and
+      // in the done-event, so "we improved the hit rate" is a number rather than a belief. Providers
+      // disagree on the field name, hence the spread.
+      let cacheReadTotal = 0, cacheWriteTotal = 0, cacheDiscountTotal = 0, sawCache = false;
       const bumpUsage = (u) => {
         if (!u) return;
         const it = u.prompt_tokens ?? u.input_tokens, ot = u.completion_tokens ?? u.output_tokens;
         if (typeof it === "number") { inTokTotal += it; sawTok = true; }
         if (typeof ot === "number") { outTokTotal += ot; sawTok = true; }
         if (typeof u.cost === "number") { costTotal += u.cost; sawCost = true; }
+        // Cached-read tokens: OpenAI nests under prompt_tokens_details.cached_tokens; DeepSeek
+        // reports prompt_cache_hit_tokens; OpenRouter surfaces cache_discount in dollars.
+        const cr = (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens)
+          ?? u.prompt_cache_hit_tokens ?? u.cached_tokens;
+        const cw = (u.prompt_tokens_details && u.prompt_tokens_details.cache_write_tokens)
+          ?? u.cache_creation_input_tokens;
+        if (typeof cr === "number") { cacheReadTotal += cr; sawCache = true; }
+        if (typeof cw === "number") { cacheWriteTotal += cw; sawCache = true; }
+        if (typeof u.cache_discount === "number") { cacheDiscountTotal += u.cache_discount; sawCache = true; }
       };
       let answer = "", streamedAny = false;
       // Per-model, per-mode output ceiling for a single round (replaces the old hardcoded 4096 that
@@ -2915,15 +2959,24 @@ async function handleChat(req, res) {
       const quality = computeQuality({ answer, routeConfidence, toolFailed: toolFailedThisTurn, retrievalCount: ctxInfo.used.length, citations });
       const outTok = sawTok ? outTokTotal : estTokens(answer.length);
       const inTok = sawTok ? inTokTotal : null;
+      // Cache summary for this turn. hitPct is share of INPUT tokens served from cache — the single
+      // number that says whether the prefix is stable. A fat prompt with hitPct 0 means the prefix
+      // is churning and every turn is paying full price for tool schemas that never change.
+      const cacheInfo = sawCache ? {
+        readTokens: cacheReadTotal || 0,
+        writeTokens: cacheWriteTotal || 0,
+        discountUsd: cacheDiscountTotal ? +cacheDiscountTotal.toFixed(6) : 0,
+        hitPct: inTok ? Math.round((cacheReadTotal / inTok) * 100) : null,
+      } : null;
       // OpenRouter reports real cost; direct providers don't — derive it from catalog prices.
       const costUsd = sawCost ? costTotal
         : (sawTok && cloudRec) ? +(((inTokTotal * (cloudRec.inCost || 0)) + (outTokTotal * (cloudRec.outCost || 0))) / 1e6).toFixed(6)
         : null;
       console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=${toolCount} rounds=${roundsUsed} conf=${quality.confidence}`);
-      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, images: imagesThisTurn || undefined, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
+      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, images: imagesThisTurn || undefined, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo || undefined, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
       try { T.chatlog.record(chatId, history, answer); } catch {}
       await meterTurn(T, costUsd, lastUserText, answer);   // SaaS: charge credits / draw cap / training sink (non-owner only)
-      sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
+      sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
       return endStream();
     }
 

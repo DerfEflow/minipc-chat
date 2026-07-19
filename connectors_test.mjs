@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createConnectors, connectorCrypto, isConnectorTool, REGISTRY } from "./connectors.mjs";
@@ -234,6 +234,32 @@ await t("real google.mjs: authUrl shape + bad-state callback rejected + crypto r
   assert.equal(crypto.dec(crypto.enc("round-trip")), "round-trip");
 });
 try { rmSync(dir2, { recursive: true, force: true }); } catch {}
+
+// disabledFor: the name-only hint that lets the model say "it's switched off" instead of "I can't".
+// Regression guard for two bugs found while building it: it originally filtered through usable(),
+// which requires credentials, so the never-configured connectors -- the ones most worth naming --
+// were silently dropped; and a guest must never be told to enable something closed to guests,
+// because that is advice they cannot act on.
+await t("disabledFor names off-but-permitted connectors, including unconfigured ones", async () => {
+  const d3 = mkdtempSync(join(tmpdir(), "cx-disabled-"));
+  writeFileSync(join(d3, "connectors.json"), JSON.stringify({
+    enabled: { zapier: true },
+    guestFlags: { zapier: false, github: false, supabase: false, stripe: false, postgres: false, railway: false, cloudflare: false },
+  }));
+  const c3 = createConnectors({ dir: d3, cfgGet: (k, dv) => dv });
+
+  const owner = c3.disabledFor({ isOwner: true, uid: "owner" });
+  const names = owner.map((o) => o.name);
+  assert.ok(!names.includes("Zapier"), "an ENABLED connector must not be advertised as off");
+  assert.ok(names.includes("GitHub"), "an off, unconfigured connector must still be named (turn it on AND set it up)");
+  assert.ok(owner.every((o) => o.needsSetup === true), "unconfigured entries must be flagged needsSetup");
+  assert.ok(!names.includes("Web"), "builtins are always on and are not connectors");
+
+  const guest = c3.disabledFor({ isOwner: false, uid: "g1" });
+  assert.equal(guest.length, 0, "a guest must never be told to enable a connector closed to guests");
+
+  try { rmSync(d3, { recursive: true, force: true }); } catch {}
+});
 
 await new Promise((r) => fake.close(r));
 try { rmSync(dir, { recursive: true, force: true }); } catch {}

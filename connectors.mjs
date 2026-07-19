@@ -447,6 +447,34 @@ export function createConnectors({ dir, cfgGet, providers = {} }) {
     return out;
   }
 
+  // A name-only list of connectors this account COULD turn on but hasn't. Sending the full schemas
+  // of every connector costs ~240 tokens per tool (143 tools was ~34k on every single turn, paid
+  // whether or not a tool was called). Sending just the names costs ~100 tokens total and buys the
+  // one thing that actually matters to a user: the model can say "enable Google in Setup" instead
+  // of "I can't do that", which is the difference between a switch and a dead end.
+  //
+  // Deliberately excludes anything the account may not use: a guest is never told to enable a
+  // connector the owner has closed to guests, because that is advice they cannot act on.
+  // Deliberately does NOT use usable(), which requires credentials to already exist. A connector the
+  // account has never configured is exactly the one worth naming -- "turn it on and set it up" is
+  // the message. So this checks PERMISSION (may this account use it at all) and reports setup state
+  // separately, rather than silently dropping anything unconfigured.
+  function disabledFor(T) {
+    const s = loadState(T);
+    const out = [];
+    for (const e of entriesFor(T)) {
+      if (e.builtin) continue;                                  // web/machine: always on, not a connector
+      if (e.pending && !providerOf(e)) continue;                // not shipped yet: nothing to suggest
+      const p = providerOf(e);
+      if (e.provider && !p) continue;
+      if (p && !p.ready()) continue;                            // server-side creds missing: user cannot fix
+      if (!T.isOwner && !e.custom && !guestAllowed(e.id)) continue;  // closed to guests: unactionable advice
+      if ((s.enabled || {})[e.id]) continue;                    // already on
+      out.push({ name: e.name, needsSetup: !configured(T, e.id) });
+    }
+    return out;
+  }
+
   async function run(T, mangled, args, signal) {
     const m = /^cx_(.+?)__(.+)$/.exec(String(mangled));
     if (!m) return "Unknown connector tool: " + mangled;
@@ -489,5 +517,5 @@ export function createConnectors({ dir, cfgGet, providers = {} }) {
   }
   const provider = (id) => providers[id] || null;
 
-  return { listFor, setEnabled, setConfig, addCustom, removeCustom, setGuestAllowed, test, toolDefsFor, run, metaFor, disconnect, provider, REGISTRY };
+  return { listFor, setEnabled, setConfig, addCustom, removeCustom, setGuestAllowed, test, toolDefsFor, disabledFor, run, metaFor, disconnect, provider, REGISTRY };
 }

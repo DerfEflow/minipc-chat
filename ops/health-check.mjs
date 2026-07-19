@@ -70,6 +70,14 @@ const RAILWAY_BIN = process.platform === "win32"
          "npm", "node_modules", "@railway", "cli", "bin", "railway.exe")
   : "railway";
 
+// ESM variant: for snippets that `import` from /app and use top-level await. Kept separate from
+// inContainer() because those snippets use require(), which is undefined in an ESM file.
+function inContainerMjs(src) {
+  const b64 = Buffer.from(src).toString("base64");
+  return execFileSync(RAILWAY_BIN, ["ssh", `sh -c "echo ${b64} | base64 -d > /tmp/_hc_esm.mjs && node /tmp/_hc_esm.mjs"`],
+    { cwd: REPO, encoding: "utf8", timeout: 120000, stdio: ["ignore", "pipe", "pipe"] });
+}
+
 function inContainer(src) {
   const b64 = Buffer.from(src).toString("base64");
   // .cjs, not .mjs: these snippets use require(), and the container's package.json makes a bare
@@ -192,18 +200,41 @@ function checkSuites() {
 // 4. Tenant wall. Guest connector flags are a deliberate decision each time; drift here is silent.
 function checkTenantWall() {
   try {
-    const state = JSON.parse(inContainer(`
-      const fs=require('fs');const d=process.env.DATA_DIR||'/data';
-      const j=JSON.parse(fs.readFileSync(d+'/connectors.json','utf8'));
+    // EFFECTIVE guest access, not just explicit flags. An earlier version of this check read only
+    // guestFlags and reported "none open" while seven connectors were in fact open to tenants:
+    // guestAllowed() falls back to the registry's guestDefault when no flag is set, and most
+    // entries ship guestDefault:true. Reading the override without the default is how a check
+    // reports green on an open door, so compute it the same way the app does.
+    // Ask the app, do not re-derive. An earlier version regex-scraped connectors.mjs for
+    // guestDefault and got it wrong in both directions: it reported the builtin "machine" entry
+    // (which never reaches the connector tool path) and missed "zapier" entirely. listFor() is the
+    // same call the Setup page renders from, so it applies flags, defaults, builtin handling, and
+    // provider readiness exactly as production does.
+    // Each field from its authoritative source. `enabled` comes from the state file, because
+    // listFor() marks a provider-backed connector "pending" when the provider isn't injected, and
+    // this harness does not construct the Google provider the way server.mjs does -- reading
+    // listFor for enablement here would under-report Google as off while it is live.
+    // `guestAllowed` comes from listFor(), which is the only thing that applies flag-then-default
+    // correctly.
+    const state = JSON.parse(inContainerMjs(`
+      import { readFileSync } from 'node:fs';
+      import { createConnectors } from '/app/connectors.mjs';
+      const d = process.env.DATA_DIR || '/data';
+      const raw = JSON.parse(readFileSync(d + '/connectors.json', 'utf8'));
+      const c = createConnectors({ dir: d, cfgGet: (k, dv) => process.env[k] || dv });
+      const rows = await c.listFor({ isOwner: true, uid: 'owner' });
       console.log(JSON.stringify({
-        enabled: Object.keys(j.enabled||{}).filter(k=>j.enabled[k]),
-        guestOpen: Object.keys(j.guestFlags||{}).filter(k=>j.guestFlags[k]),
+        enabled: Object.keys(raw.enabled || {}).filter(k => raw.enabled[k]),
+        guestOpen: rows.filter(r => !r.builtin && r.guestAllowed).map(r => r.id),
+        explicitFlags: Object.keys(raw.guestFlags || {}).length,
       }));`).trim().split("\n").pop());
 
     ok("feature", "owner connectors", state.enabled.join(", ") || "none");
     state.guestOpen.length === 0
-      ? ok("security", "guest connectors closed", "none open")
-      : warn("security", "guest connectors closed", `OPEN TO TENANTS: ${state.guestOpen.join(", ")} — confirm each was a deliberate decision.`);
+      ? ok("security", "guest connectors closed", "none reachable by tenants")
+      : warn("security", "guest connectors closed",
+          `REACHABLE BY TENANTS: ${state.guestOpen.join(", ")} (${state.explicitFlags} explicit flag(s); the rest are registry guestDefault:true). ` +
+          `A guest connects their OWN account, never the owner's env credentials. Confirm each is deliberate; set guestFlags[id]=false to close one.`);
   } catch (e) {
     warn("security", "tenant wall", "UNCHECKED — " + String(e.message).slice(0, 80));
   }
