@@ -54,6 +54,7 @@ import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore } from "./forge.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT } from "./ide.mjs";
 import { createIdeJobs } from "./idejobs.mjs";
+import { escalationFor, sendWakeups } from "./idepush.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
@@ -980,7 +981,40 @@ function ideStoreFor(T) {
 }
 // The durable job spine. Unlike CHAT_JOBS (in-memory, 45min TTL) every structural event is
 // journalled to disk, because a build has to survive a container restart, not just a page reload.
-const ideJobs = createIdeJobs({ dir: dataPath("ide"), log: (m) => console.log(m) });
+// VAPID keys for Web Push. Absent = push simply stays off and says so; nothing else degrades.
+const IDE_VAPID_PUBLIC = cfgGet("DOMINION_IDE_VAPID_PUBLIC", "");
+const IDE_VAPID_PRIVATE = cfgGet("DOMINION_IDE_VAPID_PRIVATE", "");
+const IDE_VAPID_SUBJECT = cfgGet("DOMINION_IDE_VAPID_SUBJECT", "mailto:" + OWNER_EMAIL);
+
+/*
+ * The escalation hook. The spine reports every structural event; escalationFor() applies Fred's
+ * ruling (questions, completion, failure only) and anything it declines stays silent. The push
+ * itself carries NO payload: it wakes the device, and the service worker fetches live state, so a
+ * question already answered elsewhere can never buzz a phone as if it were still open.
+ */
+function ideEscalate(job, event) {
+  // An answer releases a frozen probe. The real engine will hang its move loop here in Phase 5.
+  if (event && event.type === "answer" && job.kind === "probe") { try { resumeIdeProbe(job); } catch {} }
+  const note = escalationFor(event);
+  if (!note) return;
+  // Rebuild just enough of the tenant to find the right account's devices. Guessing from the uid
+  // does not work: in multi-tenant mode the owner's uid is an email hash like everyone else's, so
+  // a uid comparison silently resolved to an empty guest account and no push was ever sent.
+  const T = job.isOwner ? OWNER_T : { isOwner: false, uid: job.uid, role: "credit" };
+  let subs = [];
+  try { subs = ideStoreFor(T).push.list(); } catch { return; }
+  if (!subs.length) return;
+  sendWakeups({
+    subs, publicKey: IDE_VAPID_PUBLIC, privateKey: IDE_VAPID_PRIVATE, subject: IDE_VAPID_SUBJECT,
+    urgency: note.urgency, ttl: note.urgency === "high" ? 900 : 3600,
+    log: (m) => console.log(m),
+  }).then((r) => {
+    if (r.gone && r.gone.length) { try { ideStoreFor(T).push.prune(r.gone); } catch {} }
+    if (r.sent) console.log("[dominion-ai] ide push: " + note.tag + " to " + r.sent + " device(s)");
+  }).catch(() => {});
+}
+
+const ideJobs = createIdeJobs({ dir: dataPath("ide"), log: (m) => console.log(m), onEvent: ideEscalate });
 // Restart recovery. Jobs whose journal has no terminal event were being driven by a process that
 // no longer exists, so they are sealed as interrupted rather than left looking alive. Saying
 // "interrupted, work up to here is on disk" is honest; showing a spinner forever is not.
@@ -994,6 +1028,7 @@ const ideFeature = createIdeFeature({
   gate: ideGate, storeFor: ideStoreFor, jobs: ideJobs,
   billing: { canChat: (email) => billing.canChat(email) },
   multiTenant: MULTI_TENANT, log: (m) => console.log(m),
+  vapidPublicKey: IDE_VAPID_PUBLIC,
 });
 // Cloudflare Access JWT verification: identity comes from a SIGNATURE, not from a hostname.
 // ACCESS_JWT=enforce requires a valid JWT (production); "prefer" verifies when present and falls
@@ -1088,6 +1123,7 @@ async function handleIde(req, res, u) {
   if (req.method === "GET" && path === "/ide/state") return send(ideFeature.state(T));
   if (req.method === "GET" && path === "/ide/jobs") return send(ideFeature.listJobs(T));
   if (req.method === "GET" && path === "/ide/workspaces") return send(ideFeature.listWorkspaces(T));
+  if (req.method === "GET" && path === "/ide/push/key") return send(ideFeature.pushKey(T));
 
   const body = (await readJsonBody(req)) || {};
   if (req.method === "POST" && path === "/ide/prefs") return send(ideFeature.setPrefs(T, body));
@@ -1096,8 +1132,12 @@ async function handleIde(req, res, u) {
   if (req.method === "POST" && path === "/ide/workspace/update") return send(ideFeature.updateWorkspace(T, body));
   if (req.method === "POST" && path === "/ide/workspace/delete") return send(ideFeature.removeWorkspace(T, body));
   if (req.method === "POST" && path === "/ide/job/stop") return send(ideFeature.stopJob(T, body));
+  if (req.method === "POST" && path === "/ide/job/answer") return send(ideFeature.answerJob(T, body));
+  if (req.method === "POST" && path === "/ide/push/subscribe") return send(ideFeature.subscribePush(T, body));
+  if (req.method === "POST" && path === "/ide/push/unsubscribe") return send(ideFeature.unsubscribePush(T, body));
   if (req.method === "POST" && path === "/ide/job") {
-    return send(ideFeature.startJob(T, body, { runner: runIdeProbe }));
+    const ask = !!(body && body.ask);
+    return send(ideFeature.startJob(T, body, { runner: (job) => runIdeProbe(job, { ask }) }));
   }
   return sjson(res, 404, { error: "unknown ide route" });
 }
@@ -1109,7 +1149,7 @@ async function handleIde(req, res, u) {
  * No model call, no tool call, no spend. It runs detached from the request that started it, which
  * is the property the whole feature is built around.
  */
-function runIdeProbe(job) {
+function runIdeProbe(job, { ask = false } = {}) {
   const step = (ms, fn) => setTimeout(() => { try { fn(); } catch {} }, ms);
   ideJobs.emit(job.id, { type: "plan", title: "Spine probe", moves: [
     { id: "m1", title: "Confirm the job survives the client" },
@@ -1117,10 +1157,35 @@ function runIdeProbe(job) {
   ] });
   step(400, () => ideJobs.emit(job.id, { type: "move", id: "m1", title: "Confirm the job survives the client", state: "running" }));
   step(1200, () => ideJobs.emit(job.id, { type: "move", id: "m1", title: "Confirm the job survives the client", state: "done" }));
+
+  if (ask) {
+    // The pause-and-ask path. The job now sits frozen indefinitely, spending nothing, until a
+    // human answers from any device. Nothing here is on a timer: a question that expired by
+    // itself would be worse than no question at all.
+    step(1500, () => ideJobs.emit(job.id, {
+      type: "need_input", id: "q1",
+      question: "This is the pause-and-ask probe. Answer it from any device to release the build.",
+      options: ["Continue", "Use the safe default"],
+    }));
+    return;
+  }
+
   step(1600, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "running" }));
   step(2400, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "done" }));
   step(2600, () => ideJobs.emit(job.id, { type: "cost", usd: 0, credits: 0, note: "Probe jobs never spend." }));
   step(2800, () => ideJobs.finish(job.id, { type: "done", message: "Spine probe complete." }));
+}
+
+/*
+ * An answered probe finishes the work it was frozen mid-way through. The real engine (Phase 5)
+ * resumes its move loop here; the probe just proves the freeze lifts and the job completes.
+ */
+function resumeIdeProbe(job) {
+  const step = (ms, fn) => setTimeout(() => { try { fn(); } catch {} }, ms);
+  step(200, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "running" }));
+  step(900, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "done" }));
+  step(1100, () => ideJobs.emit(job.id, { type: "cost", usd: 0, credits: 0, note: "Probe jobs never spend." }));
+  step(1300, () => ideJobs.finish(job.id, { type: "done", message: "Spine probe complete." }));
 }
 
 // The caller's account view: role, status, onboarding flags, and (non-owner) their credit/sponsor state.

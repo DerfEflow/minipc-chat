@@ -25,6 +25,9 @@
     assignments: {},      // class -> model id ("" means follow the main model)
     allInOne: "",         // one model for every text class, or "" for the board
     workspaceId: "",      // assignments belong to a workspace once one exists
+    jobs: [],             // every job on this ACCOUNT, not just the one on screen
+    pushKey: "",          // VAPID applicationServerKey, "" when push is not configured
+    askedPush: false,     // permission is requested at the first real build, never on load
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -313,6 +316,186 @@
     } catch {}
   }
 
+  /* ---------- Phase 4: a build you can walk away from ------------------------------------
+   * Everything here works because the job lives on the SERVER. The browser is a window onto it:
+   * close it, reload it, or open a different device, and the work is untouched.
+   */
+
+  // The rail sits in the command bar and stays visible on the CHAT surface, because a build you
+  // cannot see is a build you will assume died.
+  function initRail() {
+    if ($("#ide-rail")) return;
+    const bar = document.querySelector("#commandbar .command-controls") || document.querySelector("#commandbar");
+    if (!bar) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.id = "ide-rail";
+    btn.title = "Your builds";
+    btn.innerHTML = '<span class="dot" aria-hidden="true"></span><span class="txt"></span><span class="count"></span>';
+    btn.addEventListener("click", () => { setEngaged(true, { reveal: true }); });
+    bar.append(btn);
+  }
+
+  function paintRail() {
+    const rail = $("#ide-rail");
+    if (!rail) return;
+    const live = (state.jobs || []).filter((j) => !j.done);
+    const asking = live.find((j) => j.waiting);
+    rail.classList.toggle("on", state.allowed && state.engaged && live.length > 0);
+    const txt = rail.querySelector(".txt"), count = rail.querySelector(".count");
+    if (asking) {
+      rail.dataset.state = "waiting";
+      txt.textContent = "Needs you";
+      count.textContent = "";
+    } else if (live.length) {
+      rail.dataset.state = "running";
+      txt.textContent = live[0].move && live[0].move.title ? live[0].move.title.slice(0, 34) : "Building";
+      count.textContent = live.length > 1 ? "+" + (live.length - 1) : "";
+    } else {
+      rail.dataset.state = "idle";
+      txt.textContent = "";
+      count.textContent = "";
+    }
+    paintLamp(asking ? "waiting" : (live.length ? "running" : "idle"), live.length);
+  }
+
+  function paintLamp(mode, n) {
+    const lamp = $("#ide-lamp"), text = $("#ide-lamp-text");
+    if (!lamp || !text) return;
+    lamp.dataset.state = mode === "idle" ? "idle" : "live";
+    text.textContent = mode === "waiting" ? "Waiting on you"
+      : mode === "running" ? (n > 1 ? n + " running" : "Running") : "Standby";
+  }
+
+  /*
+   * Reconcile with the server. Called on boot, on becoming visible, and on pageshow. This IS the
+   * "come back and it is still there" promise: the client keeps no build state of its own, it
+   * simply asks what is true now.
+   */
+  async function refreshJobs() {
+    if (!state.allowed) return;
+    try {
+      const r = await fetch("/ide/jobs", { headers: { accept: "application/json" } });
+      if (!r.ok) return;
+      const d = await r.json();
+      state.jobs = d.jobs || [];
+    } catch { return; }
+    paintRail();
+    renderAsk();
+  }
+
+  // A frozen build asking for a human. Answering is one tap, and the card says plainly that
+  // nothing is being spent while it waits, since that is the fact that makes walking away safe.
+  function renderAsk() {
+    const stage = $("#ide-stage");
+    if (!stage) return;
+    const asking = (state.jobs || []).find((j) => !j.done && j.waiting);
+    const existing = stage.querySelector(".ide-ask");
+    if (!asking) { if (existing) existing.remove(); return; }
+    if (existing && existing.dataset.jobId === asking.id) return;
+    if (existing) existing.remove();
+
+    const q = asking.needsInput || {};
+    const card = document.createElement("div");
+    card.className = "ide-ask";
+    card.dataset.jobId = asking.id;
+
+    const h = document.createElement("h3");
+    h.textContent = "Your build needs you";
+    const p = document.createElement("p");
+    p.className = "q";
+    p.textContent = q.question || "It needs an answer to continue.";
+
+    const opts = document.createElement("div");
+    opts.className = "opts";
+    for (const opt of (q.options || [])) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = opt;
+      b.addEventListener("click", () => answerJob(asking.id, q.id, opt));
+      opts.append(b);
+    }
+
+    const free = document.createElement("div");
+    free.className = "free";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "Or tell it what to do";
+    const go = document.createElement("button");
+    go.type = "button";
+    go.textContent = "Send";
+    const send = () => { if (input.value.trim()) answerJob(asking.id, q.id, input.value.trim()); };
+    go.addEventListener("click", send);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+    free.append(input, go);
+
+    const note = document.createElement("div");
+    note.className = "cost-note";
+    note.textContent = "This build is paused and spending nothing while it waits.";
+
+    card.append(h, p, opts, free, note);
+    stage.prepend(card);
+  }
+
+  async function answerJob(jobId, questionId, text) {
+    try {
+      await fetch("/ide/job/answer", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jobId, questionId, answer: text }),
+      });
+    } catch {}
+    await refreshJobs();
+  }
+
+  /*
+   * Push permission, asked at the first real build and never on page load: browsers penalize
+   * load-time prompts and people refuse them reflexively. On iOS push only reaches a PWA that was
+   * installed to the home screen, so there we say so plainly instead of pretending a notification
+   * is on its way.
+   */
+  const isIos = () => /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const isStandalone = () =>
+    window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+
+  async function ensurePush() {
+    if (state.askedPush || !state.allowed) return { ok: false, reason: "skipped" };
+    state.askedPush = true;
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return { ok: false, reason: "unsupported" };
+    if (isIos() && !isStandalone()) {
+      return { ok: false, reason: "ios_needs_install",
+        message: "On iPhone, notifications only work once this app is added to your home screen." };
+    }
+    try {
+      const keyRes = await fetch("/ide/push/key", { headers: { accept: "application/json" } });
+      const info = keyRes.ok ? await keyRes.json() : {};
+      if (!info.configured || !info.publicKey) return { ok: false, reason: "server_unconfigured" };
+      state.pushKey = info.publicKey;
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") return { ok: false, reason: "denied" };
+      const reg = await navigator.serviceWorker.ready;
+      const existing = await reg.pushManager.getSubscription();
+      const sub = existing || await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(info.publicKey),
+      });
+      await fetch("/ide/push/subscribe", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ subscription: sub.toJSON(), label: navigator.platform || "device" }),
+      });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, reason: "error", message: String(e && e.message) };
+    }
+  }
+
+  function urlBase64ToUint8Array(base64) {
+    const padded = (base64 + "=".repeat((4 - (base64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(padded);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
   function openPanel() {
     if (!state.allowed || !state.engaged) return;
     if (state.open) return;
@@ -321,6 +504,11 @@
     if (window.closeForgeDial) window.closeForgeDial();
     if (window.closeForgeImages) window.closeForgeImages();
     buildPanel();
+    // Paint from whatever is true right now. The panel is built lazily, so anything reconciled
+    // while it did not exist (a question that arrived while the works were closed) has to be
+    // drawn on the way in, or it stays invisible until the next poll.
+    renderAsk();
+    refreshJobs();
     state.open = true;
     document.body.classList.add("ide-anim");
     // Force a style flush between the two classes so the lift transitions instead of jumping.
@@ -445,8 +633,9 @@
     state.engaged = readEngaged();
     initToggleRow();
     initTrigger();
+    initRail();
     paintToggle();
-    loadAllowed();
+    loadAllowed().then(() => refreshJobs());
   }
 
   // Escape closes the works. Registered WITHOUT capture so the dial and askText (both capture:true)
@@ -456,9 +645,30 @@
     if (e.key === "Escape" && state.open) { e.preventDefault(); closePanel(); }
   });
 
+  // The reattach triad. A build that ran while the app was closed reappears on the next of these.
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshJobs(); });
+  window.addEventListener("pageshow", () => refreshJobs());
+  setInterval(() => { if (!document.hidden && state.allowed && state.engaged) refreshJobs(); }, 20000);
+
+  // A tapped notification focuses the tab already open and tells it where to go, rather than
+  // stacking up new windows.
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (e) => {
+      if (e.data && e.data.type === "ide-open") { setEngaged(true, { reveal: true }); refreshJobs(); }
+    });
+  }
+  // Cold start from a notification: /?ide=1&job=...
+  try {
+    if (new URLSearchParams(location.search).get("ide") === "1") {
+      setTimeout(() => setEngaged(true, { reveal: true }), 400);
+    }
+  } catch {}
+
   window.openIdeMode = openPanel;
   window.closeIdeMode = closePanel;
   window.ideModeEngaged = () => state.engaged;
+  window.ideRefreshJobs = refreshJobs;
+  window.ideEnsurePush = ensurePush;
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();

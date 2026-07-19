@@ -36,6 +36,7 @@ export const EVENT_TYPES = new Set([
   "cost",       // running cost for the job
   "snapshot",   // a snapshot was taken before a write batch
   "need_input", // frozen, waiting on a human (zero spend from here)
+  "answer",     // a human answered; the freeze lifts
   "done",       // terminal: finished
   "error",      // terminal: failed
   "stopped",    // terminal: explicitly stopped
@@ -43,7 +44,7 @@ export const EVENT_TYPES = new Set([
 
 const isTerminal = (t) => TERMINAL.has(t);
 
-export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = () => {} } = {}) {
+export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = () => {}, onEvent = null } = {}) {
   if (!dir) throw new Error("createIdeJobs needs a dir");
   const jobsDir = join(dir, "jobs");
   mkdirSync(jobsDir, { recursive: true });
@@ -81,6 +82,7 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
         uid: head.uid || "",
         workspaceId: head.workspaceId || "",
         kind: head.kind || "build",
+        isOwner: !!head.isOwner,
         startedAt: head.at || 0,
         endedAt: isTerminal(last.type) ? (last.at || 0) : 0,
         outcome: isTerminal(last.type) ? last.type : "",
@@ -122,12 +124,15 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
     }
   }
 
-  function create({ uid, workspaceId = "", kind = "build" } = {}) {
+  function create({ uid, workspaceId = "", kind = "build", isOwner = false } = {}) {
     if (!uid) throw new Error("a job needs a uid");
     const id = "ide_" + randomUUID().slice(0, 12);
     const at = now();
-    const head = { type: "job", at, id, uid, workspaceId, kind };
-    const job = { id, uid, workspaceId, kind, startedAt: at, endedAt: 0, outcome: "",
+    // isOwner is recorded on the header deliberately: the escalation hook fires long after the
+    // request that started the job is gone, and after a restart there is nothing else left to
+    // tell it which account's devices to notify.
+    const head = { type: "job", at, id, uid, workspaceId, kind, isOwner: !!isOwner };
+    const job = { id, uid, workspaceId, kind, isOwner: !!isOwner, startedAt: at, endedAt: 0, outcome: "",
                   events: [head], listeners: [], done: false, stopped: false, interrupted: false, stop: () => {} };
     INDEX.set(id, job);
     append(id, head);
@@ -152,6 +157,9 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
       if (type === "stopped") job.stopped = true;
     }
     for (const l of [...job.listeners]) { try { l(out); } catch {} }
+    // Escalation hook. Fired AFTER the event is on disk and delivered, and wrapped, so a failing
+    // notifier can never corrupt or stall the build it was only meant to announce.
+    if (typeof onEvent === "function") { try { onEvent(job, out); } catch (e) { log("[ide] onEvent threw: " + (e && e.message)); } }
     if (job.done) {
       for (const l of [...job.listeners]) { try { l(null); } catch {} }   // null = end of stream
       job.listeners.length = 0;
@@ -200,16 +208,27 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
       if (ev.type === "move") { lastMove = ev; pending = null; }
       else if (ev.type === "cost") lastCost = ev;
       else if (ev.type === "need_input") pending = ev;
-      else if (isTerminal(ev.type)) pending = null;
+      else if (ev.type === "answer" || isTerminal(ev.type)) pending = null;
     }
     return {
       id: j.id, uid: j.uid, workspaceId: j.workspaceId, kind: j.kind,
       startedAt: j.startedAt, endedAt: j.endedAt,
       done: j.done, stopped: j.stopped, interrupted: j.interrupted, outcome: j.outcome,
+      // "waiting" is deliberately distinct from "running": a frozen job is spending nothing, and
+      // a status rail that shows a spinner for it would be lying about both.
+      waiting: !j.done && !!pending,
       events: j.events.length,
       move: lastMove ? { id: lastMove.id || "", title: lastMove.title || "", state: lastMove.state || "" } : null,
       cost: lastCost ? { usd: lastCost.usd || 0, credits: lastCost.credits || 0 } : null,
-      needsInput: j.done ? null : (pending ? { id: pending.id || "", question: pending.question || "" } : null),
+      // The whole structured question travels, not just its text. Dropping `options` here is what
+      // turns "answer in one tap" into "type it out yourself", which is the difference between
+      // answering from a phone on the move and putting it off until you are back at a desk.
+      needsInput: j.done ? null : (pending ? {
+        id: pending.id || "",
+        question: pending.question || "",
+        options: Array.isArray(pending.options) ? pending.options.slice(0, 6) : [],
+        default: pending.default || "",
+      } : null),
     };
   }
 

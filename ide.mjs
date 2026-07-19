@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { routeMove, CLASS_INFO, TASK_CLASSES, DEFAULT_ASSIGNMENTS, IMAGE_ENGINE } from "./iderouter.mjs";
+import { createPushStore } from "./idepush.mjs";
 
 export const IDE_MODE_DEFAULT = "owner";
 
@@ -69,7 +70,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
   const file = join(home, "state.json");
   mkdirSync(home, { recursive: true });
 
-  const blank = () => ({ prefs: { engaged: false }, workspaces: [] });
+  const blank = () => ({ prefs: { engaged: false }, workspaces: [], subs: [] });
 
   function read() {
     if (!existsSync(file)) return blank();
@@ -83,6 +84,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
           assignments: (j && j.prefs && j.prefs.assignments && typeof j.prefs.assignments === "object") ? j.prefs.assignments : {},
         },
         workspaces: Array.isArray(j && j.workspaces) ? j.workspaces : [],
+        subs: Array.isArray(j && j.subs) ? j.subs : [],
       };
     } catch {
       // A corrupt state file must not take the surface down with it. Start clean; the previous
@@ -181,6 +183,13 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
       return { ok: true, removed: publicShape(gone) };
     },
     validateRoot,
+    // Push subscriptions live beside workspaces in the same per-account file: one device that
+    // subscribed is one row here, and a question reaches every device on the account.
+    push: createPushStore({
+      read: () => { const st = read(); return { subs: Array.isArray(st.subs) ? st.subs : [] }; },
+      write: (p) => { const st = read(); st.subs = p.subs || []; write(st); },
+      now,
+    }),
   };
 }
 
@@ -201,7 +210,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
    mirrors the deliberate decision in /chats/sync: syncing things you already own is not billable
    work. Starting a job IS billable, so it takes the full wall.
    ============================================================================================ */
-export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = false, log = () => {} } = {}) {
+export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = false, log = () => {}, vapidPublicKey = "" } = {}) {
   if (!gate) throw new Error("createIdeFeature needs a gate");
   if (!storeFor) throw new Error("createIdeFeature needs storeFor(T)");
   if (!jobs) throw new Error("createIdeFeature needs a job spine");
@@ -322,7 +331,7 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       if (workspaceId && !storeFor(T).get(workspaceId)) {
         return err(404, "not_found", "No such workspace.");
       }
-      const job = jobs.create({ uid: T.uid, workspaceId, kind });
+      const job = jobs.create({ uid: T.uid, workspaceId, kind, isOwner: !!T.isOwner });
       log("[ide] job " + job.id + " (" + kind + ") started by " + (T.uid || "owner"));
       if (typeof runner === "function") { try { runner(job); } catch (e) { jobs.emit(job.id, { type: "error", message: String(e && e.message || e) }); } }
       return ok({ jobId: job.id, kind, workspaceId });
@@ -363,6 +372,46 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
         confidence: decision.confidence,
         wouldAskClassifier: decision.needsClassifier,
       });
+    },
+
+    /*
+     * POST /ide/job/answer {jobId, questionId, answer}
+     * Releases a frozen build. The freeze is the point: between need_input and this call the job
+     * spends NOTHING, so a question left unanswered overnight costs nothing but time. Any device
+     * on the account can answer, because the job lives on the server rather than in the tab that
+     * started it.
+     */
+    answerJob(T, body) {
+      const blocked = wall(T); if (blocked) return blocked;
+      const id = String((body && body.jobId) || "");
+      const job = jobs.get(id);
+      if (!job || job.uid !== T.uid) return err(404, "not_found", "Unknown or expired job.");
+      if (job.done) return err(409, "already_done", "That build has already finished.");
+      const answer = String((body && body.answer) || "").slice(0, 2000);
+      if (!answer) return err(400, "answer_required", "Say what you want it to do.");
+      jobs.emit(id, { type: "answer", id: String((body && body.questionId) || ""), answer });
+      return ok({ ok: true });
+    },
+
+    // ---- push: how a build reaches a user who is not looking at it ------------------------
+    // The key is public by design (it is the applicationServerKey the browser subscribes with).
+    pushKey(T) {
+      const blocked = wall(T); if (blocked) return blocked;
+      return ok({ publicKey: vapidPublicKey || "", configured: !!vapidPublicKey });
+    },
+
+    subscribePush(T, body) {
+      const blocked = wall(T); if (blocked) return blocked;
+      if (!vapidPublicKey) return err(503, "push_unconfigured", "Push is not configured on this server yet.");
+      const r = storeFor(T).push.add(body && body.subscription, { label: (body && body.label) || "" });
+      if (r.error) return { status: 400, code: r.code, body: r };
+      log("[ide] push subscribed: " + (T.uid || "owner") + " (" + r.count + " device(s))");
+      return ok(r);
+    },
+
+    unsubscribePush(T, body) {
+      const blocked = wall(T); if (blocked) return blocked;
+      return ok(storeFor(T).push.remove((body && body.endpoint) || ""));
     },
 
     // Ownership check for the SSE attach route, which the server wires to the raw response.

@@ -155,11 +155,15 @@ await t("a summary carries the last move, cost, and any pending question", () =>
   const job = jobs.create({ uid: "u1" });
   jobs.emit(job.id, { type: "move", id: "m1", title: "First", state: "done" });
   jobs.emit(job.id, { type: "cost", usd: 0.42, credits: 42 });
-  jobs.emit(job.id, { type: "need_input", id: "q1", question: "Which database?" });
+  jobs.emit(job.id, { type: "need_input", id: "q1", question: "Which database?",
+    options: ["Postgres", "SQLite"], default: "Postgres" });
   let s = jobs.listFor("u1")[0];
   assert.equal(s.move.title, "First");
   assert.equal(s.cost.credits, 42);
   assert.equal(s.needsInput.question, "Which database?");
+  // the OPTIONS have to survive too, or "answer in one tap" quietly becomes "type it yourself"
+  assert.deepEqual(s.needsInput.options, ["Postgres", "SQLite"]);
+  assert.equal(s.needsInput.default, "Postgres");
 
   // answering (work resumes) clears the pending question
   jobs.emit(job.id, { type: "move", id: "m2", title: "Second", state: "running" });
