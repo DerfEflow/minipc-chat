@@ -53,6 +53,7 @@ import { createForgeStore } from "./forge.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
+import { createChatJobs, coalesceEvents } from "./chatjobs.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -136,6 +137,16 @@ CTX.chatlog = chatlog;
 // on the phone continues on the laptop. Distinct from chatlog above, which truncates turns and
 // drops attachments because it exists to be SEARCHED, not to be restored.
 const chatsync = createChatSync({ dir: cfgGet("CHATSYNC_DIR", dataPath("chatsync")) });
+
+// Durable chat jobs (chatjobs.mjs): every /chat run persists to SQLite so long runs survive client
+// disconnects of any length AND server restarts/redeploys. The factory sweeps orphans at boot.
+const jobStore = createChatJobs({ dir: cfgGet("CHATJOBS_DIR", dataPath("chatjobs")) });
+const CHATJOBS_TAIL = Number(cfgGet("CHATJOBS_TAIL", "4096")) || 4096;             // RAM tail cap per job
+const CHATJOBS_FLUSH_MS = Number(cfgGet("CHATJOBS_FLUSH_MS", "2000")) || 2000;     // token-batch window
+const CHATJOBS_MAX_RUNNING = Number(cfgGet("CHATJOBS_MAX_RUNNING", "6")) || 6;     // per-user in-flight cap
+const CHATJOBS_COLLECTED_TTL_MS = Number(cfgGet("CHATJOBS_COLLECTED_TTL_MS", String(86400000))) || 86400000;
+// 0 is meaningful here (= keep uncollected results forever), so no || fallback.
+const CHATJOBS_UNCOLLECTED_TTL_MS = (() => { const n = Number(cfgGet("CHATJOBS_UNCOLLECTED_TTL_MS", String(30 * 86400000))); return Number.isFinite(n) && n >= 0 ? n : 30 * 86400000; })();
 
 // Phase 4: artifact studio. Generated documents become versioned, editable artifacts.
 const ARTIFACT_DIR = cfgGet("ARTIFACT_DIR", dataPath("artifacts"));
@@ -2371,68 +2382,185 @@ async function handlePersona(req, res, u) {
   return json(404, { error: "not found" });
 }
 
-// ---- durable chat jobs (PWA suspend/resume) ----
+// ---- durable chat jobs (PWA suspend/resume + long runs) ----
 // A phone switching apps suspends the PWA and kills the /chat SSE socket mid-answer. The turn must
-// survive that: every /chat run is a JOB — all SSE events are buffered in RAM as they're emitted,
-// GET /chat/attach?job=<id>&from=<n> replays events[n..] and live-tails until the job ends, and
-// POST /chat/stop is now the ONLY thing that aborts generation (a dead socket never does).
-// Ring-capped + TTL'd with lazy GC — this is a reconnect window, not persistence.
+// survive that: every /chat run is a JOB — SSE events buffer in a capped RAM tail as they're
+// emitted, GET /chat/attach?job=<id>&from=<n> replays events[n..] and live-tails until the job
+// ends, and POST /chat/stop is the ONLY thing that aborts generation (a dead socket never does).
+// The RAM map is a reconnect window; persistence is chatjobs.mjs (jobStore) — every event also
+// lands there in coalesced batches, so a run survives hours-long disconnects AND server restarts.
+// RUNNING jobs are NEVER evicted from RAM (evicting one would orphan a live generation); the TTL
+// and cap apply to finished records only — that finished-window is what keeps exact index-for-index
+// replay for quick reconnects, while older/foreign cursors fall back to the compacted DB replay.
 const CHAT_JOBS = new Map();
 const JOB_CAP = 24, JOB_TTL_MS = 45 * 60 * 1000;
 function gcChatJobs() {
   const now = Date.now();
-  for (const [id, j] of CHAT_JOBS) if (now - (j.endedAt || j.startedAt) > JOB_TTL_MS) CHAT_JOBS.delete(id);
-  while (CHAT_JOBS.size > JOB_CAP) {
-    let victim = null;
-    for (const j of CHAT_JOBS.values()) if (j.done && (!victim || j.startedAt < victim.startedAt)) victim = j;
-    if (!victim) for (const j of CHAT_JOBS.values()) { victim = j; break; }   // all still live: drop the oldest
-    CHAT_JOBS.delete(victim.id);
+  for (const [id, j] of CHAT_JOBS) if (j.done && now - j.endedAt > JOB_TTL_MS) CHAT_JOBS.delete(id);
+  if (CHAT_JOBS.size > JOB_CAP) {
+    const done = [...CHAT_JOBS.values()].filter((j) => j.done).sort((a, b) => a.endedAt - b.endedAt);
+    for (const j of done) { if (CHAT_JOBS.size <= JOB_CAP) break; CHAT_JOBS.delete(j.id); }
   }
 }
-function createChatJob() {
+function createChatJob(T) {
   gcChatJobs();
-  const job = { id: "job_" + randomUUID().slice(0, 12), chatId: "", startedAt: Date.now(), endedAt: 0,
-                events: [], listeners: [], done: false, stopped: false, stop: () => {} };
+  const job = { id: "job_" + randomUUID().slice(0, 12), chatId: "",
+                email: String(T && T.email || "").trim().toLowerCase(), uid: String(T && T.uid || ""),
+                startedAt: Date.now(), endedAt: 0,
+                tail: [], tailStart: 0, eventCount: 0, text: "",
+                pending: [], flushTimer: null, sawDone: false, doneMeta: null, errNote: "",
+                listeners: [], done: false, stopped: false, stop: () => {} };
   CHAT_JOBS.set(job.id, job);
+  try { jobStore.createJob({ id: job.id, email: job.email, uid: job.uid, startedAt: job.startedAt }); } catch {}
   return job;
+}
+// Push this job's pending events to SQLite as one coalesced transaction. Durability must never
+// take down a live turn — a failed flush drops that batch's rows (progress counters catch up on
+// the next flush) rather than throwing into the SSE path.
+function flushJob(job) {
+  if (job.flushTimer) { clearTimeout(job.flushTimer); job.flushTimer = null; }
+  if (!job.pending.length) return;
+  const rows = coalesceEvents(job.pending, job.eventCount - job.pending.length);
+  job.pending = [];
+  try { jobStore.appendRows(job.id, rows, job.eventCount, job.text.length); } catch {}
 }
 function jobEmit(job, o) {
   if (job.done) return;
-  job.events.push(o);
+  job.tail.push(o);
+  while (job.tail.length > CHATJOBS_TAIL) { job.tail.shift(); job.tailStart++; }   // spill: DB has it
+  job.eventCount++;
+  if (o.type === "token") job.text += o.delta || "";
+  else if (o.type === "route") { try { jobStore.bindMeta(job.id, { chatId: job.chatId, model: o.model || "", mode: o.mode || "" }); } catch {} }
+  else if (o.type === "done") { job.sawDone = true; job.doneMeta = o.meta || null; }
+  else if (o.type === "error") { job.errNote = String(o.message || o.code || o.error || "error").slice(0, 300); }
+  job.pending.push(o);
+  // Structural events are natural checkpoints -> flush now; token/working batches ride the timer.
+  if ((o.type !== "token" && o.type !== "working") || job.pending.length >= 64) flushJob(job);
+  else if (!job.flushTimer) job.flushTimer = setTimeout(() => flushJob(job), CHATJOBS_FLUSH_MS);
   for (const l of [...job.listeners]) { try { l(o); } catch {} }
 }
 function finishJob(job) {
   if (job.done) return;
   job.done = true; job.endedAt = Date.now();
+  flushJob(job);
+  const status = job.stopped ? "stopped" : job.sawDone ? "done" : "error";
+  const meta = job.sawDone ? (job.doneMeta || {}) : { note: job.errNote || (job.stopped ? "stopped" : "ended without done") };
+  try { jobStore.finish(job.id, status, meta); } catch {}
   for (const l of [...job.listeners]) { try { l(null); } catch {} }   // null = end-of-stream
   job.listeners.length = 0;
 }
+// Job authorization: jobs are identity-scoped from birth. In single-tenant mode everyone resolves
+// to the owner so this always passes; in multi-tenant mode a caller can only see their OWN jobs —
+// a mismatch answers exactly like a nonexistent job (never leak that someone else's job id exists).
+const jobAuthOk = (req, jobEmail) => {
+  if (!MULTI_TENANT) return true;
+  const T = resolveTenant(req);
+  const caller = String(T && T.email || "").trim().toLowerCase();
+  return !!caller && caller === String(jobEmail || "").trim().toLowerCase();
+};
 // POST /chat/stop {jobId} — the Stop button. Fires the turn's AbortController (in-flight tools +
 // model call); the /chat handler then appends its stopped tail to the buffer and seals the job.
+// A job that only survives in the durable store is by definition already terminal -> alreadyDone.
 async function handleChatStop(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   const b = await readJsonBody(req);
   const job = b && CHAT_JOBS.get(String(b.jobId || ""));
-  if (!job) return json(404, { error: "unknown or expired job" });
+  if (!job) {
+    const row = b && jobStore.get(String(b.jobId || ""));
+    if (row && jobAuthOk(req, row.email)) return json(200, { ok: true, alreadyDone: true, stopped: row.status === "stopped" });
+    return json(404, { error: "unknown or expired job" });
+  }
+  if (!jobAuthOk(req, job.email)) return json(404, { error: "unknown or expired job" });
   if (job.done) return json(200, { ok: true, alreadyDone: true, stopped: job.stopped });
   job.stopped = true;
   try { job.stop(); } catch {}
   console.log(`[dominion-ai] /chat/stop -> ${job.id}`);
   return json(200, { ok: true });
 }
-// GET /chat/attach?job=<id>&from=<n> — SSE: replay events[n..] immediately, then live-tail new
-// events until the job ends. Unknown/expired job -> one {type:"gone"} event, then end.
+// GET /chat/attach?job=<id>&from=<n> — SSE catch-up + live-tail, in one of three modes:
+//   1. RAM job, cursor within the tail: exact index-for-index replay, then live-tail (the fast
+//      path every quick reconnect takes — byte-identical to the original contract).
+//   2. RAM job, cursor fell off the tail (a very long run): {type:"reset"} tells the client to
+//      wipe its partial, then a COMPACTED replay from the durable store (token runs come back as
+//      single fat deltas — the client concatenates, so the text reconstitutes exactly), then the
+//      not-yet-flushed pending events, then {type:"cursor",seq} to resync the resume index, then
+//      live-tail. Replay cost is O(answer text), never O(token deltas) — the 18-hour-run answer.
+//   3. No RAM record (server restarted, or the finished-window aged out): compacted replay from
+//      the durable store alone -> cursor -> end (rows there are always terminal: orphan sweep).
+// Unknown/foreign job -> one {type:"gone"} event, then end.
 function handleChatAttach(req, res, u) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
   const write = (o) => { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
-  const job = CHAT_JOBS.get(String(u.searchParams.get("job") || ""));
-  if (!job) { write({ type: "gone" }); return res.end(); }
+  const id = String(u.searchParams.get("job") || "");
   const from = Math.max(0, Math.floor(Number(u.searchParams.get("from")) || 0));
-  for (const ev of job.events.slice(from)) write(ev);   // catch-up replay (same tick as the subscribe — no gap)
+  const job = CHAT_JOBS.get(id);
+  // Replay stored rows starting at `from`; if `from` lands inside a coalesced row, fall back to
+  // reset + everything (the client rebuilds from zero — correct, just a bigger catch-up).
+  const writeDbReplay = () => {
+    let rows = from > 0 ? jobStore.replayRows(id, from) : jobStore.replayRows(id, 0);
+    if (from > 0 && !(rows.length && rows[0].seq === from)) { write({ type: "reset" }); rows = jobStore.replayRows(id, 0); }
+    for (const r of rows) write(r.ev);
+  };
+  if (!job) {
+    const row = jobStore.get(id);
+    if (!row || !jobAuthOk(req, row.email)) { write({ type: "gone" }); return res.end(); }
+    try { writeDbReplay(); } catch { write({ type: "gone" }); return res.end(); }
+    write({ type: "cursor", seq: row.eventCount });
+    return res.end();
+  }
+  if (!jobAuthOk(req, job.email)) { write({ type: "gone" }); return res.end(); }
+  if (from >= job.tailStart) {
+    for (const ev of job.tail.slice(from - job.tailStart)) write(ev);   // same tick as the subscribe — no gap
+  } else {
+    // The cursor predates the RAM tail: compacted DB catch-up + the unflushed pending batch (both
+    // read in this same tick, so together they cover exactly [0, eventCount) with no gap/overlap).
+    write({ type: "reset" });
+    try { for (const r of jobStore.replayRows(id, 0)) write(r.ev); } catch {}
+    for (const r of coalesceEvents(job.pending, 0)) write(r.ev);
+    write({ type: "cursor", seq: job.eventCount });
+  }
   if (job.done) return res.end();
   const listener = (ev) => { if (ev === null) { try { res.end(); } catch {} } else write(ev); };
   job.listeners.push(listener);
   res.on("close", () => { const i = job.listeners.indexOf(listener); if (i >= 0) job.listeners.splice(i, 1); });
+}
+
+// GET /chat/jobs[?chatId=] — the caller's own jobs (running + terminal-uncollected are the ones
+// the client acts on: reattach the running ones, deliver-on-return the finished ones). Merges the
+// live RAM state over the durable rows so a just-started job's status is fresh. Identity-scoped.
+function handleChatJobs(req, res, u) {
+  const T = resolveTenant(req);
+  const chatId = String(u.searchParams.get("chatId") || "");
+  let rows = [];
+  try { rows = jobStore.listFor(T.email, { chatId, limit: 200 }); } catch {}
+  const jobs = rows.map((r) => {
+    const live = CHAT_JOBS.get(r.id);
+    return { id: r.id, chatId: r.chatId, status: live && !live.done ? "running" : r.status,
+             startedAt: r.startedAt, endedAt: r.endedAt, model: r.model, mode: r.mode,
+             textChars: live ? live.text.length : r.textChars, collected: !!r.collectedAt };
+  });
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  res.end(JSON.stringify({ jobs }));
+}
+// GET /chat/result?job=<id> — the assembled result of a finished background run, so the client can
+// merge it into a non-visible chat WITHOUT opening an SSE stream. Identity-scoped.
+function handleChatResult(req, res, u) {
+  const id = String(u.searchParams.get("job") || "");
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  let r = null; try { r = jobStore.resultFor(id); } catch {}
+  if (!r || !jobAuthOk(req, (jobStore.get(id) || {}).email)) return json(404, { error: "unknown or expired job" });
+  return json(200, r);
+}
+// POST /chat/collect {jobId} — the client acknowledges it has merged this job's result into its
+// local history. Idempotent; starts the (short) collected-retention clock. Identity-scoped.
+async function handleChatCollect(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const b = await readJsonBody(req);
+  const id = b && String(b.jobId || "");
+  const row = id && jobStore.get(id);
+  if (!row || !jobAuthOk(req, row.email)) return json(404, { error: "unknown or expired job" });
+  try { jobStore.collect(id); } catch {}
+  return json(200, { ok: true });
 }
 
 // ---- Dominion work orders (deck orchestrator) -------------------------------------------------
@@ -2459,17 +2587,15 @@ function dominionWorkOrderStatus(woId) {
   const wo = WORK_ORDERS.get(String(woId || "").trim());
   if (!wo) return { error: "no work order with that id (it may predate the last restart)" };
   const job = CHAT_JOBS.get(wo.jobId);
-  if (!job) return { model: wo.model, done: true, expired: true, note: "The job buffer expired; the full transcript is in the chat log under " + wo.chatId + "." };
-  let text = "", meta = null, errors = [];
-  const tools = [];
-  for (const ev of job.events) {
-    if (ev.type === "token" && typeof ev.delta === "string") text += ev.delta;
-    else if (ev.type === "tool" && ev.status && ev.status !== "run") tools.push(ev.name + ":" + ev.status);
-    else if (ev.type === "error") errors.push(String(ev.message || ev.code || "error"));
-    else if (ev.type === "done") meta = ev.meta || null;
-  }
-  return { model: wo.model, done: job.done, runningForSec: Math.round((Date.now() - wo.startedAt) / 1000),
-    tools, errors, costUsd: meta && meta.costUsd, text: text.slice(-6000) };
+  // The durable store always has the structural trail (tools/errors/meta flush immediately); a
+  // live RAM job overrides with its fresher accumulated text (the store can lag one token batch).
+  let r = null;
+  try { r = jobStore.resultFor(wo.jobId); } catch {}
+  if (!job && !r) return { model: wo.model, done: true, expired: true, note: "The job record expired; the full transcript is in the chat log under " + wo.chatId + "." };
+  const text = job ? job.text : (r ? r.text : "");
+  const meta = job && job.doneMeta ? job.doneMeta : (r && r.meta) || null;
+  return { model: wo.model, done: job ? job.done : true, runningForSec: Math.round((Date.now() - wo.startedAt) / 1000),
+    tools: (r && r.tools) || [], errors: (r && r.errors) || [], costUsd: meta && meta.costUsd, text: text.slice(-6000) };
 }
 
 async function handleChat(req, res) {
@@ -2486,10 +2612,14 @@ async function handleChat(req, res) {
   sanitizeChatAttachments(history);
 
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
-  // Durable turn: every SSE event is ALSO buffered in the job so a suspended phone can reattach
-  // (/chat/attach) and catch up mid-stream or after the fact. Generation runs to completion
-  // regardless of the client connection — writes to a dead res are harmless (try/catch below).
-  const job = createChatJob();
+  // Resolve identity BEFORE the job exists so the durable row is scoped to its owner from birth
+  // (attach/stop/list authorization). Synchronous; the gates below reuse this same T.
+  const T = resolveTenant(req);
+  // Durable turn: every SSE event is ALSO buffered in the job (RAM tail + SQLite batches) so a
+  // suspended phone can reattach (/chat/attach) and catch up mid-stream, after the fact, or even
+  // after a server restart. Generation runs to completion regardless of the client connection —
+  // writes to a dead res are harmless (try/catch below).
+  const job = createChatJob(T);
   if (req.onJob) { try { req.onJob(job); } catch {} }   // internal work orders track their job handle
   const sse = (o) => { jobEmit(job, o); try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
   // `aborted` = EXPLICIT stop only (POST /chat/stop). A client disconnect no longer aborts the turn.
@@ -2540,10 +2670,9 @@ async function handleChat(req, res) {
       return endStream();
     }
   }
-  // Multi-tenant: resolve who is asking. Owner short-circuits to the globals (path unchanged); when
-  // MULTI_TENANT is off, this is always the owner. Refuse anon / paused / locked, and refuse the
-  // local model for non-owners (owner-only; never substituted).
-  const T = resolveTenant(req);
+  // Multi-tenant gates on the identity resolved above (`T`). Owner short-circuits to the globals
+  // (path unchanged); when MULTI_TENANT is off, this is always the owner. Refuse anon / paused /
+  // locked, and refuse the local model for non-owners (owner-only; never substituted).
   if (T.role === "anon") { sse({ type: "error", code: "no_identity", message: "Sign in to use Dominion." }); sse({ type: "stopped" }); return endStream(); }
   if (T.status === "paused" || T.status === "locked") {
     sse({ type: "error", code: "account_" + T.status, message: T.status === "locked" ? "Account locked — top off credits to continue." : "Account paused — the monthly cap was reached. Ask Fred to reset it." });
@@ -2577,6 +2706,15 @@ async function handleChat(req, res) {
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
   job.chatId = chatId;
+  try { jobStore.bindMeta(job.id, { chatId }); } catch {}
+  // Long-run concurrency cap (replaces the old buffer cap): a user may have several turns generating
+  // in parallel across chats, but not unbounded — each ties up a model call + the interactive lane.
+  // This job's own row already counts as running, so compare against CAP (>, not >=). Owner exempt:
+  // the deck orchestrator and work orders legitimately fan out. Refuse honestly, never silently drop.
+  if (!T.isOwner && jobStore.runningCountFor(T.email) > CHATJOBS_MAX_RUNNING) {
+    sse({ type: "error", code: "too_many_jobs", message: `You already have ${CHATJOBS_MAX_RUNNING} runs in flight — let one finish or stop it before starting another.` });
+    sse({ type: "stopped", reason: "too_many_jobs" }); return endStream();
+  }
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
 
@@ -3480,6 +3618,9 @@ const server = http.createServer(async (req, res) => {
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
     if (path === "/chat/attach" && req.method === "GET") return handleChatAttach(req, res, u);
+    if (path === "/chat/jobs" && req.method === "GET") return handleChatJobs(req, res, u);
+    if (path === "/chat/result" && req.method === "GET") return handleChatResult(req, res, u);
+    if (path === "/chat/collect" && req.method === "POST") return handleChatCollect(req, res);
     if (path === "/memory" || path.startsWith("/memory/")) return handleMemory(req, res, u);
     if (path === "/toolruns" && req.method === "GET") return handleToolRuns(req, res);
     if (path === "/tool-confirm" && req.method === "POST") return handleToolConfirm(req, res);
@@ -3532,6 +3673,11 @@ server.listen(PORT, HOST, () => {
   const ms = memory.stats();
   console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  gating=${ms.gating}${ms.gatedLax ? " (" + ms.gatedLax + " lax-auto-approved)" : ""}${ms.unverified ? " · " + ms.unverified + " unverified mentor claim(s) pending" : ""}  ·  scope-filtered retrieval  ·  vectors=${EMBED_MODEL} (${ms.embedded} embedded)  ·  dir=${MEMORY_DIR}`);
   console.log(`[dominion-ai] chatlog: ${chatlog.stats().chats} conversation(s) indexed  ·  episodic summaries via /memory/summarize-session`);
+  const js = jobStore.stats();
+  console.log(`[dominion-ai] chatjobs: durable (${JSON.stringify(js.byStatus)})  ·  ${js.uncollected} uncollected result(s) waiting  ·  ${jobStore.orphanedAtBoot} orphaned this boot  ·  max-running/user=${CHATJOBS_MAX_RUNNING}  ·  survives restart+redeploy`);
+  // Retention sweep: running jobs are never touched; collected results shed events after
+  // CHATJOBS_COLLECTED_TTL_MS, uncollected after CHATJOBS_UNCOLLECTED_TTL_MS (0 = keep forever).
+  setInterval(() => { try { jobStore.gcRetention({ collectedTtlMs: CHATJOBS_COLLECTED_TTL_MS, uncollectedTtlMs: CHATJOBS_UNCOLLECTED_TTL_MS }); } catch {} }, 3600000).unref?.();
   console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed (incl. 6 formatting on the light model)  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON (interactive)" : "auto-approve (LAX, recorded)"}  ·  9-state lifecycle persisted  ·  ${flywheel.stats().activeToolOverlays} active description overlay(s)  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl (${toolRunTail.length} reloaded)`);
   const as = artifacts.stats();
   console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  native exports: docx/pdf/xlsx/csv (Forge = docx/pdf fallback only)  ·  export gate: ${EXPORT_SAFETY_LAX ? "LAX (warn+proceed, sensitive blocks)" : "SPEC (confirm on warnings)"}  ·  9 review triggers server-side  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review|duplicate|transform]`);
