@@ -19,7 +19,9 @@ const WEBHOOK_URL = "https://app.dominion.tools/webhooks/stripe";
 
 const wallet = {};
 for (const l of fs.readFileSync(WALLET, "utf8").split(/\r?\n/)) { const m = l.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/); if (m) wallet[m[1]] = m[2].trim().replace(/^['"]|['"]$/g, ""); }
-const SK = wallet.DOMI_AI_STRIPE_LIVE_SECRET_KEY, PK = wallet.DOMI_AI_STRIPE_LIVE_PUBLISHABLE_KEY;
+// Both spellings accepted: the runbook's names and the ones Fred actually used on go-live night.
+const SK = wallet.DOMI_AI_STRIPE_LIVE_SECRET_KEY || wallet.DOMI_AI_LIVE_STRIPE_SECRET;
+const PK = wallet.DOMI_AI_STRIPE_LIVE_PUBLISHABLE_KEY || wallet.DOMI_AI_LIVE_STRIPE_PUBLISHABLE;
 
 function fail(msg) { console.error("BLOCKED: " + msg); process.exit(1); }
 if (!SK) fail("DOMI_AI_STRIPE_LIVE_SECRET_KEY is not in the wallet yet.");
@@ -41,6 +43,7 @@ if (acct.error) fail("account lookup failed: " + acct.error.message);
 const name = (acct.settings && acct.settings.dashboard && acct.settings.dashboard.display_name) || (acct.business_profile && acct.business_profile.name) || "(unnamed)";
 console.log("account:", acct.id, "| name:", name, "| charges_enabled:", acct.charges_enabled);
 if (BLOCKED_ACCOUNTS.has(acct.id)) fail(`these keys belong to ${BLOCKED_ACCOUNTS.get(acct.id)} — wrong business for Dominion revenue.`);
+if (acct.country !== "US") fail("account country is " + acct.country + ", expected US.");
 if (!acct.charges_enabled) fail("charges are not enabled on this account yet — finish Stripe activation (business + bank details) first.");
 
 // webhook: recreate for a fresh signing secret
