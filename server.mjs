@@ -2906,7 +2906,7 @@ async function handleChat(req, res) {
       await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, images: imagesThisTurn || undefined, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
       try { T.chatlog.record(chatId, history, answer); } catch {}
       await meterTurn(T, costUsd, lastUserText, answer);   // SaaS: charge credits / draw cap / training sink (non-owner only)
-      sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
+      sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
       return endStream();
     }
 

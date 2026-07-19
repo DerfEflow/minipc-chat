@@ -218,7 +218,7 @@ function renderMsg(m, i, isLastAi) {
   // Persistent "context used" line (spec: show context/tool usage per message) — survives reloads.
   // F4: the 🧠/📄/💬 chip expands on tap to list WHICH items were loaded (when the meta carries
   // them); the 🔧 chip opens the tool panel filtered to this message's runs. ⏸ marks interrupted.
-  if (m.role === "assistant" && m.meta && (m.meta.memory || m.meta.artifacts || m.meta.chats || m.meta.tools || m.meta.mode || m.meta.interrupted)) {
+  if (m.role === "assistant" && m.meta && (m.meta.memory || m.meta.artifacts || m.meta.chats || m.meta.tools || m.meta.mode || m.meta.interrupted || m.meta.outputTokens || m.meta.costUsd)) {
     const mm = document.createElement("div"); mm.className = "msgmeta";
     const sep = () => mm.appendChild(document.createTextNode(" · "));
     const bit = (text, title, fn) => { const s = document.createElement("span"); s.textContent = text; if (title) s.title = title; if (fn) { s.style.cursor = "pointer"; s.onclick = fn; } if (mm.childNodes.length) sep(); mm.appendChild(s); return s; };
@@ -233,6 +233,15 @@ function renderMsg(m, i, isLastAi) {
       bit(ctxBits.join(" · "), ci ? "Tap to see which items were loaded" : "Context loaded for this answer (per-item detail unavailable for this message)", ci ? () => toggleCtxDetail(turn, mm, ci) : null);
     }
     if (m.meta.tools) bit("🔧 " + m.meta.tools, "Tap to show this message's tool log", () => openTools({ runIds: m.meta.runIds, chatId: curId, label: "this message" }));
+    // Per-exchange usage total (Fred, 2026-07-18): the running cost counter is gone from the
+    // composer; the honest numbers land HERE, once, after the answer finishes.
+    if (m.meta.outputTokens || m.meta.costUsd) {
+      const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(n));
+      const toks = [m.meta.inputTokens ? fmt(m.meta.inputTokens) + " in" : null, m.meta.outputTokens ? fmt(m.meta.outputTokens) + " out" : null].filter(Boolean).join(" / ");
+      const cost = typeof m.meta.costUsd === "number" && m.meta.costUsd > 0 ? "$" + (m.meta.costUsd < 0.01 ? m.meta.costUsd.toFixed(4) : m.meta.costUsd.toFixed(2)) : "";
+      const label = ["⚡ " + (toks || "tokens n/a"), cost].filter(Boolean).join(" · ");
+      bit(label, "Tokens and cost for this exchange");
+    }
     turn.appendChild(mm);
   }
   const acts = document.createElement("div"); acts.className = "acts" + (m.role === "user" ? " me" : "");
@@ -1458,7 +1467,8 @@ async function updateEstimate() {
   const attachChars = pendingAtt.reduce((n, a) => n + (a.kind === "text" && a.text ? a.text.length : 0), 0);
   const payload = { messages: history, mode: modeSel ? modeSel.value : "auto", model: forcedModel() || "auto", privacyMode: privacyModeSel ? privacyModeSel.value : "normal", images: attImages(), attachChars };
   const seq = ++estSeq;
-  costChip.className = "cost-chip cc-loading"; costChip.textContent = "estimating…"; costChip.hidden = false;
+  // No cost talk while typing (Fred, 2026-07-18): the preflight still runs silently so a DOOMED
+  // send (vision gate, privacy block) can warn before the tap, but numbers wait for the answer.
   let est;
   try {
     const r = await fetch("/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
@@ -1469,15 +1479,12 @@ async function updateEstimate() {
   renderCostChip(est);
 }
 function renderCostChip(est) {
-  if (!costChip || !est || !est.backend) { hideCostChip(); return; }
-  let cls = "cost-chip", label = est.estCost || "";
-  if (est.backend === "cloud") { cls += est.free ? " cc-free" : " cc-cloud"; label = (est.model ? est.model + " · " : "") + (est.estCost || ""); }
-  else if (est.backend === "gpu-heavy") { cls += " cc-heavy" + (est.warm ? "" : " cc-cold"); label = "Heavy GPU · " + (est.estCost || ""); }
-  else if (est.backend === "blocked") { cls += " cc-cold"; label = est.blocked === "attachments_unsupported" ? "Blocked · model can't see pictures" : "Blocked · " + (privacyModeSel ? privacyModeSel.value : "") + " mode"; }
-  else { cls += " cc-free"; label = est.estCost || "included"; }   // gpu-light (always-on)
-  costChip.className = cls;
-  const lat = est.estLatency && est.estLatency !== "a few seconds" ? ` <span class="cc-lat">${escapeHtml(est.estLatency)}</span>` : "";
-  costChip.innerHTML = `<span class="cc-dot"></span><span class="cc-cost">${escapeHtml(label)}</span>${lat}`;
+  // Warnings only: the chip appears ONLY when this send would be refused (vision gate, privacy
+  // block). Costs and tokens now report once per exchange, under the finished answer.
+  if (!costChip || !est || est.backend !== "blocked") { hideCostChip(); return; }
+  const label = est.blocked === "attachments_unsupported" ? "Blocked · model can't see pictures" : "Blocked · " + (privacyModeSel ? privacyModeSel.value : "") + " mode";
+  costChip.className = "cost-chip cc-cold";
+  costChip.innerHTML = `<span class="cc-dot"></span><span class="cc-cost">${escapeHtml(label)}</span>`;
   costChip.hidden = false;
 }
 
