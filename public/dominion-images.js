@@ -60,10 +60,18 @@
   function db() {
     if (!dbPromise) {
       dbPromise = new Promise((resolve, reject) => {
-        const rq = indexedDB.open(DB_NAME, 1);
+        // v2 adds a "handles" store for the linked device folder. A FileSystemDirectoryHandle is
+        // structured-cloneable, so IndexedDB can hold the actual grant across sessions;
+        // localStorage could not (it only takes strings). Both stores are guarded so a v1 vault
+        // upgrades in place without losing a single image.
+        const rq = indexedDB.open(DB_NAME, 2);
         rq.onupgradeneeded = () => {
-          const store = rq.result.createObjectStore("images", { keyPath: "id" });
-          store.createIndex("ts", "ts");
+          const d = rq.result;
+          if (!d.objectStoreNames.contains("images")) {
+            const store = d.createObjectStore("images", { keyPath: "id" });
+            store.createIndex("ts", "ts");
+          }
+          if (!d.objectStoreNames.contains("handles")) d.createObjectStore("handles", { keyPath: "key" });
         };
         rq.onsuccess = () => resolve(rq.result);
         rq.onerror = () => reject(rq.error);
@@ -71,6 +79,32 @@
     }
     return dbPromise;
   }
+  // Handle store, kept apart from the image transactions below.
+  async function handleGet(key) {
+    const d = await db();
+    return new Promise((resolve) => {
+      const rq = d.transaction("handles").objectStore("handles").get(key);
+      rq.onsuccess = () => resolve(rq.result ? rq.result.value : null);
+      rq.onerror = () => resolve(null);
+    });
+  }
+  async function handlePut(key, value) {
+    const d = await db();
+    return new Promise((resolve) => {
+      const t = d.transaction("handles", "readwrite");
+      t.objectStore("handles").put({ key, value });
+      t.oncomplete = resolve; t.onerror = resolve;
+    });
+  }
+  async function handleDelete(key) {
+    const d = await db();
+    return new Promise((resolve) => {
+      const t = d.transaction("handles", "readwrite");
+      t.objectStore("handles").delete(key);
+      t.oncomplete = resolve; t.onerror = resolve;
+    });
+  }
+
   const tx = async (mode, fn) => {
     const d = await db();
     return new Promise((resolve, reject) => {
@@ -113,6 +147,205 @@
     };
     await vaultPut(rec);
     return rec;
+  }
+
+  // ---------- device folder (Fred, 2026-07-19) ----------
+  // Images live on the device by design (the service does not pay to house them), which left them
+  // stranded on whichever device forged them. This links ONE folder on this machine and writes
+  // every forged image into it, so whatever already backs that folder up (Google Photos, Drive for
+  // desktop, OneDrive, a NAS) carries the images everywhere without Dominion storing a byte.
+  //
+  // The grant is a real FileSystemDirectoryHandle held in IndexedDB, so it survives restarts. Two
+  // browser facts shape the UI: the picker exists only on desktop Chromium (Firefox, Safari and
+  // Chrome-on-Android have no directory picker), and a handle that comes back needing permission
+  // can only be re-granted from a user gesture. So the phone gets the share sheet instead
+  // ("Save to Photos"), and a control that cannot work here is never drawn.
+  const FOLDER_KEY = "vaultDir";
+  const folderSupported = () => typeof window.showDirectoryPicker === "function";
+  const shareSupported = () => !!(navigator.canShare && navigator.share);
+  let folderHandle = null, folderPerm = "none";          // none | granted | prompt | denied
+  let autoSave = localStorage.getItem("dfi.autosave") !== "0";
+
+  const slug = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  function fileNameFor(rec) {
+    const d = new Date(rec.ts || Date.now());
+    const p = (n) => String(n).padStart(2, "0");
+    const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+    const tail = slug(rec.prompt);
+    return `dominion-forge-${pad4(rec.seq || 0)}-${stamp}${tail ? "-" + tail : ""}.png`;
+  }
+
+  // queryPermission/requestPermission are Chromium extensions to FileSystemHandle. A handle that
+  // lacks them is one the engine hands over already usable, so absence reads as "granted" rather
+  // than as a failure that would strand a perfectly good folder.
+  const permOf = async (h) => (typeof h.queryPermission === "function" ? h.queryPermission({ mode: "readwrite" }) : "granted");
+  const askPerm = async (h) => (typeof h.requestPermission === "function" ? h.requestPermission({ mode: "readwrite" }) : "granted");
+
+  async function restoreFolder() {
+    if (!folderSupported()) return;
+    try {
+      const h = await handleGet(FOLDER_KEY);
+      if (!h) return;
+      folderHandle = h;
+      folderPerm = await permOf(h);
+    } catch { folderHandle = null; folderPerm = "none"; }
+  }
+  async function linkFolder() {
+    if (!folderSupported()) return;
+    try {
+      const h = await window.showDirectoryPicker({ id: "dominion-forge", mode: "readwrite", startIn: "pictures" });
+      folderHandle = h;
+      folderPerm = await permOf(h);
+      if (folderPerm !== "granted") folderPerm = await askPerm(h);
+      await handlePut(FOLDER_KEY, h);
+      renderFolderBar();
+      setStatus(`Linked to ${h.name}. Forged images will be written there.`);
+    } catch (e) {
+      if (e && e.name === "AbortError") return;          // the user closed the picker: not an error
+      showFault("Could not link that folder: " + (e && e.message ? e.message : "unknown error"));
+    }
+  }
+  async function reconnectFolder() {
+    if (!folderHandle) return linkFolder();
+    try {
+      folderPerm = await askPerm(folderHandle);
+      renderFolderBar();
+      if (folderPerm === "granted") setStatus(`Reconnected to ${folderHandle.name}.`);
+    } catch { showFault("This browser would not restore the folder permission. Link it again."); }
+  }
+  async function unlinkFolder() {
+    folderHandle = null; folderPerm = "none";
+    await handleDelete(FOLDER_KEY);
+    renderFolderBar();
+  }
+  const folderReady = () => !!(folderHandle && folderPerm === "granted");
+
+  // Write one vault record into the linked folder. Returns true when the file landed.
+  async function writeToFolder(rec) {
+    if (!folderReady()) return false;
+    try {
+      const name = fileNameFor(rec);
+      const fh = await folderHandle.getFileHandle(name, { create: true });
+      const w = await fh.createWritable();
+      await w.write(rec.blob);
+      await w.close();
+      rec.savedAt = Date.now();
+      rec.savedName = name;
+      await vaultPut(rec);
+      return true;
+    } catch (e) {
+      // A revoked or moved folder is the common case: say so rather than failing silently.
+      try { folderPerm = folderHandle ? await permOf(folderHandle) : "none"; } catch { folderPerm = "prompt"; }
+      renderFolderBar();
+      showFault("Could not write to the linked folder: " + (e && e.message ? e.message : "access lost"));
+      return false;
+    }
+  }
+  async function saveAllToFolder(btn) {
+    if (!folderReady()) return;
+    let recs = [];
+    try { recs = await vaultAll(); } catch {}
+    const pending = recs.filter((r) => !r.savedAt);
+    if (!pending.length) { setStatus("Every image in the vault is already in the folder."); return; }
+    if (btn) { btn.disabled = true; btn.textContent = "SAVING…"; }
+    let done = 0;
+    for (const rec of pending) {
+      if (!(await writeToFolder(rec))) break;
+      done++;
+      if (done % 5 === 0) setStatus(`Writing to ${folderHandle.name}… ${done}/${pending.length}`);
+    }
+    if (btn) { btn.disabled = false; btn.textContent = "SAVE ALL"; }
+    setStatus(`${done} image${done === 1 ? "" : "s"} written to ${folderHandle.name}.`);
+    renderFolderBar();
+    renderGallery();
+  }
+  // The folder bar's own status line, so folder feedback appears where the user is looking
+  // instead of hijacking the generation strip.
+  function setStatus(text) {
+    const n = $("#dfi-folder-note");
+    if (n) n.textContent = text;
+  }
+
+  // Redraw the folder bar for the current capability + permission state. Every branch says
+  // something true about THIS device rather than offering a control that cannot work here.
+  async function renderFolderBar() {
+    const bar = $("#dfi-folder-bar");
+    if (!bar) return;
+    const nameEl = $("#dfi-folder-name"), actions = $("#dfi-folder-actions");
+    actions.innerHTML = "";
+    const mkBtn = (label, fn, cls) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "filter-button" + (cls ? " " + cls : "");
+      b.textContent = label;
+      b.addEventListener("click", () => fn(b));
+      actions.append(b);
+      return b;
+    };
+
+    if (!folderSupported()) {
+      bar.dataset.state = "unsupported";
+      nameEl.textContent = shareSupported() ? "SAVE TO PHOTOS" : "NOT AVAILABLE HERE";
+      setStatus(shareSupported()
+        ? "This browser cannot hold a folder link, so open any image and use Save to Photos. It lands in your camera roll and your usual backup takes it from there."
+        : "This browser can neither link a folder nor open a share sheet. Use Download on any image.");
+      return;
+    }
+    if (!folderHandle) {
+      bar.dataset.state = "unlinked";
+      nameEl.textContent = "NOT LINKED";
+      setStatus("Link a folder and every forged image is written there, so your own backup carries it to your other devices.");
+      mkBtn("LINK FOLDER", () => linkFolder(), "active");
+      return;
+    }
+    if (folderPerm !== "granted") {
+      bar.dataset.state = "needs-permission";
+      nameEl.textContent = String(folderHandle.name || "FOLDER").toUpperCase();
+      setStatus("This browser needs one click to restore access to that folder after a restart.");
+      mkBtn("RECONNECT", () => reconnectFolder(), "active");
+      mkBtn("UNLINK", () => unlinkFolder());
+      return;
+    }
+
+    bar.dataset.state = "linked";
+    nameEl.textContent = String(folderHandle.name || "FOLDER").toUpperCase();
+    let recs = [];
+    try { recs = await vaultAll(); } catch {}
+    const saved = recs.filter((r) => r.savedAt).length;
+    setStatus(autoSave
+      ? `Auto-saving every new image here. ${saved} of ${recs.length} in the vault written so far.`
+      : `Auto-save is off. ${saved} of ${recs.length} in the vault written so far.`);
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "power-toggle";
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("aria-checked", String(autoSave));
+    toggle.setAttribute("aria-label", "Auto-save forged images to the linked folder");
+    toggle.title = "Auto-save every forged image";
+    toggle.innerHTML = "<i></i>";
+    toggle.addEventListener("click", () => {
+      autoSave = !autoSave;
+      localStorage.setItem("dfi.autosave", autoSave ? "1" : "0");
+      renderFolderBar();
+    });
+    actions.append(toggle);
+    if (recs.length > saved) mkBtn("SAVE ALL", (b) => saveAllToFolder(b), "active");
+    mkBtn("UNLINK", () => unlinkFolder());
+  }
+
+  // Phone path: hand the file to the OS share sheet, which is where "Save to Photos" lives.
+  async function shareImage(rec) {
+    try {
+      const file = new File([rec.blob], fileNameFor(rec), { type: "image/png" });
+      if (navigator.canShare && !navigator.canShare({ files: [file] })) throw new Error("unsupported");
+      await navigator.share({ files: [file], title: "Dominion Forge" });
+      return true;
+    } catch (e) {
+      if (e && e.name === "AbortError") return false;
+      showFault("This device would not open the share sheet. Use Download instead.");
+      return false;
+    }
   }
 
   // ---------- helpers ----------
@@ -307,6 +540,16 @@
 
         <div class="gallery" id="gallery"></div>
 
+        <section class="folder-bar" id="dfi-folder-bar">
+          <div class="folder-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/><path d="M8 13h8M12 11v4"/></svg></div>
+          <div class="folder-copy">
+            <span>DEVICE FOLDER</span>
+            <b id="dfi-folder-name">NOT LINKED</b>
+            <small id="dfi-folder-note">Link a folder and every forged image is written there, so your own backup carries it to your other devices.</small>
+          </div>
+          <div class="folder-actions" id="dfi-folder-actions"></div>
+        </section>
+
         <footer class="vault-footer">
           <div><span class="storage-light"></span><b id="dfi-vault-title">LOCAL VAULT</b><small id="dfi-vault-stats">—</small></div>
           <button type="button" id="dfi-purge">PURGE VAULT <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button>
@@ -399,6 +642,7 @@
     renderEstimate();
     renderFoundry();
     renderRefs();
+    renderFolderBar();
   }
 
   function renderRefs() {
@@ -489,7 +733,10 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ prompt, quality: state.quality, aspect: state.aspect, n: 1, refs: state.refs.map((x) => x.dataUrl) }),
       });
-      for (const img of r.images || []) await vaultSave(img.b64, { prompt, quality: r.quality, aspect: r.aspect, source: "sync" });
+      for (const img of r.images || []) {
+        const rec = await vaultSave(img.b64, { prompt, quality: r.quality, aspect: r.aspect, source: "sync" });
+        if (autoSave && folderReady()) await writeToFolder(rec);
+      }
       stopProgress();
       stripDone("Vision sealed to local vault · " + (r.usage && r.usage.outputTokens ? r.usage.outputTokens.toLocaleString() + " tokens · " : "") + fmtUsd(r.costUsd || 0));
       state.refs = [];
@@ -572,7 +819,8 @@
         const r = await apiJson(API.batch + "/" + encodeURIComponent(id) + "?offset=" + offset + "&limit=4");
         if (r.status !== "completed") { stopProgress(); showFault("Batch is " + (JOB_LABELS[r.status] || r.status).toLowerCase() + "."); break; }
         for (const img of r.images || []) {
-          await vaultSave(img.b64, { prompt: img.prompt, quality: img.quality, aspect: img.aspect, source: "batch" });
+          const rec = await vaultSave(img.b64, { prompt: img.prompt, quality: img.quality, aspect: img.aspect, source: "batch" });
+          if (autoSave && folderReady()) await writeToFolder(rec);
           saved++;
         }
         $("#generation-status").textContent = `Collecting forged visions… ${saved}/${r.total}`;
@@ -664,7 +912,7 @@
       card.dataset.kind = rec.favorite ? "favorite" : rec.source === "batch" ? "batch" : "all";
       card.innerHTML = `
         <div class="creation-art"><img class="creation-img" loading="lazy" alt="${esc(rec.prompt.slice(0, 80))}"></div>
-        <div class="card-chrome"><span>${rec.source === "batch" ? "BATCH" : "STANDARD"} · ${pad4(rec.seq || 0)}</span></div>
+        <div class="card-chrome"><span>${rec.source === "batch" ? "BATCH" : "STANDARD"} · ${pad4(rec.seq || 0)}${rec.savedAt ? " · SAVED" : ""}</span></div>
         <div class="creation-meta"><div><b>${esc(rec.prompt.toUpperCase().slice(0, 60) || "FORGED VISION")}</b><small>${esc(cap(rec.quality))} · ${esc(cap(rec.aspect))} · ${SIZES[rec.aspect] || ""}</small></div></div>`;
       card.querySelector(".creation-img").src = url;
       const fav = document.createElement("button");
@@ -695,6 +943,7 @@
       gallery.append(empty);
     }
 
+    renderFolderBar();
     $("#dfi-vault-title").textContent = recs.length ? "LOCAL VAULT HEALTHY" : "LOCAL VAULT";
     $("#dfi-vault-stats").textContent = `${recs.length} creation${recs.length === 1 ? "" : "s"}`;
     updateStorage(recs.length);
@@ -735,6 +984,26 @@
       fav.textContent = rec.favorite ? "★ FAVORITED" : "☆ FAVORITE";
       renderGallery();
     });
+    // Getting THIS image off the device: the folder on a desktop, the share sheet on a phone.
+    if (folderSupported()) {
+      const toFolder = document.createElement("button");
+      toFolder.textContent = rec.savedAt ? "IN FOLDER ✓" : "SAVE TO FOLDER";
+      toFolder.addEventListener("click", async () => {
+        if (!folderReady()) { if (!folderHandle) await linkFolder(); else await reconnectFolder(); }
+        if (!folderReady()) return;
+        toFolder.disabled = true;
+        const ok = await writeToFolder(rec);
+        toFolder.disabled = false;
+        toFolder.textContent = ok ? "IN FOLDER ✓" : "SAVE TO FOLDER";
+        renderFolderBar();
+      });
+      actions.append(toFolder);
+    } else if (shareSupported()) {
+      const share = document.createElement("button");
+      share.textContent = "SAVE TO PHOTOS";
+      share.addEventListener("click", () => shareImage(rec));
+      actions.append(share);
+    }
     const del = document.createElement("button");
     del.className = "danger";
     del.textContent = "DELETE";
@@ -758,6 +1027,9 @@
     void $("#dfi-root").offsetWidth;
     document.body.classList.add("dfi-open");
     refreshConfig();
+    // The folder grant is restored before the gallery paints, so the bar never flashes "NOT LINKED"
+    // at someone who linked it yesterday.
+    restoreFolder().then(renderFolderBar);
     renderGallery();
     refreshJobs();
     if (state.pollTimer) clearInterval(state.pollTimer);
