@@ -43,6 +43,8 @@ export const IMAGE_PRICES = {
 const TEXT_IN_PER_M = 5;      // $/1M text input tokens
 const IMG_OUT_PER_M = 30;     // $/1M image output tokens
 const BATCH_DISCOUNT = 0.5;
+const REFINE_IN_PER_M = 1;    // $/1M — gpt-5.6-luna published rates
+const REFINE_OUT_PER_M = 6;
 
 const SYNC_MAX_N = 4;
 const PROMPT_MAX = 32000;
@@ -50,6 +52,9 @@ const BATCH_MAX_GUEST = 50;
 const BATCH_MAX_OWNER = 200;
 const COLLECT_PAGE_MAX = 8;
 const SPOOL_TTL_MS = 48 * 3600 * 1000;
+const REF_MAX = 10;                       // reference plates per immediate forge
+const REF_MAX_BYTES = 6 * 1024 * 1024;    // per decoded reference image
+const REF_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 function priceFor(quality, aspect, { batch = false } = {}) {
   const p = (IMAGE_PRICES[quality] || {})[aspect];
@@ -57,13 +62,19 @@ function priceFor(quality, aspect, { batch = false } = {}) {
   return batch ? +(p * BATCH_DISCOUNT).toFixed(6) : p;
 }
 
+const IMG_IN_PER_M = 8;       // $/1M image input tokens (reference plates)
+
 function usageCostUsd(usage, { batch = false } = {}) {
   if (!usage) return null;
   const inTok = usage.input_tokens ?? usage.prompt_tokens ?? 0;
   const outTok = usage.output_tokens ?? usage.completion_tokens ?? 0;
   if (!inTok && !outTok) return null;
   const k = batch ? BATCH_DISCOUNT : 1;
-  return +(((inTok * TEXT_IN_PER_M + outTok * IMG_OUT_PER_M) / 1e6) * k).toFixed(6);
+  const det = usage.input_tokens_details;
+  const inUsd = det && typeof det.image_tokens === "number"
+    ? (det.text_tokens || 0) * TEXT_IN_PER_M + det.image_tokens * IMG_IN_PER_M
+    : inTok * TEXT_IN_PER_M;
+  return +(((inUsd + outTok * IMG_OUT_PER_M) / 1e6) * k).toFixed(6);
 }
 
 function readRawBody(req, maxBytes = 8 * 1024 * 1024) {
@@ -128,6 +139,7 @@ export function createImagesFeature(deps) {
     key,                    // () => OpenAI API key string ("" = feature unavailable)
     apiBase = "https://api.openai.com",
     model = "gpt-image-2",
+    refineModel = "gpt-5.6-luna",
     dataDir,                // spool + batch-job records live here
     resolveTenant,          // (req) => T   — the tenancy resolver from server.mjs
     screenContent,          // (text, {isOwner}) => { blocked, reason } — the content wall
@@ -194,14 +206,33 @@ export function createImagesFeature(deps) {
       textInPerM: TEXT_IN_PER_M,
       imgOutPerM: IMG_OUT_PER_M,
       syncMaxN: SYNC_MAX_N,
+      refCap: REF_MAX,
+      refine: true,
       batch: { discount: BATCH_DISCOUNT, window: "24h", maxItemsGuest: BATCH_MAX_GUEST, maxItemsOwner: BATCH_MAX_OWNER },
     });
   }
 
-  // ---- POST /api/images/generate — synchronous generation, 1-4 images.
+  // Validate the staged reference plates (dataURLs). Returns { error } or { refs: [{mime, buf}] }.
+  function parseRefs(raw) {
+    if (!Array.isArray(raw) || !raw.length) return { refs: [] };
+    if (raw.length > REF_MAX) return { error: "too many reference images (max " + REF_MAX + ")" };
+    const refs = [];
+    for (let i = 0; i < raw.length; i++) {
+      const m = /^data:([a-z0-9/+.-]+);base64,(.+)$/i.exec(String(raw[i] || ""));
+      if (!m || !REF_MIMES.has(m[1].toLowerCase())) return { error: "reference " + (i + 1) + ": unsupported image type" };
+      let buf; try { buf = Buffer.from(m[2], "base64"); } catch { return { error: "reference " + (i + 1) + ": unreadable" }; }
+      if (!buf.length || buf.length > REF_MAX_BYTES) return { error: "reference " + (i + 1) + ": too large" };
+      refs.push({ mime: m[1].toLowerCase(), buf });
+    }
+    return { refs };
+  }
+
+  // ---- POST /api/images/generate — synchronous generation, 1-4 images. With reference
+  // plates the call rides /v1/images/edits (multipart, image[] entries); without, the plain
+  // JSON /v1/images/generations. Same response shape either way.
   async function handleGenerate(req, res) {
     if (!key()) return json(res, 503, { error: "Image generation needs the OpenAI key (OPEN_AI_DOMINION_UI_APIKEY)." });
-    const raw = await readRawBody(req);
+    const raw = await readRawBody(req, 96 * 1024 * 1024);
     if (raw === null) return json(res, 413, { error: "request too large" });
     let body; try { body = JSON.parse(raw.toString("utf8") || "{}"); } catch { return json(res, 400, { error: "bad json" }); }
 
@@ -209,6 +240,8 @@ export function createImagesFeature(deps) {
     if (!T) return;
     const item = normalizeItem(body, { maxN: SYNC_MAX_N });
     if (item.error) return json(res, 400, { error: item.error });
+    const parsedRefs = parseRefs(body.refs);
+    if (parsedRefs.error) return json(res, 400, { error: parsedRefs.error });
 
     const screen = screenContent(item.prompt, { isOwner: T.isOwner });
     if (screen.blocked) {
@@ -217,15 +250,37 @@ export function createImagesFeature(deps) {
     }
 
     const startedAt = new Date().toISOString();
-    const payload = JSON.stringify({
-      model, prompt: item.prompt, size: item.size, quality: item.quality, n: item.n,
-      output_format: "png", moderation: "auto",
-    });
-    const r = await apiRequest(apiBase, key(), {
-      method: "POST", path: "/v1/images/generations",
-      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
-      body: payload,
-    });
+    let r;
+    if (parsedRefs.refs.length) {
+      const boundary = "----dominionimages" + randomUUID().replace(/-/g, "");
+      const field = (name, value) => Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`);
+      const parts = [
+        field("model", model), field("prompt", item.prompt), field("size", item.size),
+        field("quality", item.quality), field("n", String(item.n)),
+      ];
+      parsedRefs.refs.forEach((ref, i) => {
+        const ext = ref.mime === "image/png" ? "png" : ref.mime === "image/webp" ? "webp" : "jpg";
+        parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image[]"; filename="ref-${i + 1}.${ext}"\r\nContent-Type: ${ref.mime}\r\n\r\n`));
+        parts.push(ref.buf, Buffer.from("\r\n"));
+      });
+      parts.push(Buffer.from(`--${boundary}--\r\n`));
+      const upBody = Buffer.concat(parts);
+      r = await apiRequest(apiBase, key(), {
+        method: "POST", path: "/v1/images/edits",
+        headers: { "content-type": "multipart/form-data; boundary=" + boundary, "content-length": upBody.length },
+        body: upBody,
+      });
+    } else {
+      const payload = JSON.stringify({
+        model, prompt: item.prompt, size: item.size, quality: item.quality, n: item.n,
+        output_format: "png", moderation: "auto",
+      });
+      r = await apiRequest(apiBase, key(), {
+        method: "POST", path: "/v1/images/generations",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
+        body: payload,
+      });
+    }
     if (r.status !== 200) {
       const msg = apiErrorMessage(r, "Image generation failed");
       await logUsage({ ts: startedAt, model, mode: "image", status: "error", error: msg.slice(0, 200), uid: T.uid });
@@ -239,17 +294,61 @@ export function createImagesFeature(deps) {
     meter(T, costUsd);
     await logUsage({
       ts: startedAt, model, mode: "image", status: "completed", images: images.length,
-      quality: item.quality, aspect: item.aspect,
+      quality: item.quality, aspect: item.aspect, refs: parsedRefs.refs.length || null,
       promptTokens: out.usage?.input_tokens ?? null, outputTokens: out.usage?.output_tokens ?? null,
       costUsd, uid: T.uid,
     });
-    log(`image gen: ${images.length} ${item.quality}/${item.aspect} · $${costUsd} · ${T.isOwner ? "owner" : T.email || T.uid}`);
+    log(`image gen: ${images.length} ${item.quality}/${item.aspect}${parsedRefs.refs.length ? " +" + parsedRefs.refs.length + " refs" : ""} · $${costUsd} · ${T.isOwner ? "owner" : T.email || T.uid}`);
     return json(res, 200, {
       images: images.map((b64) => ({ b64, format: "png" })),
       model, quality: item.quality, aspect: item.aspect, size: item.size,
       usage: { inputTokens: out.usage?.input_tokens ?? null, outputTokens: out.usage?.output_tokens ?? null },
       costUsd,
     });
+  }
+
+  // ---- POST /api/images/refine — sharpen a creative directive with a cheap text model.
+  // Same wall as generation; metered from real usage at the refine model's published rates.
+  async function handleRefine(req, res) {
+    if (!key()) return json(res, 503, { error: "Prompt refinement needs the OpenAI key (OPEN_AI_DOMINION_UI_APIKEY)." });
+    const raw = await readRawBody(req);
+    if (raw === null) return json(res, 413, { error: "request too large" });
+    let body; try { body = JSON.parse(raw.toString("utf8") || "{}"); } catch { return json(res, 400, { error: "bad json" }); }
+    const T = gate(req, res, "prompt refinement");
+    if (!T) return;
+    const prompt = typeof body.prompt === "string" ? body.prompt.trim().slice(0, 4000) : "";
+    if (!prompt) return json(res, 400, { error: "prompt required" });
+    const screen = screenContent(prompt, { isOwner: T.isOwner });
+    if (screen.blocked) return json(res, 403, { error: screen.reason, code: "content_blocked" });
+
+    const sys = "You refine prompts for an image generation engine. Rewrite the user's directive into one vivid, concrete image prompt: subject, composition, lighting, materials, atmosphere, style. Keep the user's intent and subject exactly; add craft, never commentary. Output ONLY the refined prompt text.";
+    const payload = JSON.stringify({
+      model: refineModel,
+      messages: [{ role: "system", content: sys }, { role: "user", content: prompt }],
+      max_completion_tokens: 2500,
+    });
+    // Two attempts: gpt-5.x models occasionally return an empty message on small completions.
+    let text = "", usage = null, lastErr = "";
+    for (let attempt = 0; attempt < 2 && !text; attempt++) {
+      const r = await apiRequest(apiBase, key(), {
+        method: "POST", path: "/v1/chat/completions",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
+        body: payload, timeout: 60000,
+      });
+      if (r.status !== 200) { lastErr = apiErrorMessage(r, "Refinement failed"); continue; }
+      try {
+        const j = JSON.parse(r.buf.toString("utf8"));
+        text = String(j.choices?.[0]?.message?.content || "").trim();
+        usage = j.usage || usage;
+      } catch { lastErr = "Unreadable response from OpenAI."; }
+    }
+    if (!text) return json(res, 502, { error: lastErr || "Refinement returned nothing." });
+    const costUsd = usage
+      ? +((((usage.prompt_tokens || 0) * REFINE_IN_PER_M + (usage.completion_tokens || 0) * REFINE_OUT_PER_M) / 1e6)).toFixed(6)
+      : 0.001;
+    meter(T, costUsd);
+    await logUsage({ ts: new Date().toISOString(), model: refineModel, mode: "image_refine", status: "completed", promptTokens: usage?.prompt_tokens ?? null, outputTokens: usage?.completion_tokens ?? null, costUsd, uid: T.uid });
+    return json(res, 200, { prompt: text.slice(0, 4000), costUsd });
   }
 
   // ---- POST /api/images/batch — submit up to 50/200 generations at 50% token rates.
@@ -474,5 +573,5 @@ export function createImagesFeature(deps) {
     return json(res, 200, { id: job.id, status: job.status });
   }
 
-  return { handleConfig, handleGenerate, handleBatchCreate, handleBatchList, handleBatchGet, handleBatchCancel };
+  return { handleConfig, handleGenerate, handleRefine, handleBatchCreate, handleBatchList, handleBatchGet, handleBatchCancel };
 }

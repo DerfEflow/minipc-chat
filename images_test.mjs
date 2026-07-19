@@ -29,7 +29,7 @@ const mockOllama = http.createServer((req, res) => { let b = ""; req.on("data", 
 await new Promise((r) => mockOllama.listen(MOCK_OLLAMA, "127.0.0.1", r));
 
 // ---- mock OpenAI: /v1/images/generations, /v1/files, /v1/batches, batch output download
-const seen = { generations: [], uploadedJsonl: "", batchCreates: [], batchPolls: 0 };
+const seen = { generations: [], edits: [], refines: [], uploadedJsonl: "", batchCreates: [], batchPolls: 0 };
 let batchStatus = "in_progress";
 const mockOpenAI = http.createServer((req, res) => {
   let b = ""; req.on("data", (d) => b += d);
@@ -40,6 +40,14 @@ const mockOpenAI = http.createServer((req, res) => {
       seen.generations.push(body);
       const n = body.n || 1;
       return send({ created: 1, data: Array.from({ length: n }, () => ({ b64_json: PNG })), usage: { input_tokens: 12, output_tokens: 272 * n } });
+    }
+    if (req.url === "/v1/images/edits" && req.method === "POST") {
+      seen.edits.push({ contentType: req.headers["content-type"] || "", body: b });
+      return send({ created: 1, data: [{ b64_json: PNG }], usage: { input_tokens: 300, input_tokens_details: { text_tokens: 20, image_tokens: 280 }, output_tokens: 272 } });
+    }
+    if (req.url === "/v1/chat/completions" && req.method === "POST") {
+      seen.refines.push(JSON.parse(b));
+      return send({ choices: [{ message: { role: "assistant", content: "A refined monumental vision, cinematic lighting, coherent depth." } }], usage: { prompt_tokens: 50, completion_tokens: 30 } });
     }
     if (req.url === "/v1/files" && req.method === "POST") {
       seen.uploadedJsonl = b;
@@ -131,6 +139,36 @@ await t("owner generates 2 images; request carries exact quality/size; usage-bas
   // usage: 12 in * $5/1M + 544 out * $30/1M
   const expect = +(((12 * 5 + 544 * 30) / 1e6)).toFixed(6);
   if (r.body.costUsd !== expect) throw new Error("cost " + r.body.costUsd + " != " + expect);
+});
+
+await t("reference plates route through /v1/images/edits as multipart with image-token pricing", async () => {
+  const refs = ["data:image/png;base64," + PNG, "data:image/jpeg;base64," + PNG];
+  const r = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "match this style", quality: "low", aspect: "square", n: 1, refs } });
+  if (r.status !== 200 || r.body.images.length !== 1) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body).slice(0, 200));
+  const e = seen.edits.at(-1);
+  if (!e || !e.contentType.startsWith("multipart/form-data")) throw new Error("not multipart");
+  const plates = (e.body.match(/name="image\[\]"/g) || []).length;
+  if (plates !== 2) throw new Error("expected 2 image[] parts, saw " + plates);
+  if (!e.body.includes('name="model"') || !e.body.includes("gpt-image-2")) throw new Error("model field missing");
+  // (20 text * $5 + 280 image * $8 + 272 out * $30) / 1M
+  const expect = +(((20 * 5 + 280 * 8 + 272 * 30) / 1e6)).toFixed(6);
+  if (r.body.costUsd !== expect) throw new Error("cost " + r.body.costUsd + " != " + expect);
+});
+
+await t("bad reference plates are rejected (mime + count)", async () => {
+  const bad = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "x", refs: ["data:text/html;base64,PGI+"] } });
+  if (bad.status !== 400) throw new Error("bad mime -> " + bad.status);
+  const many = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "x", refs: Array(11).fill("data:image/png;base64," + PNG) } });
+  if (many.status !== 400) throw new Error("11 refs -> " + many.status);
+});
+
+await t("refine rewrites the directive via the text model and is gated", async () => {
+  const anon = await req("POST", "/api/images/refine", { body: { prompt: "a castle" } });
+  if (anon.status !== 401) throw new Error("anon -> " + anon.status);
+  const r = await req("POST", "/api/images/refine", { email: OWNER, body: { prompt: "a castle" } });
+  if (r.status !== 200 || !/refined/i.test(r.body.prompt)) throw new Error(r.status + " " + JSON.stringify(r.body));
+  const call = seen.refines.at(-1);
+  if (call.model !== "gpt-5.6-luna" || !call.max_completion_tokens) throw new Error("refine payload wrong: " + JSON.stringify({ m: call.model }));
 });
 
 await t("bad inputs are rejected (quality, aspect, empty prompt)", async () => {

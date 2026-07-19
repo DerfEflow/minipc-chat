@@ -1555,6 +1555,7 @@ const imagesFeature = createImagesFeature({
   key: () => OPENAI_KEY,
   apiBase: cfgGet("OPENAI_IMAGES_BASE", "https://api.openai.com"),
   model: cfgGet("DOMINION_IMAGE_MODEL", "gpt-image-2"),
+  refineModel: cfgGet("DOMINION_IMAGE_REFINE_MODEL", "gpt-5.6-luna"),
   dataDir: dataPath("images"),
   resolveTenant,
   screenContent,
@@ -3316,6 +3317,7 @@ const server = http.createServer(async (req, res) => {
     if (path === "/api/ocr" && req.method === "POST") return handleOcr(req, res);
     if (path === "/api/images/config" && req.method === "GET") return imagesFeature.handleConfig(req, res);
     if (path === "/api/images/generate" && req.method === "POST") return imagesFeature.handleGenerate(req, res);
+    if (path === "/api/images/refine" && req.method === "POST") return imagesFeature.handleRefine(req, res);
     if (path === "/api/images/batch" && req.method === "POST") return imagesFeature.handleBatchCreate(req, res);
     if (path === "/api/images/batches" && req.method === "GET") return imagesFeature.handleBatchList(req, res);
     if (path.startsWith("/api/images/batch/") && path.endsWith("/cancel") && req.method === "POST") return imagesFeature.handleBatchCancel(req, res, u);
