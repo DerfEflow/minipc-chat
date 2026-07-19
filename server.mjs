@@ -1756,6 +1756,11 @@ async function handleVoiceTts(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   if (!OPENAI_KEY) return json(503, { error: "Voice needs the OpenAI key in the box's .env (OPEN_AI_DOMINION_UI_APIKEY)." });
   const b = await readJsonBody(req);
+  // 4000 is a guard on ONE REQUEST (OpenAI's speech endpoint takes 4096), not a limit on how much
+  // of an answer can be spoken. The client sends a long answer as a queue of ~450-character chunks,
+  // so this should never fire; if it ever does, the chunker upstream is broken. Do not treat this
+  // number as the spoken-length budget: capping the answer here is the bug we removed on
+  // 2026-07-19, where long replies were cut mid-sentence with nothing said about it.
   const text = b && typeof b.text === "string" ? b.text.trim().slice(0, 4000) : "";
   if (!text) return json(400, { error: "No text to speak." });
   // Per-request voice/instructions win over the box defaults, so the Settings picker is a real

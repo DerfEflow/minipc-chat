@@ -417,6 +417,67 @@
 }
 #speak .spk-state { font-size: 9px; font-weight: 800; letter-spacing: 0.05em; color: #66ff8c; }
 
+/* ---------- what's new / release notes dialog (Fred, 2026-07-19) ----------
+   Rides the existing .dt-sheet chrome so it reads as part of the app. The body scrolls on its own
+   because the sheet is height-capped: on a phone this content is well past a screen, and a dialog
+   that scrolls the page behind it is how you lose the dismiss button. */
+.dt-release-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 17px 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(102, 255, 91, .25) transparent;
+}
+.dt-release-standfirst {
+  margin: 0 0 20px;
+  color: #c4d4df;
+  font-size: 15px;
+  line-height: 1.55;
+}
+.dt-release-head {
+  margin: 22px 0 10px;
+  color: #effaff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .17em;
+  text-transform: uppercase;
+}
+.dt-release-head::after {
+  content: "";
+  display: block;
+  width: 46px;
+  height: 1px;
+  margin-top: 7px;
+  background: linear-gradient(90deg, rgba(118, 255, 104, .9), transparent);
+}
+.dt-release-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; }
+.dt-release-list li { position: relative; padding-left: 19px; }
+.dt-release-list li::before {
+  content: "";
+  position: absolute; left: 0; top: .55em;
+  width: 6px; height: 6px;
+  background: var(--dt-energy);
+  box-shadow: 0 0 7px rgba(118, 255, 104, .5);
+  transform: rotate(45deg);
+}
+.dt-release-list b { display: block; color: #eaf6ff; font-size: 14px; font-weight: 700; letter-spacing: .01em; }
+.dt-release-list span { display: block; margin-top: 2px; color: #a9bfcd; font-size: 13.5px; line-height: 1.5; }
+.dt-release-horizon {
+  margin: 26px 0 6px;
+  padding: 15px 16px;
+  border: 1px solid rgba(255, 193, 138, .3);
+  background: linear-gradient(140deg, rgba(255, 193, 138, .08), rgba(1, 9, 15, .5) 60%);
+}
+.dt-release-horizon b { display: block; color: var(--dt-copper-hot); font-size: 13px; font-weight: 700; letter-spacing: .04em; }
+.dt-release-horizon span { display: block; margin-top: 6px; color: #b6c6d2; font-size: 13.5px; line-height: 1.5; }
+@media (max-width: 620px) {
+  .dt-release-body { padding: 15px 14px 4px; }
+  .dt-release-standfirst { font-size: 14.5px; }
+  .dt-release-list b { font-size: 13.5px; }
+  .dt-release-list span { font-size: 13px; }
+}
+
 /* ---------- voice transport + mic status (Fred, 2026-07-19) ----------
    Three fixes in one surface. Speaking used to be invisible and unstoppable: no sign the request
    was in flight, no control once audio started. The bar below IS the progress indicator and the

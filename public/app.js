@@ -1901,6 +1901,7 @@ const voice = (() => {
   let bar = null, els = null;
   let currentText = "";
   let queue = [], queueAt = 0; // chunk texts, and which one is sounding
+  let truncated = false;       // only when an answer exceeds CHUNK_CEILING, and it is announced
 
   // Synthesis latency is LINEAR in characters: measured on this account at ~9.4ms/char, so a
   // 4000-character answer is ~37 seconds of silence before the first word. A spinner does not fix
@@ -1909,17 +1910,33 @@ const voice = (() => {
   // roughly constant instead of proportional to answer length.
   // Split on sentence ends so a chunk boundary never lands mid-clause, which you WOULD hear.
   const CHUNK = 450;
+  // Hard ceiling per REQUEST, not per answer. OpenAI's speech endpoint takes 4096 characters and
+  // the box caps a request at 4000, so no single chunk may cross this. Sentence splitting alone
+  // does not guarantee that: one unpunctuated wall of text (a long list, a pasted table) is a
+  // single "sentence" and would sail past the cap and be truncated server-side, which is exactly
+  // the silent cut we are removing. Anything oversized gets hard-wrapped at word boundaries.
+  const CHUNK_MAX = 900;
+  function hardWrap(s) {
+    if (s.length <= CHUNK_MAX) return [s];
+    const parts = [], words = s.split(/(\s+)/);
+    let buf = "";
+    for (const w of words) {
+      if (buf && (buf.length + w.length) > CHUNK_MAX) { parts.push(buf.trim()); buf = ""; }
+      buf += w;
+    }
+    if (buf.trim()) parts.push(buf.trim());
+    return parts;
+  }
   function splitForSpeech(t) {
     const out = [];
     const sentences = String(t).match(/[^.!?\n]+(?:[.!?]+|\n+|$)/g) || [String(t)];
     let buf = "";
     for (const s of sentences) {
       if (buf && (buf.length + s.length) > CHUNK) { out.push(buf.trim()); buf = ""; }
-      // A single sentence longer than a chunk still has to go out whole rather than be cut.
       buf += s;
     }
     if (buf.trim()) out.push(buf.trim());
-    return out.filter(Boolean);
+    return out.flatMap(hardWrap).filter(Boolean);
   }
 
   function build() {
@@ -1951,7 +1968,8 @@ const voice = (() => {
     bar.dataset.state = s;
     const many = queue.length > 1;
     els.state.textContent = (s === "preparing" ? "PREPARING VOICE" : s === "paused" ? "PAUSED" : "SPEAKING")
-      + (many ? "  " + (queueAt + 1) + "/" + queue.length : "");
+      + (many ? "  " + (queueAt + 1) + "/" + queue.length : "")
+      + (truncated ? "  LONG ANSWER" : "");
     els.play.innerHTML = s === "speaking" ? "&#10074;&#10074;" : "&#9654;";
     els.play.disabled = s === "preparing";
     if (audio && isFinite(audio.duration) && audio.duration > 0) {
@@ -1978,14 +1996,25 @@ const voice = (() => {
 
   function teardown() {
     dropAudio();
-    queue = []; queueAt = 0; currentText = "";
+    queue = []; queueAt = 0; currentText = ""; truncated = false;
     if (source) { source.classList.remove("bspeak-active"); source = null; }
     if (bar) { bar.hidden = true; bar.dataset.state = ""; }
   }
 
   function stop() { token++; teardown(); }
 
-  const norm = (t) => String(t || "").replace(/```[\s\S]*?```/g, " . code omitted . ").slice(0, 4000).trim();
+  // No length cap on the ANSWER (Fred, 2026-07-19: "it cut off the response ... reads back half of
+  // it without any explanation at all"). This used to slice(0, 4000), which is where that came
+  // from: a long answer was chopped mid-sentence and nothing said so. That cap only made sense
+  // when the whole answer went out as ONE request against OpenAI's 4096-character limit. Now that
+  // playback is chunked, the per-request limit is a property of a chunk, not of the answer, so
+  // there is nothing left to truncate. Length is bounded by CHUNK_CEILING below instead, and when
+  // that bites the user is TOLD, out loud and on the bar. Never re-add a silent slice here.
+  const norm = (t) => String(t || "").replace(/```[\s\S]*?```/g, " . code omitted . ").trim();
+  // A sane stop on runaway length: ~90 chunks is roughly 40,000 characters, call it 45 minutes of
+  // speech. Past that we read what we can and say so rather than pretending that was the whole
+  // thing. This is a spoken-length guard, not a truncation of the answer on screen.
+  const CHUNK_CEILING = 90;
   const isSpeaking = (text) => !!(bar && !bar.hidden) && currentText === norm(text);
 
   // One chunk to one object URL. Returns "" on failure so the caller can report it once.
@@ -2027,6 +2056,13 @@ const voice = (() => {
     currentText = t;
     source = srcBtn || null;
     queue = splitForSpeech(t); queueAt = 0;
+    // If an answer is long enough to hit the ceiling, say so at the end instead of just stopping.
+    // The old behaviour cut at 4000 characters mid-word and left the user to guess.
+    truncated = queue.length > CHUNK_CEILING;
+    if (truncated) {
+      queue = queue.slice(0, CHUNK_CEILING);
+      queue.push("That is as far as I will read aloud. The rest of the answer is on screen.");
+    }
     paint("preparing");
     try {
       let ahead = fetchChunk(queue[0], mine);   // chunk 1 is already in flight before the loop
