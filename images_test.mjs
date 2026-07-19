@@ -47,12 +47,15 @@ const mockOpenAI = http.createServer((req, res) => {
     }
     if (req.url === "/v1/batches" && req.method === "POST") {
       seen.batchCreates.push(JSON.parse(b));
-      return send({ id: "batch_mock1", status: "validating" });
+      return send({ id: seen.batchCreates.length === 1 ? "batch_mock1" : "batch_mock2", status: "validating" });
     }
     if (req.url === "/v1/batches/batch_mock1" && req.method === "GET") {
       seen.batchPolls++;
       if (batchStatus !== "completed") return send({ id: "batch_mock1", status: batchStatus });
       return send({ id: "batch_mock1", status: "completed", output_file_id: "file-out-1", request_counts: { total: 3, completed: 2, failed: 1 } });
+    }
+    if (req.url === "/v1/batches/batch_mock2" && req.method === "GET") {
+      return send({ id: "batch_mock2", status: "failed" });
     }
     if (req.url === "/v1/files/file-out-1/content" && req.method === "GET") {
       const line = (i) => JSON.stringify({ custom_id: "dfi-" + i, response: { status_code: 200, body: { data: [{ b64_json: PNG }], usage: { input_tokens: 10, output_tokens: 272 } } } });
@@ -167,8 +170,9 @@ await t("batch: too-expensive submission is refused up front (needs_credits)", a
   if (r.status !== 402 || r.body.code !== "needs_credits") throw new Error(r.status + " " + JSON.stringify(r.body));
 });
 
-let est;
-await t("batch submit uploads JSONL and creates the job at /v1/images/generations", async () => {
+let est, submitCharged;
+await t("batch submit uploads JSONL, creates the job, and CHARGES AT SUBMIT", async () => {
+  const before = await balanceOf(USER);
   const items = [
     { prompt: "a lighthouse at dawn", quality: "low", aspect: "square" },
     { prompt: "a lighthouse at dusk", quality: "low", aspect: "square" },
@@ -178,37 +182,60 @@ await t("batch submit uploads JSONL and creates the job at /v1/images/generation
   if (r.status !== 200 || r.body.id !== "batch_mock1") throw new Error(r.status + " " + JSON.stringify(r.body));
   est = r.body.estUsd;
   if (est !== +(3 * 0.009 * 0.5).toFixed(6)) throw new Error("estUsd " + est);
+  submitCharged = Math.max(1, Math.ceil(est * 100));
+  if (r.body.chargedCredits !== submitCharged) throw new Error("chargedCredits " + r.body.chargedCredits);
+  const after = await balanceOf(USER);
+  if (before - after !== submitCharged) throw new Error(`submit charge ${before}->${after}, expected -${submitCharged}`);
   const lines = seen.uploadedJsonl.split("\n").filter((l) => l.includes("custom_id"));
   if (lines.length !== 3) throw new Error("jsonl lines " + lines.length);
   if (!seen.uploadedJsonl.includes('"url": "/v1/images/generations"') && !seen.uploadedJsonl.includes('"url":"/v1/images/generations"')) throw new Error("jsonl endpoint wrong");
   if (seen.batchCreates.at(-1).endpoint !== "/v1/images/generations") throw new Error("batch endpoint wrong");
 });
 
-await t("in-progress batch polls honestly (no images yet, not charged)", async () => {
+await t("in-progress batch polls honestly (no images yet, no extra charge)", async () => {
+  const before = await balanceOf(USER);
   const r = await req("GET", "/api/images/batch/batch_mock1", { email: USER });
-  if (r.status !== 200 || r.body.status !== "in_progress" || r.body.charged) throw new Error(JSON.stringify(r.body));
+  if (r.status !== 200 || r.body.status !== "in_progress" || r.body.settled) throw new Error(JSON.stringify(r.body));
+  if ((await balanceOf(USER)) !== before) throw new Error("poll changed the balance");
 });
 
-await t("completed batch pages results and charges ONCE from real usage at the 50% rate", async () => {
+await t("collection settles ONCE against real usage: overcharge comes back as credits", async () => {
   batchStatus = "completed";
   const before = await balanceOf(USER);
   const p1 = await req("GET", "/api/images/batch/batch_mock1?offset=0&limit=1", { email: USER });
   if (p1.status !== 200 || p1.body.total !== 2 || p1.body.failed !== 1) throw new Error("page1 " + JSON.stringify({ s: p1.status, t: p1.body.total, f: p1.body.failed }));
   if (p1.body.images.length !== 1 || p1.body.done) throw new Error("page1 shape wrong");
-  // 2 ok lines * (10*$5 + 272*$32)/1M * 0.5
+  // actual: 2 ok lines * (10*$5 + 272*$32)/1M * 0.5
   const expectCost = +((2 * ((10 * 5 + 272 * 32) / 1e6)) * 0.5).toFixed(6);
   if (Math.abs(p1.body.costUsd - expectCost) > 1e-9) throw new Error("costUsd " + p1.body.costUsd + " != " + expectCost);
+  const actualCredits = Math.max(1, Math.ceil(expectCost * 100));
+  const expectRefund = submitCharged - actualCredits;
+  if (expectRefund <= 0) throw new Error("test premise broken: expected an overcharge to refund");
+  if (p1.body.refundedCredits !== expectRefund) throw new Error("refundedCredits " + p1.body.refundedCredits + " != " + expectRefund);
   const afterFirst = await balanceOf(USER);
-  const expectCredits = Math.max(1, Math.ceil(expectCost * 100));
-  if (before - afterFirst !== expectCredits) throw new Error(`charge ${before}->${afterFirst}, expected -${expectCredits}`);
+  if (afterFirst - before !== expectRefund) throw new Error(`refund ${before}->${afterFirst}, expected +${expectRefund}`);
   const p2 = await req("GET", "/api/images/batch/batch_mock1?offset=1&limit=4", { email: USER });
   if (p2.body.images.length !== 1 || !p2.body.done) throw new Error("page2 shape wrong: " + JSON.stringify({ n: p2.body.images.length, done: p2.body.done }));
-  if ((await balanceOf(USER)) !== afterFirst) throw new Error("charged twice");
+  if ((await balanceOf(USER)) !== afterFirst) throw new Error("settled twice");
+});
+
+await t("a FAILED batch refunds the submit charge in full, once", async () => {
+  const before = await balanceOf(USER);
+  const items = [{ prompt: "doomed lighthouse", quality: "low", aspect: "square" }];
+  const sub = await req("POST", "/api/images/batch", { email: USER, body: { items } });
+  if (sub.status !== 200 || sub.body.id !== "batch_mock2") throw new Error(JSON.stringify(sub.body));
+  const charged = sub.body.chargedCredits;
+  if ((await balanceOf(USER)) !== before - charged) throw new Error("submit charge missing");
+  const poll = await req("GET", "/api/images/batch/batch_mock2", { email: USER });
+  if (poll.body.status !== "failed" || poll.body.refundedCredits !== charged) throw new Error(JSON.stringify(poll.body));
+  if ((await balanceOf(USER)) !== before) throw new Error("full refund missing");
+  await req("GET", "/api/images/batch/batch_mock2", { email: USER });
+  if ((await balanceOf(USER)) !== before) throw new Error("refunded twice");
 });
 
 await t("jobs list is tenant-scoped", async () => {
   const mine = await req("GET", "/api/images/batches", { email: USER });
-  if (mine.body.jobs.length !== 1) throw new Error("user should see 1 job");
+  if (mine.body.jobs.length !== 2) throw new Error("user should see 2 jobs, saw " + mine.body.jobs.length);
   const owner = await req("GET", "/api/images/batches", { email: OWNER });
   if (owner.body.jobs.length !== 0) throw new Error("owner should see none of the user's jobs");
 });

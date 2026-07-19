@@ -1559,6 +1559,15 @@ const imagesFeature = createImagesFeature({
   resolveTenant,
   screenContent,
   meter: (T, costUsd) => meterOcr(T, costUsd),
+  isMetered: (T) => !!(MULTI_TENANT && T && !T.isOwner && (T.role === "credit" || T.role === "sponsored")),
+  // Batch settle (Fred 2026-07-18): submit-charge overages come back as credits.
+  creditBack: (T, credits, reason) => {
+    if (!MULTI_TENANT || !T || T.isOwner || !(credits > 0)) return;
+    try {
+      if (T.role === "credit") billing.adminAdjust(T.email, Math.trunc(credits), reason || "batch settle refund");
+      else if (T.role === "sponsored") users.addSponsoredSpend(T.email, -(credits / 100));
+    } catch {}
+  },
   canChat: (email) => billing.canChat(email),
   billingAccount: (email) => billing.account(email),
   logUsage,

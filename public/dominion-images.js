@@ -238,7 +238,7 @@
     const batch = el("div", "dfi-card");
     const bh = el("h2", "dfi-card-h", "Batch forge: half price, ready within 24h");
     batch.append(bh);
-    batch.append(el("p", "dfi-note", "Queue prompts, submit them together, and OpenAI runs them at 50% of the live rate. Collect the finished images here; they land straight in your gallery."));
+    batch.append(el("p", "dfi-note", "Queue prompts, submit them together, and OpenAI runs them at 50% of the live rate. Your credits are charged when you submit; when you collect, any overcharge comes back to your credits automatically, and a failed batch refunds in full."));
     const qlist = el("div", "dfi-queue");
     qlist.id = "dfi-queue";
     batch.append(qlist);
@@ -389,7 +389,7 @@
       });
       state.queue = [];
       renderQueue();
-      setMsg(`Batch submitted: ${r.count} image${r.count > 1 ? "s" : ""} · estimated ${fmtUsd(r.estUsd)} · ready within 24h (usually much sooner).`);
+      setMsg(`Batch submitted: ${r.count} image${r.count > 1 ? "s" : ""} · ${fmtUsd(r.estUsd)} charged now${r.chargedCredits ? " (" + r.chargedCredits + " credits)" : ""} · ready within 24h (usually much sooner). Overcharges settle back at collection.`);
       refreshJobs();
     } catch (e) {
       setMsg(friendly(e), true);
@@ -423,7 +423,7 @@
       const when = new Date(j.ts).toLocaleString();
       row.append(el("span", "dfi-queue-txt", `${j.count} image${j.count > 1 ? "s" : ""} · ${when}`));
       row.append(el("span", "dfi-job-status dfi-job-" + j.status, JOB_LABELS[j.status] || j.status));
-      row.append(el("span", "dfi-queue-meta", j.costUsd != null ? fmtUsd(j.costUsd) + " charged" : "est " + fmtUsd(j.estUsd)));
+      row.append(el("span", "dfi-queue-meta", j.settled && j.costUsd != null ? fmtUsd(j.costUsd) + " final" : fmtUsd(j.estUsd) + " charged"));
       if (j.status === "completed") {
         const c = el("button", "dfi-btn dfi-btn-small", "Collect");
         c.addEventListener("click", () => collectBatch(j.id, c));
@@ -473,7 +473,8 @@
         renderGallery();
         offset += (r.images || []).length;
         if (r.done || !(r.images || []).length) {
-          setMsg(`Batch collected: ${saved} image${saved === 1 ? "" : "s"} in your gallery` + (r.failed ? ` · ${r.failed} failed` : "") + (r.costUsd != null ? ` · ${fmtUsd(r.costUsd)} at the 50% batch rate` : "") + ".");
+          const settle = r.refundedCredits ? ` · ${r.refundedCredits} credit${r.refundedCredits === 1 ? "" : "s"} returned` : r.extraCredits ? ` · ${r.extraCredits} extra credit${r.extraCredits === 1 ? "" : "s"} for overage` : "";
+          setMsg(`Batch collected: ${saved} image${saved === 1 ? "" : "s"} in your gallery` + (r.failed ? ` · ${r.failed} failed` : "") + (r.costUsd != null ? ` · ${fmtUsd(r.costUsd)} actual at the 50% batch rate` : "") + settle + ".");
           break;
         }
       }

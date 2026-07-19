@@ -133,6 +133,8 @@ export function createImagesFeature(deps) {
     resolveTenant,          // (req) => T   — the tenancy resolver from server.mjs
     screenContent,          // (text, {isOwner}) => { blocked, reason } — the content wall
     meter,                  // (T, costUsd) — charges non-owners exactly like OCR/chat turns
+    creditBack = () => {},  // (T, credits, reason) — returns credits to a non-owner (batch settle)
+    isMetered = () => false,// (T) => does meter() actually charge this tenant?
     billingAccount = null,  // (email) => { balance } | null — for batch affordability checks
     logUsage = async () => {},
     log = () => {},
@@ -146,6 +148,11 @@ export function createImagesFeature(deps) {
   }
   function saveJobs(jobs) {
     try { writeFileSync(jobsFile, JSON.stringify({ jobs }, null, 2)); } catch (e) { log("images: job store write failed: " + e.message); }
+  }
+  function persistJob(job) {
+    const jobs = loadJobs();
+    const i = jobs.findIndex((j) => j.id === job.id);
+    if (i >= 0) { jobs[i] = job; saveJobs(jobs); }
   }
   function cleanSpool() {
     try {
@@ -314,18 +321,25 @@ export function createImagesFeature(deps) {
     let batch; try { batch = JSON.parse(cr.buf.toString("utf8")); } catch {}
     if (!batch || !batch.id) return json(res, 502, { error: "Batch creation returned no id." });
 
+    // Fred's rule (2026-07-18): the batch is CHARGED AT SUBMIT at the published 50% rates.
+    // Collection settles against real usage — overcharges come back as credits, and the rare
+    // actual-above-published overrun is charged as the difference. Terminal failures refund fully.
+    const metered = isMetered(T);
+    const chargedCredits = metered ? Math.max(1, Math.ceil(estUsd * 100)) : 0;
+    if (metered) meter(T, estUsd);
+
     const jobs = loadJobs();
     const job = {
       id: batch.id, uid: T.uid, email: T.email || "", ts: new Date().toISOString(), model,
       count: items.length, estUsd, status: batch.status || "validating",
-      charged: false, costUsd: null, outputFileId: null,
+      chargedCredits, settled: !metered, costUsd: null, outputFileId: null,
       items: items.map((it) => ({ prompt: it.prompt.slice(0, 200), quality: it.quality, aspect: it.aspect })),
     };
     jobs.unshift(job);
     saveJobs(jobs.slice(0, 200));
-    await logUsage({ ts: job.ts, model, mode: "image_batch", status: "submitted", images: items.length, estUsd, batchId: batch.id, uid: T.uid });
-    log(`image batch submitted: ${items.length} item(s) · est $${estUsd} (50% batch rate) · ${T.isOwner ? "owner" : T.email || T.uid}`);
-    return json(res, 200, { id: batch.id, status: job.status, count: items.length, estUsd });
+    await logUsage({ ts: job.ts, model, mode: "image_batch", status: "submitted", images: items.length, estUsd, chargedCredits, batchId: batch.id, uid: T.uid });
+    log(`image batch submitted: ${items.length} item(s) · est $${estUsd} charged at submit (${chargedCredits} credits) · ${T.isOwner ? "owner" : T.email || T.uid}`);
+    return json(res, 200, { id: batch.id, status: job.status, count: items.length, estUsd, chargedCredits });
   }
 
   // ---- GET /api/images/batches — this user's jobs, newest first.
@@ -334,7 +348,7 @@ export function createImagesFeature(deps) {
     if (!T) return;
     const jobs = loadJobs().filter((j) => j.uid === T.uid).map((j) => ({
       id: j.id, ts: j.ts, count: j.count, estUsd: j.estUsd, status: j.status,
-      charged: j.charged, costUsd: j.costUsd, items: j.items,
+      chargedCredits: j.chargedCredits, settled: j.settled, costUsd: j.costUsd, items: j.items,
     }));
     return json(res, 200, { jobs });
   }
@@ -380,7 +394,19 @@ export function createImagesFeature(deps) {
     if (!["completed", "failed", "expired", "cancelled"].includes(job.status) || (job.status === "completed" && !job.outputFileId)) {
       job = await refreshJob(job);
     }
-    const base = { id: job.id, status: job.status, count: job.count, estUsd: job.estUsd, charged: job.charged, costUsd: job.costUsd, requestCounts: job.requestCounts || null };
+
+    // Terminal failure before any results: the submit charge comes back in full, once.
+    if (["failed", "expired", "cancelled"].includes(job.status) && !job.settled) {
+      creditBack(T, job.chargedCredits, "batch " + job.status + " refund " + job.id);
+      job.settled = true;
+      job.costUsd = 0;
+      job.refundedCredits = job.chargedCredits;
+      persistJob(job);
+      await logUsage({ ts: new Date().toISOString(), model, mode: "image_batch", status: job.status, refundedCredits: job.chargedCredits, batchId: job.id, uid: T.uid });
+      log(`image batch ${job.status}: refunded ${job.chargedCredits} credit(s) · ${T.isOwner ? "owner" : T.email || T.uid}`);
+    }
+
+    const base = { id: job.id, status: job.status, count: job.count, estUsd: job.estUsd, chargedCredits: job.chargedCredits, settled: job.settled, costUsd: job.costUsd, refundedCredits: job.refundedCredits || 0, requestCounts: job.requestCounts || null };
     if (job.status !== "completed" || !job.outputFileId) return json(res, 200, base);
 
     const sp = await ensureSpool(job);
@@ -389,7 +415,9 @@ export function createImagesFeature(deps) {
     const parsed = sp.lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
     const ok = parsed.filter((l) => l.response && l.response.status_code === 200 && l.response.body);
 
-    if (!job.charged) {
+    // First collection settles submit-charge vs real usage: refund the overage as credits,
+    // charge the (rare) shortfall when actual tokens run above the published table.
+    if (!job.settled) {
       let cost = 0, sawUsage = false;
       for (const l of ok) {
         const c = usageCostUsd(l.response.body.usage, { batch: true });
@@ -401,13 +429,16 @@ export function createImagesFeature(deps) {
         }
       }
       job.costUsd = +cost.toFixed(6);
-      meter(T, job.costUsd);
-      job.charged = true;
-      const jobs = loadJobs();
-      const i = jobs.findIndex((j) => j.id === job.id);
-      if (i >= 0) { jobs[i] = job; saveJobs(jobs); }
-      await logUsage({ ts: new Date().toISOString(), model, mode: "image_batch", status: "completed", images: ok.length, failed: parsed.length - ok.length, costUsd: job.costUsd, usageBased: sawUsage, batchId: job.id, uid: T.uid });
-      log(`image batch collected: ${ok.length}/${job.count} ok · $${job.costUsd} (batch rate) · ${T.isOwner ? "owner" : T.email || T.uid}`);
+      const actualCredits = ok.length ? Math.max(1, Math.ceil(job.costUsd * 100)) : 0;
+      const delta = actualCredits - job.chargedCredits;
+      if (delta > 0) meter(T, delta / 100);
+      else if (delta < 0) creditBack(T, -delta, "batch settle refund " + job.id);
+      job.refundedCredits = delta < 0 ? -delta : 0;
+      job.extraCredits = delta > 0 ? delta : 0;
+      job.settled = true;
+      persistJob(job);
+      await logUsage({ ts: new Date().toISOString(), model, mode: "image_batch", status: "completed", images: ok.length, failed: parsed.length - ok.length, costUsd: job.costUsd, chargedCredits: job.chargedCredits, refundedCredits: job.refundedCredits, extraCredits: job.extraCredits, usageBased: sawUsage, batchId: job.id, uid: T.uid });
+      log(`image batch collected: ${ok.length}/${job.count} ok · $${job.costUsd} actual vs ${job.chargedCredits} credit(s) charged at submit · settle ${job.refundedCredits ? "+" + job.refundedCredits + " back" : job.extraCredits ? "-" + job.extraCredits + " extra" : "even"} · ${T.isOwner ? "owner" : T.email || T.uid}`);
     }
 
     const offset = Math.max(0, Math.trunc(Number(u.searchParams.get("offset")) || 0));
@@ -421,7 +452,8 @@ export function createImagesFeature(deps) {
     const done = offset + limit >= ok.length;
     if (done) { try { unlinkSync(spoolPath(job.id)); } catch {} }
     return json(res, 200, {
-      ...base, charged: job.charged, costUsd: job.costUsd,
+      ...base, settled: job.settled, costUsd: job.costUsd,
+      refundedCredits: job.refundedCredits || 0, extraCredits: job.extraCredits || 0,
       total: ok.length, failed: parsed.length - ok.length, offset, images: page, done,
     });
   }
