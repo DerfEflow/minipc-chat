@@ -1554,7 +1554,7 @@ function meterOcr(T, costUsd) {
 const imagesFeature = createImagesFeature({
   key: () => OPENAI_KEY,
   apiBase: cfgGet("OPENAI_IMAGES_BASE", "https://api.openai.com"),
-  model: cfgGet("DOMINION_IMAGE_MODEL", "gpt-image-1.5"),
+  model: cfgGet("DOMINION_IMAGE_MODEL", "gpt-image-2"),
   dataDir: dataPath("images"),
   resolveTenant,
   screenContent,

@@ -16,17 +16,17 @@
   // Fallback copy of the published OpenAI tables; /api/images/config overrides at runtime.
   let CFG = {
     available: true,
-    model: "gpt-image-1.5",
+    model: "gpt-image-2",
     syncMaxN: 4,
     tokens: {
-      low: { square: 272, portrait: 408, landscape: 400 },
-      medium: { square: 1056, portrait: 1584, landscape: 1568 },
-      high: { square: 4160, portrait: 6240, landscape: 6208 },
+      low: { square: 200, portrait: 167, landscape: 167 },
+      medium: { square: 1767, portrait: 1367, landscape: 1367 },
+      high: { square: 7033, portrait: 5500, landscape: 5500 },
     },
     prices: {
-      low: { square: 0.009, portrait: 0.013, landscape: 0.013 },
-      medium: { square: 0.034, portrait: 0.05, landscape: 0.05 },
-      high: { square: 0.133, portrait: 0.2, landscape: 0.2 },
+      low: { square: 0.006, portrait: 0.005, landscape: 0.005 },
+      medium: { square: 0.053, portrait: 0.041, landscape: 0.041 },
+      high: { square: 0.211, portrait: 0.165, landscape: 0.165 },
     },
     batch: { discount: 0.5, window: "24h", maxItemsGuest: 50, maxItemsOwner: 200 },
   };
@@ -281,6 +281,7 @@
 
   // ---------- open/close (the slide) ----------
   function openPanel() {
+    if (window.closeForgeDial) window.closeForgeDial();   // one reveal at a time
     if (!$("#dfi-root")) buildPanel();
     state.open = true;
     document.body.classList.add("dfi-anim");

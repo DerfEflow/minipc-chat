@@ -6,15 +6,14 @@
 // long enough to page them down to the device, then cleaned up.
 //
 // Pricing facts [verified 2026-07-18 against developers.openai.com]:
-//   gpt-image-1.5 — text input $5/1M, image output tokens $32/1M.
-//   Published output tokens per image (identical table to gpt-image-1):
-//     low    272 (1024x1024) / 408 (1024x1536) / 400 (1536x1024)
-//     medium 1056 / 1584 / 1568
-//     high   4160 / 6240 / 6208
-//   Published per-image prices: low $0.009/$0.013/$0.013, medium $0.034/$0.05/$0.05,
-//   high $0.133/$0.20/$0.20.
-//   Batch API supports gpt-image models at 50% of the token rates, 24h window,
-//   up to 50,000 requests per job. gpt-image-1 deprecates 2026-10-23, hence 1.5 default.
+//   gpt-image-2 (released 2026-04, the current flagship) — text input $5/1M, image input
+//   $8/1M, image output tokens $30/1M; Batch rates are exactly half ($2.50/$4/$15).
+//   Published per-image prices (portrait/landscape run CHEAPER than square on this model):
+//     low    $0.006 (1024x1024) / $0.005 (1024x1536) / $0.005 (1536x1024)
+//     medium $0.053 / $0.041 / $0.041
+//     high   $0.211 / $0.165 / $0.165
+//   Token estimates below are derived from those prices at $30/1M output; metering always
+//   prefers the real usage object. Batch API: 50% off, 24h window, up to 50k requests/job.
 
 import http from "node:http";
 import https from "node:https";
@@ -29,20 +28,20 @@ export const IMAGE_SIZES = {
 };
 export const IMAGE_QUALITIES = ["low", "medium", "high"];
 
-// Published output-token counts per generated image, by quality then aspect.
+// Output-token estimates per generated image (published price / $30 per 1M), quality then aspect.
 export const IMAGE_TOKENS = {
-  low: { square: 272, portrait: 408, landscape: 400 },
-  medium: { square: 1056, portrait: 1584, landscape: 1568 },
-  high: { square: 4160, portrait: 6240, landscape: 6208 },
+  low: { square: 200, portrait: 167, landscape: 167 },
+  medium: { square: 1767, portrait: 1367, landscape: 1367 },
+  high: { square: 7033, portrait: 5500, landscape: 5500 },
 };
 // Published per-image USD (sync). Batch = 50% of these.
 export const IMAGE_PRICES = {
-  low: { square: 0.009, portrait: 0.013, landscape: 0.013 },
-  medium: { square: 0.034, portrait: 0.05, landscape: 0.05 },
-  high: { square: 0.133, portrait: 0.2, landscape: 0.2 },
+  low: { square: 0.006, portrait: 0.005, landscape: 0.005 },
+  medium: { square: 0.053, portrait: 0.041, landscape: 0.041 },
+  high: { square: 0.211, portrait: 0.165, landscape: 0.165 },
 };
 const TEXT_IN_PER_M = 5;      // $/1M text input tokens
-const IMG_OUT_PER_M = 32;     // $/1M image output tokens
+const IMG_OUT_PER_M = 30;     // $/1M image output tokens
 const BATCH_DISCOUNT = 0.5;
 
 const SYNC_MAX_N = 4;
@@ -128,7 +127,7 @@ export function createImagesFeature(deps) {
   const {
     key,                    // () => OpenAI API key string ("" = feature unavailable)
     apiBase = "https://api.openai.com",
-    model = "gpt-image-1.5",
+    model = "gpt-image-2",
     dataDir,                // spool + batch-job records live here
     resolveTenant,          // (req) => T   — the tenancy resolver from server.mjs
     screenContent,          // (text, {isOwner}) => { blocked, reason } — the content wall

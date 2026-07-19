@@ -107,8 +107,8 @@ await t("config publishes the OpenAI tables (tokens, prices, batch discount)", a
   const r = await req("GET", "/api/images/config");
   if (r.status !== 200) throw new Error("HTTP " + r.status);
   if (!r.body.available) throw new Error("not available with key set");
-  if (r.body.model !== "gpt-image-1.5") throw new Error("model: " + r.body.model);
-  if (r.body.tokens.high.portrait !== 6240 || r.body.prices.low.square !== 0.009) throw new Error("published tables wrong");
+  if (r.body.model !== "gpt-image-2") throw new Error("model: " + r.body.model);
+  if (r.body.tokens.high.portrait !== 5500 || r.body.prices.low.square !== 0.006) throw new Error("published tables wrong");
   if (r.body.batch.discount !== 0.5) throw new Error("batch discount wrong");
 });
 
@@ -127,9 +127,9 @@ await t("owner generates 2 images; request carries exact quality/size; usage-bas
   if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
   if (r.body.images.length !== 2 || r.body.images[0].b64 !== PNG) throw new Error("images wrong");
   const g = seen.generations.at(-1);
-  if (g.model !== "gpt-image-1.5" || g.quality !== "low" || g.size !== "1024x1536" || g.n !== 2) throw new Error("payload wrong: " + JSON.stringify(g));
-  // usage: 12 in * $5/1M + 544 out * $32/1M
-  const expect = +(((12 * 5 + 544 * 32) / 1e6)).toFixed(6);
+  if (g.model !== "gpt-image-2" || g.quality !== "low" || g.size !== "1024x1536" || g.n !== 2) throw new Error("payload wrong: " + JSON.stringify(g));
+  // usage: 12 in * $5/1M + 544 out * $30/1M
+  const expect = +(((12 * 5 + 544 * 30) / 1e6)).toFixed(6);
   if (r.body.costUsd !== expect) throw new Error("cost " + r.body.costUsd + " != " + expect);
 });
 
@@ -166,7 +166,7 @@ await t("credit user is METERED: balance drops by ceil(costUsd*100)", async () =
 
 await t("batch: too-expensive submission is refused up front (needs_credits)", async () => {
   const items = Array.from({ length: 40 }, () => ({ prompt: "castle", quality: "high", aspect: "landscape" }));
-  const r = await req("POST", "/api/images/batch", { email: USER, body: { items } }); // est 40*$0.10 = $4 = 400 credits > balance
+  const r = await req("POST", "/api/images/batch", { email: USER, body: { items } }); // est 40*$0.0825 = $3.30 = 330 credits > balance
   if (r.status !== 402 || r.body.code !== "needs_credits") throw new Error(r.status + " " + JSON.stringify(r.body));
 });
 
@@ -174,14 +174,14 @@ let est, submitCharged;
 await t("batch submit uploads JSONL, creates the job, and CHARGES AT SUBMIT", async () => {
   const before = await balanceOf(USER);
   const items = [
-    { prompt: "a lighthouse at dawn", quality: "low", aspect: "square" },
-    { prompt: "a lighthouse at dusk", quality: "low", aspect: "square" },
-    { prompt: "a lighthouse at night", quality: "low", aspect: "square" },
+    { prompt: "a lighthouse at dawn", quality: "medium", aspect: "square" },
+    { prompt: "a lighthouse at dusk", quality: "medium", aspect: "square" },
+    { prompt: "a lighthouse at night", quality: "medium", aspect: "square" },
   ];
   const r = await req("POST", "/api/images/batch", { email: USER, body: { items } });
   if (r.status !== 200 || r.body.id !== "batch_mock1") throw new Error(r.status + " " + JSON.stringify(r.body));
   est = r.body.estUsd;
-  if (est !== +(3 * 0.009 * 0.5).toFixed(6)) throw new Error("estUsd " + est);
+  if (est !== +(3 * 0.053 * 0.5).toFixed(6)) throw new Error("estUsd " + est);
   submitCharged = Math.max(1, Math.ceil(est * 100));
   if (r.body.chargedCredits !== submitCharged) throw new Error("chargedCredits " + r.body.chargedCredits);
   const after = await balanceOf(USER);
@@ -205,8 +205,8 @@ await t("collection settles ONCE against real usage: overcharge comes back as cr
   const p1 = await req("GET", "/api/images/batch/batch_mock1?offset=0&limit=1", { email: USER });
   if (p1.status !== 200 || p1.body.total !== 2 || p1.body.failed !== 1) throw new Error("page1 " + JSON.stringify({ s: p1.status, t: p1.body.total, f: p1.body.failed }));
   if (p1.body.images.length !== 1 || p1.body.done) throw new Error("page1 shape wrong");
-  // actual: 2 ok lines * (10*$5 + 272*$32)/1M * 0.5
-  const expectCost = +((2 * ((10 * 5 + 272 * 32) / 1e6)) * 0.5).toFixed(6);
+  // actual: 2 ok lines * (10*$5 + 272*$30)/1M * 0.5
+  const expectCost = +((2 * ((10 * 5 + 272 * 30) / 1e6)) * 0.5).toFixed(6);
   if (Math.abs(p1.body.costUsd - expectCost) > 1e-9) throw new Error("costUsd " + p1.body.costUsd + " != " + expectCost);
   const actualCredits = Math.max(1, Math.ceil(expectCost * 100));
   const expectRefund = submitCharged - actualCredits;

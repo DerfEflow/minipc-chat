@@ -121,10 +121,27 @@
   window.forgeCurrentTier = getTier;
 
   let triggerEl = null;
+  let dialRoot = null;
 
   function openDial() {
+    if (dialRoot) return;                       // already open
+    if (window.closeForgeImages) window.closeForgeImages();   // one reveal at a time
     const cur = getTier();
     let forgeOn = getForgeMode();
+
+    // Full-screen reveal: the whole interface slides off to the LEFT (body.dfd-open, mirror of
+    // the Forge Images slide-right) and the dial owns the screen. The scrim keeps its exact
+    // classes so the rendered-master art styling applies unchanged; nested inside the
+    // transformed root, its position:fixed resolves against the root's box.
+    dialRoot = el("section", "dfd-root");
+    dialRoot.id = "dfd-root";
+    dialRoot.setAttribute("aria-label", "The Forge — model effort dial");
+    const back = el("button", "dfd-back");
+    back.title = "Return to Dominion";
+    back.setAttribute("aria-label", "Return to the Dominion interface");
+    back.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4l-8 8 8 8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    dialRoot.appendChild(back);
+
     const scrim = el("div", "dial-scrim");
     const card = el("div", "dial-card");
     card.setAttribute("data-tier", cur);
@@ -147,7 +164,8 @@
       '<div class="dial-readout"><div class="dial-tier-name"></div><div class="dial-tier-desc"></div><span class="dial-cost"></span></div>' +
       '<button class="dial-done">Seal Setting</button>';
     scrim.appendChild(card);
-    document.body.appendChild(scrim);
+    dialRoot.appendChild(scrim);
+    document.body.appendChild(dialRoot);
 
     const stage = card.querySelector(".dial-stage");
     const knob = card.querySelector(".dial-knob");
@@ -224,15 +242,28 @@
       setTier(live);
       setForgeMode(forgeOn);
       scrim.classList.remove("in");
+      document.body.classList.remove("dfd-open");
       document.removeEventListener("keydown", onKey, true);
-      setTimeout(() => scrim.remove(), 240);
+      // Drop the transform context and the panel after the slide-back completes.
+      setTimeout(() => {
+        document.body.classList.remove("dfd-anim");
+        if (dialRoot) { dialRoot.remove(); dialRoot = null; }
+      }, 500);
     };
+    window.closeForgeDial = close;
     const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
     document.addEventListener("keydown", onKey, true);
     card.querySelector(".dial-done").addEventListener("click", close);
+    back.addEventListener("click", close);
     scrim.addEventListener("mousedown", (e) => { if (e.target === scrim) close(); });
 
-    requestAnimationFrame(() => { scrim.classList.add("in"); stage.focus(); });
+    // Force a style flush between the two classes so the slide transitions instead of jumping
+    // (no requestAnimationFrame dependency — throttled or absent in some webviews).
+    document.body.classList.add("dfd-anim");
+    void dialRoot.offsetWidth;
+    document.body.classList.add("dfd-open");
+    scrim.classList.add("in");
+    stage.focus();
   }
   window.openForgeDial = openDial;
 
