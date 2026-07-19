@@ -206,7 +206,9 @@ function renderMsg(m, i, isLastAi) {
       const sp = document.createElement("button");
       sp.className = "bspeak " + pos; sp.type = "button"; sp.title = "Speak this answer";
       sp.innerHTML = "&#128266;";
-      sp.onclick = (e) => { e.stopPropagation(); speakAnswer(m.content); };
+      // Toggle, not fire-and-forget: tapping the button that is currently speaking stops it.
+      // Before this, starting playback meant sitting through the whole answer with no way out.
+      sp.onclick = (e) => { e.stopPropagation(); voice.toggle(m.content, sp); };
       return sp;
     };
     b.append(mkSpk("bspeak-top"), mkSpk("bspeak-bottom"));
@@ -1661,7 +1663,7 @@ checkVersion();
 const micBtn = $("mic"), speakBtn = $("speak");
 const LS_SPEAK = "dominion.speak.v1";
 let speakOn = false; try { speakOn = localStorage.getItem(LS_SPEAK) === "1"; } catch {}
-let rec = null, recChunks = [], recStream = null, ttsAudio = null;
+let rec = null, recChunks = [], recStream = null;
 
 function paintSpeak() {
   if (!speakBtn) return;
@@ -1673,8 +1675,36 @@ function paintSpeak() {
 }
 if (speakBtn) { paintSpeak(); speakBtn.addEventListener("click", () => {
   speakOn = !speakOn; try { localStorage.setItem(LS_SPEAK, speakOn ? "1" : "0"); } catch {}
-  paintSpeak(); if (!speakOn && ttsAudio) { try { ttsAudio.pause(); } catch {} }
+  paintSpeak(); if (!speakOn) voice.stop();   // turning auto-speak off stops what is playing now
 }); }
+
+// A small status chip above the composer for the two mic phases. Recording shows a running clock
+// (you cannot tell a live mic from a dead one otherwise); transcribing shows an indeterminate
+// state. Both were previously invisible, which is what "it feels like it is hanging" meant.
+let micTimer = null, micT0 = 0;
+function micStatus(label, withClock) {
+  let chip = document.getElementById("mic-status");
+  if (!label) {
+    if (micTimer) { clearInterval(micTimer); micTimer = null; }
+    if (chip) chip.hidden = true;
+    return;
+  }
+  if (!chip) {
+    chip = document.createElement("div");
+    chip.id = "mic-status"; chip.className = "mic-status";
+    const bar = document.querySelector(".bar");
+    if (bar && bar.parentElement) bar.parentElement.insertBefore(chip, bar); else document.body.appendChild(chip);
+  }
+  chip.hidden = false;
+  chip.dataset.mode = withClock ? "rec" : "work";
+  const paint = () => {
+    const secs = withClock ? Math.floor((Date.now() - micT0) / 1000) : 0;
+    chip.innerHTML = '<i class="mic-status-dot"></i><span>' + label + "</span>" +
+      (withClock ? '<b>' + Math.floor(secs / 60) + ":" + String(secs % 60).padStart(2, "0") + "</b>" : "");
+  };
+  if (micTimer) { clearInterval(micTimer); micTimer = null; }
+  if (withClock) { micT0 = Date.now(); paint(); micTimer = setInterval(paint, 1000); } else paint();
+}
 
 async function micTap() {
   if (!micBtn) return;
@@ -1692,10 +1722,12 @@ async function micTap() {
   rec.onstop = async () => {
     try { recStream.getTracks().forEach((t) => t.stop()); } catch {}
     micBtn.classList.remove("rec"); micBtn.classList.add("busy");
-    // Instant feedback in the input itself: server STT takes a few seconds and Fred read the
-    // silence as "it's broken". The placeholder talks while the transcript is in flight.
+    // The placeholder alone was not enough: it is easy to miss, and .busy only DIMMED the button,
+    // which looks identical to "disabled and broken". The mic now carries a live spinner ring for
+    // the whole transcribe round trip, so there is always something moving while you wait.
     const oldPlaceholder = input.placeholder;
     input.placeholder = "Transcribing your voice…";
+    micStatus("Transcribing…");
     try {
       const blob = new Blob(recChunks, { type: (rec && rec.mimeType) || mime || "audio/webm" });
       if (blob.size < 1000) { showErr("Didn't catch that — recording was too short."); return; }
@@ -1704,34 +1736,213 @@ async function micTap() {
       if (!r.ok || !j || !j.text) { showErr((j && j.error) || "Transcription failed — try again."); return; }
       input.value = j.text; autosize();
       if (!busy) send();   // straight through the normal flow: picked model, tools, the works
-    } finally { micBtn.classList.remove("busy"); rec = null; input.placeholder = oldPlaceholder; }
+    } finally { micBtn.classList.remove("busy"); micStatus(""); rec = null; input.placeholder = oldPlaceholder; }
   };
   rec.start();
   micBtn.classList.add("rec");
+  micStatus("Listening… tap to finish", true);
   input.placeholder = "Listening… tap the mic again to finish.";
 }
 if (micBtn) micBtn.addEventListener("click", micTap);
 
-// Speak a finished answer. Code blocks are dropped (nobody wants JSON read aloud); UI-side cap
-// matches the server's 4000-char TTS limit.
-async function speakAnswer(text) {
-  const t = String(text || "").replace(/```[\s\S]*?```/g, " … code omitted … ").slice(0, 4000).trim();
-  if (!t) return;
-  try {
-    const r = await fetch("/api/voice/tts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: t }) });
+// ---------- the voice player (Fred, 2026-07-19) ----------
+// Three complaints, one object. (1) Hitting speak felt like the app hung: generating a minute of
+// audio takes seconds and NOTHING said so. (2) Once it started there was no way to stop it, so you
+// sat through the whole answer. (3) Every call was fire-and-forget, so overlapping taps could
+// stack two voices on top of each other.
+//
+// So: one player, one audio element, one visible transport bar. Every state the user can be in
+// (preparing / speaking / paused) is on screen with a control that acts on it. The bar is the
+// progress indicator AND the stop button, which is why it appears the instant a request starts
+// rather than when audio is ready.
+const VOICE_PREF = "dominion.voice.name.v1";
+function voicePref() { try { return localStorage.getItem(VOICE_PREF) || ""; } catch { return ""; } }
+
+const voice = (() => {
+  let audio = null;            // the HTMLAudioElement for the CHUNK currently sounding
+  let token = 0;               // bumped on every start and stop, so a slow response from a
+                               // cancelled request can never come back and hijack the player
+  let source = null;           // the .bspeak button that started this, for its lit state
+  let bar = null, els = null;
+  let currentText = "";
+  let queue = [], queueAt = 0; // chunk texts, and which one is sounding
+
+  // Synthesis latency is LINEAR in characters: measured on this account at ~9.4ms/char, so a
+  // 4000-character answer is ~37 seconds of silence before the first word. A spinner does not fix
+  // a 37 second wait. Chunking does: we synthesize ~450 characters at a time (~4s), start speaking
+  // as soon as chunk one lands, and generate the rest while it plays. Time-to-first-word becomes
+  // roughly constant instead of proportional to answer length.
+  // Split on sentence ends so a chunk boundary never lands mid-clause, which you WOULD hear.
+  const CHUNK = 450;
+  function splitForSpeech(t) {
+    const out = [];
+    const sentences = String(t).match(/[^.!?\n]+(?:[.!?]+|\n+|$)/g) || [String(t)];
+    let buf = "";
+    for (const s of sentences) {
+      if (buf && (buf.length + s.length) > CHUNK) { out.push(buf.trim()); buf = ""; }
+      // A single sentence longer than a chunk still has to go out whole rather than be cut.
+      buf += s;
+    }
+    if (buf.trim()) out.push(buf.trim());
+    return out.filter(Boolean);
+  }
+
+  function build() {
+    if (bar) return;
+    bar = document.createElement("div");
+    bar.className = "voice-bar";
+    bar.hidden = true;
+    bar.innerHTML =
+      '<button type="button" class="vb-play" aria-label="Pause or resume"></button>' +
+      '<div class="vb-body"><div class="vb-top"><b class="vb-state"></b><small class="vb-time"></small></div>' +
+      '<div class="vb-track"><i></i></div></div>' +
+      '<button type="button" class="vb-stop" aria-label="Stop speaking">&#10005;</button>';
+    document.body.appendChild(bar);
+    els = {
+      play: bar.querySelector(".vb-play"), stop: bar.querySelector(".vb-stop"),
+      state: bar.querySelector(".vb-state"), time: bar.querySelector(".vb-time"),
+      fill: bar.querySelector(".vb-track i"),
+    };
+    els.play.onclick = () => { if (!audio) return; if (audio.paused) audio.play().catch(() => {}); else audio.pause(); paint(); };
+    els.stop.onclick = () => stop();
+  }
+
+  const mmss = (s) => (isFinite(s) && s >= 0 ? Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0") : "0:00");
+
+  function paint(state) {
+    build();
+    const s = state || (!audio ? "preparing" : audio.paused ? "paused" : "speaking");
+    bar.hidden = false;
+    bar.dataset.state = s;
+    const many = queue.length > 1;
+    els.state.textContent = (s === "preparing" ? "PREPARING VOICE" : s === "paused" ? "PAUSED" : "SPEAKING")
+      + (many ? "  " + (queueAt + 1) + "/" + queue.length : "");
+    els.play.innerHTML = s === "speaking" ? "&#10074;&#10074;" : "&#9654;";
+    els.play.disabled = s === "preparing";
+    if (audio && isFinite(audio.duration) && audio.duration > 0) {
+      // Progress spans the WHOLE answer, not the current chunk: a bar that resets to zero every
+      // few seconds tells the user nothing about how much is left.
+      const within = audio.currentTime / audio.duration;
+      els.time.textContent = mmss(audio.currentTime) + " / " + mmss(audio.duration);
+      els.fill.style.width = Math.min(100, ((queueAt + within) / Math.max(1, queue.length)) * 100) + "%";
+    } else {
+      els.time.textContent = "";
+      els.fill.style.width = "";
+    }
+    if (source) source.classList.add("bspeak-active");
+  }
+
+  function dropAudio() {
+    if (audio) {
+      try { audio.pause(); } catch {}
+      audio.onended = audio.ontimeupdate = audio.onloadedmetadata = null;
+      if (audio.src && audio.src.startsWith("blob:")) { try { URL.revokeObjectURL(audio.src); } catch {} }
+    }
+    audio = null;
+  }
+
+  function teardown() {
+    dropAudio();
+    queue = []; queueAt = 0; currentText = "";
+    if (source) { source.classList.remove("bspeak-active"); source = null; }
+    if (bar) { bar.hidden = true; bar.dataset.state = ""; }
+  }
+
+  function stop() { token++; teardown(); }
+
+  const norm = (t) => String(t || "").replace(/```[\s\S]*?```/g, " . code omitted . ").slice(0, 4000).trim();
+  const isSpeaking = (text) => !!(bar && !bar.hidden) && currentText === norm(text);
+
+  // One chunk to one object URL. Returns "" on failure so the caller can report it once.
+  async function fetchChunk(text, mine) {
+    const r = await fetch("/api/voice/tts", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text, voice: voicePref() || undefined }),
+    });
+    if (mine !== token) return "";
     if (!r.ok) {
-      // Spoken answers are a bonus, but a SILENT failure looked like the feature never shipped.
-      // Say why, once per session (quota outages on the voice provider are the usual culprit).
-      if (!speakAnswer._warned) {
-        speakAnswer._warned = true;
-        const j = await r.json().catch(() => null);
-        showErr("Voice reply failed: " + ((j && j.error) || ("HTTP " + r.status)) + ". The speaker toggle stays on; it retries on the next answer.");
-      }
-      return;
+      const j = await r.json().catch(() => null);
+      throw new Error((j && j.error) || ("HTTP " + r.status));
     }
     const blob = await r.blob();
-    if (ttsAudio) { try { ttsAudio.pause(); } catch {} }
-    ttsAudio = new Audio(URL.createObjectURL(blob));
-    ttsAudio.play().catch(() => { if (!speakAnswer._warned) { speakAnswer._warned = true; showErr("Your browser blocked audio autoplay — tap anywhere once and the next answer will speak."); } });
-  } catch {}
-}
+    if (mine !== token) return "";
+    return URL.createObjectURL(blob);
+  }
+
+  // Play one chunk to its end. Resolves early (false) if the player was stopped mid-chunk.
+  function playChunk(url, mine) {
+    return new Promise((resolve) => {
+      dropAudio();
+      audio = new Audio(url);
+      audio.onloadedmetadata = () => paint();
+      audio.ontimeupdate = () => { if (mine === token) paint(); };
+      audio.onended = () => resolve(true);
+      audio.play().then(() => { if (mine === token) paint("speaking"); }).catch(() => {
+        showErr("Your browser blocked audio playback. Tap anywhere once, then press speak again.");
+        resolve(false);
+      });
+    });
+  }
+
+  async function speak(text, srcBtn) {
+    const t = norm(text);
+    if (!t) return;
+    stop();                       // never stack two voices
+    const mine = ++token;
+    currentText = t;
+    source = srcBtn || null;
+    queue = splitForSpeech(t); queueAt = 0;
+    paint("preparing");
+    try {
+      let ahead = fetchChunk(queue[0], mine);   // chunk 1 is already in flight before the loop
+      for (let i = 0; i < queue.length; i++) {
+        if (mine !== token) return;
+        queueAt = i;
+        const url = await ahead;
+        if (mine !== token || !url) return;
+        // Kick off the NEXT chunk before playing this one, so generation overlaps playback and
+        // the gap between chunks stays inaudible on anything but the shortest sentences.
+        ahead = (i + 1 < queue.length) ? fetchChunk(queue[i + 1], mine) : Promise.resolve("");
+        ahead.catch(() => {});    // a later failure is reported when we await it, not here
+        const finished = await playChunk(url, mine);
+        if (mine !== token || !finished) return;
+      }
+      if (mine === token) teardown();
+    } catch (e) {
+      if (mine !== token) return;
+      teardown();
+      showErr("Voice failed: " + (e && e.message ? e.message : "could not reach the box") + ".");
+    }
+  }
+
+  function toggle(text, srcBtn) { if (isSpeaking(text)) stop(); else speak(text, srcBtn); }
+
+  return { speak, stop, toggle, isSpeaking };
+})();
+
+// Auto-speak path keeps its old name so callers elsewhere are unchanged.
+function speakAnswer(text) { voice.speak(text); }
+
+// Voice picker. The list comes from the server so the box stays the single source of truth about
+// which voices exist; the CHOICE is per-device in localStorage, because it is a preference of the
+// ear using the phone, not a property of the account.
+(async function wireVoicePicker() {
+  const sel = document.getElementById("voice-sel"), tryBtn = document.getElementById("voice-try");
+  if (!sel) return;
+  let cfg = null;
+  try { cfg = await (await fetch("/api/voice/config")).json(); } catch {}
+  if (!cfg || !Array.isArray(cfg.voices)) { sel.innerHTML = '<option value="">Voice unavailable</option>'; sel.disabled = true; if (tryBtn) tryBtn.disabled = true; return; }
+  const saved = voicePref();
+  sel.innerHTML = cfg.voices.map((v, i) =>
+    '<option value="' + v + '">' + v.charAt(0).toUpperCase() + v.slice(1) +
+    (v === cfg.voice ? " (default)" : "") + (i < 2 ? " · most natural" : "") + "</option>").join("");
+  sel.value = cfg.voices.includes(saved) ? saved : cfg.voice;
+  sel.addEventListener("change", () => {
+    try { localStorage.setItem(VOICE_PREF, sel.value); } catch {}
+    voice.speak("Voice set to " + sel.value + ". This is how Dominion will read your answers.");
+  });
+  if (tryBtn) tryBtn.addEventListener("click", () => {
+    try { localStorage.setItem(VOICE_PREF, sel.value); } catch {}
+    voice.speak("This is " + sel.value + ", reading a sentence at the pace and register Dominion will use for your answers.");
+  });
+})();

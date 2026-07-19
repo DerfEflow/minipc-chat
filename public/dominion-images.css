@@ -1,9 +1,24 @@
-/* Dominion Forge Images — Codex design (F:\Codex Sandbox\dominion-forge-images-design) ported
-   verbatim, scoped under #dfi-root so nothing leaks into the app shell. Brand rule: the engine
-   reads DOMINION FORGE, never a model name. The slide mechanic (interface pushes off RIGHT,
-   panel arrives from the left) lives at the top; everything below is the design system plus the
-   few live-data additions the mockup didn't need (reference tray, foundry queue, real image
-   cards, viewer). */
+/* Dominion Forge Images: Codex design (F:\Codex Sandbox\dominion-forge-images-design) ported
+   and then re-tuned for legibility (Fred, 2026-07-19). Scoped under #dfi-root so nothing leaks
+   into the app shell. Brand rule: the engine reads DOMINION FORGE, never a model name.
+
+   Legibility pass, four deliberate changes from the ported mockup:
+   1. TYPE SCALE. The mockup drew labels at 7-9px, which reads on a designer's 27" panel and not
+      on a phone. Everything is stepped up through the --t-* tokens below; nothing is smaller
+      than 9.5px, and body-grade text (prompt, notes, card titles) is 12.5px and up.
+   2. SPACING. Padding and gaps were sized for the smaller type. They scale with it, so the
+      panels breathe instead of cramming.
+   3. THE REFINE CONTROL. It used to float absolutely inside the prompt box, so it read as part
+      of the text field. It is now a real toolbar on its own surface, below a divider.
+   4. THE BACKGROUND. .scene used to paint a flat near-black of its own, unrelated to anything the
+      chat shell sits on, so the slide read as a cut to a different page. It now paints the SAME
+      neural-chassis artwork the chat side shows, at the same geometry, and counter-slides so it
+      holds still while the panels travel over it. That is the glide.
+      What the chat side actually has behind it: #rendered-scene (the chassis image) at z0 plus
+      #bgglass at z1; #bgvideo exists but sits at opacity 0 in the current design. If any of those
+      change, .scene has to change with them, or the two views drift apart. See the .scene block
+      for why it repaints the artwork rather than showing through to it.
+      Text contrast is the panels' job (.glass-panel / .command-rail), never that layer's. */
 
 /* ---------- the slide ---------- */
 body:not(.dfi-anim) #dfi-root { display: none; }
@@ -49,9 +64,20 @@ body.dfi-open #overlay {
   --font-ui: "Bahnschrift", "Arial Narrow", "Segoe UI", sans-serif;
   --font-mono: "Cascadia Mono", "Consolas", monospace;
 
-  /* the mockup's body rule */
+  /* TYPE SCALE, one place to tune. --t-micro is the floor: nothing goes below it. */
+  --t-micro: 9.5px;    /* eyebrow-grade mono labels */
+  --t-label: 11px;     /* section labels, chips, button text */
+  --t-value: 13px;     /* readouts, telemetry numbers */
+  --t-body: 13.5px;    /* notes, card titles, list rows */
+  --t-read: 15px;      /* the prompt and anything else genuinely read */
+
+  /* SPACING SCALE */
+  --pad-panel: 22px;
+  --gap-section: 22px;
+
+  /* the mockup's body rule, minus the opaque background (see header note 4) */
   color: var(--ice);
-  background: #010403;
+  background: transparent;
   font-family: var(--font-ui);
   -webkit-font-smoothing: antialiased;
 }
@@ -62,20 +88,50 @@ body.dfi-open #dfi-root { transform: none; }
 #dfi-root button { color: inherit; }
 #dfi-root svg { width: 1.2em; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
-/* ---------- scene ---------- */
-#dfi-root .scene { position: fixed; inset: 0; overflow: hidden; pointer-events: none; background:
-  radial-gradient(circle at 50% 88%, rgba(69, 255, 31, .13), transparent 30%),
-  radial-gradient(circle at 86% 12%, rgba(199, 124, 66, .08), transparent 24%),
-  linear-gradient(145deg, #020807 0%, #030b09 38%, #010403 100%); }
-#dfi-root .scene::before { content: ""; position: absolute; inset: 0; opacity: .14; background-image:
+/* ---------- scene ----------
+   THE SHARED BACKDROP. This paints the same neural-chassis artwork, at the same size, position
+   and filter, that #rendered-scene paints behind the chat shell. Same geometry means the two
+   line up exactly, so crossing from one view to the other shows no seam.
+
+   Why repaint it instead of just going transparent and letting #rendered-scene show through:
+   transparency only works if every shell element actually slides away, and #neural-glass does not
+   reliably translate (its transform is overridden in some states). A transparent panel would let
+   the chat window ghost through the gutters. Painting our own opaque copy is immune to that.
+
+   THE COUNTER-SLIDE is what sells the glide. .scene is a child of the transformed #dfi-root, so
+   by default it would slide in WITH the panels and the background would travel with the page,
+   which reads as a cut. Translating it by the exact inverse of the parent pins it to the viewport:
+   parent -104vw + child +104vw = a backdrop that never moves while the panels glide across it.
+   Both use the same duration and easing, so they stay locked frame for frame. If you change
+   #dfi-root's transform or transition, change this one to match or the background will drift. */
+#dfi-root .scene {
+  position: fixed; inset: 0; overflow: hidden; pointer-events: none;
+  /* --veil reproduces whatever opacity #rendered-scene is running at, as a solid layer instead of
+     element opacity (real opacity here would let the chat shell ghost through). The app runs the
+     chassis at full strength on desktop and dims it to .82 below 900px, so the veil is 0 here and
+     picks up .18 in that breakpoint. Keep the two in step or the slide gains a brightness step. */
+  --veil: rgba(1, 4, 7, 0);
+  background:
+    /* forge accent, above the artwork */
+    radial-gradient(circle at 50% 88%, rgba(69, 255, 31, .10), transparent 32%),
+    radial-gradient(circle at 86% 12%, rgba(199, 124, 66, .06), transparent 26%),
+    linear-gradient(var(--veil), var(--veil)),
+    url("/assets/dominion-neural-chassis-desktop-4k-v3.webp") center / contain no-repeat,
+    #010407;
+  filter: contrast(1.04) saturate(1.08) brightness(1);
+  transform: translateX(104vw);
+  transition: transform 0.45s cubic-bezier(0.32, 0.72, 0.28, 1);
+}
+body.dfi-open #dfi-root .scene { transform: none; }
+#dfi-root .scene::before { content: ""; position: absolute; inset: 0; opacity: .09; background-image:
   linear-gradient(90deg, transparent 49.8%, rgba(137,255,104,.32) 50%, transparent 50.2%),
   linear-gradient(transparent 49.8%, rgba(137,255,104,.18) 50%, transparent 50.2%); background-size: 94px 94px; mask-image: radial-gradient(circle at 50% 50%, #000, transparent 75%); }
-#dfi-root .scene::after { content: ""; position: absolute; inset: 0; background: linear-gradient(110deg, transparent 18%, rgba(255,255,255,.025) 30%, transparent 41%); transform: translateX(-70%); animation: dfi-scene-glare 9s ease-in-out infinite; }
-#dfi-root .scene-grid { position: absolute; inset: -12%; opacity: .23; transform: perspective(800px) rotateX(58deg) translateY(43%); background:
+#dfi-root .scene::after { content: ""; position: absolute; inset: 0; background: linear-gradient(110deg, transparent 18%, rgba(255,255,255,.02) 30%, transparent 41%); transform: translateX(-70%); animation: dfi-scene-glare 9s ease-in-out infinite; }
+#dfi-root .scene-grid { position: absolute; inset: -12%; opacity: .15; transform: perspective(800px) rotateX(58deg) translateY(43%); background:
   linear-gradient(90deg, transparent 0 12%, rgba(82,255,50,.19) 12.2% 12.4%, transparent 12.6% 48%, rgba(82,255,50,.13) 48.2% 48.4%, transparent 48.6%),
   repeating-linear-gradient(0deg, transparent 0 54px, rgba(119,255,82,.11) 55px, transparent 56px); }
-#dfi-root .scene-reactor { position: absolute; left: 50%; bottom: -180px; width: 560px; height: 420px; transform: translateX(-50%); border-radius: 50%; border: 1px solid rgba(130,255,90,.22); box-shadow: 0 0 80px rgba(80,255,35,.15), inset 0 0 90px rgba(80,255,35,.08); }
-#dfi-root .scene-reactor::before, #dfi-root .scene-reactor::after { content: ""; position: absolute; border-radius: 50%; inset: 48px; border: 1px dashed rgba(130,255,90,.2); animation: dfi-reactor-spin 24s linear infinite; }
+#dfi-root .scene-reactor { position: absolute; left: 50%; bottom: -180px; width: 560px; height: 420px; transform: translateX(-50%); border-radius: 50%; border: 1px solid rgba(130,255,90,.18); box-shadow: 0 0 80px rgba(80,255,35,.11), inset 0 0 90px rgba(80,255,35,.06); }
+#dfi-root .scene-reactor::before, #dfi-root .scene-reactor::after { content: ""; position: absolute; border-radius: 50%; inset: 48px; border: 1px dashed rgba(130,255,90,.16); animation: dfi-reactor-spin 24s linear infinite; }
 #dfi-root .scene-reactor::after { inset: 112px; border-style: solid; animation-direction: reverse; animation-duration: 16s; }
 #dfi-root .scene-sparks i { position: absolute; bottom: 2%; left: calc(12% + var(--x, 0%)); width: 2px; height: 2px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 8px 2px var(--lime); animation: dfi-spark-drift 7s linear infinite; opacity: 0; }
 #dfi-root .scene-sparks i:nth-child(1) { --x: 6%; animation-delay: -1s; }
@@ -86,117 +142,137 @@ body.dfi-open #dfi-root { transform: none; }
 #dfi-root .scene-sparks i:nth-child(6) { --x: 82%; animation-delay: -3.2s; }
 
 /* ---------- shell + command rail ---------- */
-#dfi-root .app-shell { position: relative; min-height: 100vh; padding: 12px; }
+#dfi-root .app-shell { position: relative; min-height: 100vh; padding: 14px; }
 #dfi-root .command-rail {
-  position: sticky; top: 8px; z-index: 20; min-height: 76px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 18px; padding: 8px 12px;
+  position: sticky; top: 8px; z-index: 20; min-height: 96px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 22px; padding: 14px 20px;
   border: 1px solid rgba(166, 227, 210, .22); clip-path: polygon(12px 0, calc(100% - 12px) 0, 100% 12px, 100% calc(100% - 12px), calc(100% - 12px) 100%, 12px 100%, 0 calc(100% - 12px), 0 12px);
-  background: linear-gradient(180deg, rgba(255,255,255,.055), transparent 35%), linear-gradient(110deg, rgba(4,18,15,.95), rgba(1,8,7,.9) 55%, rgba(11,21,17,.92));
+  background: linear-gradient(180deg, rgba(255,255,255,.055), transparent 35%), linear-gradient(110deg, rgba(4,18,15,.92), rgba(1,8,7,.86) 55%, rgba(11,21,17,.9));
   box-shadow: 0 16px 48px rgba(0,0,0,.55), inset 0 1px rgba(240,255,250,.11), inset 0 -1px rgba(0,0,0,.8), 0 0 30px rgba(57,255,20,.04);
   backdrop-filter: blur(18px) saturate(1.3);
 }
 #dfi-root .command-rail::after { content: ""; position: absolute; left: 12%; right: 12%; bottom: 0; height: 1px; background: linear-gradient(90deg, transparent, var(--lime), transparent); opacity: .55; box-shadow: 0 0 12px var(--lime); }
-#dfi-root .brand-lockup { display: flex; align-items: center; gap: 12px; min-width: 0; }
-#dfi-root .brand-lockup h1, #dfi-root .vault-header h2 { margin: 2px 0 0; font-size: clamp(20px, 2vw, 29px); line-height: 1; letter-spacing: .15em; font-weight: 650; }
-#dfi-root .brand-lockup h1 span, #dfi-root .vault-header h2 span { color: var(--lime); text-shadow: 0 0 18px rgba(121,255,82,.4); }
-#dfi-root .eyebrow { margin: 0; color: #84a69c; font: 700 8px/1.2 var(--font-mono); letter-spacing: .22em; }
-#dfi-root .brand-reactor { position: relative; flex: none; width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid rgba(121,255,82,.4); transform: rotate(45deg); background: rgba(2,12,9,.8); box-shadow: 0 0 18px rgba(121,255,82,.12), inset 0 0 15px rgba(121,255,82,.08); }
-#dfi-root .brand-reactor::before, #dfi-root .brand-reactor::after { content: ""; position: absolute; inset: 6px; border: 1px solid rgba(199,124,66,.55); }
-#dfi-root .brand-reactor::after { inset: 11px; border-color: rgba(121,255,82,.6); animation: dfi-reactor-spin 8s linear infinite; }
-#dfi-root .brand-reactor span { width: 10px; height: 10px; border-radius: 50%; background: var(--lime-hot); box-shadow: 0 0 8px var(--lime), 0 0 21px var(--lime); }
+#dfi-root .brand-lockup { display: flex; align-items: center; gap: 16px; min-width: 0; }
+/* The masthead. It was competing with the status readouts at 20px; it now leads the rail. */
+#dfi-root .brand-lockup h1 { margin: 5px 0 0; font-size: clamp(27px, 3.1vw, 42px); line-height: 1; letter-spacing: .17em; font-weight: 650; text-shadow: 0 0 26px rgba(121,255,82,.14); }
+#dfi-root .vault-header h2 { margin: 5px 0 0; font-size: clamp(23px, 2.5vw, 33px); line-height: 1; letter-spacing: .15em; font-weight: 650; }
+#dfi-root .brand-lockup h1 span, #dfi-root .vault-header h2 span { color: var(--lime); text-shadow: 0 0 22px rgba(121,255,82,.5); }
+#dfi-root .eyebrow { margin: 0; color: #9ab8ae; font: 700 var(--t-micro)/1.2 var(--font-mono); letter-spacing: .26em; }
+#dfi-root .brand-reactor { position: relative; flex: none; width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid rgba(121,255,82,.4); transform: rotate(45deg); background: rgba(2,12,9,.8); box-shadow: 0 0 18px rgba(121,255,82,.12), inset 0 0 15px rgba(121,255,82,.08); }
+#dfi-root .brand-reactor::before, #dfi-root .brand-reactor::after { content: ""; position: absolute; inset: 7px; border: 1px solid rgba(199,124,66,.55); }
+#dfi-root .brand-reactor::after { inset: 13px; border-color: rgba(121,255,82,.6); animation: dfi-reactor-spin 8s linear infinite; }
+#dfi-root .brand-reactor span { width: 11px; height: 11px; border-radius: 50%; background: var(--lime-hot); box-shadow: 0 0 8px var(--lime), 0 0 21px var(--lime); }
 #dfi-root .brand-reactor i { position: absolute; inset: -5px; border: 1px solid rgba(151,222,202,.16); }
-#dfi-root .rail-button { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid rgba(151,222,202,.2); background: linear-gradient(180deg, rgba(255,255,255,.04), transparent), rgba(2,10,8,.75); cursor: pointer; clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px); transition: border-color .18s, color .18s, box-shadow .18s; }
+#dfi-root .rail-button { width: 46px; height: 46px; display: grid; place-items: center; border: 1px solid rgba(151,222,202,.2); background: linear-gradient(180deg, rgba(255,255,255,.04), transparent), rgba(2,10,8,.75); cursor: pointer; clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px); transition: border-color .18s, color .18s, box-shadow .18s; }
 #dfi-root .rail-button:hover { color: var(--lime-hot); border-color: var(--line-hot); box-shadow: 0 0 18px rgba(121,255,82,.14), inset 0 0 12px rgba(121,255,82,.06); }
-#dfi-root .rail-button svg { width: 21px; }
+#dfi-root .rail-button svg { width: 23px; }
 #dfi-root .close-button { justify-self: end; color: #9eb1ab; }
 #dfi-root .rail-status { display: flex; min-width: 0; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
-#dfi-root .status-cell { min-width: 140px; padding: 7px 16px; display: grid; grid-template-columns: 13px 1fr; gap: 2px 8px; align-items: center; border-right: 1px solid var(--line); }
+#dfi-root .status-cell { min-width: 162px; padding: 10px 18px; display: grid; grid-template-columns: 14px 1fr; gap: 5px 10px; align-items: center; border-right: 1px solid var(--line); }
 #dfi-root .status-cell:last-child { border: 0; }
-#dfi-root .status-cell svg, #dfi-root .pulse-dot { grid-row: 1 / span 2; width: 11px; }
-#dfi-root .status-cell small { color: #678077; font: 700 7px/1 var(--font-mono); letter-spacing: .18em; }
-#dfi-root .status-cell b { color: #b9d1ca; font: 600 10px/1.2 var(--font-mono); letter-spacing: .05em; }
+#dfi-root .status-cell svg, #dfi-root .pulse-dot { grid-row: 1 / span 2; width: 12px; }
+#dfi-root .status-cell small { color: #7e9990; font: 700 var(--t-micro)/1 var(--font-mono); letter-spacing: .2em; }
+#dfi-root .status-cell b { color: #c8ded7; font: 600 var(--t-value)/1.2 var(--font-mono); letter-spacing: .05em; }
 #dfi-root .status-cell:first-child b { color: var(--lime); }
-#dfi-root .pulse-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 7px var(--lime); animation: dfi-dot-breathe 2.2s ease-in-out infinite; }
+#dfi-root .pulse-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 7px var(--lime); animation: dfi-dot-breathe 2.2s ease-in-out infinite; }
 
 /* ---------- layout + panels ---------- */
-#dfi-root .forge-layout { display: grid; grid-template-columns: minmax(330px, 390px) minmax(0, 1fr); gap: 12px; margin-top: 12px; min-height: calc(100vh - 112px); }
+#dfi-root .forge-layout { display: grid; grid-template-columns: minmax(360px, 420px) minmax(0, 1fr); gap: 14px; margin-top: 14px; min-height: calc(100vh - 132px); }
 #dfi-root .glass-panel { position: relative; overflow: hidden; border: 1px solid rgba(150,216,198,.2); background:
   linear-gradient(135deg, rgba(255,255,255,.038), transparent 21%),
-  linear-gradient(180deg, rgba(6,20,16,.87), rgba(2,9,7,.91));
+  linear-gradient(180deg, rgba(6,20,16,.82), rgba(2,9,7,.87));
   box-shadow: 0 26px 70px rgba(0,0,0,.55), inset 0 1px rgba(235,255,249,.09), inset 0 -1px rgba(0,0,0,.9);
   backdrop-filter: blur(20px) saturate(1.25);
 }
 #dfi-root .panel-specular { position: absolute; z-index: 0; inset: 0; pointer-events: none; background: linear-gradient(112deg, transparent 0 7%, rgba(255,255,255,.04) 15%, transparent 23% 100%); }
-#dfi-root .control-deck { padding: 16px; clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%); }
+#dfi-root .control-deck { padding: var(--pad-panel); clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%); }
 #dfi-root .control-deck::after { content: ""; position: absolute; top: 14px; right: 0; bottom: 14px; width: 1px; background: linear-gradient(transparent, var(--lime), transparent); opacity: .35; }
-#dfi-root .deck-section { position: relative; z-index: 1; padding: 0 0 15px; margin-bottom: 15px; border-bottom: 1px solid rgba(151,222,202,.11); }
-#dfi-root .section-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
-#dfi-root .section-heading > div { display: flex; align-items: center; gap: 8px; }
-#dfi-root .section-heading span { color: var(--copper-hot); font: 700 9px/1 var(--font-mono); }
-#dfi-root .section-heading p { margin: 0; color: #b8d0c9; font: 700 9px/1 var(--font-mono); letter-spacing: .17em; }
-#dfi-root .section-heading small { color: #627d73; font: 600 7px/1 var(--font-mono); letter-spacing: .13em; }
+#dfi-root .deck-section { position: relative; z-index: 1; padding: 0 0 var(--gap-section); margin-bottom: var(--gap-section); border-bottom: 1px solid rgba(151,222,202,.11); }
+#dfi-root .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+#dfi-root .section-heading > div { display: flex; align-items: baseline; gap: 10px; }
+#dfi-root .section-heading span { color: var(--copper-hot); font: 700 var(--t-label)/1 var(--font-mono); }
+#dfi-root .section-heading p { margin: 0; color: #c6dbd4; font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .19em; }
+#dfi-root .section-heading small { color: #7b968c; font: 600 var(--t-micro)/1 var(--font-mono); letter-spacing: .14em; white-space: nowrap; }
+
+/* The prompt. A text field the user actually reads back, so it gets --t-read and real padding.
+   The tool row below it is a separate surface; see header note 3. */
 #dfi-root .prompt-frame { position: relative; border: 1px solid rgba(121,255,82,.29); background: linear-gradient(180deg, rgba(121,255,82,.04), transparent 28%), rgba(0,7,5,.72); box-shadow: inset 0 0 22px rgba(0,0,0,.55), 0 0 18px rgba(121,255,82,.04); clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); }
 #dfi-root .prompt-frame::before { content: ""; position: absolute; left: 0; top: 0; width: 24px; height: 1px; background: var(--lime); box-shadow: 0 0 10px var(--lime); }
-#dfi-root .prompt-frame textarea { width: 100%; min-height: 112px; resize: vertical; display: block; padding: 13px 13px 36px; border: 0; outline: 0; color: #d5e7e2; background: transparent; font: 400 13px/1.56 "Segoe UI", sans-serif; }
+#dfi-root .prompt-frame:focus-within { border-color: rgba(121,255,82,.5); box-shadow: inset 0 0 22px rgba(0,0,0,.5), 0 0 24px rgba(121,255,82,.09); }
+#dfi-root .prompt-frame textarea { width: 100%; min-height: 132px; resize: vertical; display: block; padding: 16px 16px 14px; border: 0; outline: 0; color: #dceee9; background: transparent; font: 400 var(--t-read)/1.62 "Segoe UI", sans-serif; }
+#dfi-root .prompt-frame textarea::placeholder { color: #6d8880; }
 #dfi-root .prompt-frame textarea::selection { background: rgba(121,255,82,.25); }
-#dfi-root .prompt-tools { position: absolute; left: 9px; right: 9px; bottom: 7px; display: flex; justify-content: space-between; align-items: center; }
-#dfi-root .prompt-tools button { display: inline-flex; align-items: center; gap: 6px; min-height: 24px; border: 0; color: #6f8d83; background: transparent; cursor: pointer; font: 700 8px/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
-#dfi-root .prompt-tools button:hover { color: var(--lime); }
-#dfi-root .prompt-tools svg { width: 14px; }
-#dfi-root .reference-well { margin-top: 8px; min-height: 52px; display: flex; align-items: center; gap: 10px; padding: 8px 11px; cursor: pointer; border: 1px dashed rgba(151,222,202,.19); background: rgba(5,16,13,.52); transition: border-color .2s, background .2s; }
+/* Was position:absolute over the textarea, which is exactly why Refine disappeared into the
+   field. Now a static toolbar with its own divider and fill. */
+#dfi-root .prompt-tools { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 9px 11px; border-top: 1px solid rgba(151,222,202,.16); background: rgba(3,13,10,.62); }
+#dfi-root .prompt-tools button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 34px; padding: 0 13px; cursor: pointer; border: 1px solid rgba(151,222,202,.2); color: #9db6ae; background: rgba(1,9,7,.6); font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .13em; text-transform: uppercase; transition: color .18s, border-color .18s, background .18s, box-shadow .18s; }
+#dfi-root .prompt-tools button:hover { color: var(--lime-hot); border-color: rgba(121,255,82,.45); background: rgba(121,255,82,.07); }
+#dfi-root .prompt-tools svg { width: 16px; }
+/* Refine is the primary action in this row and is styled to be found without hunting. */
+#dfi-root #dfi-refine { color: var(--lime-hot); border-color: rgba(121,255,82,.42); background: linear-gradient(180deg, rgba(121,255,82,.13), rgba(121,255,82,.05)); box-shadow: 0 0 16px rgba(121,255,82,.08), inset 0 1px rgba(224,255,211,.14); }
+#dfi-root #dfi-refine:hover { border-color: rgba(121,255,82,.7); box-shadow: 0 0 24px rgba(121,255,82,.18), inset 0 1px rgba(224,255,211,.2); }
+#dfi-root #dfi-refine:disabled { opacity: .55; cursor: default; box-shadow: none; }
+#dfi-root #dfi-clear { flex: none; }
+
+#dfi-root .reference-well { margin-top: 12px; min-height: 64px; display: flex; align-items: center; gap: 13px; padding: 12px 14px; cursor: pointer; border: 1px dashed rgba(151,222,202,.19); background: rgba(5,16,13,.52); transition: border-color .2s, background .2s; }
 #dfi-root .reference-well:hover, #dfi-root .reference-well:focus-visible { outline: 0; border-color: rgba(121,255,82,.46); background: rgba(121,255,82,.045); }
-#dfi-root .reference-well svg { width: 23px; color: var(--copper-hot); }
-#dfi-root .reference-well div { display: grid; gap: 4px; flex: 1; }
-#dfi-root .reference-well b { font: 700 8.5px/1 var(--font-mono); letter-spacing: .14em; }
-#dfi-root .reference-well small { color: #667f77; font: 500 8px/1 var(--font-mono); }
-#dfi-root .reference-well > span { width: 24px; height: 24px; display: grid; place-items: center; color: var(--lime); border: 1px solid rgba(121,255,82,.28); font-size: 17px; }
+#dfi-root .reference-well svg { width: 26px; color: var(--copper-hot); }
+#dfi-root .reference-well div { display: grid; gap: 6px; flex: 1; min-width: 0; }
+#dfi-root .reference-well b { font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .15em; }
+#dfi-root .reference-well small { color: #7b948c; font: 500 var(--t-micro)/1.45 var(--font-mono); }
+#dfi-root .reference-well > span { flex: none; width: 28px; height: 28px; display: grid; place-items: center; color: var(--lime); border: 1px solid rgba(121,255,82,.28); font-size: 19px; }
 /* live addition: staged reference plates */
-#dfi-root .reference-tray { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
-#dfi-root .reference-tray figure { position: relative; margin: 0; width: 44px; height: 44px; border: 1px solid rgba(121,255,82,.35); }
+#dfi-root .reference-tray { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+#dfi-root .reference-tray figure { position: relative; margin: 0; width: 50px; height: 50px; border: 1px solid rgba(121,255,82,.35); }
 #dfi-root .reference-tray img { width: 100%; height: 100%; object-fit: cover; display: block; }
-#dfi-root .reference-tray button { position: absolute; top: -7px; right: -7px; width: 16px; height: 16px; display: grid; place-items: center; padding: 0; cursor: pointer; color: #ffb49a; border: 1px solid rgba(199,124,66,.5); background: rgba(10,4,2,.92); font-size: 10px; line-height: 1; }
-#dfi-root .segment-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
-#dfi-root .segment { position: relative; min-height: 64px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 7px 4px; cursor: pointer; border: 1px solid rgba(151,222,202,.14); color: #8aa29a; background: linear-gradient(180deg, rgba(255,255,255,.025), transparent 40%), rgba(1,9,7,.58); transition: transform .15s, border-color .2s, color .2s, box-shadow .2s, background .2s; clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px); }
+#dfi-root .reference-tray button { position: absolute; top: -8px; right: -8px; width: 19px; height: 19px; display: grid; place-items: center; padding: 0; cursor: pointer; color: #ffb49a; border: 1px solid rgba(199,124,66,.5); background: rgba(10,4,2,.92); font-size: 12px; line-height: 1; }
+
+#dfi-root .segment-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+#dfi-root .segment { position: relative; min-height: 82px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: 11px 6px; cursor: pointer; border: 1px solid rgba(151,222,202,.14); color: #9ab2aa; background: linear-gradient(180deg, rgba(255,255,255,.025), transparent 40%), rgba(1,9,7,.58); transition: transform .15s, border-color .2s, color .2s, box-shadow .2s, background .2s; clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px); }
 #dfi-root .segment:hover { color: #dcebe7; border-color: rgba(151,222,202,.33); transform: translateY(-1px); }
 #dfi-root .segment.selected { color: var(--lime-hot); border-color: rgba(121,255,82,.48); background: linear-gradient(180deg, rgba(121,255,82,.1), transparent 68%), rgba(3,15,10,.8); box-shadow: inset 0 0 15px rgba(121,255,82,.045), 0 0 15px rgba(121,255,82,.065); }
 #dfi-root .segment.selected::after { content: ""; position: absolute; left: 17%; right: 17%; bottom: 0; height: 1px; background: var(--lime); box-shadow: 0 0 9px 1px var(--lime); }
-#dfi-root .segment b { font: 700 9px/1 var(--font-mono); letter-spacing: .11em; }
-#dfi-root .segment small { color: #60756f; font: 500 7.5px/1 var(--font-mono); }
-#dfi-root .segment.selected small { color: #8cad9f; }
-#dfi-root .quality-rune { color: var(--copper-hot); font: 600 13px/1 Georgia, serif; text-shadow: 0 0 9px rgba(242,173,108,.35); }
+#dfi-root .segment b { font: 700 12px/1 var(--font-mono); letter-spacing: .12em; }
+#dfi-root .segment small { color: #7b918a; font: 500 var(--t-micro)/1.25 var(--font-mono); text-align: center; }
+#dfi-root .segment.selected small { color: #a6c6b8; }
+#dfi-root .quality-rune { color: var(--copper-hot); font: 600 16px/1 Georgia, serif; text-shadow: 0 0 9px rgba(242,173,108,.35); }
 #dfi-root .shape { display: block; border: 1px solid currentColor; background: linear-gradient(135deg, rgba(121,255,82,.12), transparent); box-shadow: inset 0 0 7px rgba(121,255,82,.08); }
-#dfi-root .shape.square { width: 20px; height: 20px; }
-#dfi-root .shape.portrait { width: 15px; height: 22px; }
-#dfi-root .shape.landscape { width: 26px; height: 17px; }
+#dfi-root .shape.square { width: 22px; height: 22px; }
+#dfi-root .shape.portrait { width: 17px; height: 24px; }
+#dfi-root .shape.landscape { width: 28px; height: 19px; }
 
 /* ---------- batch + telemetry + ignite ---------- */
-#dfi-root .batch-module { position: relative; z-index: 1; display: grid; grid-template-columns: 40px 1fr auto; gap: 10px; align-items: center; padding: 12px; margin-bottom: 12px; border: 1px solid rgba(199,124,66,.28); background: linear-gradient(100deg, rgba(199,124,66,.08), rgba(2,11,8,.68) 62%); clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); transition: border-color .25s, box-shadow .25s, background .25s; }
+#dfi-root .batch-module { position: relative; z-index: 1; display: grid; grid-template-columns: 44px 1fr auto; gap: 14px; align-items: center; padding: 15px; margin-bottom: 15px; border: 1px solid rgba(199,124,66,.28); background: linear-gradient(100deg, rgba(199,124,66,.08), rgba(2,11,8,.68) 62%); clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); transition: border-color .25s, box-shadow .25s, background .25s; }
 #dfi-root .batch-module.active { border-color: rgba(121,255,82,.42); background: linear-gradient(100deg, rgba(121,255,82,.09), rgba(2,11,8,.74) 62%); box-shadow: 0 0 22px rgba(121,255,82,.06); }
-#dfi-root .batch-icon { position: relative; width: 36px; height: 36px; }
-#dfi-root .batch-icon i { position: absolute; width: 22px; height: 22px; border: 1px solid rgba(242,173,108,.42); background: rgba(7,11,8,.9); }
+#dfi-root .batch-icon { position: relative; width: 40px; height: 40px; }
+#dfi-root .batch-icon i { position: absolute; width: 24px; height: 24px; border: 1px solid rgba(242,173,108,.42); background: rgba(7,11,8,.9); }
 #dfi-root .batch-icon i:nth-child(1) { left: 1px; top: 1px; }
-#dfi-root .batch-icon i:nth-child(2) { left: 7px; top: 7px; }
-#dfi-root .batch-icon i:nth-child(3) { left: 13px; top: 13px; border-color: var(--copper-hot); box-shadow: 0 0 10px rgba(242,173,108,.17); }
+#dfi-root .batch-icon i:nth-child(2) { left: 8px; top: 8px; }
+#dfi-root .batch-icon i:nth-child(3) { left: 15px; top: 15px; border-color: var(--copper-hot); box-shadow: 0 0 10px rgba(242,173,108,.17); }
 #dfi-root .batch-module.active .batch-icon i { border-color: rgba(121,255,82,.55); box-shadow: 0 0 10px rgba(121,255,82,.1); }
-#dfi-root .batch-module > div:nth-child(2) { display: grid; gap: 4px; }
-#dfi-root .batch-module span { color: #a9bdb7; font: 700 8px/1 var(--font-mono); letter-spacing: .15em; }
-#dfi-root .batch-module b { color: var(--copper-hot); font: 700 10px/1 var(--font-mono); letter-spacing: .08em; }
+#dfi-root .batch-module > div:nth-child(2) { display: grid; gap: 6px; min-width: 0; }
+#dfi-root .batch-module span { color: #bacec8; font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .17em; }
+#dfi-root .batch-module b { color: var(--copper-hot); font: 700 var(--t-value)/1 var(--font-mono); letter-spacing: .08em; }
 #dfi-root .batch-module.active b { color: var(--lime); }
-#dfi-root .batch-module small { color: #687e77; font: 500 7.5px/1.3 var(--font-mono); }
-#dfi-root .power-toggle { position: relative; width: 42px; height: 22px; padding: 0; cursor: pointer; border: 1px solid rgba(151,222,202,.22); border-radius: 20px; background: rgba(0,6,4,.8); }
-#dfi-root .power-toggle i { position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #56665f; box-shadow: 0 0 0 1px #1f2e29; transition: transform .22s ease, background .22s, box-shadow .22s; }
+#dfi-root .batch-module small { color: #7d938c; font: 500 var(--t-micro)/1.5 var(--font-mono); }
+#dfi-root .power-toggle { position: relative; flex: none; width: 48px; height: 26px; padding: 0; cursor: pointer; border: 1px solid rgba(151,222,202,.22); border-radius: 20px; background: rgba(0,6,4,.8); }
+#dfi-root .power-toggle i { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #56665f; box-shadow: 0 0 0 1px #1f2e29; transition: transform .22s ease, background .22s, box-shadow .22s; }
 #dfi-root .power-toggle[aria-checked="true"] { border-color: rgba(121,255,82,.55); }
-#dfi-root .power-toggle[aria-checked="true"] i { transform: translateX(20px); background: var(--lime-hot); box-shadow: 0 0 5px var(--lime), 0 0 13px var(--lime); }
-#dfi-root .telemetry-module { position: relative; z-index: 1; margin-bottom: 12px; padding: 11px 12px 9px; border: 1px solid rgba(151,222,202,.13); background: rgba(0,7,5,.58); }
-#dfi-root .telemetry-line { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
-#dfi-root .telemetry-line span { color: #668078; font: 600 7px/1 var(--font-mono); letter-spacing: .13em; }
-#dfi-root .telemetry-line b { color: #b7ccc6; font: 700 10px/1 var(--font-mono); }
+#dfi-root .power-toggle[aria-checked="true"] i { transform: translateX(22px); background: var(--lime-hot); box-shadow: 0 0 5px var(--lime), 0 0 13px var(--lime); }
+
+#dfi-root .telemetry-module { position: relative; z-index: 1; margin-bottom: 15px; padding: 14px 15px 12px; border: 1px solid rgba(151,222,202,.13); background: rgba(0,7,5,.58); }
+#dfi-root .telemetry-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 7px 0; }
+#dfi-root .telemetry-line span { color: #7c948c; font: 600 var(--t-micro)/1 var(--font-mono); letter-spacing: .15em; }
+#dfi-root .telemetry-line b { color: #c6dad4; font: 700 var(--t-value)/1 var(--font-mono); }
 #dfi-root .telemetry-line:nth-child(2) b { color: var(--copper-hot); }
 #dfi-root .telemetry-line:nth-child(3) b { color: var(--lime); }
-#dfi-root .energy-meter { display: flex; gap: 3px; height: 5px; margin: 8px 0 7px; }
+#dfi-root .energy-meter { display: flex; gap: 3px; height: 6px; margin: 11px 0 9px; }
 #dfi-root .energy-meter i { flex: 1; background: rgba(121,255,82,.09); border: 1px solid rgba(121,255,82,.08); }
 #dfi-root .energy-meter i.lit { background: rgba(121,255,82,.65); border-color: rgba(160,255,133,.6); box-shadow: 0 0 5px rgba(121,255,82,.35); }
-#dfi-root .telemetry-module p { margin: 0; color: #526a62; font: 500 7px/1.3 var(--font-mono); }
-#dfi-root .forge-button { position: relative; z-index: 1; width: 100%; min-height: 63px; display: grid; grid-template-columns: 44px 1fr 26px; align-items: center; gap: 10px; padding: 8px 14px; cursor: pointer; overflow: hidden; border: 1px solid rgba(121,255,82,.61); color: var(--lime-hot); text-align: left; background:
+/* #82998f, not the mockup's dimmer grey: at --t-micro this is small text, so it has to clear the
+   4.5:1 AA floor against the panel glass even where the chassis backdrop is at its brightest. */
+#dfi-root .telemetry-module p { margin: 0; color: #82998f; font: 500 var(--t-micro)/1.45 var(--font-mono); }
+
+#dfi-root .forge-button { position: relative; z-index: 1; width: 100%; min-height: 76px; display: grid; grid-template-columns: 44px 1fr 26px; align-items: center; gap: 14px; padding: 12px 18px; cursor: pointer; overflow: hidden; border: 1px solid rgba(121,255,82,.61); color: var(--lime-hot); text-align: left; background:
   linear-gradient(180deg, rgba(185,255,157,.14), transparent 46%),
   linear-gradient(90deg, rgba(20,70,31,.92), rgba(4,24,13,.95) 55%, rgba(18,58,25,.88));
   clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
@@ -208,61 +284,63 @@ body.dfi-open #dfi-root { transform: none; }
 #dfi-root .forge-button:hover::before { transform: translateX(120%); }
 #dfi-root .forge-button:active { transform: translateY(1px) scale(.997); }
 #dfi-root .forge-button:disabled { cursor: default; filter: saturate(.55) brightness(.85); }
-#dfi-root .forge-button small { display: block; margin-bottom: 4px; color: #8fc780; font: 600 7px/1 var(--font-mono); letter-spacing: .14em; }
-#dfi-root .forge-button b { display: block; font: 700 14px/1 var(--font-ui); letter-spacing: .12em; }
-#dfi-root .forge-button > svg { justify-self: end; width: 22px; }
-#dfi-root .forge-core { position: relative; width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid rgba(184,255,159,.5); transform: rotate(45deg); background: rgba(2,10,5,.64); box-shadow: inset 0 0 10px rgba(121,255,82,.1), 0 0 12px rgba(121,255,82,.1); }
+#dfi-root .forge-button small { display: block; margin-bottom: 6px; color: #a3d497; font: 600 var(--t-micro)/1 var(--font-mono); letter-spacing: .16em; }
+#dfi-root .forge-button b { display: block; font: 700 17px/1 var(--font-ui); letter-spacing: .13em; }
+#dfi-root .forge-button > svg { justify-self: end; width: 23px; }
+#dfi-root .forge-core { position: relative; width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid rgba(184,255,159,.5); transform: rotate(45deg); background: rgba(2,10,5,.64); box-shadow: inset 0 0 10px rgba(121,255,82,.1), 0 0 12px rgba(121,255,82,.1); }
 #dfi-root .forge-core::before, #dfi-root .forge-core::after { content: ""; position: absolute; inset: 5px; border: 1px solid rgba(121,255,82,.4); }
 #dfi-root .forge-core::after { inset: 10px; background: var(--lime); box-shadow: 0 0 8px var(--lime); }
 #dfi-root .forge-core i { position: absolute; inset: -4px; border: 1px solid rgba(121,255,82,.12); animation: dfi-reactor-spin 9s linear infinite; }
 #dfi-root .forge-button.igniting .forge-core { animation: dfi-core-ignite .65s ease-in-out infinite alternate; }
 
 /* live addition: the foundry queue tray (batch directives awaiting submission) */
-#dfi-root .foundry-tray { position: relative; z-index: 1; margin-top: 12px; padding: 10px 12px; border: 1px solid rgba(199,124,66,.4); background: linear-gradient(100deg, rgba(199,124,66,.09), rgba(2,11,8,.8) 62%); }
+#dfi-root .foundry-tray { position: relative; z-index: 1; margin-top: 15px; padding: 13px 15px; border: 1px solid rgba(199,124,66,.4); background: linear-gradient(100deg, rgba(199,124,66,.09), rgba(2,11,8,.8) 62%); }
 #dfi-root .foundry-tray[hidden] { display: none; }
-#dfi-root .foundry-tray header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-#dfi-root .foundry-tray header b { color: var(--copper-hot); font: 700 8.5px/1 var(--font-mono); letter-spacing: .14em; }
-#dfi-root .foundry-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-top: 1px solid rgba(151,222,202,.08); }
-#dfi-root .foundry-row span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #b7ccc6; font-size: 10.5px; }
-#dfi-root .foundry-row small { color: #667f77; font: 500 7.5px/1 var(--font-mono); white-space: nowrap; }
-#dfi-root .foundry-row button, #dfi-root .foundry-tray header button { border: 0; background: transparent; color: #ff9c8b; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 3px; }
-#dfi-root .foundry-submit { width: 100%; margin-top: 8px; min-height: 34px; cursor: pointer; color: var(--lime-hot); border: 1px solid rgba(121,255,82,.5); background: rgba(121,255,82,.08); font: 700 9px/1 var(--font-mono); letter-spacing: .13em; }
+#dfi-root .foundry-tray header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; }
+#dfi-root .foundry-tray header b { color: var(--copper-hot); font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .15em; }
+#dfi-root .foundry-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid rgba(151,222,202,.08); }
+#dfi-root .foundry-row span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #c2d6d0; font-size: var(--t-body); }
+#dfi-root .foundry-row small { color: #7b948c; font: 500 var(--t-micro)/1 var(--font-mono); white-space: nowrap; }
+#dfi-root .foundry-row button, #dfi-root .foundry-tray header button { border: 0; background: transparent; color: #ff9c8b; cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px; }
+#dfi-root .foundry-submit { width: 100%; margin-top: 11px; min-height: 42px; cursor: pointer; color: var(--lime-hot); border: 1px solid rgba(121,255,82,.5); background: rgba(121,255,82,.08); font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .14em; }
 #dfi-root .foundry-submit:hover { box-shadow: 0 0 14px rgba(121,255,82,.15); }
 #dfi-root .foundry-submit:disabled { opacity: .5; cursor: default; }
 
 /* ---------- vault ---------- */
 #dfi-root .vault { display: flex; flex-direction: column; min-width: 0; clip-path: polygon(14px 0, 100% 0, 100% 100%, 14px 100%, 0 calc(100% - 14px), 0 14px); }
-#dfi-root .vault-header { position: relative; z-index: 1; display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 20px 21px 17px; border-bottom: 1px solid rgba(151,222,202,.12); background: linear-gradient(90deg, rgba(121,255,82,.03), transparent 44%); }
-#dfi-root .vault-header .eyebrow { display: flex; align-items: center; gap: 8px; }
+#dfi-root .vault-header { position: relative; z-index: 1; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 26px 26px 22px; border-bottom: 1px solid rgba(151,222,202,.12); background: linear-gradient(90deg, rgba(121,255,82,.03), transparent 44%); }
+#dfi-root .vault-header .eyebrow { display: flex; align-items: center; gap: 9px; }
 #dfi-root .vault-header .pulse-dot { grid-row: auto; }
-#dfi-root .vault-header h2 { margin-top: 6px; font-size: clamp(20px, 2vw, 27px); }
-#dfi-root .vault-note { margin: 7px 0 0; color: #718b82; font-size: 11px; }
-#dfi-root .vault-actions { display: flex; align-items: center; gap: 7px; }
-#dfi-root .search-control { width: min(250px, 21vw); height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid rgba(151,222,202,.15); background: rgba(0,7,5,.55); }
-#dfi-root .search-control svg { flex: none; width: 15px; color: #687f78; }
-#dfi-root .search-control input { min-width: 0; width: 100%; border: 0; outline: 0; color: #c7d9d4; background: transparent; font-size: 10px; }
-#dfi-root .search-control input::placeholder { color: #536a63; }
-#dfi-root .filter-button { height: 36px; min-width: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 11px; cursor: pointer; border: 1px solid rgba(151,222,202,.14); color: #789087; background: rgba(0,7,5,.52); font: 700 8px/1 var(--font-mono); letter-spacing: .12em; }
-#dfi-root .filter-button svg { width: 14px; }
-#dfi-root .filter-button span { color: #566b64; }
+#dfi-root .vault-note { margin: 10px 0 0; color: #85a096; font-size: var(--t-body); line-height: 1.5; }
+#dfi-root .vault-actions { display: flex; align-items: center; gap: 9px; }
+#dfi-root .search-control { width: min(270px, 22vw); height: 42px; display: flex; align-items: center; gap: 9px; padding: 0 12px; border: 1px solid rgba(151,222,202,.15); background: rgba(0,7,5,.55); }
+#dfi-root .search-control:focus-within { border-color: rgba(121,255,82,.4); }
+#dfi-root .search-control svg { flex: none; width: 16px; color: #7c938c; }
+#dfi-root .search-control input { min-width: 0; width: 100%; border: 0; outline: 0; color: #cfe0db; background: transparent; font-size: var(--t-body); }
+#dfi-root .search-control input::placeholder { color: #66807a; }
+#dfi-root .filter-button { height: 42px; min-width: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 14px; cursor: pointer; border: 1px solid rgba(151,222,202,.14); color: #8ba49b; background: rgba(0,7,5,.52); font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .13em; }
+#dfi-root .filter-button svg { width: 16px; }
+#dfi-root .filter-button span { color: #6b8078; }
 #dfi-root .filter-button:hover, #dfi-root .filter-button.active { color: var(--lime-hot); border-color: rgba(121,255,82,.4); background: rgba(121,255,82,.06); box-shadow: inset 0 -1px var(--lime); }
-#dfi-root .generation-strip { position: relative; z-index: 2; display: grid; grid-template-columns: 42px minmax(180px, .8fr) minmax(160px, 1fr) 42px; align-items: center; gap: 12px; margin: 12px 15px 0; padding: 10px 13px; border: 1px solid rgba(121,255,82,.37); background: linear-gradient(90deg, rgba(20,72,29,.28), rgba(2,15,9,.92)); box-shadow: 0 0 24px rgba(121,255,82,.08), inset 0 1px rgba(214,255,198,.08); }
+
+#dfi-root .generation-strip { position: relative; z-index: 2; display: grid; grid-template-columns: 44px minmax(180px, .8fr) minmax(160px, 1fr) 48px; align-items: center; gap: 14px; margin: 14px 18px 0; padding: 13px 16px; border: 1px solid rgba(121,255,82,.37); background: linear-gradient(90deg, rgba(20,72,29,.28), rgba(2,15,9,.92)); box-shadow: 0 0 24px rgba(121,255,82,.08), inset 0 1px rgba(214,255,198,.08); }
 #dfi-root .generation-strip[hidden] { display: none; }
 #dfi-root .generation-strip.fault { border-color: rgba(255,124,90,.55); }
 #dfi-root .generation-strip.fault b { color: #ffb49a; }
-#dfi-root .forge-spinner { position: relative; width: 32px; height: 32px; border: 1px solid rgba(121,255,82,.22); transform: rotate(45deg); }
+#dfi-root .forge-spinner { position: relative; width: 34px; height: 34px; border: 1px solid rgba(121,255,82,.22); transform: rotate(45deg); }
 #dfi-root .forge-spinner i { position: absolute; inset: 4px; border: 1px solid rgba(121,255,82,.45); animation: dfi-reactor-spin 2s linear infinite; }
 #dfi-root .forge-spinner i:nth-child(2) { inset: 8px; animation-direction: reverse; }
 #dfi-root .forge-spinner i:nth-child(3) { inset: 12px; background: var(--lime); box-shadow: 0 0 7px var(--lime); border: 0; }
-#dfi-root .generation-strip > div:nth-child(2) { display: grid; gap: 5px; }
-#dfi-root .generation-strip b { color: var(--lime-hot); font: 700 9px/1 var(--font-mono); letter-spacing: .13em; }
-#dfi-root .generation-strip span { color: #78948a; font-size: 9px; }
-#dfi-root .progress-track { height: 4px; overflow: hidden; background: rgba(121,255,82,.08); }
+#dfi-root .generation-strip > div:nth-child(2) { display: grid; gap: 7px; min-width: 0; }
+#dfi-root .generation-strip b { color: var(--lime-hot); font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .14em; }
+#dfi-root .generation-strip span { color: #8ba49b; font-size: var(--t-body); }
+#dfi-root .progress-track { height: 5px; overflow: hidden; background: rgba(121,255,82,.08); }
 #dfi-root .progress-track i { display: block; width: 8%; height: 100%; background: linear-gradient(90deg, #429a33, var(--lime-hot)); box-shadow: 0 0 9px var(--lime); transition: width .2s linear; }
-#dfi-root .generation-strip strong { color: var(--lime); font: 700 11px/1 var(--font-mono); }
-#dfi-root .gallery { position: relative; z-index: 1; flex: 1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(250px, 1fr); gap: 10px; padding: 12px 15px; }
-#dfi-root .gallery-empty { grid-column: 1 / -1; align-self: center; text-align: center; color: #63807a; font: 500 11px/1.7 var(--font-mono); padding: 40px 20px; }
-#dfi-root .creation-card { position: relative; min-height: 260px; overflow: hidden; cursor: pointer; border: 1px solid rgba(151,222,202,.17); background: #020806; clip-path: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%, 0 9px); transition: transform .2s ease, border-color .25s, box-shadow .25s; }
+#dfi-root .generation-strip strong { color: var(--lime); font: 700 15px/1 var(--font-mono); text-align: right; }
+
+#dfi-root .gallery { position: relative; z-index: 1; flex: 1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(260px, 1fr); gap: 14px; padding: 16px 18px; }
+#dfi-root .gallery-empty { grid-column: 1 / -1; align-self: center; text-align: center; color: #7b948c; font: 500 var(--t-body)/1.75 var(--font-mono); padding: 48px 24px; }
+#dfi-root .creation-card { position: relative; min-height: 270px; overflow: hidden; cursor: pointer; border: 1px solid rgba(151,222,202,.17); background: #020806; clip-path: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%, 0 9px); transition: transform .2s ease, border-color .25s, box-shadow .25s; }
 #dfi-root .creation-card:hover { transform: translateY(-2px); border-color: rgba(121,255,82,.43); box-shadow: 0 13px 28px rgba(0,0,0,.42), 0 0 20px rgba(121,255,82,.07); }
 #dfi-root .creation-card.hidden-card { display: none; }
 #dfi-root .creation-art { position: absolute; inset: 0; overflow: hidden; background: #03100c; }
@@ -278,36 +356,37 @@ body.dfi-open #dfi-root { transform: none; }
 #dfi-root .art-forge i:nth-child(1) { --i: 0%; }
 #dfi-root .art-forge i:nth-child(2) { --i: 8%; border-style: dashed; animation: dfi-reactor-spin 19s linear infinite; }
 #dfi-root .art-forge i:nth-child(3) { --i: 18%; border-color: rgba(121,255,82,.25); }
-#dfi-root .card-chrome { position: absolute; z-index: 7; top: 9px; left: 9px; right: 9px; display: flex; justify-content: space-between; align-items: center; }
-#dfi-root .card-chrome > span { padding: 5px 8px; border: 1px solid rgba(151,222,202,.17); color: #8da69e; background: rgba(0,7,5,.74); backdrop-filter: blur(8px); font: 700 7px/1 var(--font-mono); letter-spacing: .13em; }
-#dfi-root .favorite { width: 30px; height: 30px; display: grid; place-items: center; cursor: pointer; border: 1px solid rgba(151,222,202,.18); color: #8aa198; background: rgba(0,7,5,.72); font-size: 14px; }
+#dfi-root .card-chrome { position: absolute; z-index: 7; top: 11px; left: 11px; right: 11px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+#dfi-root .card-chrome > span { padding: 6px 10px; border: 1px solid rgba(151,222,202,.17); color: #a3bab2; background: rgba(0,7,5,.74); backdrop-filter: blur(8px); font: 700 var(--t-micro)/1 var(--font-mono); letter-spacing: .14em; }
+#dfi-root .favorite { flex: none; width: 34px; height: 34px; display: grid; place-items: center; cursor: pointer; border: 1px solid rgba(151,222,202,.18); color: #8aa198; background: rgba(0,7,5,.72); font-size: 16px; }
 #dfi-root .favorite.active { color: var(--lime-hot); border-color: rgba(121,255,82,.4); text-shadow: 0 0 8px var(--lime); }
-#dfi-root .creation-meta { position: absolute; z-index: 7; left: 0; right: 0; bottom: 0; min-height: 67px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 13px 12px; background: linear-gradient(180deg, rgba(2,8,6,.1), rgba(1,7,5,.93) 25%); border-top: 1px solid rgba(151,222,202,.11); }
-#dfi-root .creation-meta > div { display: grid; gap: 5px; min-width: 0; }
-#dfi-root .creation-meta b { overflow: hidden; color: #d7e8e3; font: 700 10px/1 var(--font-ui); letter-spacing: .12em; white-space: nowrap; text-overflow: ellipsis; }
-#dfi-root .creation-meta small { color: #6b837a; font: 500 7.5px/1 var(--font-mono); }
-#dfi-root .card-action { flex: none; width: 33px; height: 33px; display: grid; place-items: center; cursor: pointer; color: var(--copper-hot); border: 1px solid rgba(199,124,66,.32); background: rgba(17,9,4,.65); }
+#dfi-root .creation-meta { position: absolute; z-index: 7; left: 0; right: 0; bottom: 0; min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 15px 15px 14px; background: linear-gradient(180deg, rgba(2,8,6,.1), rgba(1,7,5,.94) 25%); border-top: 1px solid rgba(151,222,202,.11); }
+#dfi-root .creation-meta > div { display: grid; gap: 7px; min-width: 0; }
+#dfi-root .creation-meta b { overflow: hidden; color: #dceee9; font: 700 var(--t-value)/1.15 var(--font-ui); letter-spacing: .1em; white-space: nowrap; text-overflow: ellipsis; }
+#dfi-root .creation-meta small { color: #82998f; font: 500 var(--t-micro)/1 var(--font-mono); }
+#dfi-root .card-action { flex: none; width: 38px; height: 38px; display: grid; place-items: center; cursor: pointer; color: var(--copper-hot); border: 1px solid rgba(199,124,66,.32); background: rgba(17,9,4,.65); }
 #dfi-root .card-action:hover { color: #ffd0a0; border-color: rgba(242,173,108,.6); box-shadow: 0 0 13px rgba(242,173,108,.13); }
-#dfi-root .card-action svg { width: 15px; }
-#dfi-root .card-action.collect { color: var(--lime); border-color: rgba(121,255,82,.4); background: rgba(4,17,7,.7); font: 700 7.5px/1 var(--font-mono); letter-spacing: .08em; width: auto; padding: 0 9px; }
-#dfi-root .vault-footer { position: relative; z-index: 1; min-height: 47px; display: flex; align-items: center; justify-content: space-between; padding: 8px 17px; border-top: 1px solid rgba(151,222,202,.12); background: rgba(0,7,5,.58); }
-#dfi-root .vault-footer > div { display: grid; grid-template-columns: 10px auto; gap: 3px 7px; align-items: center; }
-#dfi-root .storage-light { grid-row: 1 / span 2; width: 6px; height: 6px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 7px var(--lime); }
-#dfi-root .vault-footer b { color: #9bb6ad; font: 700 7.5px/1 var(--font-mono); letter-spacing: .12em; }
-#dfi-root .vault-footer small { color: #556d64; font: 500 7px/1 var(--font-mono); }
-#dfi-root .vault-footer button { display: flex; align-items: center; gap: 8px; border: 0; color: #739087; background: transparent; cursor: pointer; font: 700 7.5px/1 var(--font-mono); letter-spacing: .11em; }
+#dfi-root .card-action svg { width: 17px; }
+#dfi-root .card-action.collect { color: var(--lime); border-color: rgba(121,255,82,.4); background: rgba(4,17,7,.7); font: 700 var(--t-micro)/1 var(--font-mono); letter-spacing: .08em; width: auto; padding: 0 12px; }
+#dfi-root .vault-footer { position: relative; z-index: 1; min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 20px; border-top: 1px solid rgba(151,222,202,.12); background: rgba(0,7,5,.58); }
+#dfi-root .vault-footer > div { display: grid; grid-template-columns: 10px auto; gap: 5px 9px; align-items: center; }
+#dfi-root .storage-light { grid-row: 1 / span 2; width: 7px; height: 7px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 7px var(--lime); }
+#dfi-root .vault-footer b { color: #aec6bd; font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .13em; }
+#dfi-root .vault-footer small { color: #82998f; font: 500 var(--t-micro)/1 var(--font-mono); }
+/* min-height, not just line-height: as a borderless text button this was a 19px tap target. */
+#dfi-root .vault-footer button { display: flex; align-items: center; gap: 9px; min-height: 36px; padding: 0 6px; border: 0; color: #85a29a; background: transparent; cursor: pointer; font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .12em; }
 #dfi-root .vault-footer button:hover { color: var(--lime); }
-#dfi-root .vault-footer svg { width: 15px; }
+#dfi-root .vault-footer svg { width: 17px; }
 
 /* ---------- viewer (live addition, design vocabulary) ---------- */
 #dfi-root .dfi-viewer { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 18px; background: rgba(0, 4, 3, .82); backdrop-filter: blur(6px); }
 #dfi-root .dfi-viewer-card { max-width: min(94vw, 760px); max-height: 94vh; overflow-y: auto; border: 1px solid rgba(121,255,82,.4); background: linear-gradient(180deg, rgba(6,20,16,.96), rgba(2,9,7,.97)); box-shadow: 0 30px 80px rgba(0,0,0,.6), 0 0 34px rgba(121,255,82,.1); clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px); }
 #dfi-root .dfi-viewer-card img { width: 100%; display: block; }
-#dfi-root .dfi-viewer-meta { padding: 13px 15px 16px; }
-#dfi-root .dfi-viewer-meta p { margin: 0 0 6px; color: #d5e7e2; font-size: 12.5px; line-height: 1.55; }
-#dfi-root .dfi-viewer-meta small { display: block; margin-bottom: 10px; color: #6b837a; font: 500 8px/1 var(--font-mono); letter-spacing: .08em; }
-#dfi-root .dfi-viewer-actions { display: flex; gap: 7px; flex-wrap: wrap; }
-#dfi-root .dfi-viewer-actions a, #dfi-root .dfi-viewer-actions button { height: 34px; display: inline-flex; align-items: center; gap: 7px; padding: 0 13px; cursor: pointer; text-decoration: none; border: 1px solid rgba(151,222,202,.2); color: #b9d1ca; background: rgba(0,7,5,.6); font: 700 8px/1 var(--font-mono); letter-spacing: .11em; }
+#dfi-root .dfi-viewer-meta { padding: 17px 19px 19px; }
+#dfi-root .dfi-viewer-meta p { margin: 0 0 9px; color: #dceee9; font-size: 14.5px; line-height: 1.6; }
+#dfi-root .dfi-viewer-meta small { display: block; margin-bottom: 14px; color: #82998f; font: 500 var(--t-micro)/1 var(--font-mono); letter-spacing: .09em; }
+#dfi-root .dfi-viewer-actions { display: flex; gap: 9px; flex-wrap: wrap; }
+#dfi-root .dfi-viewer-actions a, #dfi-root .dfi-viewer-actions button { height: 42px; display: inline-flex; align-items: center; gap: 8px; padding: 0 16px; cursor: pointer; text-decoration: none; border: 1px solid rgba(151,222,202,.2); color: #c2d6d0; background: rgba(0,7,5,.6); font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .12em; }
 #dfi-root .dfi-viewer-actions .primary { color: var(--lime-hot); border-color: rgba(121,255,82,.5); background: rgba(121,255,82,.08); }
 #dfi-root .dfi-viewer-actions .danger { color: #ffb49a; border-color: rgba(199,90,60,.45); }
 
@@ -334,61 +413,88 @@ body.dfi-open #dfi-root { transform: none; }
 @keyframes dfi-dust-drift { to { transform: translateY(-43px); } }
 @keyframes dfi-core-ignite { from { filter: brightness(1); } to { filter: brightness(1.75); box-shadow: 0 0 25px rgba(121,255,82,.55); } }
 
-/* ---------- responsive (design breakpoints) ---------- */
+/* ---------- responsive ----------
+   The old breakpoints SHRANK type on small screens (h1 to 18px, eyebrow to 6.5px), which is
+   backwards: a phone is held further from the eye relative to its pixel density, not closer.
+   Small screens now drop columns and chrome instead, and hold the type scale. */
 @media (min-width: 1500px) {
-  #dfi-root .forge-layout { grid-template-columns: 410px minmax(0, 1fr); }
+  #dfi-root .forge-layout { grid-template-columns: 440px minmax(0, 1fr); }
   #dfi-root .gallery { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   #dfi-root .hero-card { grid-column: span 2; }
 }
 
-@media (max-width: 1050px) {
+@media (max-width: 1180px) {
   #dfi-root .rail-status .status-cell:nth-child(3) { display: none; }
-  #dfi-root .forge-layout { grid-template-columns: 350px minmax(0, 1fr); }
+  #dfi-root .forge-layout { grid-template-columns: 370px minmax(0, 1fr); }
   #dfi-root .vault-header { align-items: flex-start; }
   #dfi-root .vault-actions { flex-wrap: wrap; justify-content: flex-end; }
-  #dfi-root .search-control { width: 220px; }
+  #dfi-root .search-control { width: 230px; }
   #dfi-root .gallery { grid-template-columns: 1fr; }
-  #dfi-root .creation-card { min-height: 300px; }
+  #dfi-root .creation-card { min-height: 320px; }
 }
 
-@media (max-width: 790px) {
-  #dfi-root .app-shell { padding: 7px; }
-  #dfi-root .command-rail { position: relative; top: 0; grid-template-columns: 1fr auto; min-height: 68px; }
+/* Backdrop art direction, mirrored from #rendered-scene so the two views stay identical at every
+   size. Portrait phones get the dedicated tall master, not a crop of the landscape one.
+   The layer COUNT must stay at four here: background-size / position / repeat are inherited from
+   the base shorthand as per-layer lists, and a different count would slide them out of register. */
+@media (max-width: 900px) { #dfi-root .scene { --veil: rgba(1, 4, 7, .18); } }
+@media (max-width: 900px) and (orientation: portrait) {
+  #dfi-root .scene { background-image:
+    radial-gradient(circle at 50% 88%, rgba(69, 255, 31, .10), transparent 32%),
+    radial-gradient(circle at 86% 12%, rgba(199, 124, 66, .06), transparent 26%),
+    linear-gradient(var(--veil), var(--veil)),
+    url("/assets/dominion-neural-chassis-mobile-4k-v3.webp"); }
+}
+@media (max-width: 620px) {
+  #dfi-root .scene { filter: contrast(1.03) saturate(1.07) brightness(.94); }
+}
+
+@media (max-width: 900px) {
+  #dfi-root .app-shell { padding: 9px; }
+  #dfi-root .command-rail { position: relative; top: 0; grid-template-columns: 1fr auto; min-height: 0; gap: 12px; padding: 13px 14px; }
   #dfi-root .brand-lockup .back-button { display: none; }
-  #dfi-root .brand-reactor { width: 38px; height: 38px; }
   #dfi-root .rail-status { grid-column: 1 / -1; grid-row: 2; width: 100%; }
-  #dfi-root .status-cell { min-width: 0; flex: 1; padding: 7px 10px; }
+  #dfi-root .status-cell { min-width: 0; flex: 1; padding: 9px 12px; }
   #dfi-root .close-button { grid-column: 2; grid-row: 1; }
   #dfi-root .forge-layout { grid-template-columns: 1fr; min-height: 0; }
-  #dfi-root .control-deck { padding: 13px; }
-  #dfi-root .vault-header { flex-direction: column; padding: 17px 16px 14px; }
+  #dfi-root .control-deck { padding: 18px; }
+  #dfi-root .vault-header { flex-direction: column; padding: 22px 18px 18px; }
   #dfi-root .vault-actions { width: 100%; justify-content: flex-start; }
   #dfi-root .search-control { flex: 1; width: auto; }
-  #dfi-root .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: 255px; padding: 10px; }
-  #dfi-root .generation-strip { grid-template-columns: 36px 1fr 38px; }
+  #dfi-root .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: 280px; padding: 12px; }
+  #dfi-root .generation-strip { grid-template-columns: 38px 1fr 44px; }
   #dfi-root .progress-track { grid-column: 2 / -1; }
 }
 
-@media (max-width: 520px) {
+@media (max-width: 560px) {
   #dfi-root .app-shell { padding: 0; }
   #dfi-root .command-rail, #dfi-root .control-deck, #dfi-root .vault { clip-path: none; border-left: 0; border-right: 0; }
-  #dfi-root .command-rail { padding: 9px 10px; }
-  #dfi-root .brand-lockup h1 { font-size: 18px; letter-spacing: .11em; }
-  #dfi-root .eyebrow { font-size: 6.5px; }
-  #dfi-root .rail-status { overflow-x: auto; }
-  #dfi-root .status-cell { min-width: 148px; }
-  #dfi-root .forge-layout { margin-top: 6px; gap: 6px; }
-  #dfi-root .prompt-frame textarea { min-height: 105px; }
-  #dfi-root .segment { min-height: 62px; }
-  #dfi-root .batch-module { grid-template-columns: 36px 1fr auto; }
-  #dfi-root .vault-header h2 { font-size: 20px; letter-spacing: .1em; }
-  #dfi-root .vault-note { font-size: 10px; }
-  #dfi-root .vault-actions { display: grid; grid-template-columns: 1fr auto auto auto; }
-  #dfi-root .search-control { width: 100%; }
-  #dfi-root .gallery { grid-template-columns: 1fr; grid-auto-rows: 280px; }
-  #dfi-root .generation-strip { margin: 8px 8px 0; }
-  #dfi-root .creation-card { min-height: 280px; }
-  #dfi-root .vault-footer { flex-wrap: wrap; gap: 8px; }
+  #dfi-root .command-rail { padding: 13px 13px 0; gap: 10px; }
+  #dfi-root .brand-lockup h1 { font-size: 27px; letter-spacing: .13em; }
+  #dfi-root .brand-reactor { width: 44px; height: 44px; }
+  #dfi-root .rail-status { overflow-x: auto; margin-top: 4px; }
+  #dfi-root .status-cell { min-width: 150px; }
+  #dfi-root .forge-layout { margin-top: 8px; gap: 8px; }
+  #dfi-root .control-deck { padding: 17px 15px; }
+  /* 16px is the iOS threshold: anything smaller makes Safari zoom the page on focus. */
+  #dfi-root .prompt-frame textarea { min-height: 124px; font-size: 16px; padding: 15px 14px 13px; }
+  #dfi-root .prompt-tools button { flex: 1; }
+  #dfi-root #dfi-clear { flex: none; }
+  #dfi-root .segment { min-height: 76px; padding: 10px 4px; }
+  #dfi-root .segment b { font-size: 11.5px; letter-spacing: .08em; }
+  #dfi-root .batch-module { grid-template-columns: 1fr auto; gap: 12px; }
+  #dfi-root .batch-icon { display: none; }
+  /* thumb-sized switch on touch: 26px tall is a miss target on a phone */
+  #dfi-root .power-toggle { width: 56px; height: 32px; }
+  #dfi-root .power-toggle i { width: 22px; height: 22px; }
+  #dfi-root .power-toggle[aria-checked="true"] i { transform: translateX(24px); }
+  #dfi-root .vault-header h2 { font-size: 24px; letter-spacing: .12em; }
+  #dfi-root .vault-actions { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
+  #dfi-root .search-control { width: 100%; grid-column: 1 / -1; }
+  #dfi-root .gallery { grid-template-columns: 1fr; grid-auto-rows: 300px; padding: 12px 10px; }
+  #dfi-root .generation-strip { margin: 10px 10px 0; padding: 12px; }
+  #dfi-root .creation-card { min-height: 300px; }
+  #dfi-root .vault-footer { flex-wrap: wrap; gap: 10px; padding: 12px 15px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

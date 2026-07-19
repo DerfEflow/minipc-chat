@@ -1656,7 +1656,22 @@ async function handleOcr(req, res) {
 // Fred's choice — that's the whole point of Dominion. Uses the same direct OpenAI key as chat.
 const VOICE_STT_MODEL = cfgGet("VOICE_STT_MODEL", "gpt-4o-mini-transcribe");
 const VOICE_TTS_MODEL = cfgGet("VOICE_TTS_MODEL", "gpt-4o-mini-tts");
-const VOICE_TTS_VOICE = cfgGet("VOICE_TTS_VOICE", "onyx");
+// Default voice moved off "onyx" (Fred, 2026-07-19: "its terrible"). Probed live against this
+// account: onyx returns ~60KB of audio for a phrase the newer voices deliver in ~28-37KB, which is
+// exactly the dragging, over-enunciated delivery he was hearing. cedar and marin are the current
+// natural-sounding pair. Every voice below is confirmed working, and the picker in Settings hands
+// the choice to Fred's ear rather than settling it here.
+const VOICE_TTS_VOICE = cfgGet("VOICE_TTS_VOICE", "cedar");
+// gpt-4o-mini-tts is STEERABLE and the instructions string was simply never being sent. Verified
+// accepted by the live endpoint. This is the biggest quality lever available without leaving
+// /v1/audio/speech, which is the only endpoint serving speech: the gpt-audio-* models 404 there,
+// they are chat-completions models, so "switch to a better OpenAI model" is not the fix here.
+const VOICE_TTS_INSTRUCTIONS = cfgGet("VOICE_TTS_INSTRUCTIONS",
+  "Speak in a calm, grounded, confident register with deliberate pacing. Natural conversational rhythm, " +
+  "clear consonants, no announcer gloss and no sing-song. Let sentences land: pause briefly at punctuation " +
+  "rather than rushing between clauses.");
+// Confirmed working on this account, newest and most natural first.
+const VOICE_TTS_VOICES = ["cedar", "marin", "ash", "sage", "verse", "ballad", "coral", "alloy", "echo", "fable", "nova", "shimmer", "onyx"];
 
 async function handleVoiceTranscribe(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
@@ -1693,13 +1708,25 @@ async function handleVoiceTranscribe(req, res) {
   return json(200, { text });
 }
 
+// What voices exist and which one is the box default. The client picker reads this instead of
+// carrying its own hardcoded list, so adding a voice server-side is a one-line change.
+function handleVoiceConfig(req, res) {
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  res.end(JSON.stringify({ voices: VOICE_TTS_VOICES, voice: VOICE_TTS_VOICE, model: VOICE_TTS_MODEL, ready: !!OPENAI_KEY }));
+}
+
 async function handleVoiceTts(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   if (!OPENAI_KEY) return json(503, { error: "Voice needs the OpenAI key in the box's .env (OPEN_AI_DOMINION_UI_APIKEY)." });
   const b = await readJsonBody(req);
   const text = b && typeof b.text === "string" ? b.text.trim().slice(0, 4000) : "";
   if (!text) return json(400, { error: "No text to speak." });
-  const payload = JSON.stringify({ model: VOICE_TTS_MODEL, voice: (b.voice || VOICE_TTS_VOICE), input: text, response_format: "mp3" });
+  // Per-request voice/instructions win over the box defaults, so the Settings picker is a real
+  // control and not a suggestion. Unknown voice names fall back rather than 400 the caller.
+  const voice = VOICE_TTS_VOICES.includes(String(b.voice || "")) ? String(b.voice) : VOICE_TTS_VOICE;
+  const instructions = (typeof b.instructions === "string" && b.instructions.trim())
+    ? b.instructions.trim().slice(0, 800) : VOICE_TTS_INSTRUCTIONS;
+  const payload = JSON.stringify({ model: VOICE_TTS_MODEL, voice, input: text, response_format: "mp3", instructions });
   const rq = https.request(
     { method: "POST", hostname: "api.openai.com", path: "/v1/audio/speech",
       headers: { authorization: "Bearer " + OPENAI_KEY, "content-type": "application/json", "content-length": Buffer.byteLength(payload) }, timeout: 60000 },
@@ -3324,6 +3351,7 @@ const server = http.createServer(async (req, res) => {
     if (path.startsWith("/api/images/batch/") && req.method === "GET") return imagesFeature.handleBatchGet(req, res, u);
     if (path === "/api/voice/transcribe" && req.method === "POST") return handleVoiceTranscribe(req, res);
     if (path === "/api/voice/tts" && req.method === "POST") return handleVoiceTts(req, res);
+    if (path === "/api/voice/config" && req.method === "GET") return handleVoiceConfig(req, res);
 
     // True forget (Fred 2026-07-12): deleting a chat on the phone must erase the SERVER's copy too —
     // the chatlog transcript AND any episodic memory distilled from it (source.referenceId = chatId).
