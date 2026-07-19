@@ -198,6 +198,19 @@ function renderMsg(m, i, isLastAi) {
   const turn = document.createElement("div"); turn.className = "turn";
   const row = document.createElement("div"); row.className = "msg " + (m.role === "user" ? "me" : "ai");
   const b = document.createElement("div"); b.className = "bubble"; b.textContent = m.content; row.appendChild(b); turn.appendChild(row);
+  // Per-answer speak buttons (Fred, 2026-07-18): top-right and bottom-right of every AI bubble,
+  // for speaking THIS answer on demand. The composer's big toggle is the auto-speak master.
+  if (m.role === "assistant" && m.content) {
+    b.classList.add("has-speak");
+    const mkSpk = (pos) => {
+      const sp = document.createElement("button");
+      sp.className = "bspeak " + pos; sp.type = "button"; sp.title = "Speak this answer";
+      sp.innerHTML = "&#128266;";
+      sp.onclick = (e) => { e.stopPropagation(); speakAnswer(m.content); };
+      return sp;
+    };
+    b.append(mkSpk("bspeak-top"), mkSpk("bspeak-bottom"));
+  }
   // Sent attachments render inside the bubble: picture thumbnails (tap to open full size) and
   // file chips. Pruned ones (storage cap) show an honest placeholder instead of vanishing.
   if (m.role === "user" && Array.isArray(m.attachments) && m.attachments.length) {
@@ -1643,8 +1656,10 @@ let rec = null, recChunks = [], recStream = null, ttsAudio = null;
 function paintSpeak() {
   if (!speakBtn) return;
   speakBtn.classList.toggle("speakon", speakOn);
-  speakBtn.innerHTML = speakOn ? "&#128266;" : "&#128264;";
-  speakBtn.title = "Speak answers aloud (" + (speakOn ? "on" : "off") + ")";
+  speakBtn.innerHTML = speakOn
+    ? '<span class="spk-ic">&#128266;</span><span class="spk-state">ON</span>'
+    : '<span class="spk-ic">&#128264;</span>';
+  speakBtn.title = "Auto-speak every answer (" + (speakOn ? "on" : "off") + ")";
 }
 if (speakBtn) { paintSpeak(); speakBtn.addEventListener("click", () => {
   speakOn = !speakOn; try { localStorage.setItem(LS_SPEAK, speakOn ? "1" : "0"); } catch {}

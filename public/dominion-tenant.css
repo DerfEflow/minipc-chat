@@ -375,3 +375,28 @@
 }
 /* Docked pill never needs the rail-open fade (the drawer overlays the composer naturally). */
 .rail-open .dt-guide-pill.dt-guide-docked { opacity: 1; pointer-events: auto; }
+
+/* Voice mode, found (Fred, 2026-07-18): the speaker toggle was display:none on phones — spoken
+   answers were invisible exactly where they matter. Dock it bottom-left with the paperclip. */
+@media (max-width: 620px) {
+  #speak { display: flex; grid-column: 1; grid-row: 2; justify-self: end; margin-right: 8px; }
+}
+
+/* Per-answer speak buttons (bubble corners) + the auto-speak master toggle state. */
+.msg.ai .bubble.has-speak { position: relative; padding-right: 46px; }
+.bspeak {
+  position: absolute; right: 8px; width: 30px; height: 30px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 8px; cursor: pointer; font-size: 14px; opacity: 0.7;
+  background: rgba(10, 30, 16, 0.55); border: 1px solid rgba(102, 255, 140, 0.35); color: #b8ffcf;
+}
+.bspeak:hover { opacity: 1; box-shadow: 0 0 10px rgba(102, 255, 140, 0.4); }
+.bspeak-top { top: 8px; }
+.bspeak-bottom { bottom: 8px; }
+#speak { display: flex; align-items: center; justify-content: center; gap: 2px; }
+#speak.speakon {
+  background: linear-gradient(160deg, rgba(60, 255, 120, 0.2), rgba(8, 28, 14, 0.75)) !important;
+  border-color: rgba(102, 255, 140, 0.7) !important; color: #b8ffcf;
+  box-shadow: 0 0 14px rgba(80, 255, 130, 0.5), inset 0 0 8px rgba(80, 255, 130, 0.15);
+}
+#speak .spk-state { font-size: 9px; font-weight: 800; letter-spacing: 0.05em; color: #66ff8c; }

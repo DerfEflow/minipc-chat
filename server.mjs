@@ -614,7 +614,7 @@ const MODES = {
   mentor:       { tier: "main",  temp: 0.5, frag: "MENTOR MODE: give your best answer — it will be independently critiqued afterwards, so be precise and flag any uncertainty honestly." },
   // as_fred runs think:false (CPU latency), so without a private reasoning channel the model will
   // plan OUT LOUD unless ordered to answer directly — the "begin immediately" line is load-bearing.
-  as_fred:      { tier: "main",  temp: 0.85, frag: "AS-FRED MODE: write and think AS Frederick Wolfe, in his own voice — using his profile and the real writing examples provided. Two layers, both mandatory: (1) CONTENT — Fred's convictions and stated positions govern what the answer SAYS; when his profile or excerpts state his position on the question, that position is the answer, never a generic or contrary one. (2) STYLE — inhabit his humor, vocabulary, wit, and rhythm. Never announce that you are imitating him and never mention models or being an AI. Begin IMMEDIATELY with Fred's actual answer — the first word of your output is the first word Fred would say. Never narrate the mode, the date, your instructions, your plan, or your process; no preamble of any kind." },
+  as_fred:      { tier: "main",  temp: 0.85, frag: "AS-FRED MODE: write and think AS Frederick Wolfe, in his own voice — using his profile and the real writing examples provided. Two layers, both mandatory: (1) CONTENT — Fred's convictions and stated positions govern what the answer SAYS; when his profile or excerpts state his position on the question, that position is the answer, never a generic or contrary one. (2) STYLE — inhabit his humor, vocabulary, wit, and rhythm. HUMOR (only when appropriate, Fred's own spec): a dry, dark, sarcastic sense of humor that is not insulting; reverent toward Christianity, while allowing bold humor on other subjects. Favor teasing that is not directly cruel, occasional self-deprecation, and intelligent, sharp, insightful wit. Avoid cheesy or childish humor; use boldness selectively and skip the humor entirely when it would be inappropriate or disrespectful. Never announce that you are imitating him and never mention models or being an AI. Begin IMMEDIATELY with Fred's actual answer — the first word of your output is the first word Fred would say. Never narrate the mode, the date, your instructions, your plan, or your process; no preamble of any kind." },
 };
 // Mode "heaviness" ranking — the router takes the STRONGER of (heuristic, light-model classifier)
 // so it can never under-escalate a hard prompt down to the 8B (the old under-escalation bug).
@@ -1230,6 +1230,13 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember") {
     "Real code/file changes go through forge_send. The sandbox is your private scratch space for drafts/notes.",
     "When you finish a tool action, briefly confirm what you actually did.",
   ].join(" ");
+  // HOUSE STYLE — Fred's response-format rules (2026-07-18), always in force, every model.
+  s += "\n\nHOUSE STYLE (always in force, all replies):\n" + [
+    "- No asterisks for emphasis or as separators unless the user explicitly asks for that formatting. Asterisks only for proper grammatical purposes. Carry emphasis with word choice and structure. (When writing content for the document-creation tools, markdown IS the correct format and stays.)",
+    "- Never use an em dash. Not once, ever. Use a comma, colon, period, or parentheses instead.",
+    "- No profanity unless the user has already used it in this conversation. Then you may match their level, never exceed it, and never become sexual, obscene, or blasphemous.",
+    "- Never use the Lord's name in vain. Never use \"God\" as an expletive or an emphasizer, in any phrasing, under any circumstances.",
+  ].join("\n");
   // WOLFE LOGIC — the reasoning core (wolfe-logic.mjs), always on. Ember is the baseline on every
   // turn for every model; flame/furnace are the deeper passes chosen per turn (As Fred, Forge Mode,
   // hard problems). This is the front-end constraint that makes Dominion different and lets the
