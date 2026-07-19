@@ -29,7 +29,7 @@ Process follows the highest tier a move touches, per move.
 
 | # | Assumption | Tag | Verification plan |
 | --- | --- | --- | --- |
-| A1 | Catalog prices for gpt-5.6-terra are current enough to bill against | `[assumed]` | Weekly catalogaudit already runs; confirm terra in latest verdict before Phase 3 ships |
+| A1 | Catalog prices for gpt-5.6-terra are current enough to bill against | `[assumed]` | Terra confirmed still present after the parallel worker's catalog edits (models.catalog.mjs:90, $2.50/$15). Weekly catalogaudit remains the standing check |
 | A2 | A third reveal can transform the same four shell elements without fighting the existing two | `[assumed]` | Build Phase 1, verify in real Chrome over CDP (preview pane cannot judge motion) |
 | A3 | Web Push works through Cloudflare Access for an authenticated PWA | `[assumed]` | Live probe on Fred's Pixel in Phase 4 before any guest exposure |
 | A4 | Per-user Forge nodes stay connected long enough for multi-move builds | `[assumed]` | Phase 4.9 node-loss handling makes this survivable either way |
@@ -70,7 +70,7 @@ Process follows the highest tier a move touches, per move.
 | --- | --- | --- | --- |
 | L-1 | VAPID keys not yet generated or stored in wallet + Railway env | Blocks Phase 4.6 push | OPEN, due Phase 4 |
 | L-2 | Billing races (autoRecharge mutex, addSponsoredSpend atomicity) predate this build | Guest parallel builds can double-charge | OPEN, due Phase 8.2 before guest flip |
-| L-3 | Merge-to-main coordination with concurrent sessions | Integration risk | OPEN, due at merge |
+| L-3 | Merge-to-main coordination | Integration risk | HALF CLOSED: main merged INTO this branch at b30fcb9 (2 conflicts, both kept-both-sides; catalog/route/carve-out integration points re-verified after). The final merge back to main is still pending |
 | L-4 | Real-device push verification on iOS (home-screen install requirement) | Guest UX honesty | OPEN, due Phase 4.8 |
 | L-5 | Toggle state was per-device only | Low | CLOSED in Phase 2: prefs live in the per-account IDE store, `POST /ide/prefs` on every flip, and a device with no stored opinion adopts the account's. A device that HAS an opinion keeps it, so the phone in your hand outranks a decision some other machine made |
 | L-6 | Phase 1 motion never visually confirmed by me | Aesthetic risk only | OPEN, needs Fred's eyes. The preview pane times out on screenshot with the animated chassis (known environment breakage), so geometry was verified numerically instead: shell settles at -112vh, works at 0, z-index 70, 0.45s shared curve |
@@ -95,7 +95,7 @@ rather than being guessed silently. Done is not declared with OPEN high-impact i
 | 0 Groundwork | DONE | Worktree `minipc-chat-ide` on `feat/ide-mode` from e7aae5d; 6 rulings locked; FITS pack open; `ide.mjs` gate + `IDE_MODE` env + `/account.ideMode`; ide_test 7/7; all 28 existing suites green; verified live on devboot (owner true / guest false) |
 | 1 Toggle + reveal | DONE | Drawer toggle + `#ide-root` third reveal, stage-lift motion (shell -112vh out the top, works rise from 104vh), mutual exclusion wired both ways, Escape, composer trigger, SW v61 + `?v=1` trio. Verified live in-browser: lift geometry numerically correct, server authoritative over localStorage, guest walled, zero console errors, 29/29 suites |
 | 2 Workspace + job spine | DONE | `idejobs.mjs` disk-journalled durable spine (replay, reattach, restart recovery, per-user multi-job registry) + `ide.mjs` workspace registry/prefs/gate stack + `/ide/*` routes + `isProtectedPath` carve-out on roots. 31/31 suites. Verified live: a job COMPLETED with zero clients attached then replayed 8 events; a container killed mid-job came back sealed `interrupted`, never "running" |
-| 3 Router + Assignment Board | not started | |
+| 3 Router + Assignment Board | DONE | `iderouter.mjs` deterministic table (extension + folder + keyword, confidence bands, cheap tiebreaker only when ambiguous, degrades to the free answer on failure) + Assignment Board UI + live route preview + `POST /ide/route/preview`. Verified live: design work reaches gpt-5.6-terra, images reach Dominion Forge, grunt work reaches the cheap tier, each with its reason |
 | 4 Background persistence + callback | not started | |
 | 5 Build engine | not started | |
 | 6 Two lenses | not started | |
