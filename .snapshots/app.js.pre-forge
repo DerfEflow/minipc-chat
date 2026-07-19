@@ -1,0 +1,1727 @@
+// Dominion AI — chat client. Server-side agent loop at /chat (routes models + runs tools).
+// Multi-conversation history, per-message actions, persona/temperature, and a Mode selector that
+// drives the Phase-1 router (Auto = the server's light model classifies + picks 8B vs 30B).
+const $ = (id) => document.getElementById(id);
+const wrap = $("wrap"), main = $("main"), input = $("input"), sendBtn = $("send"),
+      modelSel = $("model"), modeSel = $("mode"), privacyModeSel = $("privacy-mode"), cloudBadge = $("cloudbadge"), empty = $("empty"),
+      sidebar = $("sidebar"), overlay = $("overlay"), menuBtn = $("menu"), newBtn = $("newchat"), chatlist = $("chatlist"),
+      settingsBtn = $("settings"), smodal = $("smodal"), sclose = $("sclose"), ssave = $("ssave"),
+      personaSel = $("persona-sel"), personaCustom = $("persona-custom"), tempInput = $("temp"), tempVal = $("temp-val"),
+      memBtn = $("memory"), mmodal = $("mmodal"), mclose = $("mclose"), madd = $("madd"), msave = $("msave"),
+      mlist = $("mlist"), mstats = $("mstats"), mfilterStatus = $("mfilter-status"),
+      toolsBtn = $("tools"), tmodal = $("tmodal"), tclose = $("tclose"), tlist = $("tlist"), tstats = $("tstats"),
+      confirmToolsBox = $("confirm-tools"),
+      artifactsBtn = $("artifacts"), amodal = $("amodal"), aclose = $("aclose"), alist = $("alist"), adetail = $("adetail"), astats = $("astats"), ahead = $("ahead"),
+      improveBtn = $("improve"), imodal = $("imodal"), iclose = $("iclose"), ilist = $("ilist"), istats = $("istats"), iadd = $("iadd"), iaddbtn = $("iaddbtn"),
+      chatSearch = $("chatsearch"), privacySel = $("privacy-sel"),
+      personaBtn = $("persona"), pmodal = $("pmodal"), pclose = $("pclose"), pstats = $("pstats"),
+      padd = $("padd"), pkind = $("pkind"), ptitle = $("ptitle"), paddbtn = $("paddbtn"),
+      purl = $("purl"), pscrape = $("pscrape"), pscan = $("pscan"), pdistill = $("pdistill"),
+      pprofile = $("pprofile"), pfilterKind = $("pfilter-kind"), pmsg = $("pmsg"), plist = $("plist"),
+      costChip = $("cost-chip"),
+      attachBtn = $("attach"), attachFile = $("attach-file"), attachStrip = $("attach-strip"), attachWarn = $("attach-warn");
+
+const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "minipc-chat.model.v1",
+      LS_MODE = "dominion.mode.v1", LS_SET = "dominion.settings.v1", OLD_MSGS = "minipc-chat.messages.v1",
+      LS_PMODE = "dominion.privacy-mode.v1";
+
+// ---- Phase 2 privacy modes (Fred's hard allow-list; the SERVER enforces, this mirrors it) ----
+// normal = all providers + local · trusted = OpenAI/Anthropic direct + local · private = local only.
+let privacyCfg = { trustedProviders: ["openai", "anthropic"] };   // filled from /api/models .privacy
+let availCache = {};                                              // provider -> has-key, from /api/models
+const providerAllowedClient = (mode, provider) => {
+  if (provider === "local" || !provider) return true;
+  if (mode === "normal") return true;
+  if (mode === "private") return false;
+  return privacyCfg.trustedProviders.includes(provider);   // trusted
+};
+// Disable (never remove) model options the current privacy mode disallows, with an honest suffix.
+// We do NOT auto-switch the selection — Fred's pick is honored or refused, never silently swapped.
+function applyPrivacyFilter() {
+  if (!modelSel) return;
+  const mode = privacyModeSel ? privacyModeSel.value : "normal";
+  for (const og of modelSel.querySelectorAll("optgroup")) {
+    const isLocal = og.id === "model-local-group";
+    for (const o of og.querySelectorAll("option")) {
+      const provider = isLocal || o.value === "local" ? "local" : (o.dataset.provider || "openrouter");
+      const modeOk = providerAllowedClient(mode, provider);
+      // strip any prior mode suffix, then re-annotate
+      o.textContent = o.textContent.replace(/ — (blocked in .*|key needed)$/,"");
+      if (!modeOk) { o.disabled = true; o.textContent += " — blocked in " + mode; }
+      else if (o.dataset.noKey === "1") { o.disabled = true; o.textContent += " — key needed"; }
+      else o.disabled = false;
+    }
+  }
+  if (cloudBadge) updateCloudBadge();
+  if (typeof renderModelPanel === "function") renderModelPanel();   // reflect mode changes in the panel
+}
+
+const PRESETS = {
+  default: "",
+  concise: "Be maximally concise — short, direct answers, minimal preamble.",
+  brainstorm: "Act as a sharp brainstorming partner: offer ideas, angles, and honest pushback; think briefly out loud.",
+  code: "You are a precise coding assistant: give exact, runnable specifics; for real file changes use forge_send with complete instructions.",
+};
+
+let chats = [], curId = null, busy = false, aborter = null, chatQuery = "";
+let settings = { persona: "default", personaCustom: "", temperature: 0.7, confirmTools: false, privacy: "redacted_external" };
+let pendingAtt = [];   // attachments staged in the composer for the NEXT send
+
+// Background video: muted+playsinline autoplay is usually allowed, but Android suppresses it under
+// battery saver / when the PWA resumes from background — kick it back to life on those signals.
+(() => {
+  const v = document.getElementById("bgvideo"); if (!v) return;
+  // The footage has a slow camera pan baked in; half-speed playback tames the drift without
+  // the stutter of near-freeze rates. (A locked-camera cut removes the pan entirely.)
+  const RATE = 0.5;
+  v.defaultPlaybackRate = RATE; v.playbackRate = RATE;
+  const kick = () => { v.playbackRate = RATE; if (v.paused) v.play().catch(() => {}); };
+  v.addEventListener("ratechange", () => { if (v.playbackRate !== RATE) v.playbackRate = RATE; });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) kick(); });
+  window.addEventListener("pageshow", kick);
+  window.addEventListener("pointerdown", kick, { once: true });
+  kick();
+})();
+
+// ---------- persistence ----------
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "c" + Date.now() + Math.random().toString(36).slice(2));
+// Attachment bytes are the one thing that can blow the ~5MB localStorage quota: full pixels are
+// kept for only the ATT_KEEP_CHATS most recently updated chats; older chats keep honest name-only
+// placeholders. If a save STILL overflows, one retry strips all attachment data rather than
+// silently losing the whole history write.
+const ATT_KEEP_CHATS = 12;
+function serializeChats(stripAll) {
+  const byRecency = [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const keep = new Set(byRecency.slice(0, ATT_KEEP_CHATS).map((c) => c.id));
+  return JSON.stringify(chats.slice(0, 100).map((c) => {
+    if (!c.messages.some((m) => m.attachments && m.attachments.length)) return c;
+    const full = keep.has(c.id) && !stripAll;
+    return { ...c, messages: c.messages.map((m) => {
+      if (!m.attachments || !m.attachments.length) return m;
+      if (full) return m;
+      return { ...m, attachments: m.attachments.map((a) => a.kind === "image" && a.dataUrl ? { kind: "image_ref", name: a.name } : a.kind === "text" ? { kind: "text", name: a.name, text: "" } : a) };
+    }) };
+  }));
+}
+const save = () => {
+  try { localStorage.setItem(LS_CHATS, serializeChats(false)); localStorage.setItem(LS_CUR, curId || ""); }
+  catch { try { localStorage.setItem(LS_CHATS, serializeChats(true)); localStorage.setItem(LS_CUR, curId || ""); } catch {} }
+};
+const saveSettings = () => { try { localStorage.setItem(LS_SET, JSON.stringify(settings)); } catch {} };
+function load() {
+  try { const r = localStorage.getItem(LS_CHATS); const a = r && JSON.parse(r); if (Array.isArray(a)) chats = a; } catch {}
+  if (!chats.length) { try { const old = JSON.parse(localStorage.getItem(OLD_MSGS) || "null"); if (Array.isArray(old) && old.length) chats = [{ id: uid(), title: titleFrom(old), messages: old, updatedAt: Date.now() }]; } catch {} }
+  curId = localStorage.getItem(LS_CUR) || (chats[0] && chats[0].id) || null;
+  if (!curId) newChat();
+  try { const s = JSON.parse(localStorage.getItem(LS_SET) || "null"); if (s && typeof s === "object") settings = { ...settings, ...s }; } catch {}
+  try { const m = localStorage.getItem(LS_MODE); if (m && modeSel) modeSel.value = m; } catch {}
+  try { const p = localStorage.getItem(LS_PMODE); if (p && privacyModeSel) privacyModeSel.value = p; } catch {}
+}
+const cur = () => chats.find((c) => c.id === curId);
+const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); const base = u ? (u.content || (Array.isArray(u.attachments) && u.attachments[0] && ("📎 " + u.attachments[0].name)) || "") : "New chat"; return String(base).replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
+const resolvePersona = () => settings.persona === "custom" ? (settings.personaCustom || "") : (PRESETS[settings.persona] || "");
+const forcedModel = () => { const v = modelSel ? modelSel.value : "local"; return (v && v !== "auto" && v !== "local") ? v : ""; };
+
+// ---------- chats ----------
+// Leaving a substantial chat triggers a server-side episodic summary (fire-and-forget; the server
+// dedupes and skips chats it already summarized).
+function summarizeLeft(id) {
+  const c = chats.find((x) => x.id === id);
+  if (!c || c.messages.length < 4) return;
+  fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
+}
+function newChat() { if (busy) return; const prev = curId; const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); }
+// Fresh-start ignition: a quick green scan-sweep over the chat surface as the rail closes.
+function igniteChatSurface() {
+  const surf = document.getElementById("neural-glass") || document.body;
+  surf.classList.remove("nc-ignite"); void surf.offsetWidth;   // retrigger
+  surf.classList.add("nc-ignite");
+  setTimeout(() => surf.classList.remove("nc-ignite"), 1000);
+}
+function switchChat(id) { if (busy) return; const prev = curId; curId = id; save(); renderAll(); scroll(true); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); }
+function deleteChat(id) {
+  // True forget: also erase the server's transcript copy + any episodic memory distilled from this
+  // chat, so cross-chat retrieval can never resurrect it (fire-and-forget; nothing breaks offline).
+  fetch("/chatlog/forget", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
+  chats = chats.filter((c) => c.id !== id); if (curId === id) curId = (chats[0] && chats[0].id) || null; if (!curId) { newChat(); return; } save(); renderAll();
+}
+function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = prompt("Rename chat", c.title); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); } }
+
+// ---------- sidebar ----------
+const openSidebar = () => { sidebar.classList.add("open"); overlay.classList.add("show"); document.body.classList.add("rail-open"); };
+const closeSidebar = () => { sidebar.classList.remove("open"); overlay.classList.remove("show"); document.body.classList.remove("rail-open"); };
+const MODE_LABEL = { fast: "Fast", normal: "Normal", deep_think: "Deep", long_context: "Long", draft: "Draft", tool: "Tool", mentor: "Mentor" };
+// Friendly tier labels — raw LOCAL model names never surface anywhere in the UI (Fred's lock).
+// Cloud (OpenRouter) models DO surface by name on purpose: Fred chose one and is spending on it.
+const MODEL_TIER_LABEL = {
+  "qwen3:8b": "Fast", "qwen3:30b-a3b": "Deep", local: "Local Qwen",
+  "anthropic/claude-haiku-4.5": "Claude Haiku 4.5", "openai/gpt-4o": "GPT-4o",
+  "google/gemini-2.5-flash": "Gemini 2.5 Flash", "meta-llama/llama-4-maverick": "Llama 4 Maverick",
+  "meta-llama/llama-3.1-70b-instruct": "Llama 3.1 70B", "z-ai/glm-5.2": "GLM 5.2",
+  "moonshotai/kimi-k2.6": "Kimi K2.6", "qwen/qwen3-235b-a22b-2507": "Qwen3 235B",
+};
+// A model id is "cloud" when it carries a provider prefix (contains "/"); local ids never do.
+const isCloudModel = (v) => typeof v === "string" && v.includes("/");
+// Toggle the header "via OpenRouter" spend indicator to match the current selection.
+function updateCloudBadge() { if (cloudBadge) cloudBadge.hidden = !isCloudModel(modelSel ? modelSel.value : ""); }
+const relTime = (ts) => { const d = Date.now() - (ts || 0); const m = Math.round(d / 60000); if (m < 60) return m + "m"; const h = Math.round(m / 60); if (h < 24) return h + "h"; return Math.round(h / 24) + "d"; };
+function renderSidebar() {
+  chatlist.innerHTML = "";
+  const q = chatQuery.trim().toLowerCase();
+  for (const c of [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) {
+    if (q && !(c.title || "").toLowerCase().includes(q) && !c.messages.some((m) => (m.content || "").toLowerCase().includes(q))) continue;
+    const row = document.createElement("div"); row.className = "ci" + (c.id === curId ? " active" : "");
+    const ttl = document.createElement("div"); ttl.className = "ttl"; ttl.textContent = c.title || "New chat"; ttl.onclick = () => switchChat(c.id);
+    const meta = document.createElement("span"); meta.className = "meta";
+    meta.textContent = (c.lastMode && MODE_LABEL[c.lastMode] ? MODE_LABEL[c.lastMode] + " · " : "") + (c.updatedAt ? relTime(c.updatedAt) : "");
+    const ren = document.createElement("span"); ren.className = "x"; ren.textContent = "✎"; ren.title = "Rename"; ren.onclick = (e) => { e.stopPropagation(); renameChat(c.id); };
+    const del = document.createElement("span"); del.className = "x"; del.textContent = "×"; del.title = "Delete"; del.onclick = (e) => { e.stopPropagation(); if (confirm("Delete this chat?")) deleteChat(c.id); };
+    row.append(ttl, meta, ren, del); chatlist.appendChild(row);
+  }
+  if (!chatlist.children.length && q) { const n = document.createElement("div"); n.className = "none"; n.style.cssText = "color:var(--muted);font-size:13px;text-align:center;padding:14px"; n.textContent = "No chats match."; chatlist.appendChild(n); }
+}
+
+// ---------- rendering ----------
+const stripThink = (t) => t.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<think>[\s\S]*$/, "").trim();
+// Follow the stream only while the reader is AT the bottom. The old unconditional snap fought any
+// upward scroll during generation (the "shaking"). Scrolling up hands control to the user; coming
+// back to the bottom re-engages the follow; scroll(true) re-engages explicitly (send / chat switch).
+let followStream = true;
+const nearBottom = () => main.scrollHeight - main.scrollTop - main.clientHeight < 140;
+main.addEventListener("scroll", () => { followStream = nearBottom(); }, { passive: true });
+const scroll = (force) => { if (force) followStream = true; if (followStream) main.scrollTop = main.scrollHeight; };
+function mkAct(label, fn, title) { const b = document.createElement("button"); b.className = "act"; b.textContent = label; if (title) b.title = title; b.onclick = fn; return b; }
+// The user prompt that preceded message i (feeds hallucination check / save lesson / convert-to-eval).
+function precedingUser(c, i) { for (let k = i - 1; k >= 0; k--) if (c.messages[k].role === "user") return c.messages[k].content; return ""; }
+async function copyText(t) { try { await navigator.clipboard.writeText(t); } catch { const a = document.createElement("textarea"); a.value = t; document.body.appendChild(a); a.select(); try { document.execCommand("copy"); } catch {} a.remove(); } }
+function renderMsg(m, i, isLastAi) {
+  const turn = document.createElement("div"); turn.className = "turn";
+  const row = document.createElement("div"); row.className = "msg " + (m.role === "user" ? "me" : "ai");
+  const b = document.createElement("div"); b.className = "bubble"; b.textContent = m.content; row.appendChild(b); turn.appendChild(row);
+  // Per-answer speak buttons (Fred, 2026-07-18): top-right and bottom-right of every AI bubble,
+  // for speaking THIS answer on demand. The composer's big toggle is the auto-speak master.
+  if (m.role === "assistant" && m.content) {
+    b.classList.add("has-speak");
+    const mkSpk = (pos) => {
+      const sp = document.createElement("button");
+      sp.className = "bspeak " + pos; sp.type = "button"; sp.title = "Speak this answer";
+      sp.innerHTML = "&#128266;";
+      sp.onclick = (e) => { e.stopPropagation(); speakAnswer(m.content); };
+      return sp;
+    };
+    b.append(mkSpk("bspeak-top"), mkSpk("bspeak-bottom"));
+  }
+  // Sent attachments render inside the bubble: picture thumbnails (tap to open full size) and
+  // file chips. Pruned ones (storage cap) show an honest placeholder instead of vanishing.
+  if (m.role === "user" && Array.isArray(m.attachments) && m.attachments.length) {
+    const gal = document.createElement("div"); gal.className = "att-gallery";
+    for (const a of m.attachments) {
+      if (a.kind === "image" && a.dataUrl) {
+        const img = document.createElement("img"); img.src = a.dataUrl; img.alt = a.name || "picture"; img.title = a.name || "";
+        img.onclick = () => openImageFull(a.dataUrl);
+        gal.appendChild(img);
+      } else {
+        const chip = document.createElement("span"); chip.className = "att-file";
+        chip.textContent = a.kind === "text" ? "📄 " + (a.name || "file") : "🖼 " + (a.name || "picture") + " (no longer stored on this device)";
+        gal.appendChild(chip);
+      }
+    }
+    b.prepend(gal);
+  }
+  // Persistent "context used" line (spec: show context/tool usage per message) — survives reloads.
+  // F4: the 🧠/📄/💬 chip expands on tap to list WHICH items were loaded (when the meta carries
+  // them); the 🔧 chip opens the tool panel filtered to this message's runs. ⏸ marks interrupted.
+  if (m.role === "assistant" && m.meta && (m.meta.memory || m.meta.artifacts || m.meta.chats || m.meta.tools || m.meta.mode || m.meta.interrupted || m.meta.outputTokens || m.meta.costUsd)) {
+    const mm = document.createElement("div"); mm.className = "msgmeta";
+    const sep = () => mm.appendChild(document.createTextNode(" · "));
+    const bit = (text, title, fn) => { const s = document.createElement("span"); s.textContent = text; if (title) s.title = title; if (fn) { s.style.cursor = "pointer"; s.onclick = fn; } if (mm.childNodes.length) sep(); mm.appendChild(s); return s; };
+    if (m.meta.mode && MODE_LABEL[m.meta.mode]) bit(MODE_LABEL[m.meta.mode]);
+    if (m.meta.interrupted) { const b = bit("⏸ interrupted", "You stopped this answer before it finished"); b.style.color = "#e8b07c"; }
+    const ctxBits = [];
+    if (m.meta.memory) ctxBits.push("🧠 " + m.meta.memory);
+    if (m.meta.artifacts) ctxBits.push("📄 " + m.meta.artifacts);
+    if (m.meta.chats) ctxBits.push("💬 " + m.meta.chats);
+    if (ctxBits.length) {
+      const ci = m.meta.contextItems;
+      bit(ctxBits.join(" · "), ci ? "Tap to see which items were loaded" : "Context loaded for this answer (per-item detail unavailable for this message)", ci ? () => toggleCtxDetail(turn, mm, ci) : null);
+    }
+    if (m.meta.tools) bit("🔧 " + m.meta.tools, "Tap to show this message's tool log", () => openTools({ runIds: m.meta.runIds, chatId: curId, label: "this message" }));
+    // Per-exchange usage total (Fred, 2026-07-18): the running cost counter is gone from the
+    // composer; the honest numbers land HERE, once, after the answer finishes.
+    if (m.meta.outputTokens || m.meta.costUsd) {
+      const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(n));
+      const toks = [m.meta.inputTokens ? fmt(m.meta.inputTokens) + " in" : null, m.meta.outputTokens ? fmt(m.meta.outputTokens) + " out" : null].filter(Boolean).join(" / ");
+      const cost = typeof m.meta.costUsd === "number" && m.meta.costUsd > 0 ? "$" + (m.meta.costUsd < 0.01 ? m.meta.costUsd.toFixed(4) : m.meta.costUsd.toFixed(2)) : "";
+      const label = ["⚡ " + (toks || "tokens n/a"), cost].filter(Boolean).join(" · ");
+      bit(label, "Tokens and cost for this exchange");
+    }
+    turn.appendChild(mm);
+  }
+  const acts = document.createElement("div"); acts.className = "acts" + (m.role === "user" ? " me" : "");
+  if (m.role === "user") { acts.append(mkAct("Edit", () => editUser(i)), mkAct("Copy", () => copyText(m.content))); }
+  else {
+    acts.appendChild(mkAct("Copy", () => copyText(m.content)));
+    acts.appendChild(mkAct("Save", () => saveAsArtifact(m.content), "Save as artifact"));
+    acts.appendChild(mkAct("Critique", () => critiqueMessage(i), "Full mentor critique"));
+    // F1 (audit items 23-25): distinct per-message spec controls, compact glyphs to fit 375px.
+    acts.appendChild(mkAct("🔎", () => critiqueMessage(i, "hallucination_check"), "Hallucination check"));
+    acts.appendChild(mkAct("💡", () => saveLesson(i), "Save lesson"));
+    acts.appendChild(mkAct("🧪", () => convertToEval(i), "Convert to eval"));
+    if (isLastAi && !busy) { acts.appendChild(mkAct("Continue", () => continueLast())); acts.appendChild(mkAct("Regenerate", () => regenerate())); }
+  }
+  turn.appendChild(acts); wrap.appendChild(turn);
+}
+// F4: expandable context detail — lists the actual memory/artifact/chat items the server loaded.
+function toggleCtxDetail(turn, anchor, ci) {
+  const old = turn.querySelector(".ctxdetail"); if (old) { old.remove(); return; }
+  const d = document.createElement("div"); d.className = "ctx ctxdetail"; d.style.whiteSpace = "pre-wrap";
+  const lines = [];
+  for (const it of ci.memory || []) lines.push("🧠 " + (it.title || "memory") + (it.label ? "  [" + it.label + "]" : ""));
+  for (const it of ci.artifacts || []) lines.push("📄 " + (it.title || "artifact"));
+  for (const it of ci.chats || []) lines.push("💬 " + (it.title || "past chat"));
+  d.textContent = lines.length ? lines.join("\n") : "(nothing was loaded)";
+  anchor.after(d);
+}
+// F1 (item 24): Save lesson — pick where it lands: failure ledger / eval case / prompt rule.
+async function saveLesson(i) {
+  const c = cur(); if (!c || !c.messages[i]) return;
+  const answer = c.messages[i].content, orig = precedingUser(c, i);
+  const kind = (prompt("Save lesson as — failure, eval, or rule:", "failure") || "").trim().toLowerCase();
+  if (!kind) return;
+  if (kind.startsWith("f")) {
+    const note = prompt("The lesson — what should have happened instead:", ""); if (note == null) return;
+    const r = await aApi("/ledger", { category: "manual", severity: "low", originalRequest: orig.slice(0, 2000), flawedOutput: answer.slice(0, 4000), correctedOutput: note.trim(), detectedBy: "user" });
+    alert(r.item ? "Lesson logged to the failure ledger." : "Ledger: " + (r.error || "failed"));
+  } else if (kind.startsWith("e")) {
+    await convertToEval(i);
+  } else if (kind.startsWith("r")) {
+    const t = prompt("Rule (a compact instruction the assistant should follow):", ""); if (t == null || !t.trim()) return;
+    const r = await aApi("/rules", { content: t.trim(), scope: "global", status: "candidate" });
+    alert(r.item ? "Saved as a candidate rule — test/activate it in Mentor & Improvement." : "Rule: " + (r.error || "failed"));
+  } else alert("Unknown kind — use failure, eval, or rule.");
+}
+// F1 (item 25): Convert to eval — the preceding user prompt becomes the eval input.
+async function convertToEval(i) {
+  const c = cur(); if (!c || !c.messages[i]) return;
+  const orig = precedingUser(c, i) || c.messages[i].content;
+  const exp = prompt("Expected behavior (what a good answer must do):", ""); if (exp == null) return;
+  const r = await aApi("/evals", { title: orig.replace(/\s+/g, " ").slice(0, 80), input: orig.slice(0, 4000), expectedBehavior: exp, source: "manual" });
+  alert(r.item ? "Eval case saved — run it from Mentor & Improvement." : "Eval: " + (r.error || "failed"));
+}
+function renderAll() {
+  wrap.querySelectorAll(".turn, .err").forEach((n) => n.remove());
+  const c = cur();
+  empty.style.display = (c && c.messages.length) ? "none" : "";
+  if (c) {
+    let lastAi = -1; for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { lastAi = i; break; }
+    c.messages.forEach((m, i) => renderMsg(m, i, i === lastAi));
+  }
+  renderSidebar(); scroll();
+}
+function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px"; }
+function showErr(t) { document.querySelector(".err")?.remove(); const e = document.createElement("div"); e.className = "err"; e.textContent = t; wrap.appendChild(e); scroll(); }
+
+// ---------- models (advanced override; the router picks by default) ----------
+// The LOCAL optgroup is rebuilt from Ollama's live list. The CLOUD groups are rebuilt from the
+// server's live catalog (/api/models) — categorized, priced, with a bench tag (🔧 = can drive your
+// tools, 💬 = chat-only) and dimmed when that provider has no key configured. If either fetch fails
+// the static options in index.html survive as a fallback. Fred's lock: local raw names never surface.
+function fmtCtxShort(n) { if (!n) return ""; return n >= 1e6 ? (n % 1e6 ? (n / 1e6).toFixed(1) : n / 1e6) + "M" : Math.round(n / 1e3) + "K"; }
+function fmtPriceShort(m) { return (!m.inCost && !m.outCost) ? "Free" : `$${m.inCost}/${m.outCost}`; }
+let catalogGroups = [];   // live /api/models groups — the source for the custom model panel
+async function loadModels() {
+  if (!modelSel) return;
+  const saved = localStorage.getItem(LS_MODEL);
+  const localGroup = document.getElementById("model-local-group");
+  try {
+    const r = await fetch("/ollama/v1/models", { cache: "no-store" });
+    if (r.ok && localGroup) {
+      const ids = ((await r.json()).data || []).map((m) => m.id || m.name).filter(Boolean);
+      localGroup.innerHTML = "<option value='local'>Local Qwen (free)</option>";
+      for (const id of ids) {
+        const o = document.createElement("option");
+        o.value = id; o.textContent = (MODEL_TIER_LABEL[id] || id.replace(/:.*$/, "")) + " (local)";
+        localGroup.appendChild(o);
+      }
+    }
+  } catch {}
+  // Cloud groups from the live catalog. Only rebuild if the fetch succeeds — otherwise leave the
+  // static index.html options intact so a picked cloud id never vanishes.
+  try {
+    const r = await fetch("/api/models", { cache: "no-store" });
+    if (r.ok) {
+      const cat = await r.json();
+      const avail = cat.available || {};
+      availCache = avail;
+      if (cat.privacy && Array.isArray(cat.privacy.trustedProviders)) privacyCfg.trustedProviders = cat.privacy.trustedProviders;
+      catalogGroups = cat.groups || [];
+      // Drop every existing cloud optgroup (keep the local one) before rebuilding.
+      Array.from(modelSel.querySelectorAll("optgroup")).forEach((g) => { if (g.id !== "model-local-group") g.remove(); });
+      for (const grp of (cat.groups || [])) {
+        if (!grp.models || !grp.models.length) continue;
+        const og = document.createElement("optgroup");
+        og.label = grp.category;
+        for (const m of grp.models) {
+          const o = document.createElement("option");
+          o.value = m.id;
+          o.dataset.provider = m.provider || "openrouter";
+          const bench = m.toolCapable ? "🔧" : "💬"; // 🔧 doing / 💬 chatting
+          const bits = [m.name, fmtPriceShort(m), fmtCtxShort(m.ctx)].filter(Boolean);
+          o.textContent = `${bench} ${bits.join(" · ")}`;
+          const provOk = m.provider === "openrouter" ? avail.openrouter : m.provider === "openai" ? avail.openai : m.provider === "deepseek" ? avail.deepseek : m.provider === "anthropic" ? avail.anthropic : true;
+          if (provOk === false) o.dataset.noKey = "1";   // key-vs-privacy annotation applied by applyPrivacyFilter
+          og.appendChild(o);
+        }
+        modelSel.appendChild(og);
+      }
+      applyPrivacyFilter();   // annotate/disable per current privacy mode + key availability
+    }
+  } catch {}
+  // Restore the saved pick if it's still a valid, enabled option; else Local.
+  const opt = saved && Array.from(modelSel.options).find((o) => o.value === saved);
+  modelSel.value = (saved === "auto" || !opt || opt.disabled) ? "local" : saved;
+  updateCloudBadge();
+  updateModelTrigger();
+  renderModelPanel();
+}
+
+// ---------- custom Model dropdown (replaces the unreadable native <select> list) ----------
+// The native <select id="model"> stays the state holder; this renders a framed, column-aligned
+// panel from the live catalog and mirrors the same key/privacy disabling the picker already computes.
+const modelTrigger = $("model-trigger"), modelPanel = $("model-panel"), modelCurrent = $("model-current");
+const provLabel = (p) => ({ openrouter: "OpenRouter", openai: "OpenAI", deepseek: "DeepSeek", anthropic: "Anthropic", local: "Local" }[p] || p);
+const findCatalogModel = (id) => { for (const g of catalogGroups) { const m = (g.models || []).find((x) => x.id === id); if (m) return m; } return null; };
+
+function updateModelTrigger() {
+  if (!modelCurrent || !modelSel) return;
+  const v = modelSel.value; let name = "Local Qwen", price = "", local = true;
+  if (v && v !== "local") {
+    const m = findCatalogModel(v);
+    if (m) { name = m.name; price = (!m.inCost && !m.outCost) ? "Free" : fmtPriceShort(m); local = false; }
+    else { const o = Array.from(modelSel.options).find((x) => x.value === v); name = o ? o.textContent.replace(/\s*\(local\)$/, "").replace(/^[🔧💬]\s*/, "") : v; }
+  }
+  modelCurrent.classList.toggle("is-local", local);
+  modelCurrent.innerHTML = escapeHtml(name) + (price ? ` <span class="mc-price">${escapeHtml(price)}</span>` : "");
+}
+
+function modelRowHtml(o, cur, mode) {
+  const disabled = o.noKey || o.blocked, sel = o.id === cur;
+  const cls = ["model-row"]; if (sel) cls.push("is-selected"); if (disabled) cls.push("is-disabled"); if (o.blocked) cls.push("is-blocked");
+  const price = o.free ? `<span class="mr-price is-free">Free</span>` : (o.price ? `<span class="mr-price">${escapeHtml(o.price)}</span>` : "");
+  const note = o.blocked ? `<span class="mr-note">blocked · ${escapeHtml(mode)}</span>` : (o.noKey ? `<span class="mr-note">key needed</span>` : "");
+  return `<div class="${cls.join(" ")}" data-value="${escapeHtml(o.id)}" ${disabled ? 'aria-disabled="true"' : 'role="option"'}${sel ? ' aria-selected="true"' : ""}>
+    <span class="mr-name"><span class="mr-bench">${o.tool ? "🔧" : "💬"}${o.vis ? "👁" : ""}</span><span class="mr-text">${escapeHtml(o.name)}</span></span>
+    <span class="mr-meta">${escapeHtml(o.meta || "")}</span>
+    <span class="mr-tag">${price}${note}</span></div>`;
+}
+
+function renderModelPanel() {
+  if (!modelPanel || !modelSel) return;
+  const mode = privacyModeSel ? privacyModeSel.value : "normal", cur = modelSel.value;
+  let html = `<div class="model-group is-local">Local · free · private</div>`;
+  html += modelRowHtml({ id: "local", name: "Local Qwen", free: true, meta: "on-box · free · private", tool: true }, cur, mode);
+  const lg = document.getElementById("model-local-group");
+  if (lg) for (const o of lg.querySelectorAll("option")) { if (o.value === "local") continue; html += modelRowHtml({ id: o.value, name: o.textContent.replace(/\s*\(local\)$/, ""), free: true, meta: "on-box · local", tool: true }, cur, mode); }
+  for (const g of catalogGroups) {
+    if (!g.models || !g.models.length) continue;
+    html += `<div class="model-group">${escapeHtml(g.category)}</div>`;
+    for (const m of g.models) {
+      const keyed = m.provider === "openrouter" ? availCache.openrouter : m.provider === "openai" ? availCache.openai : m.provider === "deepseek" ? availCache.deepseek : m.provider === "anthropic" ? availCache.anthropic : true;
+      html += modelRowHtml({
+        id: m.id, name: m.name, tool: m.toolCapable, vis: !!m.vision, free: (!m.inCost && !m.outCost), price: fmtPriceShort(m),
+        meta: [(m.params && m.params !== "undisclosed") ? m.params : null, fmtCtxShort(m.ctx)].filter(Boolean).join(" · "),
+        noKey: keyed === false, blocked: !providerAllowedClient(mode, m.provider),
+      }, cur, mode);
+    }
+  }
+  modelPanel.innerHTML = html;
+}
+
+function openModelPanel() { renderModelPanel(); modelPanel.hidden = false; if (modelTrigger) modelTrigger.setAttribute("aria-expanded", "true"); requestAnimationFrame(() => { const s = modelPanel.querySelector(".is-selected"); if (s) s.scrollIntoView({ block: "nearest" }); }); }
+function closeModelPanel() { if (modelPanel) modelPanel.hidden = true; if (modelTrigger) modelTrigger.setAttribute("aria-expanded", "false"); }
+if (modelTrigger) modelTrigger.addEventListener("click", (e) => { e.stopPropagation(); modelPanel.hidden ? openModelPanel() : closeModelPanel(); });
+if (modelPanel) modelPanel.addEventListener("click", (e) => {
+  const row = e.target.closest(".model-row"); if (!row || row.classList.contains("is-disabled")) return;
+  modelSel.value = row.dataset.value; modelSel.dispatchEvent(new Event("change")); closeModelPanel();
+});
+document.addEventListener("click", (e) => { if (modelPanel && !modelPanel.hidden && !e.target.closest("#model-picker")) closeModelPanel(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modelPanel && !modelPanel.hidden) closeModelPanel(); });
+
+// ---------- attachments (pictures + text files) ----------
+// Staged in pendingAtt, sent as an OPTIONAL `attachments` field on the user message; content stays
+// a plain string so history, search, titles, and every server subsystem keep working unchanged.
+// Pictures are downscaled ON THE PHONE (long edge 1568px) so a 12MP camera shot becomes a few
+// hundred KB, and only vision-badged models may receive them (the server enforces the same gate).
+const ATT_MAX_IMAGES = 4, ATT_MAX_TEXTS = 4, ATT_MAX_TEXT_BYTES = 200 * 1024, ATT_IMG_EDGE = 1568;
+const ATT_TEXT_EXT = /\.(txt|md|markdown|csv|json|log|xml|yaml|yml|html|css|js|mjs|ts|py|sql|sh|ps1)$/i;
+const ATT_DOC_EXT = /\.(pdf|docx|xlsx)$/i;
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+// PDFs and Word docs extract to text ON THE DEVICE (lazy-loaded module + vendored pdf.js),
+// then ride the same {kind:"text"} wire as any pasted file — which is why they work with
+// every model, local included, and never add binary parsing to the server.
+let extractMod = null, pdfjsLib = null;
+function attStatus(msg) {   // transient progress line above the composer (OCR can take ~10-20s)
+  if (!attachWarn) return;
+  if (msg) { attachWarn.hidden = false; attachWarn.textContent = msg; }
+  else updateAttachGate();
+}
+// One wire for both OCR callers (scanned-PDF pages and photographed documents).
+async function postOcr(pages, name, source) {
+  const resp = await fetch("/api/ocr", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, pages, source, privacyMode: privacyModeSel ? privacyModeSel.value : "normal" }) });
+  const j = await resp.json().catch(() => ({}));
+  if (!resp.ok || j.error) throw new Error(j.error || "OCR failed");
+  return j;
+}
+// "Read text instead": staged pictures transcribe via /api/ocr and become a text attachment,
+// so a photo of a document reaches models that can't see pixels. Never automatic — the user
+// taps it from the vision-gate warning, because on a vision model real pixels beat OCR.
+let ocrBusy = false;
+async function ocrPendingImages() {
+  const imgs = pendingAtt.filter((a) => a.kind === "image" && a.dataUrl);
+  if (!imgs.length || ocrBusy) return;
+  ocrBusy = true; if (attachBtn) attachBtn.classList.add("busy");
+  attStatus("Reading " + imgs.length + " picture" + (imgs.length === 1 ? "" : "s") + " with OCR… (~" + Math.max(5, imgs.length * 2) + "s)");
+  try {
+    const j = await postOcr(imgs.map((a) => a.dataUrl), imgs[0].name || "photo", "photo");
+    pendingAtt = pendingAtt.filter((a) => !(a.kind === "image" && a.dataUrl));
+    const base = imgs.length === 1 ? (imgs[0].name || "photo").replace(/\.[a-z0-9]+$/i, "") : imgs.length + " pictures";
+    pendingAtt.push({ kind: "text", name: (base + " — transcribed").slice(0, 120), text: j.text });
+    renderAttachStrip(); updateEstimate(); attStatus("");
+  } catch (e) {
+    attStatus("");
+    attachWarn.hidden = false; attachWarn.textContent = "OCR: " + ((e && e.message) || "failed");
+    setTimeout(updateAttachGate, 6000);
+  } finally { ocrBusy = false; if (attachBtn) attachBtn.classList.remove("busy"); }
+}
+async function extractDocFile(f) {
+  if (!("DecompressionStream" in window)) throw new Error("this browser can't unpack documents; paste the text instead");
+  extractMod ||= await import("/attach-extract.mjs?v=2");
+  const buf = await f.arrayBuffer();
+  if (f.type === XLSX_MIME || /\.xlsx$/i.test(f.name || "")) {
+    const r = await extractMod.extractXlsx(buf, { maxChars: ATT_MAX_TEXT_BYTES });
+    return { kind: "text", name: (f.name || "sheet.xlsx").slice(0, 120), text: r.text };
+  }
+  if (f.type === "application/pdf" || /\.pdf$/i.test(f.name || "")) {
+    pdfjsLib ||= await extractMod.loadPdfjsBrowser();
+    try {
+      const r = await extractMod.extractPdf(buf, pdfjsLib, { maxChars: ATT_MAX_TEXT_BYTES });
+      return { kind: "text", name: (f.name || "document.pdf").slice(0, 120), text: r.text };
+    } catch (e) {
+      if (!/scanned or image-only/.test((e && e.message) || "")) throw e;
+      // Scanned PDF: render pages on the device, let the server's vision OCR transcribe them,
+      // and the text comes back to ride the normal wire (works with every model afterward).
+      attStatus("Scanned PDF — rendering pages for OCR…");
+      const rp = await extractMod.renderPdfPages(buf, pdfjsLib, { maxPages: 12 });
+      attStatus("Reading " + rp.rendered + (rp.total > rp.rendered ? " of " + rp.total : "") + " page(s) with OCR… (~" + Math.max(5, rp.rendered * 2) + "s)");
+      let j;
+      try { j = await postOcr(rp.pages, f.name || "document.pdf", "pdf"); }
+      finally { attStatus(""); }
+      let text = j.text;
+      if (rp.total > rp.rendered) text += "\n\n(Only the first " + rp.rendered + " of " + rp.total + " pages were transcribed — the OCR cap.)";
+      return { kind: "text", name: (f.name || "document.pdf").slice(0, 120), text };
+    }
+  }
+  const r = await extractMod.extractDocx(buf, { maxChars: ATT_MAX_TEXT_BYTES });
+  return { kind: "text", name: (f.name || "document.docx").slice(0, 120), text: r.text };
+}
+const attImages = () => pendingAtt.filter((a) => a.kind === "image").length;
+const attTexts = () => pendingAtt.filter((a) => a.kind === "text").length;
+
+// Current model's vision capability: cloud models per the live catalog flag; local has none.
+function modelSeesImages() {
+  const v = modelSel ? modelSel.value : "local";
+  if (!v || v === "local" || !isCloudModel(v)) return false;
+  const m = findCatalogModel(v);
+  return !!(m && m.vision);
+}
+
+async function downscaleImage(file) {
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, ATT_IMG_EDGE / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
+    const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+    cv.getContext("2d").drawImage(bmp, 0, 0, w, h);
+    bmp.close && bmp.close();
+    // Screenshots keep PNG crispness when small enough; photos go JPEG. GIFs lose animation
+    // by design (models see a single frame anyway).
+    let dataUrl = "";
+    if (file.type === "image/png") { const png = cv.toDataURL("image/png"); if (png.length < 1.25 * 1024 * 1024) dataUrl = png; }
+    if (!dataUrl) dataUrl = cv.toDataURL("image/jpeg", 0.85);
+    const mime = dataUrl.slice(5, dataUrl.indexOf(";"));
+    return { kind: "image", name: (file.name || "picture").slice(0, 120), mime, dataUrl };
+  } catch { return null; }
+}
+
+function readTextFile(file) {
+  return new Promise((resolve) => {
+    const r = new FileReader();
+    r.onload = () => { const text = String(r.result || "").slice(0, ATT_MAX_TEXT_BYTES); resolve(text.trim() ? { kind: "text", name: (file.name || "file.txt").slice(0, 120), text } : null); };
+    r.onerror = () => resolve(null);
+    r.readAsText(file.slice(0, ATT_MAX_TEXT_BYTES));
+  });
+}
+
+async function addFiles(fileList) {
+  const files = Array.from(fileList || []); if (!files.length) return;
+  let rejected = [];
+  if (attachBtn) attachBtn.classList.add("busy");   // PDF extraction on a phone can take a couple seconds
+  try {
+    for (const f of files) {
+      if (f.type && f.type.startsWith("image/")) {
+        if (attImages() >= ATT_MAX_IMAGES) { rejected.push(f.name + " (max " + ATT_MAX_IMAGES + " pictures)"); continue; }
+        const a = await downscaleImage(f);
+        if (a) pendingAtt.push(a); else rejected.push((f.name || "picture") + " (couldn't read it)");
+      } else if (f.type === "application/pdf" || f.type === DOCX_MIME || ATT_DOC_EXT.test(f.name || "")) {
+        if (attTexts() >= ATT_MAX_TEXTS) { rejected.push(f.name + " (max " + ATT_MAX_TEXTS + " files)"); continue; }
+        try { pendingAtt.push(await extractDocFile(f)); }
+        catch (e) { rejected.push((f.name || "document") + " (" + ((e && e.message) || "couldn't read it") + ")"); }
+      } else if (/\.(doc|xls)$/i.test(f.name || "")) {
+        rejected.push(f.name + (/\.doc$/i.test(f.name) ? " (old .doc format; save it as .docx first)" : " (old .xls format; save it as .xlsx first)"));
+      } else if ((f.type && f.type.startsWith("text/")) || f.type === "application/json" || ATT_TEXT_EXT.test(f.name || "")) {
+        if (attTexts() >= ATT_MAX_TEXTS) { rejected.push(f.name + " (max " + ATT_MAX_TEXTS + " files)"); continue; }
+        const a = await readTextFile(f);
+        if (a) pendingAtt.push(a); else rejected.push((f.name || "file") + " (empty or unreadable)");
+      } else {
+        rejected.push((f.name || "file") + " (pictures, PDFs, Word .docx, Excel .xlsx, and text files only)");
+      }
+    }
+  } finally { if (attachBtn) attachBtn.classList.remove("busy"); }
+  renderAttachStrip();
+  if (rejected.length) { attachWarn.hidden = false; attachWarn.textContent = "Skipped: " + rejected.join(", "); setTimeout(updateAttachGate, 4000); }
+  updateEstimate();
+}
+
+function removeAttachment(i) { pendingAtt.splice(i, 1); renderAttachStrip(); updateEstimate(); }
+
+function renderAttachStrip() {
+  if (!attachStrip) return;
+  attachStrip.innerHTML = "";
+  attachStrip.hidden = pendingAtt.length === 0;
+  pendingAtt.forEach((a, i) => {
+    const cell = document.createElement("div"); cell.className = "att-cell";
+    if (a.kind === "image") {
+      const img = document.createElement("img"); img.src = a.dataUrl; img.alt = a.name; img.title = a.name;
+      img.onclick = () => openImageFull(a.dataUrl);
+      cell.appendChild(img);
+    } else {
+      const chip = document.createElement("span"); chip.className = "att-file"; chip.textContent = "📄 " + a.name; chip.title = a.name;
+      cell.appendChild(chip);
+    }
+    const x = document.createElement("button"); x.className = "att-x"; x.textContent = "×"; x.title = "Remove"; x.setAttribute("aria-label", "Remove " + a.name);
+    x.onclick = () => removeAttachment(i);
+    cell.appendChild(x);
+    attachStrip.appendChild(cell);
+  });
+  updateAttachGate();
+}
+
+// The honest gate, mirrored from the server: pictures need a vision-badged model. Never swaps the
+// model, never silently drops the picture — it says so, and offers the one real fix that doesn't
+// change the user's model pick: transcribing the picture to text ("Read text instead"). Private
+// mode gets its own honest copy with NO button, because OCR itself is cloud and would be refused.
+function attachSendBlocked() { return attImages() > 0 && !modelSeesImages(); }
+function updateAttachGate() {
+  if (!attachWarn) return;
+  if (attachSendBlocked()) {
+    attachWarn.hidden = false;
+    attachWarn.replaceChildren();
+    const priv = privacyModeSel && privacyModeSel.value === "private";
+    const span = document.createElement("span");
+    span.textContent = priv
+      ? "Private mode is local-only and the local model can't view pictures. Remove the picture, or change Privacy to use a vision model or OCR."
+      : "This model can't view pictures — pick one with the 👁 badge, remove it, or transcribe it: ";
+    attachWarn.appendChild(span);
+    if (!priv) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "att-ocr"; b.textContent = "Read text instead";
+      b.title = "Transcribe the picture(s) with OCR so this model can read them";
+      b.onclick = ocrPendingImages;
+      attachWarn.appendChild(b);
+    }
+  } else { attachWarn.hidden = true; attachWarn.replaceChildren(); }
+}
+
+// Chrome blocks top-frame data: navigation; a Blob URL opens fine in a new tab.
+function openImageFull(dataUrl) {
+  try {
+    const [head, b64] = dataUrl.split(",");
+    const mime = head.slice(5, head.indexOf(";"));
+    const bin = atob(b64); const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    window.open(URL.createObjectURL(new Blob([buf], { type: mime })), "_blank");
+  } catch {}
+}
+
+// ---------- agent loop over SSE ----------
+function setBusy(on) { busy = on; sendBtn.classList.toggle("stop", on); sendBtn.innerHTML = on ? "&#9632;" : "&#8593;"; sendBtn.title = on ? "Stop" : "Send"; if (on && typeof hideCostChip === "function") hideCostChip(); }
+
+// ---- durable live turn (PWA suspend/resume) ----
+// The server buffers every /chat turn as a JOB ({type:"job"} is the first SSE event) and keeps
+// generating even if this socket dies (phone switched apps). We track the live turn here; when the
+// stream drops mid-answer we reattach via GET /chat/attach?job=<id>&from=<eventIndex> and catch up
+// — mid-stream into the same bubble, or straight to the finished answer. Stop is now a server call.
+const LS_LIVEJOB = "dominion.livejob";
+let liveJob = null;        // { jobId, eventIndex, chatId } — the in-flight turn
+let liveSession = null;    // UI + parser state for the in-flight turn (null after finalize/reload)
+let readerActive = false;  // an SSE reader (original or reattach) is currently consuming
+let reattachTimer = null, reattachTries = 0;
+const persistLiveJob = () => { try { if (liveJob) localStorage.setItem(LS_LIVEJOB, JSON.stringify(liveJob)); } catch {} };
+const clearLiveJob = () => { liveJob = null; try { localStorage.removeItem(LS_LIVEJOB); } catch {} };
+
+// One in-progress AI bubble + all per-turn parser state. Used by BOTH the original /chat stream
+// and any /chat/attach reattach — the same session keeps accumulating into the same bubble.
+function newSession(c) {
+  document.querySelector(".err")?.remove();
+  empty.style.display = "none";
+  const row = document.createElement("div"); row.className = "turn";
+  const inner = document.createElement("div"); inner.className = "msg ai";
+  const tools = document.createElement("div"); tools.className = "tools";
+  const live = document.createElement("div"); live.className = "bubble think cursor"; live.textContent = "Dominion AI is working…";
+  inner.append(tools, live); row.appendChild(inner); wrap.appendChild(row); scroll();
+  const st = { c, inner, tools, live, chips: [], raw: "", ctxEl: null, ctxItems: null, doneMeta: null,
+               mentorCritique: null, done: false, stopped: false, gone: false, errMsg: "", warm: 0 };
+  st.warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "Dominion AI is working… (first reply can take ~20s)"; scroll(); } }, 6000);
+  return st;
+}
+
+// THE event dispatcher — every SSE event (original stream AND reattach replay/tail) goes through
+// here exactly once. Replayed token deltas re-concatenate into st.raw, so a from=0 replay after an
+// app reload reconstitutes the partial text.
+function processEvent(st, ev) {
+  const { inner, tools, live, chips } = st;
+  if (ev.type === "job") {
+    liveJob = { jobId: ev.id, eventIndex: 0, chatId: st.c.id }; persistLiveJob();
+  } else if (ev.type === "route") {
+    // Model/mode intentionally NOT shown — the in-progress bubble just says "Dominion AI is working".
+  } else if (ev.type === "context") {
+    // F4: keep the per-item detail the server sends (it was previously discarded).
+    st.ctxItems = { memory: ev.items || [], artifacts: ev.artifactItems || [], chats: ev.chatItems || [] };
+    if (!st.ctxEl) { st.ctxEl = document.createElement("div"); st.ctxEl.className = "ctx"; inner.insertBefore(st.ctxEl, tools); }
+    const bits = [];
+    if (ev.memory) bits.push("🧠 " + ev.memory + " memor" + (ev.memory === 1 ? "y" : "ies"));
+    if (ev.artifacts) bits.push("📄 " + ev.artifacts + " artifact" + (ev.artifacts === 1 ? "" : "s"));
+    if (ev.chats) bits.push("💬 " + ev.chats + " past chat" + (ev.chats === 1 ? "" : "s"));
+    st.ctxEl.textContent = bits.join(" · ");
+    scroll();
+  } else if (ev.type === "mentor_full") {
+    st.mentorCritique = ev.critique || null;
+  } else if (ev.type === "done") {
+    st.done = true; st.doneMeta = ev.meta || null;
+  } else if (ev.type === "stopped") {
+    st.stopped = true;   // explicit /chat/stop — finalize keeps the partial, marked interrupted
+  } else if (ev.type === "gone") {
+    st.gone = true;      // the job expired server-side — say so honestly, never a silent retry
+  } else if (ev.type === "artifact") {
+    const note = document.createElement("div"); note.className = "ctx"; note.style.cursor = "pointer";
+    note.textContent = "📄 saved artifact: " + ev.title + " (tap to open)";
+    note.onclick = () => { openArtifacts(); openArtifact(ev.id); };
+    inner.insertBefore(note, tools); scroll();
+  } else if (ev.type === "mentor") {
+    const note = document.createElement("div"); note.className = "ctx";
+    note.textContent = "🎓 mentor: " + ev.score + "/10" + (ev.priority && ev.priority !== "none" ? " · revise " + ev.priority : "") + (ev.findings ? " · " + ev.findings + " finding(s)" : "");
+    inner.insertBefore(note, tools); scroll();
+  } else if (ev.type === "tool") {
+    if (ev.status === "run") {
+      const chip = document.createElement("div"); chip.className = "tool" + (ev.gated ? " gated" : "");
+      chip.innerHTML = '<span class="sp"></span>'; const lab = document.createElement("span"); lab.textContent = (ev.gated ? "🔒 " : "🔧 ") + ev.name + "…"; chip.appendChild(lab);
+      if (ev.cls) { const cb = document.createElement("span"); cb.className = "cls"; cb.textContent = ev.cls.replace(/_/g, " "); chip.appendChild(cb); }
+      chip._runId = ev.runId; chip._name = ev.name; chip._lab = lab; tools.appendChild(chip); chips.push(chip); scroll();
+    } else {
+      const chip = [...chips].reverse().find((x) => (ev.runId ? x._runId === ev.runId : x._name === ev.name) && !x._done);
+      if (chip) {
+        chip._done = true; const sp = chip.querySelector(".sp"); if (sp) sp.remove();
+        if (ev.status === "done") { chip.classList.add("done"); chip._lab.textContent = "✓ " + ev.name; }
+        else if (ev.status === "failed") { chip.classList.add("failed"); chip._lab.textContent = "✗ " + ev.name; }
+        else if (ev.status === "blocked") { chip.classList.add("blocked"); chip._lab.textContent = "⛔ " + ev.name + " — blocked"; }
+        else if (ev.status === "cancelled") { chip.classList.add("cancelled"); chip._lab.textContent = "⃠ " + ev.name + " — skipped"; }
+      }
+    }
+  } else if (ev.type === "tool_confirm") {
+    const box = document.createElement("div"); box.className = "confirm";
+    const q = document.createElement("div"); q.className = "cq"; q.textContent = "Run " + ev.name + " (" + String(ev.cls || "").replace(/_/g, " ") + ")?" + (ev.preview ? "  " + ev.preview : "");
+    const btns = document.createElement("div"); btns.className = "cbtns";
+    const yes = document.createElement("button"); yes.className = "yes"; yes.textContent = "Approve";
+    const no = document.createElement("button"); no.textContent = "Deny";
+    const decide = (approved) => { yes.disabled = no.disabled = true; box.remove(); fetch("/tool-confirm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runId: ev.runId, approved }) }).catch(() => {}); };
+    yes.onclick = () => decide(true); no.onclick = () => decide(false);
+    btns.append(yes, no); box.append(q, btns); tools.appendChild(box); scroll();
+  } else if (ev.type === "working") {
+    // Server heartbeat while the model grinds — keeps the bubble alive instead of dead air.
+    // Never names models; phases: reading context / thinking / writing / running tools.
+    if (!stripThink(st.raw)) { clearTimeout(st.warm); live.textContent = "Dominion AI is working — " + (ev.phase || "thinking") + "… " + (ev.elapsed != null ? ev.elapsed + "s" : ""); scroll(); }
+  } else if (ev.type === "token") {
+    st.raw += ev.delta || ""; const shown = stripThink(st.raw); live.classList.toggle("think", !shown); live.textContent = shown || "Dominion AI is working…"; scroll();
+  } else if (ev.type === "error") {
+    // Gate refusals (access code / credits) carry a human message and send the user to Setup —
+    // never swallow them into a generic "server error".
+    st.gateCode = (ev.code === "needs_invite" || ev.code === "needs_credits") ? ev.code : "";
+    st.errMsg = ev.message || (ev.code === "privacy_mode_block"
+      ? "Blocked by privacy mode."
+      : "Chat failed: " + (ev.error || "server error") + " — tap send to retry.");
+  }
+}
+
+// Shared SSE reader: parses the stream, dispatches each event once, and keeps liveJob.eventIndex
+// exact (it's the resume cursor for /chat/attach?from=). localStorage writes are throttled — the
+// in-memory index is what mid-session reattaches use; a reload always replays from 0.
+async function readSse(res, st) {
+  const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split("\n"); buf = lines.pop() || "";
+    for (const line of lines) {
+      const s = line.trim(); if (!s.startsWith("data:")) continue;
+      let ev; try { ev = JSON.parse(s.slice(5).trim()); } catch { continue; }
+      processEvent(st, ev);
+      if (liveJob && liveJob.jobId) {
+        liveJob.eventIndex++;
+        if (ev.type !== "token" || liveJob.eventIndex % 25 === 0) persistLiveJob();
+      }
+    }
+  }
+}
+
+// The single end-of-turn: persist the message (full or honestly-interrupted partial), clear the
+// live-job cursor, restore the composer, and show any error/critique. Used by every path.
+function finalizeSession(st) {
+  clearTimeout(st.warm);
+  if (reattachTimer) { clearTimeout(reattachTimer); reattachTimer = null; }
+  reattachTries = 0;
+  const c = st.c, final = stripThink(st.raw);
+  if (st.done) {
+    const msg = { role: "assistant", content: final || "(no response)" };
+    if (st.doneMeta) { msg.meta = st.doneMeta; if (st.ctxItems) msg.meta.contextItems = st.ctxItems; if (st.doneMeta.mode) c.lastMode = st.doneMeta.mode; }
+    c.messages.push(msg); c.updatedAt = Date.now(); save();
+    if (speakOn && final) speakAnswer(final);   // voice: read the finished answer aloud (toggle)
+  } else if (final) {
+    c.messages.push({ role: "assistant", content: final, meta: { interrupted: true } }); c.updatedAt = Date.now(); save();
+  } else if (st.errMsg) {
+    // Nothing ever came back (e.g. "Failed to fetch") — the composer was already cleared when the
+    // turn was sent, so "tap send to retry" would otherwise hit an empty box and do nothing. Pull
+    // the unanswered question back out of history and into the composer so retry actually works.
+    const last = c.messages[c.messages.length - 1];
+    if (last && last.role === "user") { c.messages.pop(); input.value = last.content; autosize(); }
+  }
+  clearLiveJob(); liveSession = null;
+  setBusy(false); aborter = null; renderAll();
+  if (st.errMsg) showErr(st.errMsg);
+  // Access-code / credits gate: show the message, then take them to the Setup page that fixes it.
+  if (st.gateCode) setTimeout(() => { location.href = "/setup"; }, 2500);
+  if (st.mentorCritique) {   // Mentor mode: show the critique card under the fresh answer
+    const card = document.createElement("div"); card.className = "critique";
+    renderCritiqueCard(card, st.mentorCritique, (c.messages.filter((m) => m.role === "user").slice(-1)[0] || {}).content || "", final);
+    wrap.appendChild(card); scroll();
+  }
+}
+
+async function streamReply(c) {
+  const st = liveSession = newSession(c);
+  setBusy(true); aborter = new AbortController();
+  let netErr = "";
+  readerActive = true;
+  try {
+    const res = await fetch("/chat", {
+      method: "POST", headers: { "content-type": "application/json" }, signal: aborter.signal,
+      body: JSON.stringify({
+        messages: c.messages.map((m) => (m.attachments && m.attachments.length
+          ? { role: m.role, content: m.content, attachments: m.attachments }
+          : { role: m.role, content: m.content })),
+        mode: modeSel ? modeSel.value : "auto",
+        model: forcedModel() || "auto",
+        privacyMode: privacyModeSel ? privacyModeSel.value : "normal",
+        persona: resolvePersona(),
+        temperature: settings.temperature,
+        confirmTools: !!settings.confirmTools,
+        chatId: c.id,
+      }),
+    });
+    if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+    await readSse(res, st);
+  } catch (e) {
+    if (e.name === "AbortError") st.stopped = true;   // legacy local stop (no jobId had arrived yet)
+    else netErr = e.message || "network error";
+  } finally { readerActive = false; }
+  if (!st.done && !st.stopped && !st.gone && !st.errMsg && liveJob && liveJob.jobId) {
+    // The stream died mid-turn but the job survives server-side (phone suspended, wifi blip):
+    // do NOT render the retry/error state — reattach and catch up (backoff + on next visible).
+    scheduleReattach();
+    return;
+  }
+  if (!st.done && !st.stopped && !st.gone && !st.errMsg) st.errMsg = "Chat failed: " + (netErr || "connection lost") + " — tap send to retry.";
+  finalizeSession(st);
+}
+
+// ---- reattach: resume the live turn after a suspend/reload ----
+const REATTACH_DELAYS = [1000, 3000, 10000];
+function scheduleReattach(immediate) {
+  if (!liveJob || !liveJob.jobId) return;
+  clearTimeout(reattachTimer);
+  reattachTimer = setTimeout(attemptReattach, immediate ? 0 : REATTACH_DELAYS[Math.min(reattachTries, REATTACH_DELAYS.length - 1)]);
+}
+async function attemptReattach() {
+  if (readerActive || !liveJob || !liveJob.jobId) return;
+  if (liveJob.chatId !== curId) return;   // reattach targets the chat on screen; boot/visible re-checks
+  let st = liveSession;
+  if (!st) {
+    // The app was reloaded: rebuild the streaming bubble and replay from 0 — the partial text is
+    // reconstituted from the replayed token deltas.
+    const c = cur(); if (!c) return;
+    st = liveSession = newSession(c);
+    liveJob.eventIndex = 0;
+  }
+  setBusy(true);
+  reattachTries++;
+  readerActive = true;
+  try {
+    const r = await fetch("/chat/attach?job=" + encodeURIComponent(liveJob.jobId) + "&from=" + (liveJob.eventIndex || 0), { cache: "no-store" });
+    if (!r.ok || !r.body) throw new Error("HTTP " + r.status);
+    await readSse(r, st);
+  } catch {} finally { readerActive = false; }
+  if (st.done || st.stopped) return finalizeSession(st);
+  if (st.gone) { st.errMsg = "That answer expired on the server — ask again."; return finalizeSession(st); }
+  if (st.errMsg) return finalizeSession(st);
+  // Died again mid-tail — keep trying (1s/3s/10s… and on next visible); give up only after a while.
+  if (reattachTries >= 8) { st.errMsg = "Lost the server mid-answer and couldn't reattach — tap send to retry."; return finalizeSession(st); }
+  scheduleReattach();
+}
+// Called on boot, visibilitychange→visible, pageshow, and chat switch: if a live job exists for the
+// chat on screen and no reader is consuming it, reattach immediately.
+function maybeReattach() {
+  if (readerActive) return;
+  if (!liveJob) { try { const j = JSON.parse(localStorage.getItem(LS_LIVEJOB) || "null"); if (j && j.jobId) liveJob = j; } catch {} }
+  if (!liveJob || liveJob.chatId !== curId) return;
+  scheduleReattach(true);
+}
+
+function send() {
+  if (busy) {
+    // Stop = a server-side call now (generation no longer dies with the socket). Falls back to the
+    // old local abort if the job id hasn't arrived yet or the POST can't get through.
+    if (liveJob && liveJob.jobId) {
+      fetch("/chat/stop", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jobId: liveJob.jobId }) })
+        .catch(() => { if (aborter) aborter.abort(); });
+    } else if (aborter) aborter.abort();
+    return;
+  }
+  const text = input.value.trim(); if (!text && !pendingAtt.length) return;
+  if (attachSendBlocked()) { updateAttachGate(); attachWarn.classList.remove("shake"); void attachWarn.offsetWidth; attachWarn.classList.add("shake"); return; }
+  const c = cur(); if (!c) return;
+  input.value = ""; autosize(); hideCostChip();
+  scroll(true);   // a fresh send always re-engages the follow so the reply starts in view
+  const msg = { role: "user", content: text || "" };
+  if (pendingAtt.length) { msg.attachments = pendingAtt; pendingAtt = []; renderAttachStrip(); }
+  c.messages.push(msg);
+  if (c.title === "New chat") c.title = titleFrom(c.messages);
+  c.updatedAt = Date.now(); save(); renderAll();
+  streamReply(c);
+}
+function regenerate() {
+  if (busy) return; const c = cur(); if (!c) return;
+  for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { c.messages.splice(i, 1); break; }
+  save(); renderAll(); streamReply(c);
+}
+// Pick up where a (possibly stopped) answer left off (spec: offer continuation after stop).
+function continueLast() {
+  if (busy) return; const c = cur(); if (!c) return;
+  c.messages.push({ role: "user", content: "Continue exactly where you left off." });
+  c.updatedAt = Date.now(); save(); renderAll(); streamReply(c);
+}
+function editUser(i) {
+  if (busy) return; const c = cur(); if (!c) return;
+  input.value = c.messages[i].content;
+  // Attachments come back to the staging strip with the text, so an edited resend keeps them.
+  const att = c.messages[i].attachments;
+  pendingAtt = Array.isArray(att) ? att.filter((a) => a.kind === "image" ? a.dataUrl : a.kind === "text") : [];
+  renderAttachStrip();
+  c.messages = c.messages.slice(0, i); c.updatedAt = Date.now(); save(); renderAll(); autosize(); input.focus();
+}
+
+// ---------- settings ----------
+function openSettings() {
+  personaSel.value = settings.persona; personaCustom.value = settings.personaCustom || "";
+  personaCustom.hidden = settings.persona !== "custom";
+  tempInput.value = String(settings.temperature); tempVal.textContent = String(settings.temperature);
+  if (confirmToolsBox) confirmToolsBox.checked = !!settings.confirmTools;
+  if (privacySel) privacySel.value = settings.privacy || "redacted_external";
+  smodal.hidden = false;
+}
+const closeSettings = () => { smodal.hidden = true; };
+function saveSettingsUI() {
+  settings.persona = personaSel.value; settings.personaCustom = personaCustom.value.trim();
+  settings.temperature = parseFloat(tempInput.value);
+  if (confirmToolsBox) settings.confirmTools = confirmToolsBox.checked;
+  if (privacySel) settings.privacy = privacySel.value;
+  if (modelSel) try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {}
+  updateCloudBadge();
+  saveSettings(); closeSettings();
+}
+
+// ---------- memory panel (Phase 2) ----------
+function badge(text, cls) { const b = document.createElement("span"); b.className = "mbadge" + (cls ? " " + cls : ""); b.textContent = text; return b; }
+async function memApi(path, body) {
+  const r = await fetch(path, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : { cache: "no-store" });
+  return r.json().catch(() => ({}));
+}
+async function loadMemory() {
+  mlist.textContent = "Loading…";
+  const status = mfilterStatus ? mfilterStatus.value : "";
+  const d = await memApi("/memory" + (status ? "?status=" + encodeURIComponent(status) : ""));
+  const items = (d && d.items) || [];
+  if (mstats && d.stats) { const p = d.stats.byStatus && d.stats.byStatus.pending; mstats.textContent = (d.stats.total || 0) + " saved" + (p ? " · " + p + " pending" : ""); }
+  renderMemory(items);
+}
+function renderMemory(items) {
+  mlist.innerHTML = "";
+  if (!items.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "No memories yet. Add one above, or tell me “remember that…”"; mlist.appendChild(n); return; }
+  for (const m of items) {
+    const it = document.createElement("div"); it.className = "mitem";
+    const top = document.createElement("div"); top.className = "mtop";
+    top.append(badge(m.type), badge(m.status, m.status));
+    if (m.scope && m.scope !== "global") top.append(badge("scope: " + m.scope));
+    if (m.unverified) top.append(badge("unverified mentor claim", "rejected"));          // pending until Fred validates it
+    else if (m.gatedAs === "approval" && m.status === "approved") top.append(badge("lax auto-approve", "pending"));   // spec mode would have gated this
+    if (m.sensitive) top.append(badge("sensitive", "pending"));
+    if (m.pinned) { const p = document.createElement("span"); p.className = "pinned"; p.textContent = "📌"; top.appendChild(p); }
+    const c = document.createElement("div"); c.className = "mc"; c.textContent = m.content;
+    const acts = document.createElement("div"); acts.className = "macts";
+    if (m.status === "pending") acts.append(mkAct("Approve", () => memUpdate(m.id, { action: "approve" })), mkAct("Reject", () => memUpdate(m.id, { action: "reject" })));
+    acts.append(
+      mkAct(m.pinned ? "Unpin" : "Pin", () => memUpdate(m.id, { action: m.pinned ? "unpin" : "pin" })),
+      mkAct("Edit", () => { const t = prompt("Edit memory", m.content); if (t != null && t.trim()) memUpdate(m.id, { content: t.trim() }); }),
+      mkAct("→ Eval", async (ev) => { const exp = prompt("Expected behavior (what a good answer must do):", ""); if (exp == null) return; await aApi("/evals", { title: m.content.slice(0, 80), input: m.content, expectedBehavior: exp, source: "manual" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }),
+      mkAct("→ Rule", async (ev) => { await aApi("/rules", { content: m.content, scope: "global", status: "candidate" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }),
+      // F3 (item 28, spec 616): the 8th inbox action — convert a memory into a retrieval-scope note
+      // (guides what gets looked up; mirrors → Rule with scope:"retrieval").
+      mkAct("→ Retrieval note", async (ev) => { await aApi("/rules", { content: m.content, scope: "retrieval", status: "candidate" }); if (ev && ev.target) ev.target.textContent = "saved ✓"; }, "Save as a retrieval guidance note"),
+      mkAct(m.status === "archived" ? "Unarchive" : "Archive", () => memUpdate(m.id, { action: m.status === "archived" ? "approve" : "archive" })),
+      mkAct("Delete", () => { if (confirm("Delete this memory?")) memDelete(m.id); }),
+    );
+    it.append(top, c, acts); mlist.appendChild(it);
+  }
+}
+async function memUpdate(id, patch) { await memApi("/memory/update", { id, ...patch }); loadMemory(); }
+async function memDelete(id) { await memApi("/memory/delete", { id }); loadMemory(); }
+async function addMemory() { const v = (madd.value || "").trim(); if (!v) return; await memApi("/memory", { content: v, source: "user_explicit" }); madd.value = ""; loadMemory(); }
+function openMemory() { mmodal.hidden = false; loadMemory(); }
+const closeMemory = () => { mmodal.hidden = true; };
+
+// ---------- persona forge ("become an expert in me") ----------
+let pKindsFilled = false;
+function setPMsg(t) { if (!pmsg) return; pmsg.textContent = t || ""; }
+async function loadPersona() {
+  const d = await memApi("/persona");
+  const s = (d && d.stats) || {};
+  if (pstats) pstats.textContent = (s.docs || 0) + " item" + (s.docs === 1 ? "" : "s") + " · " + (s.chunks || 0) + " chunks" + (s.pendingEmbeds ? " · " + s.pendingEmbeds + " embedding…" : "");
+  renderProfile(d && d.profile);
+  if (!pKindsFilled && d && Array.isArray(d.kinds)) {
+    for (const k of d.kinds) { const o = document.createElement("option"); o.value = k; o.textContent = k[0].toUpperCase() + k.slice(1); pfilterKind.appendChild(o); }
+    pKindsFilled = true;
+  }
+  loadPersonaList();
+}
+function renderProfile(profile) {
+  pprofile.innerHTML = "";
+  if (!profile || !profile.systemBlock) { const n = document.createElement("div"); n.className = "none"; n.textContent = "No voice profile yet. Add some of your writing, then tap “Refresh profile” to distill your voice."; pprofile.appendChild(n); return; }
+  const when = profile.updatedAt ? " (updated " + String(profile.updatedAt).slice(0, 10) + ")" : "";
+  pprofile.textContent = "Fred Profile" + when + "\n\n" + profile.systemBlock;
+}
+async function loadPersonaList() {
+  plist.textContent = "Loading…";
+  const kind = pfilterKind ? pfilterKind.value : "";
+  const d = await memApi("/persona/list" + (kind ? "?kind=" + encodeURIComponent(kind) : ""));
+  renderPersonaDocs((d && d.items) || []);
+}
+function renderPersonaDocs(items) {
+  plist.innerHTML = "";
+  if (!items.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "Nothing in the corpus yet."; plist.appendChild(n); return; }
+  for (const it of items) {
+    const row = document.createElement("div"); row.className = "mitem";
+    const top = document.createElement("div"); top.className = "mtop";
+    const kb = document.createElement("span"); kb.className = "pkind-badge"; kb.textContent = it.kind; top.appendChild(kb);
+    const meta = document.createElement("span"); meta.textContent = (it.chunks || 0) + " chunk" + (it.chunks === 1 ? "" : "s") + " · " + it.chars + " chars"; top.appendChild(meta);
+    const c = document.createElement("div"); c.className = "mc"; c.textContent = it.title;
+    const acts = document.createElement("div"); acts.className = "macts";
+    acts.append(mkAct("Delete", () => { if (confirm("Remove this from the corpus?")) memApi("/persona/delete", { id: it.id }).then(loadPersona); }));
+    row.append(top, c, acts); plist.appendChild(row);
+  }
+}
+async function addPersonaText() {
+  const v = (padd.value || "").trim(); if (!v) return;
+  setPMsg("Adding…");
+  const d = await memApi("/persona/ingest", { text: v, kind: pkind.value, title: (ptitle.value || "").trim() });
+  if (d && d.error) return setPMsg(d.error);
+  padd.value = ""; ptitle.value = "";
+  setPMsg(d.deduped ? "Already had that." : "Added ✓ (" + (d.chunks || 0) + " chunks)");
+  loadPersona();
+}
+async function scrapePersona() {
+  const url = (purl.value || "").trim(); if (!url) return;
+  setPMsg("Fetching " + url + " …");
+  const d = await memApi("/persona/scrape", { url });
+  if (d && d.error) return setPMsg(d.error);
+  purl.value = "";
+  setPMsg("Scraped ✓ (" + (d.chars || 0) + " chars, " + (d.chunks || 0) + " chunks)");
+  loadPersona();
+}
+let scanTimer = null;
+async function scanPersonaInbox() {
+  pscan.disabled = true;
+  setPMsg("Scanning inboxes…");
+  const d = await memApi("/persona/scan", {});
+  if (d && d.error) { pscan.disabled = false; return setPMsg(d.error); }
+  pollScan();
+}
+async function pollScan() {
+  const s = await memApi("/persona/scan/status");
+  if (!s) { pscan.disabled = false; return; }
+  if (s.running) {
+    setPMsg("Ingesting… " + (s.ingested || 0) + " file(s), " + (s.chunks || 0) + " chunks so far" + (s.skipped ? " · " + s.skipped + " skipped" : ""));
+    clearTimeout(scanTimer); scanTimer = setTimeout(pollScan, 2000);
+    return;
+  }
+  pscan.disabled = false;
+  if (s.error) return setPMsg("Scan failed: " + s.error);
+  setPMsg("Ingested " + (s.ingested || 0) + " file(s), " + (s.chunks || 0) + " chunks" + (s.skipped ? " · " + s.skipped + " skipped" : "") + (s.backup && String(s.backup).includes("corpus-") ? " · backed up ✓" : ""));
+  loadPersona();
+}
+let distillTimer = null;
+async function distillProfile() {
+  pdistill.disabled = true;
+  setPMsg("Starting a full read of your corpus…");
+  const start = await memApi("/persona/distill", {});
+  if (start && start.error) { pdistill.disabled = false; return setPMsg(start.error); }
+  pollDistill();
+}
+async function pollDistill() {
+  const s = await memApi("/persona/distill/status");
+  if (!s) { pdistill.disabled = false; return; }
+  if (s.running) {
+    const phase = s.phase === "reading" ? "Reading your whole corpus" : s.phase === "synthesizing" ? "Synthesizing your voice" : "Starting";
+    const prog = s.batchesTotal ? " — batch " + s.batchesDone + "/" + s.batchesTotal : "";
+    const cap = s.capped ? " · digesting " + s.digestedChunks + "/" + s.totalChunks + " chunks" : "";
+    setPMsg(phase + "…" + prog + cap);
+    clearTimeout(distillTimer); distillTimer = setTimeout(pollDistill, 2500);
+    return;
+  }
+  pdistill.disabled = false;
+  if (s.phase === "error") return setPMsg("Distill failed: " + (s.error || "unknown"));
+  if (s.phase === "done") {
+    const cov = s.capped ? " (digested " + s.digestedChunks + "/" + s.totalChunks + " chunks — cap reached)" : " (read the whole corpus)";
+    setPMsg("Profile refreshed ✓" + cov);
+    const d = await memApi("/persona/profile"); renderProfile(d && d.profile); loadPersona();
+  }
+}
+async function resumeDistillIfRunning() {
+  const s = await memApi("/persona/distill/status"); if (s && s.running) { pdistill.disabled = true; pollDistill(); }
+  const sc = await memApi("/persona/scan/status"); if (sc && sc.running) { pscan.disabled = true; pollScan(); }
+}
+function openPersona() { pmodal.hidden = false; setPMsg(""); loadPersona(); resumeDistillIfRunning(); }
+const closePersona = () => { pmodal.hidden = true; };
+
+// ---------- tool activity panel (Phase 3) ----------
+const tfmt = (ts) => { try { return new Date(ts).toLocaleString(); } catch { return ts || ""; } };
+// F1 (item 26): the panel can open FILTERED to one message's runs — exact runIds when the message
+// meta carries them, else the honest fallback of everything logged for this chat.
+let toolFilter = null;   // { runIds?: [], chatId?: "", label: "" }
+async function loadTools() {
+  tlist.textContent = "Loading…";
+  let all = [];
+  try { all = ((await (await fetch("/toolruns", { cache: "no-store" })).json()).runs) || []; } catch {}
+  let runs = all;
+  if (toolFilter) {
+    runs = (toolFilter.runIds && toolFilter.runIds.length)
+      ? all.filter((r) => toolFilter.runIds.includes(r.runId))
+      : toolFilter.chatId ? all.filter((r) => r.chatId === toolFilter.chatId) : all;
+  }
+  if (tstats) tstats.textContent = toolFilter ? runs.length + " of " + all.length + " (" + (toolFilter.label || "filtered") + ")" : (runs.length ? runs.length + " recent" : "");
+  tlist.innerHTML = "";
+  if (toolFilter) {
+    const bar = document.createElement("div"); bar.className = "mfilter";
+    bar.appendChild(Object.assign(document.createElement("span"), { textContent: "Filtered to " + (toolFilter.label || "selection") }));
+    bar.appendChild(mkAct("Show all", () => { toolFilter = null; loadTools(); }));
+    tlist.appendChild(bar);
+  }
+  if (!runs.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = toolFilter ? "No matching tool runs (runs before this update aren't tracked per message)." : "No tool activity yet."; tlist.appendChild(n); return; }
+  for (const r of runs) {
+    const it = document.createElement("div"); it.className = "tritem";
+    const top = document.createElement("div"); top.className = "trtop";
+    const nm = document.createElement("span"); nm.className = "trname"; nm.textContent = r.name;
+    const cb = document.createElement("span"); cb.className = "tbadge " + (r.cls || ""); cb.textContent = String(r.cls || "").replace(/_/g, " ");
+    const sb = document.createElement("span"); sb.className = "tbadge " + (r.status || ""); sb.textContent = r.status || "";
+    const tm = document.createElement("span"); tm.textContent = tfmt(r.ts);
+    top.append(nm, cb, sb, tm);
+    it.appendChild(top);
+    const prevText = r.output || r.reason || r.input || "";
+    if (prevText) { const p = document.createElement("div"); p.className = "trprev"; p.textContent = prevText; it.appendChild(p); }
+    tlist.appendChild(it);
+  }
+}
+function openTools(filter) { toolFilter = filter && (filter.runIds || filter.chatId) ? filter : null; tmodal.hidden = false; loadTools(); }
+const closeTools = () => { tmodal.hidden = true; };
+
+// ---------- artifact studio (Phase 4) ----------
+const aApi = async (path, body) => { const r = await fetch(path, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : { cache: "no-store" }); return r.json().catch(() => ({})); };
+function openArtifacts() { amodal.hidden = false; showArtifactList(); }
+const closeArtifacts = () => { amodal.hidden = true; };
+async function showArtifactList() {
+  adetail.hidden = true; alist.hidden = false; alist.textContent = "Loading…";
+  const d = await aApi("/artifacts"); const items = (d && d.items) || [];
+  if (astats) astats.textContent = d.stats ? (d.stats.total || 0) + " saved" : "";
+  alist.innerHTML = "";
+  if (!items.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "No artifacts yet. Generate a document in Draft mode, or use “Save” on a reply."; alist.appendChild(n); return; }
+  for (const a of items) {
+    const it = document.createElement("div"); it.className = "aitem";
+    const ttl = document.createElement("div"); ttl.className = "atitle"; ttl.textContent = a.title;
+    const top = document.createElement("div"); top.className = "atop";
+    const ty = document.createElement("span"); ty.className = "abadge"; ty.textContent = a.type;
+    const st = document.createElement("span"); st.className = "abadge " + a.status; st.textContent = a.status;
+    const vc = document.createElement("span"); vc.textContent = "v" + a.version + (a.versionCount > 1 ? " of " + a.versionCount : "");
+    const wc = document.createElement("span"); wc.textContent = a.wordCount + " words";
+    top.append(ty, st, vc, wc); it.append(ttl, top); it.onclick = () => openArtifact(a.id); alist.appendChild(it);
+  }
+}
+async function openArtifact(id) {
+  const a = await aApi("/artifacts/get?id=" + encodeURIComponent(id));
+  if (!a || a.error) return;
+  alist.hidden = true; adetail.hidden = false; adetail.innerHTML = "";
+  const back = document.createElement("button"); back.className = "back"; back.textContent = "← All artifacts"; back.onclick = showArtifactList; adetail.appendChild(back);
+  const h = document.createElement("div"); h.className = "sheet-h"; h.textContent = a.title; adetail.appendChild(h);
+  const meta = document.createElement("div"); meta.className = "arow";
+  meta.innerHTML = `<span class="abadge ${a.status}">${a.status}</span><span>${a.type}</span><span>v${a.version} of ${a.versionCount}</span><span>${a.wordCount} words</span>`;
+  // F4: model used (friendly tier label only — underlying model names never surface).
+  if (a.modelProviderId) meta.appendChild(Object.assign(document.createElement("span"), { textContent: "model: " + (MODEL_TIER_LABEL[a.modelProviderId] || "local") }));
+  // F4: explicit mentor-review status — "reviewed" only when the CURRENT version was reviewed.
+  if (a.mentorReviewed && a.reviewedVersion === a.version) { const b = document.createElement("span"); b.className = "abadge reviewed"; b.textContent = "reviewed"; meta.appendChild(b); }
+  else if (a.reviewRecommended && a.reviewRecommended.length) { const b = document.createElement("span"); b.className = "abadge draft"; b.textContent = "review suggested"; b.title = a.reviewRecommended.join(", ").replace(/_/g, " "); meta.appendChild(b); }
+  // F4: tappable source-chat link (chats live in this browser's storage; gone = said honestly).
+  if (a.sourceChatId) {
+    const l = mkAct("from chat ↗", () => {
+      const ch = chats.find((x) => x.id === a.sourceChatId);
+      if (!ch) return alert("The source chat no longer exists on this device.");
+      closeArtifacts(); switchChat(ch.id);
+    }, "Open the chat this artifact came from");
+    meta.appendChild(l);
+  }
+  adetail.appendChild(meta);
+  const vrow = document.createElement("div"); vrow.className = "arow";
+  const sel = document.createElement("select");
+  for (let v = 1; v <= a.versionCount; v++) { const o = document.createElement("option"); o.value = v; o.textContent = "v" + v; if (v === a.version) o.selected = true; sel.appendChild(o); }
+  sel.onchange = async () => { await aApi("/artifacts/setversion", { id: a.id, version: Number(sel.value) }); openArtifact(a.id); };
+  vrow.append(Object.assign(document.createElement("span"), { textContent: "Version" }), sel);
+  if (a.versionCount > 1) {
+    // Any-to-any version diff (the API always supported it; the UI now does too)
+    const dsel = document.createElement("select");
+    for (let v = 1; v <= a.versionCount; v++) { const o = document.createElement("option"); o.value = v; o.textContent = "vs v" + v; if (v === (a.version - 1 || 1)) o.selected = true; dsel.appendChild(o); }
+    vrow.append(dsel, mkAct("Diff", () => showDiff(a.id, Number(dsel.value), a.version)));
+  }
+  adetail.appendChild(vrow);
+  const c = document.createElement("div"); c.className = "acontent"; c.textContent = a.content; adetail.appendChild(c);
+  const acts = document.createElement("div"); acts.className = "arow"; acts.style.marginTop = "8px";
+  acts.append(
+    mkAct("Revise", () => reviseArtifact(a)),
+    mkAct("Export", () => exportArtifact(a)),
+    mkAct(a.status === "final" ? "Unfinalize" : "Mark final", () => markFinal(a)),
+    mkAct("Review", () => reviewArtifact(a.id)),
+    mkAct("Duplicate", async () => { const r = await aApi("/artifacts/duplicate", { id: a.id }); if (r.item) openArtifact(r.item.id); }),
+    mkAct("Save as template", async () => { const r = await aApi("/artifacts/duplicate", { id: a.id, asTemplate: true }); if (r.item) openArtifact(r.item.id); }),
+    mkAct("Rename", () => renameArt(a)),
+    // E4: archived status reachable from the artifact panel (backend always supported it).
+    mkAct(a.status === "archived" ? "Unarchive" : "Archive", () => setArtStatus(a.id, a.status === "archived" ? "draft" : "archived")),
+    mkAct("Delete", () => { if (confirm("Delete this artifact and all versions?")) delArt(a.id); }),
+  );
+  adetail.appendChild(acts);
+  // E1: server-side trigger sweep marked this artifact review-recommended.
+  if (a.reviewRecommended && a.reviewRecommended.length && !(a.mentorReviewed && a.reviewedVersion === a.version)) {
+    const rr = document.createElement("div"); rr.className = "arow";
+    rr.textContent = "⚠ Mentor review recommended: " + a.reviewRecommended.join(", ").replace(/_/g, " ");
+    adetail.appendChild(rr);
+  }
+  const xrow = document.createElement("div"); xrow.className = "arow";
+  xrow.append(
+    mkAct("→ Checklist", () => transformArt(a.id, "checklist")),
+    mkAct("Extract tasks", () => transformArt(a.id, "tasks")),
+    mkAct("Extract memories", async (ev) => { if (ev && ev.target) ev.target.textContent = "extracting…"; const r = await aApi("/artifacts/transform", { id: a.id, kind: "memory" }); alert(r.error ? "Extract: " + r.error : (r.count ? "Saved " + r.count + " memor" + (r.count === 1 ? "y" : "ies") + ":\n\n- " + r.saved.join("\n- ") : "Nothing durable found.")); openArtifact(a.id); }),
+  );
+  adetail.appendChild(xrow);
+  if (a.reviewNotes) { const rv = document.createElement("div"); rv.className = "areview"; rv.textContent = a.reviewNotes; adetail.appendChild(rv); }
+}
+async function showDiff(id, from, to) {
+  const d = await aApi(`/artifacts/diff?id=${encodeURIComponent(id)}&a=${from}&b=${to}`);
+  const box = document.createElement("div"); box.className = "adiff";
+  (d.diff || "(no diff)").split("\n").forEach((l) => { const ln = document.createElement("div"); if (l[0] === "+") ln.className = "add"; else if (l[0] === "-") ln.className = "del"; ln.textContent = l; box.appendChild(ln); });
+  const old = adetail.querySelector(".adiff"); if (old) old.remove(); adetail.appendChild(box); box.scrollIntoView();
+}
+async function reviseArtifact(a) { const t = prompt("Revise — the full new content:", a.content); if (t != null && t.trim()) { await aApi("/artifacts/version", { id: a.id, content: t }); openArtifact(a.id); } }
+// Export safety (spec, E2): the SERVER gate runs the seven checks — docx/pdf/xlsx/csv now export
+// natively. Sensitive-data detection blocks until explicitly overridden; other warnings ride along.
+async function exportArtifact(a) {
+  const f = prompt("Export format (md, txt, json, html, docx, pdf, xlsx, csv):", "md"); if (f == null) return;
+  if (!a.mentorReviewed && !confirm("This artifact hasn't been mentor-reviewed. Export anyway?")) return;
+  let r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim() });
+  if (r.blocked === "sensitive_data") {
+    if (!confirm("⚠ Possible sensitive data detected: " + (r.detected || []).join(", ") + "\n\nExport anyway?")) return;
+    r = await aApi("/artifacts/export", { id: a.id, format: (f || "md").trim(), override_sensitive: true });
+  }
+  const warns = r.gate && r.gate.warnings && r.gate.warnings.length ? "\n\nWarnings: " + r.gate.warnings.map((w) => w.message || w.check).join("; ") : "";
+  alert(r.error ? "Export: " + r.error : "Exported to " + r.path + warns + (r.queued ? "\n\nForge conversion queued — the " + f.trim() + " lands next to it shortly." : r.warning ? "\n\n" + r.warning : ""));
+}
+// Mark final offers a mentor review first (spec: review trigger on final) — one tap, never a blocker.
+async function markFinal(a) {
+  if (a.status === "final") return setArtStatus(a.id, "draft");
+  if (!a.mentorReviewed && confirm("Run a mentor review before finalizing? (Recommended — takes ~20s)")) {
+    const note = document.createElement("div"); note.className = "areview"; note.textContent = "Reviewing…"; adetail.appendChild(note);
+    await aApi("/artifacts/review", { id: a.id });
+  }
+  await setArtStatus(a.id, "final");
+}
+async function transformArt(id, kind) {
+  const note = document.createElement("div"); note.className = "areview"; note.textContent = "Transforming with the local model (~20s)…"; adetail.appendChild(note);
+  const r = await aApi("/artifacts/transform", { id, kind });
+  if (r.item) openArtifact(r.item.id); else { note.remove(); alert("Transform: " + (r.error || "failed")); }
+}
+async function setArtStatus(id, status) { await aApi("/artifacts/update", { id, status }); openArtifact(id); }
+async function renameArt(a) { const t = prompt("Rename artifact:", a.title); if (t != null && t.trim()) { await aApi("/artifacts/update", { id: a.id, title: t.trim() }); openArtifact(a.id); } }
+async function reviewArtifact(id) { const note = document.createElement("div"); note.className = "areview"; note.textContent = "Reviewing with the local model (≈20s)…"; adetail.appendChild(note); await aApi("/artifacts/review", { id }); openArtifact(id); }
+async function delArt(id) { await aApi("/artifacts/delete", { id }); showArtifactList(); }
+async function saveAsArtifact(content) {
+  const guess = (String(content).split("\n").find((l) => l.trim()) || "Document").replace(/^#+\s*/, "").replace(/[*_`]/g, "").slice(0, 60);
+  const t = prompt("Save as artifact — title:", guess); if (t == null) return;
+  const r = await aApi("/artifacts", { title: t || "Document", content, type: "markdown" });
+  if (r.item) { openArtifacts(); openArtifact(r.item.id); }
+}
+
+// ---------- mentor critique (Phase 5) ----------
+const escapeHtml = (s) => String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+// F1 (item 23): taskType picks the lens — the default full critique or the distinct
+// hallucination_check (the server maps it to the factual-review specialist rubric).
+async function critiqueMessage(i, taskType = "answer_review") {
+  const c = cur(); if (!c || !c.messages[i]) return;
+  const answer = c.messages[i].content; const orig = precedingUser(c, i);
+  const card = document.createElement("div"); card.className = "critique";
+  card.textContent = (taskType === "hallucination_check" ? "🔎 Checking for hallucinations…" : "🎓 Mentor reviewing…") + " (~15s)";
+  wrap.appendChild(card); scroll();
+  try {
+    const d = await aApi("/mentor/review", { content: answer, originalRequest: orig, taskType, privacyMode: settings.privacy || "redacted_external", chatId: c.id });
+    renderCritiqueCard(card, d.critique || {}, orig, answer, { reviewId: d.reviewId, ledgerId: d.ledgerId, taskType });
+  } catch { card.textContent = "Mentor review failed."; }
+}
+function renderCritiqueCard(card, c, orig, answer, ids = {}) {
+  card.innerHTML = "";
+  const head = document.createElement("div"); head.className = "crhead";
+  const sp = document.createElement("span"); sp.className = "scorepill"; sp.textContent = (c.overall_score ?? "?") + "/10"; head.appendChild(sp);
+  head.appendChild(Object.assign(document.createElement("span"), { className: "crsec", textContent: (ids.taskType === "hallucination_check" ? "hallucination check · " : "") + "risk " + (c.hallucination_risk || "?") + " · revise " + (c.revision_priority || "none") + " · " + (c._provider || "") }));
+  // F2 (item 27): rejecting a critique is RECORDED — the review record is marked rejected and the
+  // auto-created ledger entry is removed, so a bad critique never poisons the flywheel.
+  const x = document.createElement("button"); x.className = "act"; x.textContent = "✕"; x.title = "Reject critique (recorded — removes its ledger entry)"; x.style.marginLeft = "auto";
+  x.onclick = () => {
+    card.remove();
+    aApi("/mentor/reject", { reviewId: ids.reviewId || null, ledgerId: ids.ledgerId || null, taskType: ids.taskType || "answer_review", chatId: curId, contentPreview: String(answer || "").slice(0, 300) }).catch(() => {});
+  };
+  head.appendChild(x);
+  card.appendChild(head);
+  const sec = (label, a) => { if (!a || !a.length) return; const d = document.createElement("div"); d.className = "crsec"; d.innerHTML = "<b>" + label + ":</b> " + a.map(escapeHtml).join("; "); card.appendChild(d); };
+  sec("Major", c.major_findings); sec("Unsupported", c.unsupported_claims); sec("Reasoning", c.reasoning_errors); sec("Safety/Privacy", c.safety_or_privacy_issues);
+  if (c.recommended_revision) { const d = document.createElement("div"); d.className = "crsec"; d.innerHTML = "<b>Suggestion:</b> " + escapeHtml(c.recommended_revision); card.appendChild(d); }
+  // Apply revision (spec): one tap -> the local model rewrites the answer using this critique.
+  if (answer && (c.recommended_revision || (c.major_findings || []).length)) {
+    const row = document.createElement("div"); row.className = "cand";
+    row.appendChild(Object.assign(document.createElement("span"), { textContent: "✍️ apply this critique to the answer" }));
+    const b = document.createElement("button"); b.textContent = "Apply revision";
+    b.onclick = async () => {
+      b.disabled = true; b.textContent = "revising… (~30s)";
+      try {
+        const d = await aApi("/mentor/revise", { content: answer, originalRequest: orig, critique: c });
+        if (d.revised) {
+          const ch = cur();
+          if (ch) { ch.messages.push({ role: "assistant", content: d.revised, meta: { revised: true } }); ch.updatedAt = Date.now(); save(); renderAll(); }
+          b.textContent = "applied ✓";
+        } else { b.textContent = "failed"; b.disabled = false; }
+      } catch { b.textContent = "failed"; b.disabled = false; }
+    };
+    row.appendChild(b); card.appendChild(row);
+  }
+  const cand = (label, text, save) => { const r = document.createElement("div"); r.className = "cand"; r.appendChild(Object.assign(document.createElement("span"), { textContent: "💡 " + text })); const b = document.createElement("button"); b.textContent = label; b.onclick = async () => { b.disabled = true; await save(); b.textContent = "saved ✓"; }; r.appendChild(b); card.appendChild(r); };
+  (c.memory_candidates || []).forEach((t) => cand("→ memory", t, () => memApi("/memory", { content: t, source: "mentor_suggested" })));
+  (c.eval_case_candidates || []).forEach((t) => cand("→ eval", t, () => aApi("/evals", { title: t.slice(0, 80), input: t, source: "mentor" })));
+  (c.prompt_rule_candidates || []).forEach((t) => cand("→ rule", t, () => aApi("/rules", { content: t, scope: "global", status: "candidate" })));
+  (c.retrieval_rule_candidates || []).forEach((t) => cand("→ retrieval rule", t, () => aApi("/rules", { content: t, scope: "retrieval", status: "candidate" })));
+  cand("→ ledger", "log this review as a failure entry", () => aApi("/ledger", { category: "mentor_flag", severity: "low", originalRequest: orig, flawedOutput: "(see chat)", detectedBy: "mentor" }));
+  scroll();
+}
+
+// ---------- mentor & improvement panel (Phase 5) ----------
+let itab = "ledger";
+function openImprove() { imodal.hidden = false; setITab(itab); }
+const closeImprove = () => { imodal.hidden = true; };
+function setITab(t) {
+  itab = t; document.querySelectorAll(".itab").forEach((el) => el.classList.toggle("on", el.dataset.tab === t));
+  iadd.placeholder = t === "ledger" ? "Log a failure / lesson…" : t === "evals" ? "Eval input prompt…" : t === "prompts" ? "Prompt content (name/scope asked next)…" : t === "finetune" ? "Instruction / input (ideal output asked next)…" : "Prompt rule (a compact instruction)…";
+  loadImprove();
+}
+async function loadImprove() {
+  ilist.textContent = "Loading…";
+  const path = itab === "ledger" ? "/ledger" : itab === "evals" ? "/evals" : itab === "prompts" ? "/prompts" : itab === "finetune" ? "/finetune" : "/rules";
+  const d = await aApi(path); const items = (d && d.items) || [];
+  if (istats && d.stats) { const s = d.stats; istats.textContent = `${s.failures}F · ${s.evals}E · ${s.rules}R (${s.activeRules} active) · ${s.prompts || 0}P · ${s.finetune || 0}FT`; }
+  ilist.innerHTML = "";
+  if (!items.length) { const n = document.createElement("div"); n.className = "none"; n.textContent = "Nothing here yet."; ilist.appendChild(n); return; }
+  for (const it of items) ilist.appendChild(itab === "ledger" ? renderFailure(it) : itab === "evals" ? renderEval(it) : itab === "prompts" ? renderPrompt(it) : itab === "finetune" ? renderFinetune(it) : renderRule(it));
+}
+function renderPrompt(p) {
+  const it = document.createElement("div"); it.className = "mitem";
+  const top = document.createElement("div"); top.className = "mtop";
+  top.append(badge(p.name), badge(p.scope), badge("v" + p.version), badge(p.active ? "active" : "inactive", p.active ? "" : "pending"));
+  const c = document.createElement("div"); c.className = "mc"; c.textContent = p.content;
+  if (p.changeReason) { const r = document.createElement("div"); r.className = "mtop"; r.textContent = "why: " + p.changeReason; it.appendChild(r); }
+  const acts = document.createElement("div"); acts.className = "macts";
+  acts.append(
+    mkAct(p.active ? "Deactivate" : "Activate", async () => { if (p.active) await aApi("/prompts/update", { id: p.id, active: false }); else await aApi("/prompts/activate", { id: p.id }); loadImprove(); }),
+    mkAct("New version", async () => { const t = prompt("New version of \"" + p.name + "\":", p.content); if (t == null || !t.trim()) return; const why = prompt("Reason for the change:", "") || ""; await aApi("/prompts", { name: p.name, scope: p.scope, content: t.trim(), changeReason: why }); loadImprove(); }),
+    mkAct("Delete", () => fUpdate("/prompts/delete", { id: p.id })),
+  );
+  it.append(top, c, acts); return it;
+}
+function renderFailure(f) {
+  const it = document.createElement("div"); it.className = "mitem";
+  const top = document.createElement("div"); top.className = "mtop";
+  top.append(badge(f.category), badge(f.severity, f.severity === "high" || f.severity === "critical" ? "rejected" : ""), badge(f.status, f.status === "open" ? "pending" : ""), Object.assign(document.createElement("span"), { textContent: "by " + f.detectedBy }));
+  const c = document.createElement("div"); c.className = "mc"; c.textContent = (f.originalRequest || "").slice(0, 160) || "(no request)";
+  const acts = document.createElement("div"); acts.className = "macts";
+  acts.append(mkAct(f.status === "open" ? "Mark resolved" : "Reopen", () => fUpdate("/ledger/update", { id: f.id, status: f.status === "open" ? "resolved" : "open" })), mkAct("Delete", () => fUpdate("/ledger/delete", { id: f.id })));
+  it.append(top, c);
+  // F4 (spec 1819-1831): root cause + improvement actions (+ sampling category / linked items)
+  // were stored by the Group-A pipeline but never displayed.
+  const detail = [
+    f.rootCause && f.rootCause !== "unknown" ? "root: " + f.rootCause.replace(/_/g, " ") : "",
+    (f.improvementActions || []).length ? "actions: " + f.improvementActions.map((a) => a.replace(/_/g, " ")).join(", ") : "",
+    f.samplingCategory ? "sampled: " + f.samplingCategory : "",
+    (f.linkedEvalIds || []).length ? "evals: " + f.linkedEvalIds.length : "",
+    (f.linkedRuleIds || []).length ? "rules: " + f.linkedRuleIds.length : "",
+  ].filter(Boolean).join(" · ");
+  if (detail) { const d = document.createElement("div"); d.className = "mtop"; d.textContent = detail; it.appendChild(d); }
+  if (f.correctedOutput) { const d = document.createElement("div"); d.className = "mtop"; d.textContent = "lesson: " + String(f.correctedOutput).slice(0, 140); it.appendChild(d); }
+  it.appendChild(acts); return it;
+}
+// A7 completion: the fine-tuning candidate queue tab (store/endpoints landed in Group A; the tab
+// itself never did). Candidates need explicit approval here before any training use.
+function renderFinetune(t) {
+  const it = document.createElement("div"); it.className = "mitem";
+  const top = document.createElement("div"); top.className = "mtop";
+  top.append(badge(t.source.replace(/_/g, " ")), badge(t.status, t.status === "candidate" ? "pending" : t.status === "rejected" ? "rejected" : ""));
+  const c = document.createElement("div"); c.className = "mc"; c.textContent = (t.input || "").slice(0, 160) + (t.idealOutput ? "\n→ " + String(t.idealOutput).slice(0, 120) : "");
+  const acts = document.createElement("div"); acts.className = "macts";
+  if (t.status === "candidate") acts.append(mkAct("Approve", () => fUpdate("/finetune/update", { id: t.id, status: "approved" })), mkAct("Reject", () => fUpdate("/finetune/update", { id: t.id, status: "rejected" })));
+  acts.append(mkAct("Delete", () => fUpdate("/finetune/delete", { id: t.id })));
+  it.append(top, c, acts); return it;
+}
+function renderEval(e) {
+  const it = document.createElement("div"); it.className = "mitem";
+  const top = document.createElement("div"); top.className = "mtop";
+  top.append(badge(e.category), Object.assign(document.createElement("span"), { textContent: e.latestScore == null ? "not run" : "score " + e.latestScore + "/10" }), Object.assign(document.createElement("span"), { textContent: "src:" + e.source }));
+  const c = document.createElement("div"); c.className = "mc"; c.textContent = e.title;
+  const acts = document.createElement("div"); acts.className = "macts";
+  acts.append(mkAct("Run", async (ev) => { const b = ev && ev.target; if (b) { b.textContent = "running…"; } const r = await aApi("/evals/run", { id: e.id }); alert(r.run ? `Score ${r.run.score}/10 · ${r.run.passed ? "PASS" : "FAIL"}\n\n${(r.output || "").slice(0, 400)}` : "Run failed"); loadImprove(); }), mkAct("Delete", () => fUpdate("/evals/delete", { id: e.id })));
+  it.append(top, c, acts); return it;
+}
+function renderRule(r) {
+  const it = document.createElement("div"); it.className = "mitem";
+  const top = document.createElement("div"); top.className = "mtop";
+  top.append(badge(r.scope), badge(r.status, r.status === "active" ? "" : "pending"));
+  if (typeof r.evalDelta === "number") top.append(badge((r.evalDelta > 0 ? "+" : "") + r.evalDelta + " on evals", r.evalDelta < 0 ? "rejected" : ""));
+  const c = document.createElement("div"); c.className = "mc"; c.textContent = r.content;
+  const acts = document.createElement("div"); acts.className = "macts";
+  acts.append(
+    mkAct(r.status === "active" ? "Retire" : "Activate", () => fUpdate("/rules/update", { id: r.id, status: r.status === "active" ? "retired" : "active" })),
+    mkAct("Test", async (ev) => { const b = ev && ev.target; if (b) b.textContent = "testing… (minutes)"; const d = await aApi("/rules/test", { id: r.id }); alert(d.error ? "Test: " + d.error : "Δ " + d.delta + " — " + d.verdict + "\n\n" + d.results.map((x) => `${x.title}: ${x.before} → ${x.after}`).join("\n")); loadImprove(); }),
+    mkAct("Delete", () => fUpdate("/rules/delete", { id: r.id })),
+  );
+  it.append(top, c, acts); return it;
+}
+async function fUpdate(path, body) { await aApi(path, body); loadImprove(); }
+async function addImprove() {
+  const v = (iadd.value || "").trim(); if (!v) return;
+  if (itab === "ledger") await aApi("/ledger", { category: "manual", severity: "low", originalRequest: v, detectedBy: "user" });
+  else if (itab === "evals") { const exp = prompt("Expected behavior (what a good answer must do):", ""); await aApi("/evals", { title: v.slice(0, 80), input: v, expectedBehavior: exp || "", source: "manual" }); }
+  else if (itab === "prompts") {
+    const name = prompt("Prompt name (same name = new version of that prompt):", "house-style"); if (name == null) return;
+    const scope = prompt("Scope (global, mode, tool, mentor, router):", "global") || "global";
+    const why = prompt("Reason for this prompt:", "") || "";
+    await aApi("/prompts", { name: name.trim() || "unnamed", scope: scope.trim(), content: v, changeReason: why });
+  }
+  else if (itab === "finetune") {
+    const ideal = prompt("Ideal output (what the model SHOULD produce for this input):", ""); if (ideal == null) return;
+    await aApi("/finetune", { input: v, idealOutput: ideal, source: "user_authored_instruction" });
+  }
+  else await aApi("/rules", { content: v, scope: "global", status: "candidate" });
+  iadd.value = ""; loadImprove();
+}
+
+// ---------- pre-send cost estimate chip (docs/CLOUD-MIGRATION.md §6) ----------
+// A live, deterministic preflight (/estimate — no model call): what THIS turn costs before you send.
+// Debounced on typing; superseded-by-newer-keystroke guard; hides while empty or streaming.
+let estTimer = null, estSeq = 0;
+function scheduleEstimate() { if (estTimer) clearTimeout(estTimer); estTimer = setTimeout(updateEstimate, 350); }
+function hideCostChip() { if (costChip) costChip.hidden = true; }
+async function updateEstimate() {
+  if (!costChip) return;
+  const text = input.value.trim();
+  if ((!text && !pendingAtt.length) || busy) { hideCostChip(); return; }
+  const c = cur();
+  const history = c ? c.messages.map((m) => ({ role: m.role, content: m.content })) : [];
+  history.push({ role: "user", content: text });
+  // Pictures ride the estimate as a COUNT only (the server prices them at a flat per-image token
+  // figure); the chip also mirrors the vision gate so a doomed send says so before the tap.
+  // Staged file text (a 40-page PDF is real tokens) rides as a CHAR COUNT, never the bytes.
+  const attachChars = pendingAtt.reduce((n, a) => n + (a.kind === "text" && a.text ? a.text.length : 0), 0);
+  const payload = { messages: history, mode: modeSel ? modeSel.value : "auto", model: forcedModel() || "auto", privacyMode: privacyModeSel ? privacyModeSel.value : "normal", images: attImages(), attachChars };
+  const seq = ++estSeq;
+  // No cost talk while typing (Fred, 2026-07-18): the preflight still runs silently so a DOOMED
+  // send (vision gate, privacy block) can warn before the tap, but numbers wait for the answer.
+  let est;
+  try {
+    const r = await fetch("/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    est = await r.json();
+  } catch { if (seq === estSeq) hideCostChip(); return; }
+  if (seq !== estSeq) return;                       // a newer keystroke already superseded this
+  if (busy || (!input.value.trim() && !pendingAtt.length)) { hideCostChip(); return; }
+  renderCostChip(est);
+}
+function renderCostChip(est) {
+  // Warnings only: the chip appears ONLY when this send would be refused (vision gate, privacy
+  // block). Costs and tokens now report once per exchange, under the finished answer.
+  if (!costChip || !est || est.backend !== "blocked") { hideCostChip(); return; }
+  const label = est.blocked === "attachments_unsupported" ? "Blocked · model can't see pictures" : "Blocked · " + (privacyModeSel ? privacyModeSel.value : "") + " mode";
+  costChip.className = "cost-chip cc-cold";
+  costChip.innerHTML = `<span class="cc-dot"></span><span class="cc-cost">${escapeHtml(label)}</span>`;
+  costChip.hidden = false;
+}
+
+// ---------- wire up ----------
+input.addEventListener("input", autosize);
+input.addEventListener("input", scheduleEstimate);
+// Desktop (mouse) sends on Enter; phone/touch lets Enter insert a newline (use the send button).
+const enterSends = !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && enterSends) { e.preventDefault(); send(); } });
+sendBtn.addEventListener("click", send);
+menuBtn.addEventListener("click", () => (sidebar.classList.contains("open") ? closeSidebar() : openSidebar()));
+// Setup door in the rail: connectors + credits. Everyone gets their own setup page (the page
+// itself renders owner vs guest panels by role; the server enforces owner-only endpoints).
+const sbSetup = $("sb-setup");
+if (sbSetup) sbSetup.addEventListener("click", () => { location.href = "/setup"; });
+// Guests never see the Private/Local lane: the local model is owner-only (the server already
+// refuses it; offering a dead option would just confuse a paying guest). Owner path unchanged.
+fetch("/account").then((r) => r.json()).then((a) => {
+  if (a && a.multiTenant && !a.isOwner && privacyModeSel) {
+    const opt = privacyModeSel.querySelector('option[value="private"]');
+    if (opt) opt.remove();
+    if (privacyModeSel.value === "private" || (localStorage.getItem(LS_PMODE) || "") === "private") {
+      try { localStorage.setItem(LS_PMODE, "normal"); } catch {}
+      privacyModeSel.value = "normal";
+      privacyModeSel.dispatchEvent(new Event("change"));
+    }
+  }
+}).catch(() => {});
+overlay.addEventListener("click", closeSidebar);
+newBtn.addEventListener("click", newChat);
+if (chatSearch) chatSearch.addEventListener("input", () => { chatQuery = chatSearch.value || ""; renderSidebar(); });
+if (modeSel) modeSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODE, modeSel.value); } catch {} updateEstimate(); });
+// Privacy mode persists, re-filters the picker to the allowed providers, and refreshes the estimate.
+if (privacyModeSel) privacyModeSel.addEventListener("change", () => { try { localStorage.setItem(LS_PMODE, privacyModeSel.value); } catch {} applyPrivacyFilter(); updateEstimate(); updateAttachGate(); explainPrivacy(privacyModeSel.value); });
+// Why the privacy dial matters (Fred, 2026-07-18): the selector decides WHERE your words may
+// travel. Explain it in place the moment it's touched, not in a manual nobody opens.
+const PRIVACY_NOTES = {
+  normal: "Normal: any model, any provider. Fine for everyday questions with nothing sensitive in them.",
+  trusted: "Trusted: only providers with the strictest data-retention terms (OpenAI, Anthropic) plus the local engine. Use it for business details, client names, and money.",
+  private: "Private: nothing leaves this machine; local model only. Use it for secrets, credentials, legal matters, or anything you would not put in an email.",
+};
+function explainPrivacy(mode) {
+  const text = PRIVACY_NOTES[mode];
+  if (!text) return;
+  document.querySelector(".privacy-note")?.remove();
+  const n = document.createElement("div");
+  n.className = "privacy-note";
+  n.innerHTML = "<b>Privacy dial</b> — it controls where your words are allowed to travel.<br>" + text;
+  document.body.appendChild(n);
+  setTimeout(() => { n.classList.add("gone"); setTimeout(() => n.remove(), 400); }, 8000);
+  n.addEventListener("click", () => n.remove());
+}
+if (privacyModeSel) privacyModeSel.addEventListener("pointerdown", () => {
+  if (!explainPrivacy._seen) { explainPrivacy._seen = true; explainPrivacy(privacyModeSel.value); }
+}, { passive: true });
+// Model pick persists immediately (matches Mode) and flips the "via OpenRouter" spend indicator live.
+if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateModelTrigger(); updateCloudBadge(); updateEstimate(); updateAttachGate(); modelLaser(); });
+// Selection ceremony: a green laser races the trigger's border, then the model name flares and
+// settles. Pure class choreography; the CSS lives in dominion-tenant.css.
+function modelLaser() {
+  if (!modelTrigger || !modelCurrent) return;
+  modelTrigger.classList.remove("laser"); modelCurrent.classList.remove("name-flare");
+  void modelTrigger.offsetWidth;   // retrigger
+  modelTrigger.classList.add("laser");
+  setTimeout(() => { modelTrigger.classList.remove("laser"); modelCurrent.classList.add("name-flare"); }, 900);
+  setTimeout(() => modelCurrent.classList.remove("name-flare"), 2600);
+}
+// Attachments: button opens the picker; picked/pasted/dropped files stage into the strip.
+if (attachBtn && attachFile) {
+  attachBtn.addEventListener("click", () => attachFile.click());
+  attachFile.addEventListener("change", async () => { await addFiles(attachFile.files); attachFile.value = ""; });
+}
+input.addEventListener("paste", (e) => {
+  const files = e.clipboardData && e.clipboardData.files;
+  if (files && files.length) { e.preventDefault(); addFiles(files); }
+});
+{
+  const footer = document.querySelector("#neural-glass footer") || document.body;
+  footer.addEventListener("dragover", (e) => { if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) { e.preventDefault(); footer.classList.add("att-drag"); } });
+  footer.addEventListener("dragleave", () => footer.classList.remove("att-drag"));
+  footer.addEventListener("drop", (e) => { footer.classList.remove("att-drag"); if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) { e.preventDefault(); addFiles(e.dataTransfer.files); } });
+}
+settingsBtn.addEventListener("click", openSettings);
+sclose.addEventListener("click", closeSettings);
+ssave.addEventListener("click", saveSettingsUI);
+smodal.addEventListener("click", (e) => { if (e.target === smodal) closeSettings(); });
+memBtn.addEventListener("click", openMemory);
+mclose.addEventListener("click", closeMemory);
+msave.addEventListener("click", addMemory);
+mmodal.addEventListener("click", (e) => { if (e.target === mmodal) closeMemory(); });
+if (mfilterStatus) mfilterStatus.addEventListener("change", loadMemory);
+toolsBtn.addEventListener("click", () => openTools());   // unfiltered (a click event is not a filter)
+tclose.addEventListener("click", closeTools);
+tmodal.addEventListener("click", (e) => { if (e.target === tmodal) closeTools(); });
+artifactsBtn.addEventListener("click", openArtifacts);
+aclose.addEventListener("click", closeArtifacts);
+amodal.addEventListener("click", (e) => { if (e.target === amodal) closeArtifacts(); });
+improveBtn.addEventListener("click", openImprove);
+iclose.addEventListener("click", closeImprove);
+imodal.addEventListener("click", (e) => { if (e.target === imodal) closeImprove(); });
+if (personaBtn) {
+  personaBtn.addEventListener("click", openPersona);
+  pclose.addEventListener("click", closePersona);
+  pmodal.addEventListener("click", (e) => { if (e.target === pmodal) closePersona(); });
+  paddbtn.addEventListener("click", addPersonaText);
+  pscrape.addEventListener("click", scrapePersona);
+  pscan.addEventListener("click", scanPersonaInbox);
+  pdistill.addEventListener("click", distillProfile);
+  pfilterKind.addEventListener("change", loadPersonaList);
+}
+iaddbtn.addEventListener("click", addImprove);
+document.querySelectorAll(".itab").forEach((el) => el.addEventListener("click", () => setITab(el.dataset.tab)));
+personaSel.addEventListener("change", () => { personaCustom.hidden = personaSel.value !== "custom"; });
+tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.value; });
+// Durable-turn resume: coming back to the app (or reloading it) reattaches to an in-flight answer.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) maybeReattach(); });
+window.addEventListener("pageshow", () => maybeReattach());
+
+load(); renderAll(); loadModels(); autosize();
+maybeReattach();   // an answer may still be generating server-side from before this (re)load
+if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+
+// ---- update watcher ----
+// This tab can stay open for days; the service worker only refreshes cache on a NEW page load,
+// so a long-lived tab silently keeps running whatever JS it loaded first — any later deploy (or
+// crash-restart) never reaches it. Poll the server's build id and reload once it changes. Never
+// yank the page out from under an in-flight answer: defer until the turn finishes.
+let lastBuild = null, pendingReload = false;
+async function doReload() {
+  try { const keys = await caches.keys(); await Promise.all(keys.map((k) => caches.delete(k))); } catch {}
+  location.reload();
+}
+async function checkVersion() {
+  try {
+    const r = await fetch("/api/version", { cache: "no-store" });
+    if (!r.ok) return;
+    const { build } = await r.json();
+    if (lastBuild === null) { lastBuild = build; return; }
+    if (build !== lastBuild) { if (busy) pendingReload = true; else doReload(); }
+  } catch {}
+}
+setInterval(() => { if (pendingReload && !busy) doReload(); else checkVersion(); }, 90000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVersion(); });
+checkVersion();
+
+// ---------- voice (Phase D): OpenAI ears + mouth, the PICKED model as the brain ----------
+// Tap mic -> record; tap again -> stop -> /api/voice/transcribe (OpenAI STT on the box) -> the
+// transcript auto-sends through the normal /chat flow (whatever model is picked, tools included).
+// The speaker toggle speaks finished answers via /api/voice/tts. Voice I/O is OpenAI; the brain
+// stays Fred's choice — that's the point of Dominion.
+const micBtn = $("mic"), speakBtn = $("speak");
+const LS_SPEAK = "dominion.speak.v1";
+let speakOn = false; try { speakOn = localStorage.getItem(LS_SPEAK) === "1"; } catch {}
+let rec = null, recChunks = [], recStream = null, ttsAudio = null;
+
+function paintSpeak() {
+  if (!speakBtn) return;
+  speakBtn.classList.toggle("speakon", speakOn);
+  speakBtn.innerHTML = speakOn
+    ? '<span class="spk-ic">&#128266;</span><span class="spk-state">ON</span>'
+    : '<span class="spk-ic">&#128264;</span>';
+  speakBtn.title = "Auto-speak every answer (" + (speakOn ? "on" : "off") + ")";
+}
+if (speakBtn) { paintSpeak(); speakBtn.addEventListener("click", () => {
+  speakOn = !speakOn; try { localStorage.setItem(LS_SPEAK, speakOn ? "1" : "0"); } catch {}
+  paintSpeak(); if (!speakOn && ttsAudio) { try { ttsAudio.pause(); } catch {} }
+}); }
+
+async function micTap() {
+  if (!micBtn) return;
+  if (rec && rec.state === "recording") { rec.stop(); return; }   // second tap = stop -> transcribe -> send
+  if (!navigator.mediaDevices || !window.MediaRecorder) { showErr("Voice input isn't supported in this browser."); return; }
+  try { recStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { showErr("Microphone permission denied — allow the mic for this site."); return; }
+  // Chrome/Android = webm+opus; iOS Safari = mp4. The server forwards whatever mime it gets.
+  const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus"
+    : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
+  recChunks = [];
+  try { rec = new MediaRecorder(recStream, mime ? { mimeType: mime } : undefined); }
+  catch { showErr("Couldn't start the recorder."); try { recStream.getTracks().forEach((t) => t.stop()); } catch {} return; }
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+  rec.onstop = async () => {
+    try { recStream.getTracks().forEach((t) => t.stop()); } catch {}
+    micBtn.classList.remove("rec"); micBtn.classList.add("busy");
+    // Instant feedback in the input itself: server STT takes a few seconds and Fred read the
+    // silence as "it's broken". The placeholder talks while the transcript is in flight.
+    const oldPlaceholder = input.placeholder;
+    input.placeholder = "Transcribing your voice…";
+    try {
+      const blob = new Blob(recChunks, { type: (rec && rec.mimeType) || mime || "audio/webm" });
+      if (blob.size < 1000) { showErr("Didn't catch that — recording was too short."); return; }
+      const r = await fetch("/api/voice/transcribe", { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j || !j.text) { showErr((j && j.error) || "Transcription failed — try again."); return; }
+      input.value = j.text; autosize();
+      if (!busy) send();   // straight through the normal flow: picked model, tools, the works
+    } finally { micBtn.classList.remove("busy"); rec = null; input.placeholder = oldPlaceholder; }
+  };
+  rec.start();
+  micBtn.classList.add("rec");
+  input.placeholder = "Listening… tap the mic again to finish.";
+}
+if (micBtn) micBtn.addEventListener("click", micTap);
+
+// Speak a finished answer. Code blocks are dropped (nobody wants JSON read aloud); UI-side cap
+// matches the server's 4000-char TTS limit.
+async function speakAnswer(text) {
+  const t = String(text || "").replace(/```[\s\S]*?```/g, " … code omitted … ").slice(0, 4000).trim();
+  if (!t) return;
+  try {
+    const r = await fetch("/api/voice/tts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: t }) });
+    if (!r.ok) {
+      // Spoken answers are a bonus, but a SILENT failure looked like the feature never shipped.
+      // Say why, once per session (quota outages on the voice provider are the usual culprit).
+      if (!speakAnswer._warned) {
+        speakAnswer._warned = true;
+        const j = await r.json().catch(() => null);
+        showErr("Voice reply failed: " + ((j && j.error) || ("HTTP " + r.status)) + ". The speaker toggle stays on; it retries on the next answer.");
+      }
+      return;
+    }
+    const blob = await r.blob();
+    if (ttsAudio) { try { ttsAudio.pause(); } catch {} }
+    ttsAudio = new Audio(URL.createObjectURL(blob));
+    ttsAudio.play().catch(() => { if (!speakAnswer._warned) { speakAnswer._warned = true; showErr("Your browser blocked audio autoplay — tap anywhere once and the next answer will speak."); } });
+  } catch {}
+}
