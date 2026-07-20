@@ -3878,6 +3878,25 @@ const server = http.createServer(async (req, res) => {
     if (path === "/hands/stream" && req.method === "GET") return handsHub.handleStream(req, res, u);
     if (path === "/hands/result" && req.method === "POST") return handsHub.handleResult(req, res, await readJsonBody(req));
     if (path === "/hands/chunk" && req.method === "POST") return handsHub.handleChunk(req, res, await readJsonBody(req));
+    /*
+     * Local-tier self-check (fix C). Bearer-gated (HANDS_TOKEN), so it proves the server->node->Ollama
+     * path through the SAME ollamaChat()/embedText() the app uses, without faking owner auth under CF
+     * Access enforce. Also a standing probe that Qwen is reachable from the cloud.
+     */
+    if (path === "/hands/selftest-ollama" && req.method === "GET") {
+      if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }
+      const t0 = Date.now();
+      let chat = null, embed = null, chatErr = null;
+      try { chat = await ollamaChat(LIGHT_MODEL, [{ role: "user", content: "Reply with exactly: ALIVE" }], { noTools: true, think: false, num_predict: 12 }); }
+      catch (e) { chatErr = String(e && e.message || e); }
+      try { embed = await embedText("probe"); } catch { /* embed reported via null below */ }
+      const content = chat && chat.message && chat.message.content ? String(chat.message.content).trim() : null;
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({
+        ok: !!content, viaHands: OLLAMA_VIA_HANDS || "(direct http)", ms: Date.now() - t0,
+        chat: content, chatErr, embedDim: Array.isArray(embed) ? embed.length : 0,
+      }));
+    }
     if (path === "/hands/run" && req.method === "POST") return handsHub.handleRun(req, res, await readJsonBody(req));
     if (path === "/hands/nodes" && req.method === "GET") return handsHub.handleNodes(req, res);
 
