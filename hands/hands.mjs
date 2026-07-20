@@ -330,6 +330,28 @@ export async function executeJob(tool, args = {}, meta = {}) {
         return { ok: true, text: parts.join(""), chunks: parts.length };
       }
 
+      /*
+       * claude_code (2026-07-20): run Claude Code headless in a repo on this machine. This is the
+       * capability that lets Command Deck's work orders (and Dominion's own models) reach ONE
+       * machine-access channel instead of the parallel bridge. It mirrors the bridge poller's
+       * execClaude exactly: a git baseline snapshot BEFORE any change so rollback always exists, the
+       * same headless `claude -p` invocation, the same delete-protection restore, and a plain summary.
+       * Output streams back (Step 3) so a long agent run keeps the hub deadline alive.
+       *
+       * Roots + carve-outs still hold: dir must be within an allowed root, and the args blob was
+       * already scanned for D:/backups at the top of executeJob.
+       */
+      case "claude_code": {
+        const dir = String(args.dir || args.repo || "");
+        if (!dir) return { ok: false, error: "claude_code needs a dir (the repo folder to work in)" };
+        const w = withinRoots(dir); if (!w.ok) return refuse(w.reason);
+        if (!existsSync(dir)) return { ok: false, error: "not found: " + dir };
+        const canDelete = args.canDelete === true;
+        const instructions = String(args.instructions || args.title || "").trim();
+        if (!instructions) return { ok: false, error: "claude_code needs instructions" };
+        return await runClaudeCode({ dir, title: args.title, instructions, canDelete, emit: meta.emit, timeoutMs: args.timeoutMs });
+      }
+
       // ---- fix C (2026-07-20): local Ollama passthrough ----
       // The Railway container binds Ollama to 127.0.0.1 only and has no tailnet, so the cloud app
       // cannot reach the model. This node can reach it trivially. The app dispatches ollama_chat /
@@ -346,6 +368,114 @@ export async function executeJob(tool, args = {}, meta = {}) {
   } catch (e) {
     return { ok: false, error: `hands ${tool} failed: ` + (e && e.message || e) };
   }
+}
+
+// ---- claude_code: headless Claude Code runner (the single-channel consolidation, 2026-07-20) ----
+// Mirrors command-deck/bridge/poller.mjs execClaude so behaviour is identical to the bridge it
+// replaces: git baseline first, `claude -p` headless, delete-protection restore, plain summary.
+const CLAUDE_CMD = process.env.HANDS_CLAUDE_CMD || "claude";
+const CLAUDE_ARGS = String(process.env.HANDS_CLAUDE_ARGS || "--permission-mode acceptEdits").split(/\s+/).filter(Boolean);
+const CLAUDE_TIMEOUT_MS = Number(process.env.HANDS_CLAUDE_TIMEOUT_MS || 15 * 60 * 1000);
+const NOHOOKS_DIR = join(HERE, ".nohooks");
+
+/*
+ * Claude Code auth: the machine's OAuth login was revoked, so headless runs use ANTHROPIC_API_KEY
+ * instead, which Fred placed in the wallet (~/.app-secrets.env) on both machines. An API key does
+ * not expire the way an interactive OAuth session can, which is the right choice for an always-on
+ * agent. We read it from the env first, then the wallet, and inject ONLY that one key into Claude's
+ * child env — never the whole wallet. NOTE: this bills work orders against the API key.
+ */
+function walletValue(name) {
+  if (process.env[name]) return process.env[name];
+  try {
+    const home = process.env.USERPROFILE || process.env.HOME || "";
+    const txt = readFileSync(join(home, ".app-secrets.env"), "utf8");
+    const m = txt.match(new RegExp("^\\s*(?:export\\s+)?" + name + "\\s*=\\s*(.*)$", "m"));
+    if (m) return m[1].trim().replace(/^["']|["']$/g, "");
+  } catch { /* no wallet on this box */ }
+  return "";
+}
+
+function gitIn(dir, gitArgs, timeoutMs = 30000) {
+  return new Promise((res) => {
+    // Committer identity MUST match the bridge's ("Command Deck Bridge" / Fred's real email): a
+    // fresh git repo has no user.name/email so commits fail without it, AND the existing revert
+    // safety gate (poller.mjs revertJob) only rolls back commits authored by that exact name. Same
+    // email so Vercel team-deploys are not blocked by an unrecognized author.
+    const child = spawn("git", [
+      "-c", "safe.directory=*", "-c", "core.hooksPath=" + NOHOOKS_DIR, "-c", "core.fsmonitor=false",
+      "-c", "user.email=fredwolfe@gmail.com", "-c", "user.name=Command Deck Bridge",
+      ...gitArgs,
+    ], { cwd: dir, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+    let out = "", err = "";
+    const t = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, timeoutMs);
+    child.stdout.on("data", (d) => (out += d)); child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => { clearTimeout(t); res({ code: -1, out, err: String(e && e.message) }); });
+    child.on("close", (code) => { clearTimeout(t); res({ code, out, err }); });
+  });
+}
+
+async function claudeBaseline(dir) {
+  try { mkdirSync(NOHOOKS_DIR, { recursive: true }); } catch {}
+  const isRepo = (await gitIn(dir, ["rev-parse", "--is-inside-work-tree"])).out.trim() === "true";
+  if (!isRepo) {
+    await gitIn(dir, ["init"]);
+    await gitIn(dir, ["add", "-A"]);
+    await gitIn(dir, ["commit", "--allow-empty", "-m", "hands: baseline snapshot"]);
+  } else {
+    const dirty = (await gitIn(dir, ["status", "--porcelain"])).out.trim();
+    if (dirty) { await gitIn(dir, ["add", "-A"]); await gitIn(dir, ["commit", "-m", "hands: pre-job snapshot"]); }
+  }
+  return (await gitIn(dir, ["rev-parse", "HEAD"])).out.trim();
+}
+
+async function runClaudeCode({ dir, title, instructions, canDelete, emit, timeoutMs }) {
+  const baseline = await claudeBaseline(dir);
+  const deleteRule = canDelete ? "" :
+    "IMPORTANT: This folder is delete-protected. You may create and edit files, but do NOT delete files or remove their contents wholesale.\n";
+  const prompt =
+    "You are Claude Code running headless on Fred's machine via the Dominion hands node.\n" +
+    'Work order: "' + (title || "(untitled)") + '"\n' + deleteRule +
+    "If the request is unclear, contradictory, unsafe, or you cannot do it correctly, make NO changes and instead explain the problem in plain language. Do not guess. Do NOT run git or commit; the node handles version control. End with a short, plain-English summary of exactly what you did, or why you couldn't.\n\n" +
+    "--- INSTRUCTIONS ---\n" + instructions;
+
+  const cap = Math.min(Math.max(Number(timeoutMs) || CLAUDE_TIMEOUT_MS, 5000), 30 * 60 * 1000);
+  const scrubbed = { ...process.env }; delete scrubbed.HANDS_TOKEN; delete scrubbed.HANDS_CF_CLIENT_SECRET;
+  // Give Claude Code the API key from the wallet (OAuth on these machines is revoked).
+  const apiKey = walletValue("ANTHROPIC_API_KEY");
+  if (apiKey) scrubbed.ANTHROPIC_API_KEY = apiKey;
+  const useShell = IS_WIN;
+  let child;
+  try {
+    child = useShell
+      ? spawn([CLAUDE_CMD, ...CLAUDE_ARGS, "-p"].join(" "), [], { cwd: dir, shell: true, env: scrubbed, windowsHide: true })
+      : spawn(CLAUDE_CMD, [...CLAUDE_ARGS, "-p"], { cwd: dir, shell: false, env: scrubbed, windowsHide: true });
+  } catch (e) { return { ok: false, error: "could not launch Claude Code: " + (e && e.message) }; }
+
+  let out = "", err = "";
+  const killer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, cap);
+  try { child.stdin.write(prompt); child.stdin.end(); } catch {}
+  child.stdout.on("data", (d) => { const s = d.toString(); out += s; if (emit) emit(s); });
+  child.stderr.on("data", (d) => (err += d.toString()));
+  const code = await new Promise((r) => { child.on("error", (e) => { err += "\n" + e.message; r(-1); }); child.on("close", r); });
+  clearTimeout(killer);
+
+  const text = (out + (err ? "\n[stderr]\n" + err : "")).trim();
+  const summary = text.split("\n").filter(Boolean).slice(-12).join("\n") || "Done.";
+  if (code !== 0) return { ok: false, baseline, error: "Claude Code couldn't finish (exit " + code + "). " + text.slice(0, 240), log: text.slice(-6000) };
+
+  // Delete-protection: restore anything Claude removed under a protected root.
+  const restored = [];
+  if (!canDelete) {
+    const st = await gitIn(dir, ["-c", "core.quotepath=false", "-c", "status.renames=false", "status", "--porcelain", "-z"]);
+    const deleted = st.out.split("\0").filter(Boolean).filter((e) => e.slice(0, 2).includes("D")).map((e) => e.slice(3)).filter(Boolean);
+    for (const f of deleted) { const co = await gitIn(dir, ["checkout", "--", f]); if (co.code === 0) restored.push(f); }
+  }
+  // Record the post-work state as a rollback point (the node commits, so revert is always possible).
+  await gitIn(dir, ["add", "-A"]);
+  await gitIn(dir, ["commit", "-m", "hands: " + String(title || "work order").slice(0, 60)]);
+  const head = (await gitIn(dir, ["rev-parse", "HEAD"])).out.trim();
+  return { ok: true, baseline, commit: head, summary, restored, chars: text.length };
 }
 
 // ---- local Ollama passthrough (fix C) ---------------------------------------------------------
