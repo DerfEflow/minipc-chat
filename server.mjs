@@ -2922,8 +2922,6 @@ async function handleChat(req, res) {
   opts.wildfire = wildfireOn;
 
   opts.noTools = !attachTools;
-  // Carry identity into the local path so its tool payload is filtered like the cloud path's.
-  opts.role = T.role; opts.forgeExtra = forgeExtra;
   if (wildfireNotice) sse({ type: "wildfire", ...wildfireNotice, armed: wildfireOn });
   // D1: the full routing decision surfaces immediately (spec routing JSON shape)...
   sse({ type: "route", model, mode, route: routeOf(tier, mode), reason, confidence: routeConfidence,
@@ -2958,6 +2956,10 @@ async function handleChat(req, res) {
    * it finish while the UI pretends it stopped. Owners inherit CTX.hands, so it gets wrapped here
    * rather than at the base, which stays signal-free for background jobs like the corpus backup.
    */
+  // Carry identity into the local path so its tool payload is filtered like the cloud path's.
+  // MUST sit after forgeExtra is resolved above: reading it earlier is a temporal dead zone and
+  // throws on every single turn. That shipped on 2026-07-19 and is why this line is down here now.
+  opts.role = T.role; opts.forgeExtra = forgeExtra;
   if (reqCtx.hands === (T.ctxBase || CTX).hands && reqCtx.hands) {
     const base = reqCtx.hands;
     reqCtx.hands = { ...base, dispatch: (tool, args, opts = {}) => base.dispatch(tool, args, { ...opts, signal: ac.signal }) };
@@ -3697,7 +3699,18 @@ const server = http.createServer(async (req, res) => {
       const payload = catalogPayload();
       // Tenant-aware default: the owner lands on the global default; everyone else lands on the tenant
       // default (Hermes 4 70B) so the picker preselects it for them.
-      try { payload.default = defaultModelFor(resolveTenant(req).isOwner); } catch {}
+      let isOwnerHere = false;
+      try { const TT = resolveTenant(req); isOwnerHere = !!TT.isOwner; payload.default = defaultModelFor(isOwnerHere); } catch {}
+      /*
+       * The Wildfire star is OWNER-ONLY (Fred, 2026-07-19: "in my version ONLY"). Strip the flag
+       * from a guest's payload rather than hiding it in CSS, so a guest's picker has no idea the
+       * roster exists. Wildfire itself is refused server-side regardless; this is about the UI not
+       * advertising a control they cannot use.
+       */
+      payload.wildfire = isOwnerHere;
+      if (!isOwnerHere) {
+        for (const g of payload.groups || []) g.models = (g.models || []).map(({ broadCapable, ...rest }) => rest);
+      }
       payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY };
       // Phase 2: tell the UI the privacy modes + which providers each mode permits, so the picker can
       // filter and the switch can render. The server ALSO enforces (privacy.mjs) — this is display only.

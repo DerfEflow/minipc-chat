@@ -317,6 +317,10 @@ const WILDFIRE_ROSTER = new Set([
   "nvidia/nemotron-3-ultra-550b-a55b",
 ]);
 
+// Stamp it onto every model record so it rides the /api/models payload to the picker without a
+// second lookup. Runs AFTER finalize(), so toolCapable is already resolved.
+for (const m of MODELS) m.broadCapable = WILDFIRE_ROSTER.has(m.id) && m.toolCapable === true;
+
 // Can this model be trusted with Wildfire's broad authority? Tool capability is a prerequisite:
 // a model that cannot call tools can never be armed, whatever the roster says.
 export const isBroadCapable = (id) => WILDFIRE_ROSTER.has(id) && isToolCapable(id);

@@ -535,6 +535,9 @@ async function loadModels() {
       const avail = cat.available || {};
       availCache = avail;
       if (cat.privacy && Array.isArray(cat.privacy.trustedProviders)) privacyCfg.trustedProviders = cat.privacy.trustedProviders;
+      // Owner-only surfaces (the Wildfire switch and the roster star) key off this. The server is
+      // the authority: it both sets this flag and refuses a non-owner arming attempt independently.
+      window.dominionIsOwner = cat.wildfire === true;
       catalogGroups = cat.groups || [];
       // Drop every existing cloud optgroup (keep the local one) before rebuilding.
       Array.from(modelSel.querySelectorAll("optgroup")).forEach((g) => { if (g.id !== "model-local-group") g.remove(); });
@@ -548,7 +551,11 @@ async function loadModels() {
           o.dataset.provider = m.provider || "openrouter";
           const bench = m.toolCapable ? "🔧" : "💬"; // 🔧 doing / 💬 chatting
           const bits = [m.name, fmtPriceShort(m), fmtCtxShort(m.ctx)].filter(Boolean);
-          o.textContent = `${bench} ${bits.join(" · ")}`;
+          // The Wildfire star. Owner-only: the server strips broadCapable from a guest's payload
+          // entirely, so a guest's picker never renders one. Deliberately plain, per Fred: it marks
+          // "trusted with broad authority", which is a narrower claim than the wrench (tool-capable).
+          if (m.broadCapable) o.dataset.broad = "1";
+          o.textContent = `${m.broadCapable ? "★ " : ""}${bench} ${bits.join(" · ")}`;
           const provOk = m.provider === "openrouter" ? avail.openrouter : m.provider === "openai" ? avail.openai : m.provider === "deepseek" ? avail.deepseek : m.provider === "anthropic" ? avail.anthropic : true;
           if (provOk === false) o.dataset.noKey = "1";   // key-vs-privacy annotation applied by applyPrivacyFilter
           og.appendChild(o);
@@ -924,6 +931,32 @@ function processEvent(st, ev) {
     if (ev.chats) bits.push("💬 " + ev.chats + " past chat" + (ev.chats === 1 ? "" : "s"));
     st.ctxEl.textContent = bits.join(" · ");
     scroll();
+  } else if (ev.type === "wildfire") {
+    /*
+     * Wildfire feedback. Three shapes, all deliberately visible:
+     *   blocked  armed on a model that is not on the roster, so it refused to arm
+     *   denied   a non-owner tried (the server logs this as a denial too)
+     *   nudge    a starred model, machine work asked for, and Wildfire left off
+     */
+    const note = document.createElement("div");
+    note.className = "ctx wildfire-note wildfire-" + (ev.kind || "note");
+    note.textContent = (ev.kind === "nudge" ? "🔥 " : "⚠ ") + (ev.text || "");
+    inner.insertBefore(note, tools);
+    scroll();
+  } else if (ev.type === "tools_capped") {
+    // The 128-tool ceiling silently shed connector tools for months. Never again silently.
+    const note = document.createElement("div");
+    note.className = "ctx tools-capped";
+    note.textContent = "⚠ " + (ev.text || "") + (ev.names && ev.names.length ? " Dropped: " + ev.names.join(", ") : "");
+    inner.insertBefore(note, tools);
+    scroll();
+  } else if (ev.type === "tools_unavailable") {
+    // The worst failure mode: a normal-looking answer that touched nothing. Badge it loudly.
+    const note = document.createElement("div");
+    note.className = "ctx tools-unavailable";
+    note.textContent = "⚠ " + (ev.text || "");
+    inner.insertBefore(note, tools);
+    scroll();
   } else if (ev.type === "mentor_full") {
     st.mentorCritique = ev.critique || null;
   } else if (ev.type === "done") {
@@ -1082,6 +1115,9 @@ async function streamReply(c) {
         // as before, while Flame/Furnace still override deliberately.
         ...((window.forgeTierValue && window.forgeTierValue() !== "ember") ? { wolfeTier: window.forgeTierValue() } : {}),
         ...(window.forgeModeValue && window.forgeModeValue() ? { forgeMode: true } : {}),
+        // Wildfire: broad authority for this turn. Sent only when actually armed, so an unarmed
+        // turn stays byte-identical to before (same reasoning as wolfeTier omitting "ember").
+        ...(window.wildfireValue && window.wildfireValue() ? { wildfire: true } : {}),
       }),
     });
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
@@ -2074,6 +2110,41 @@ async function micTap() {
   input.placeholder = "Listening… tap the mic again to finish.";
 }
 if (micBtn) micBtn.addEventListener("click", micTap);
+
+/*
+ * FIRE ALARM. No confirmation dialog, on purpose. Fred asked to be able to cut its legs off, and a
+ * "are you sure?" in the middle of a model doing something you did not expect is exactly the wrong
+ * moment to add a click. The cost of a mis-click is a stopped turn, which is recoverable. The cost
+ * of hesitating is not.
+ *
+ * The server scopes it: owner pulls every turn and every machine, a guest pulls only their own.
+ */
+const fireAlarmBtn = $("fire-alarm");
+if (fireAlarmBtn) {
+  fireAlarmBtn.addEventListener("click", async () => {
+    fireAlarmBtn.classList.add("firing");
+    fireAlarmBtn.disabled = true;
+    let msg = "";
+    try {
+      const r = await fetch("/chat/fire-alarm", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) msg = "Fire Alarm failed: " + (j.error || r.status);
+      else if (!j.turns && !j.machineJobs) msg = "Fire Alarm pulled. Nothing was running.";
+      else msg = `Fire Alarm pulled. Stopped ${j.turns} turn${j.turns === 1 ? "" : "s"} and ${j.machineJobs} machine job${j.machineJobs === 1 ? "" : "s"}${(j.nodes || []).length ? " on " + j.nodes.join(", ") : ""}.`;
+    } catch (e) {
+      msg = "Fire Alarm could not reach the server: " + (e && e.message || e);
+    }
+    // Also abort anything this client is still streaming, so the UI matches reality immediately.
+    try { if (aborter) aborter.abort(); } catch {}
+    const note = document.createElement("div");
+    note.className = "ctx fire-alarm-note";
+    note.textContent = "🔔 " + msg;
+    const host = document.getElementById("msgs") || document.body;
+    host.appendChild(note);
+    try { note.scrollIntoView({ block: "end" }); } catch {}
+    setTimeout(() => { fireAlarmBtn.classList.remove("firing"); fireAlarmBtn.disabled = false; }, 900);
+  });
+}
 
 // ---------- the voice player (Fred, 2026-07-19) ----------
 // Three complaints, one object. (1) Hitting speak felt like the app hung: generating a minute of

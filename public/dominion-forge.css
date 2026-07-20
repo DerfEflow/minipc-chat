@@ -624,3 +624,114 @@ body.dfd-open #dfd-root { transform: none; }
 @media (prefers-reduced-motion: reduce) {
   body.dfd-anim #sidebar, body.dfd-anim #commandbar, body.dfd-anim #neural-glass, body.dfd-anim #overlay, #dfd-root { transition: none; }
 }
+
+/* ============================ WILDFIRE + FIRE ALARM (2026-07-19) ============================
+ * Wildfire is the owner's broad-authority arming switch. It sits opposite Forge Mode on the dial
+ * and reads deliberately hotter: Forge Mode is reach, Wildfire is reach WITHOUT the confirmation
+ * gates, across both machines. The visual weight should match the actual weight.
+ */
+.dial-wildfire {
+  position: absolute;
+  z-index: 10;
+  left: 7.9%; top: 79.3%; width: 21.8%; height: 11.1%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid rgba(207, 108, 66, .24);
+  border-radius: 8px;
+  background: radial-gradient(ellipse at 50% 20%, rgba(121,38,16,.18), rgba(1,5,8,.48));
+  color: #d2a08e;
+  font: 900 clamp(7px, 2.1vw, 11px)/1 "Bahnschrift", "Arial Narrow", sans-serif;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 2px #000;
+  cursor: pointer;
+  transition: color .22s ease, background .22s ease, border-color .22s ease, box-shadow .22s ease, transform .1s ease;
+}
+.dial-wildfire small { color: #7d5a4c; font-size: .62em; letter-spacing: .12em; line-height: 1.15; text-align: center; transition: color .2s ease; }
+.dial-wildfire:hover { color: #ffd7bd; border-color: rgba(255,138,79,.46); }
+.dial-wildfire:active { transform: translateY(1px) scale(.985); }
+
+/* Armed. Hotter and whiter at the core than Forge Mode, with a slow breath so it never reads as
+ * a static decoration you can stop noticing. */
+.dial-card[data-wildfire="on"] .dial-wildfire {
+  color: #fffaf2;
+  border-color: rgba(255, 196, 150, .9);
+  background: radial-gradient(ellipse at 50% 26%, rgba(255,255,246,.46), rgba(255,86,24,.36) 34%, rgba(92,14,4,.8) 78%);
+  box-shadow: inset 0 0 18px rgba(255,140,70,.55), 0 0 6px #fff6e8, 0 0 20px #ff6a20, 0 0 42px rgba(255,40,8,.7);
+  text-shadow: 0 0 7px #fff, 0 0 15px #ff6a20;
+  animation: wildfire-breathe 2.6s ease-in-out infinite;
+}
+.dial-card[data-wildfire="on"] .dial-wildfire small { color: #ffe2c8; }
+@keyframes wildfire-breathe {
+  0%, 100% { box-shadow: inset 0 0 18px rgba(255,140,70,.55), 0 0 6px #fff6e8, 0 0 20px #ff6a20, 0 0 42px rgba(255,40,8,.7); }
+  50%      { box-shadow: inset 0 0 22px rgba(255,170,100,.66), 0 0 9px #fff, 0 0 28px #ff8038, 0 0 56px rgba(255,60,14,.82); }
+}
+
+/* Armed on a model that is not on the roster. Amber, not red: the server will refuse it, so this
+ * is a "you are about to be told no" state rather than a danger state. */
+.dial-wildfire.dial-wildfire-mismatch {
+  border-color: rgba(255, 196, 74, .8);
+  background: radial-gradient(ellipse at 50% 26%, rgba(255,226,150,.28), rgba(70,48,6,.72) 74%);
+  box-shadow: inset 0 0 12px rgba(255,196,74,.4), 0 0 12px rgba(255,180,60,.5);
+  animation: none;
+}
+.dial-wildfire.dial-wildfire-mismatch small { color: #ffdf9c; }
+
+/* The composer trigger carries a hairline ember while Wildfire is armed, so you can see it is on
+ * without opening the dial. */
+body.wildfire-armed .forge-trigger {
+  filter: drop-shadow(0 0 4px #ff7a2a) drop-shadow(0 0 10px rgba(255,60,14,.55));
+}
+
+/* ---------------------------------- Fire Alarm ---------------------------------- */
+.fire-alarm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px; height: 34px;
+  padding: 0;
+  border: 1px solid rgba(190, 96, 70, .3);
+  border-radius: 9px;
+  background: radial-gradient(ellipse at 50% 25%, rgba(96,26,12,.3), rgba(2,6,9,.5));
+  color: #b87c6c;
+  cursor: pointer;
+  transition: color .18s ease, border-color .18s ease, box-shadow .18s ease, transform .08s ease;
+}
+.fire-alarm svg { width: 18px; height: 18px; }
+.fire-alarm:hover {
+  color: #ffd9c8;
+  border-color: rgba(255, 108, 62, .7);
+  box-shadow: 0 0 10px rgba(255, 84, 30, .45), inset 0 0 8px rgba(255,110,50,.25);
+}
+.fire-alarm:active { transform: translateY(1px) scale(.97); }
+.fire-alarm:disabled { cursor: default; }
+.fire-alarm.firing {
+  color: #fff;
+  border-color: #ff5a1e;
+  box-shadow: 0 0 14px #ff5a1e, 0 0 34px rgba(255,60,14,.8), inset 0 0 12px rgba(255,150,90,.5);
+  animation: fire-alarm-ring .28s linear 3;
+}
+@keyframes fire-alarm-ring {
+  0%, 100% { transform: rotate(0deg); }
+  25%      { transform: rotate(-11deg); }
+  75%      { transform: rotate(11deg); }
+}
+
+/* ------------------------- in-conversation notices ------------------------- */
+.ctx.wildfire-note, .ctx.tools-capped, .ctx.tools-unavailable, .ctx.fire-alarm-note {
+  border-left: 2px solid rgba(255,138,60,.6);
+  padding-left: 8px;
+  margin: 6px 0;
+  line-height: 1.4;
+}
+.ctx.wildfire-nudge   { color: #ffbe86; border-left-color: #ff8a3c; }
+.ctx.wildfire-blocked { color: #ffcf87; border-left-color: #ffb43c; }
+.ctx.wildfire-denied  { color: #ff9d8a; border-left-color: #ff5a3c; }
+/* The two that used to fail silently. Amber, and never quiet. */
+.ctx.tools-capped      { color: #ffd79a; border-left-color: #ffb43c; }
+.ctx.tools-unavailable { color: #ffb0a0; border-left-color: #ff5a3c; font-weight: 600; }
+.ctx.fire-alarm-note   { color: #ffd0be; border-left-color: #ff5a1e; }

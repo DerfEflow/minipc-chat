@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="/dominion-ui.css?v=39" />
 <link rel="stylesheet" href="/dominion-tenant.css?v=8" />
 <link rel="stylesheet" href="/dominion-vault.css?v=1" />
-<link rel="stylesheet" href="/dominion-forge.css?v=3" />
+<link rel="stylesheet" href="/dominion-forge.css?v=4" />
 <link rel="stylesheet" href="/dominion-images.css?v=4" />
 </head>
 <body>
@@ -270,6 +270,18 @@
               <path fill="#ffe9c4" d="M12 10c.9 3 4 4.5 4 8a4 4 0 0 1-8 0c0-2.7 2.4-3.4 2.4-6 0-1 .6-1.6 1.6-2z"/>
             </svg>
           </button>
+          <!--
+            FIRE ALARM. Stops everything at once: every live turn and every job running on every
+            connected machine, with a process-tree kill node-side. Available to every account, not
+            just Fred: an emergency brake only one person can reach is not an emergency brake. A
+            guest's pull is scoped server-side to their own sessions and their own node.
+          -->
+          <button id="fire-alarm" class="fire-alarm" type="button" title="Fire Alarm — stop everything, everywhere, now" aria-label="Fire Alarm: stop all work on all machines">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="currentColor" d="M12 2a6 6 0 0 0-6 6v3.6l-1.4 2.6a1 1 0 0 0 .9 1.5h13a1 1 0 0 0 .9-1.5L18 11.6V8a6 6 0 0 0-6-6z"/>
+              <path fill="currentColor" d="M9.5 18a2.5 2.5 0 0 0 5 0z"/>
+            </svg>
+          </button>
         </div>
         <textarea id="input" rows="1" placeholder="Give Dominion a directiveâ€¦" autocomplete="off"></textarea>
         <button id="speak" class="mic" title="Speak answers aloud (off)" aria-label="Toggle spoken answers">
@@ -411,7 +423,7 @@
     </div>
   </div>
 
-  <script src="/dominion-forge.js?v=3"></script>
+  <script src="/dominion-forge.js?v=4"></script>
   <script src="/dominion-images.js?v=4" defer></script>
   <script src="/app.js?v=45"></script>
   <script src="/dominion-ui.js?v=39"></script>
