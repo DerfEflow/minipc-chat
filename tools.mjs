@@ -298,6 +298,7 @@ export const TOOLS = [
   { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "forge_read", description: "Read files on the connected machine (READ-ONLY). op: 'read' a file, 'list' a folder, 'tree' a folder tree, 'grep' (search hint). Reaches the machine through its Dominion hands node; the node enforces allowed folders + carve-outs.", parameters: { type: "object", properties: { op: { type: "string", enum: ["read", "list", "tree", "grep"] }, path: { type: "string" }, query: { type: "string" } }, required: ["op"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_write", description: "Write (create or overwrite) a file on the connected machine, in a folder the machine allows. Reaches it through the Dominion hands node (carve-outs + allowed-folders enforced). Use for real file changes as you build.", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path on that machine." }, content: { type: "string" } }, required: ["path", "content"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_run", description: "Run a shell command on the connected machine and return its output (PowerShell on Windows, sh on Linux). Reaches it through the Dominion hands node; the node enforces carve-outs and refuses destructive commands against protected dirs. Use to build, test, and inspect as you work.", parameters: { type: "object", properties: { command: { type: "string" }, timeoutMs: { type: "number", description: "Optional, default 60000, max 600000." } }, required: ["command"] } } } },
+  { category: "code", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "forge_rollback", description: "Undo a change you made on the machine. Call with no id to LIST recent snapshots (every forge_write and forge_run takes one automatically), then call again with an id to restore it. File overwrites restore exactly; files you created are deleted; a shell command that touched a git repo returns the exact git commands to revert it. Use this the moment you realize a change was wrong, instead of asking Fred to fix it.", parameters: { type: "object", properties: { id: { type: "string", description: "Snapshot id from the list. Omit to list." }, limit: { type: "number", description: "How many recent snapshots to list, default 15." } } } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "scaffold_project", description: "Create a whole project/app as a file TREE on the connected machine in one call. Give `root` (an absolute base folder on that machine) and `files` (each { path relative to root, content }). Creates all folders and files, then returns the rendered tree. Use this when the user asks you to build an app or project — lay out the full structure at once. Reaches the machine through its Dominion hands node (allowed folders + carve-outs enforced per file).", parameters: { type: "object", properties: { root: { type: "string", description: "Absolute base folder on the machine, e.g. C:/Users/Fred/projects/my-app." }, files: { type: "array", description: "Files to create.", items: { type: "object", properties: { path: { type: "string", description: "Path relative to root (e.g. src/index.js). Absolute paths allowed but discouraged." }, content: { type: "string" } }, required: ["path", "content"] } } }, required: ["root", "files"] } } } },
   { category: "machine", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "browser_control", description: "Drive a REAL web browser on the connected machine (persistent profile, so sites stay logged in). Ops: open (start it), navigate {url}, read (page text), elements (list clickable/typable elements with selectors), click {selector}, type {selector,text,enter}, eval {expression}, screenshot {fullPage}, tabs, back, close. Typical flow: navigate, then read or elements, then click/type. Use this for anything behind a login or rendered by JavaScript; use web_read for a simple public page.", parameters: { type: "object", properties: { op: { type: "string", enum: ["open", "navigate", "read", "elements", "click", "type", "eval", "screenshot", "tabs", "back", "close"] }, url: { type: "string" }, selector: { type: "string", description: "CSS selector." }, text: { type: "string" }, enter: { type: "boolean", description: "Press Enter after typing." }, expression: { type: "string", description: "JavaScript to evaluate in the page." }, fullPage: { type: "boolean" }, max: { type: "number" } }, required: ["op"] } } } },
   { category: "machine", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "desktop_control", description: "Control the actual mouse, keyboard and screen of the connected machine (Windows). Ops: screenshot, windows (list open windows), focus {title}, move {x,y}, click {x,y,button,double}, type {text}, key {keys} where keys is SendKeys syntax such as ^s for ctrl+s or %{F4} for alt+F4. Take a screenshot first to see where things are. This reaches below the file carve-outs, so be deliberate: it can do anything a person at that keyboard could do.", parameters: { type: "object", properties: { op: { type: "string", enum: ["screenshot", "windows", "focus", "move", "click", "type", "key"] }, x: { type: "number" }, y: { type: "number" }, button: { type: "string", enum: ["left", "right"] }, double: { type: "boolean" }, text: { type: "string" }, keys: { type: "string" }, title: { type: "string" } }, required: ["op"] } } } },
@@ -416,7 +417,7 @@ const PROTECTED_RE = [
   /\bdb[-_ ]?backups?\b/i,
   /pg_dump|pg_restore/i,         // dumping/restoring a (prod) DB
 ];
-const REACHES_OUT = new Set(["forge_read", "forge_write", "forge_run", "scaffold_project", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox",
+const REACHES_OUT = new Set(["forge_read", "forge_write", "forge_run", "forge_rollback", "scaffold_project", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox",
   "browser_control", "desktop_control"]);
 export function assertNotProtected(name, args) {
   if (!REACHES_OUT.has(name)) return { ok: true };
@@ -556,14 +557,37 @@ export async function runTool(name, args, ctx, signal = null) {
         return await forgeRead(ctx, args.op, args.path || "", args.query || "", signal);
       case "forge_write": {
         if (!ctx.hands) return "Writing to a machine needs a connected Dominion hands node. Start it on the computer you want to reach.";
-        return fmtHands(await ctx.hands.dispatch("fs_write", { path: args.path, content: args.content ?? "" }), (r) => `Wrote ${r.bytes} bytes to ${r.path} on ${r.node || "the machine"}.`);
+        return fmtHands(await ctx.hands.dispatch("fs_write", { path: args.path, content: args.content ?? "" }), (r) => `Wrote ${r.bytes} bytes to ${r.path} on ${r.node || "the machine"}.${r.snapshot ? ` Snapshot ${r.snapshot} taken first, so forge_rollback can undo this.` : ""}`);
       }
       case "scaffold_project":
         return await scaffoldProject(ctx, args);
       case "forge_run": {
         if (!ctx.hands) return "Running commands on a machine needs a connected Dominion hands node. Start it on the computer you want to reach.";
         const r = await ctx.hands.dispatch("shell_run", { command: args.command, timeoutMs: args.timeoutMs });
-        return fmtHands(r, (x) => `exit ${x.code}${x.stdout ? "\n" + x.stdout.slice(0, 7000) : ""}${x.stderr ? "\nstderr:\n" + x.stderr.slice(0, 2000) : ""}`);
+        return fmtHands(r, (x) => `exit ${x.code}${x.snapshot && x.snapshotMethod === "git-anchor" ? ` (repo anchored, snapshot ${x.snapshot})` : ""}${x.stdout ? "\n" + x.stdout.slice(0, 7000) : ""}${x.stderr ? "\nstderr:\n" + x.stderr.slice(0, 2000) : ""}`);
+      }
+      case "forge_rollback": {
+        // Undo. Fred's standing rule is that nothing changes without a rollback path, so the models
+        // that make the mess get the tool that cleans it up rather than having to ask him.
+        if (!ctx.hands) return "Rollback needs a connected Dominion hands node.";
+        if (!args.id) {
+          const listed = await ctx.hands.dispatch("snapshot_list", { limit: Math.min(Number(args.limit) || 15, 50) });
+          return fmtHands(listed, (r) => {
+            const rows = (r.snapshots || []).map((s) => `${s.id}  ${s.at}  ${s.tool}  [${s.method}]  ${(s.entries || []).map((e) => e.path).join(", ") || (s.command ? s.command.slice(0, 60) : "")}`);
+            return rows.length ? "Recent changes on " + (r.node || "the machine") + " (pass an id to roll one back):\n" + rows.join("\n") : "No snapshots recorded on that machine yet.";
+          });
+        }
+        const r = await ctx.hands.dispatch("snapshot_restore", { id: String(args.id) });
+        return fmtHands(r, (x) => {
+          const lines = [`Rolled back snapshot ${x.id} (${x.tool}, taken ${x.at}).`];
+          for (const d of x.restored || []) lines.push("  " + d);
+          for (const f of x.failed || []) lines.push("  FAILED: " + f);
+          if (x.gitPlan && x.gitPlan.length) {
+            lines.push("A repo was anchored rather than auto-reverted. To roll the repo back, run:");
+            for (const g of x.gitPlan) lines.push("  " + g);
+          }
+          return lines.join("\n");
+        });
       }
       case "forge_send": {
         // Legacy Claude-Code work-order path (bridge). On the cloud/hands path, redirect to the direct tools.

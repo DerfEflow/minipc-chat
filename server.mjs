@@ -22,6 +22,7 @@ import { join, normalize, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { TOOL_DEFS, toolDefs, WRITE_TOOLS, runTool, toolMeta, assertNotProtected, effectivePermission, needsConfirm, lifecycle, passConfirmGate } from "./tools.mjs";
+import { initDenials, recordDenial, denialSummary, readDenials } from "./denials.mjs";
 import { createMemoryStore } from "./memory.mjs";
 import { createArtifactStore } from "./artifacts.mjs";
 import { createMentor, MENTOR_ROLES } from "./mentor.mjs";
@@ -32,14 +33,22 @@ import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./ro
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
-import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload } from "./models.catalog.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds } from "./models.catalog.mjs";
+
+/*
+ * Does this turn actually ask for work ON a machine? Used only to decide whether the "you forgot
+ * Wildfire" nudge is worth saying. Deliberately narrower than the tool-intent heuristic elsewhere:
+ * a nudge that fires during ordinary conversation is noise, and Fred would switch it off within a
+ * day. Better to miss a few than to cry wolf.
+ */
+const MACHINE_INTENT_RE = /\b(build|deploy|install|refactor|migrate|fix|debug|run|execute|script|commit|push|repo|repository|codebase|server|database|file|folder|directory|terminal|shell|command|laptop|mini-?pc|machine|my computer)\b/i;
 import { screenContent } from "./safety.mjs";
 import { wolfeLogic, tierFor, normalizeTier } from "./wolfe-logic.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createUsersStore } from "./tenancy.mjs";
-import { createTenantResolver, filterToolDefs, FORGE_TOOLS } from "./tenantstores.mjs";
+import { createTenantResolver, filterToolDefs, toolAllowedFor, FORGE_TOOLS } from "./tenantstores.mjs";
 import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors.mjs";
 import { createAccessVerifier } from "./accessjwt.mjs";
 import { createImagesFeature } from "./images.mjs";
@@ -89,6 +98,9 @@ const cfgGet = (k, d = "") => process.env[k] ?? localEnv[k] ?? bridgeEnv[k] ?? d
 // Linux/Railway it defaults to the persistent Volume mount at /data. Each specific *_DIR env still
 // wins when set (back-compat), so nothing about the box changes.
 const DATA_DIR = cfgGet("DATA_DIR", process.platform === "win32" ? "C:\\minipc-chat" : "/data");
+// Forbidden-access log. Fred asked for every attempt against a walled path, even the failed ones,
+// surfaced at the weekly security check. See denials.mjs for why there are two layers.
+initDenials({ dir: DATA_DIR });
 const dataPath = (sub) => (process.platform === "win32" ? DATA_DIR + "\\" + sub : DATA_DIR + "/" + sub);
 // The bridge poller's localhost poke listener (see command-deck bridge/poller.mjs) — must match
 // its BRIDGE_POKE_PORT. Used by /bridge/poke (deck app → tailnet → here) and by the forge tools.
@@ -875,9 +887,9 @@ const handsHub = createHandsHub({
 const HANDS_DEFAULT_NODE = cfgGet("HANDS_DEFAULT_NODE", "");
 CTX.hands = {
   target: () => handsHub.pick(HANDS_DEFAULT_NODE),
-  dispatch: (tool, args) => {
+  dispatch: (tool, args, opts = {}) => {
     const n = handsHub.pick(HANDS_DEFAULT_NODE);
-    return n ? handsHub.dispatch(n, tool, args || {}, { timeoutMs: 60000 })
+    return n ? handsHub.dispatch(n, tool, args || {}, { timeoutMs: 60000, ...opts })
              : Promise.resolve({ ok: false, offline: true, error: "No machine is connected. Start your Dominion hands node on the computer you want to reach." });
   },
 };
@@ -1370,7 +1382,10 @@ async function ollamaChat(model, messages, opts = {}) {
     payload.keep_alive = opts.keep_alive || (model === MAIN_MODEL ? "60m" : "5m");
     // C3: tool defs are assembled LIVE with the flywheel's active description overlays, so mentor
     // tool-guidance actually changes what the model sees about each tool at prompt time.
-    if (!opts.noTools) payload.tools = toolDefs(flywheel.activeToolOverlays());
+    // Filter to the caller's role. Before 2026-07-19 this handed the local model the FULL registry
+    // regardless of who was asking. Non-owners are redirected off the local model upstream so it
+    // was not exploitable, but an unfiltered payload is a hole waiting for a routing change.
+    if (!opts.noTools) payload.tools = filterToolDefs(toolDefs(flywheel.activeToolOverlays()), opts.role || "owner", opts.forgeExtra || null);
     if (opts.format) payload.format = opts.format;   // e.g. "json" — forces valid JSON, suppresses thinking spill
     if (opts.think === false) payload.think = false;  // disable qwen3 reasoning for structured extraction (thinking-on + json grammar collapses to "{}")
     const options = {};
@@ -2513,6 +2528,38 @@ async function handleChatStop(req, res) {
   console.log(`[dominion-ai] /chat/stop -> ${job.id}`);
   return json(200, { ok: true });
 }
+/*
+ * POST /chat/fire-alarm — the master kill. Fred, 2026-07-19: "I want to be able to cut its legs off."
+ *
+ * Stop handles the turn you are looking at. The Fire Alarm handles everything at once: every live
+ * chat turn, and every job running on every machine, with a process-tree kill on the node side.
+ *
+ * SCOPE IS THE WHOLE POINT. The owner pulls the entire board. A guest pulls only their own turns and
+ * their own node, so one guest can never stop Fred's work or another guest's. Available to everyone
+ * because an emergency brake that only one person can reach is not an emergency brake.
+ */
+async function handleFireAlarm(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const T = resolveTenant(req);
+  if (!T || T.role === "anon") return json(401, { error: "no_identity" });
+
+  let turns = 0;
+  for (const j of CHAT_JOBS.values()) {
+    if (j.done) continue;
+    if (!T.isOwner && j.uid !== T.uid) continue;    // a guest only ever pulls their own
+    j.stopped = true;
+    try { j.stop(); } catch {}
+    turns++;
+  }
+
+  const scope = T.isOwner ? "owner" : "user:" + T.uid;
+  let machines = { killed: 0, nodes: [] };
+  try { machines = handsHub.cancelAll({ scope, reason: "fire alarm" }); } catch (e) { console.warn("[dominion-ai] fire-alarm cancelAll failed: " + (e && e.message)); }
+
+  console.log(`[dominion-ai] FIRE ALARM by ${T.isOwner ? "owner" : T.uid} -> ${turns} turn(s), ${machines.killed} machine job(s) on [${(machines.nodes || []).join(", ")}]`);
+  return json(200, { ok: true, turns, machineJobs: machines.killed, nodes: machines.nodes, scope: T.isOwner ? "everything" : "your own sessions and machine" });
+}
+
 // GET /chat/attach?job=<id>&from=<n> — SSE catch-up + live-tail, in one of three modes:
 //   1. RAM job, cursor within the tail: exact index-for-index replay, then live-tail (the fast
 //      path every quick reconnect takes — byte-identical to the original contract).
@@ -2839,7 +2886,45 @@ async function handleChat(req, res) {
   // Phase B: only CHATTING-bench cloud models are barred from tools; doing-bench models keep
   // whatever consumeNeeds decided (chat-only turns still skip the schemas to save tokens).
   if (cloudModel && !isToolCapable(cloudModel)) { attachTools = false; }
+
+  /*
+   * WILDFIRE (Fred, 2026-07-19) — the owner's broad-authority arming switch.
+   *
+   * Deliberately SEPARATE from Forge Mode. Forge Mode stays exactly as it was, for everyone, on
+   * every model, because Fred uses it to experiment with small models and it is a major part of the
+   * guest product. Wildfire is his alone: it arms the full surface for a model on the roster.
+   *
+   * Three outcomes, all of them loud rather than silent, because silent tool-stripping is the exact
+   * failure that made him think the app was never wired up:
+   *   armed + rostered model  -> tools forced ON even in fast mode
+   *   armed + wrong model     -> refuse to arm, and name the models that qualify
+   *   not armed + rostered    -> a nudge, only when he actually asked for machine work
+   */
+  const wildfireAsked = input.wildfire === true;
+  const wildfireEligible = !!cloudModel && isBroadCapable(cloudModel);
+  let wildfireOn = false, wildfireNotice = null;
+
+  if (wildfireAsked && !T.isOwner) {
+    // Guests can never arm it, whatever they post. The wall is server-side, not a hidden button.
+    wildfireNotice = { kind: "denied", text: "Wildfire is not available on this account." };
+    recordDenial({ source: "app", tool: "wildfire", reason: "non-owner attempted to arm Wildfire", args: { model: cloudModel }, model: cloudModel, user: T.uid, role: T.role });
+  } else if (wildfireAsked && T.isOwner) {
+    if (!wildfireEligible) {
+      wildfireNotice = { kind: "blocked", text: `Wildfire refused to arm: ${cloudModel ? "that model is not on the broad-authority roster" : "Wildfire needs a cloud model"}. Models that qualify: ${broadCapableNames().join(", ")}.` };
+      attachTools = false;
+    } else {
+      wildfireOn = true;
+      attachTools = true;   // armed means armed, even on a fast turn
+    }
+  } else if (T.isOwner && wildfireEligible && !wildfireAsked && MACHINE_INTENT_RE.test(lastUserText)) {
+    wildfireNotice = { kind: "nudge", text: "You forgot to turn on Wildfire, dummy. That model can do this job, but it is not armed for broad machine work this turn." };
+  }
+  opts.wildfire = wildfireOn;
+
   opts.noTools = !attachTools;
+  // Carry identity into the local path so its tool payload is filtered like the cloud path's.
+  opts.role = T.role; opts.forgeExtra = forgeExtra;
+  if (wildfireNotice) sse({ type: "wildfire", ...wildfireNotice, armed: wildfireOn });
   // D1: the full routing decision surfaces immediately (spec routing JSON shape)...
   sse({ type: "route", model, mode, route: routeOf(tier, mode), reason, confidence: routeConfidence,
         needs: { tools: attachTools, memory: needs.memory, retrieval: !skipRetrieval, mentor_review: needs.mentorReview }, privacyRisk });
@@ -2864,8 +2949,18 @@ async function handleChat(req, res) {
     const forgeOn = forgeEnabled && (() => { try { return forgeStore.status(T.uid).enabled; } catch { return false; } })();
     if (forgeOn) {
       forgeExtra = FORGE_TOOLS;
-      reqCtx.hands = { dispatch: (tool, args) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000 }) };
+      reqCtx.hands = { dispatch: (tool, args, opts = {}) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000, ...opts, signal: ac.signal }) };
     }
+  }
+  /*
+   * Stop has to reach the machine. Every hands dispatch made during THIS turn carries the turn's
+   * abort signal, so pressing Stop kills the running command on Fred's computer instead of letting
+   * it finish while the UI pretends it stopped. Owners inherit CTX.hands, so it gets wrapped here
+   * rather than at the base, which stays signal-free for background jobs like the corpus backup.
+   */
+  if (reqCtx.hands === (T.ctxBase || CTX).hands && reqCtx.hands) {
+    const base = reqCtx.hands;
+    reqCtx.hands = { ...base, dispatch: (tool, args, opts = {}) => base.dispatch(tool, args, { ...opts, signal: ac.signal }) };
   }
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
   working("reading context");   // retrieval (embed call + vec cache) can be slow on a cold box
@@ -3005,8 +3100,13 @@ async function handleChat(req, res) {
       // + five connectors = 198 defs, and every OpenAI-direct tool turn 400'd on the length.)
       if (cloudTools && cloudTools.length > TOOL_CAP) {
         const dropped = cloudTools.length - TOOL_CAP;
+        const droppedNames = cloudTools.slice(TOOL_CAP).map((d) => d && d.function && d.function.name).filter(Boolean);
         cloudTools = cloudTools.slice(0, TOOL_CAP);
         console.log(`[dominion-ai] tool defs: offering ${TOOL_CAP} of ${TOOL_CAP + dropped} to ${cloudModel} (${dropped} connector tool(s) past the provider cap dropped)`);
+        // Say it OUT LOUD in the UI. A console line nobody reads is why Fred spent months believing
+        // connectors were never wired: the tools were silently shed and the answer looked normal.
+        sse({ type: "tools_capped", offered: TOOL_CAP, dropped, names: droppedNames.slice(0, 12),
+              text: `${dropped} connector tool(s) did not fit this model's ${TOOL_CAP}-tool limit and were not offered this turn. Core machine tools were kept.` });
       }
       let inTokTotal = 0, outTokTotal = 0, costTotal = 0, sawCost = false, sawTok = false;
       // PROMPT-CACHE VISIBILITY (Fred, 2026-07-19). Every model in the catalog prices cache READS
@@ -3075,7 +3175,11 @@ async function handleChat(req, res) {
         // no endpoint supports tool calling, answer anyway without tools and say so, instead of erroring
         // the whole turn. The catalog is audited (tools_audit.mjs), so this should stay dormant.
         if (!or.ok && toolsThisRound && /tool|function.?call/i.test(String(or.error || "")) && /support|endpoint|not available/i.test(String(or.error || ""))) {
-          sse({ type: "ctx", text: "This model's host can't run tools right now — answering without them." });
+          // Distinct event, not a ctx line. This is the failure mode that most looks like success:
+          // the provider rejects the tool payload, we answer without hands, and the reply reads
+          // perfectly normal while having touched nothing. The UI must badge it, not bury it.
+          sse({ type: "tools_unavailable", model: cloudModel,
+                text: "This model's host refused the tool payload, so this answer was written WITHOUT machine access. Nothing was read or changed." });
           cloudTools = null;
           or = await cloudChatStream(cloudModel, messages,
             { temperature: opts.temperature, num_predict: outCap, signal: ac.signal, tools: null, toolChoice: "none" },
@@ -3120,6 +3224,7 @@ async function handleChat(req, res) {
             const guard = assertNotProtected(name, args);
             if (!guard.ok) {
               life.push("blocked", { reason: guard.reason });
+              recordDenial({ source: "app", tool: name, reason: guard.reason, args, model: cloudModel, user: T && (T.uid || (T.isOwner ? "owner" : null)), role: T && T.role });
               sse({ type: "tool", name, runId, cls, status: "blocked", preview: guard.reason });
               await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "blocked", reason: guard.reason, states: life.states, input: inPrev, chatId, model: cloudModel });
               toolMsg(`BLOCKED: this ${guard.reason}. I cannot do that.`);
@@ -3136,6 +3241,29 @@ async function handleChat(req, res) {
               await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "blocked", reason: "orchestrator wall", states: life.states, input: inPrev, chatId, model: cloudModel });
               toolMsg(`BLOCKED: ${name} is not available in this session. Building happens through work orders, never directly here.`);
               toolSummaries.push(name + " · blocked (wall)");
+              continue;
+            }
+
+            /*
+             * 1a-bis) ROLE WALL, RUNTIME SIDE. Added 2026-07-19.
+             *
+             * filterToolDefs() strips owner-only tools from the SCHEMA a non-owner is shown, and
+             * until now that was the whole wall: presentation only. toolAllowedFor() existed in
+             * tenantstores.mjs and was never imported here, so a guest session that emitted a call
+             * to forge_run, desktop_control or browser_control by hallucination, replay, or a
+             * crafted request would have sailed straight through to execution.
+             *
+             * The orchestrator wall directly above already re-checks at runtime for exactly this
+             * hazard. The role wall simply never got its other half. It has one now, and
+             * guest_wall_test.mjs fails the build if it ever regresses.
+             */
+            if (!toolAllowedFor(T.role, name, forgeExtra)) {
+              life.push("blocked", { reason: "role wall" });
+              recordDenial({ source: "role-wall", tool: name, reason: "non-owner called an owner-only tool", args, model: cloudModel, user: T.uid, role: T.role });
+              sse({ type: "tool", name, runId, cls, status: "blocked", preview: "not available on this account" });
+              await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "blocked", reason: "role wall", states: life.states, input: inPrev, chatId, model: cloudModel });
+              toolMsg(`BLOCKED: ${name} is not available on this account.`);
+              toolSummaries.push(name + " · blocked (role)");
               continue;
             }
 
@@ -3336,10 +3464,25 @@ async function handleChat(req, res) {
           const guard = assertNotProtected(name, args);
           if (!guard.ok) {
             life.push("blocked", { reason: guard.reason });
+            recordDenial({ source: "app-local", tool: name, reason: guard.reason, args, model, user: T && (T.uid || (T.isOwner ? "owner" : null)), role: T && T.role });
             sse({ type: "tool", name, runId, cls, status: "blocked", preview: guard.reason });
             await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "blocked", reason: guard.reason, states: life.states, input: inPrev, chatId, model });
             messages.push({ role: "tool", tool_name: name, content: `BLOCKED: this ${guard.reason}. I cannot do that.` });
             toolSummaries.push(name + " · blocked");
+            continue;
+          }
+
+          // 1a-bis) ROLE WALL, runtime side, local path. Non-owners are redirected off the local
+          // model upstream (see defaultModelFor), so this is defence in depth rather than a live
+          // hole today. It is here because "no gaps" has to mean every path, not the ones we
+          // happen to remember. The local tool payload is filtered to match (see ollamaChat).
+          if (!toolAllowedFor(T.role, name, forgeExtra)) {
+            life.push("blocked", { reason: "role wall" });
+            recordDenial({ source: "role-wall-local", tool: name, reason: "non-owner called an owner-only tool on the local path", args, model, user: T && T.uid, role: T && T.role });
+            sse({ type: "tool", name, runId, cls, status: "blocked", preview: "not available on this account" });
+            await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "blocked", reason: "role wall", states: life.states, input: inPrev, chatId, model });
+            messages.push({ role: "tool", tool_name: name, content: `BLOCKED: ${name} is not available on this account.` });
+            toolSummaries.push(name + " · blocked (role)");
             continue;
           }
 
@@ -3700,6 +3843,7 @@ const server = http.createServer(async (req, res) => {
 
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
+    if (path === "/chat/fire-alarm" && req.method === "POST") return handleFireAlarm(req, res);
     if (path === "/chat/attach" && req.method === "GET") return handleChatAttach(req, res, u);
     if (path === "/chat/jobs" && req.method === "GET") return handleChatJobs(req, res, u);
     if (path === "/chat/result" && req.method === "GET") return handleChatResult(req, res, u);

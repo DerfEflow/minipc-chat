@@ -34,6 +34,7 @@ import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { initSnapshots, beforeMutation, listSnapshots, restoreSnapshot, journal } from "./snapshot.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const IS_WIN = process.platform === "win32";
@@ -115,6 +116,14 @@ const BROWSER_PROFILE = String(process.env.HANDS_BROWSER_PROFILE || join(HERE, "
 const SHOT_DIR = String(process.env.HANDS_SHOT_DIR || join(HERE, ".shots"));
 const DESKTOP_ON = String(process.env.HANDS_DESKTOP || "") === "1";
 
+// ---- reversibility: nothing mutates this machine without a snapshot first ----------------------
+// Fred's standing rule. See hands/snapshot.mjs for exactly what is and is not recoverable: file
+// writes are exact, shell commands get a git anchor when they touch a repo, everything is
+// journalled. Snapshots live off the node dir by default so a rollback of the node itself does
+// not take the snapshots with it.
+const SNAP_DIR = String(process.env.HANDS_SNAP_DIR || join(HERE, ".snapshots"));
+initSnapshots({ dir: SNAP_DIR });
+
 function norm(p) { const r = resolve(String(p || "")); return IS_WIN ? r.toLowerCase() : r; }
 function underAny(target, dirs) {
   const t = norm(target);
@@ -128,8 +137,21 @@ export function withinRoots(p) {
 }
 const refuse = (reason) => ({ ok: false, refused: true, reason });
 
+// ---- cancellation: Stop must cut the legs off, not wait politely ------------------------------
+// Every running shell is tracked by job id so a cancel event can reach it. Killing the immediate
+// child is not enough on Windows: PowerShell spawns its own children (npm, git, node), and killing
+// the parent orphans them. taskkill /T takes the whole tree.
+const RUNNING = new Map();   // jobId -> { child, cancelled }
+function killTree(child) {
+  if (!child || child.killed) return;
+  try {
+    if (IS_WIN) spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+    else { try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); } }
+  } catch { try { child.kill("SIGKILL"); } catch {} }
+}
+
 // ---- shell (PowerShell on Windows via -EncodedCommand — the machines.mjs quoting-proof trick) --
-function runShell(command, timeoutMs = 60000) {
+function runShell(command, timeoutMs = 60000, jobId = null) {
   return new Promise((res) => {
     const t0 = Date.now();
     // The child must never see the hands secret.
@@ -142,10 +164,17 @@ function runShell(command, timeoutMs = 60000) {
       cmd = "sh"; args = ["-c", String(command)];
     }
     let child;
-    try { child = spawn(cmd, args, { windowsHide: true, env }); }
+    try { child = spawn(cmd, args, { windowsHide: true, env, detached: !IS_WIN }); }
     catch (e) { return res({ ok: false, error: "could not launch shell: " + (e && e.message) }); }
+    const track = jobId ? { child, cancelled: false } : null;
+    if (jobId) RUNNING.set(jobId, track);
     let stdout = "", stderr = "", done = false;
-    const finish = (r) => { if (done) return; done = true; try { child.kill(); } catch {} res(r); };
+    const finish = (r) => {
+      if (done) return; done = true;
+      if (jobId) RUNNING.delete(jobId);
+      killTree(child);
+      res(track && track.cancelled ? { ...r, ok: false, cancelled: true, error: "stopped by the user" } : r);
+    };
     const cap = Math.min(Math.max(Number(timeoutMs) || 60000, 1000), 600000);
     const timer = setTimeout(() => finish({ ok: false, timedOut: true, code: -1, stdout: stdout.slice(0, 8000), stderr: stderr.slice(0, 2000), ms: Date.now() - t0 }), cap);
     child.stdout.on("data", (d) => (stdout += d));
@@ -156,7 +185,7 @@ function runShell(command, timeoutMs = 60000) {
 }
 
 // ---- the executor: one job in, one result out. Exported so tests hit it directly. -------------
-export async function executeJob(tool, args = {}) {
+export async function executeJob(tool, args = {}, meta = {}) {
   // Carve-outs first, on the raw args blob, for EVERY tool — same order as the tool bus.
   const guard = assertNotProtected(args);
   if (!guard.ok) return refuse(guard.reason);
@@ -202,9 +231,10 @@ export async function executeJob(tool, args = {}) {
         const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
         if (underAny(args.path, SELF_PROTECT)) return refuse("write under a self-protected dir (the live app / this node) — the box is the mission's fallback");
         const buf = args.base64 ? Buffer.from(String(args.content || ""), "base64") : Buffer.from(String(args.content ?? ""), "utf8");
+        const snap = beforeMutation("fs_write", args, { node: NODE_NAME });
         mkdirSync(dirname(resolve(args.path)), { recursive: true });
         writeFileSync(args.path, buf);
-        return { ok: true, path: args.path, bytes: buf.length };
+        return { ok: true, path: args.path, bytes: buf.length, snapshot: snap.id, snapshotMethod: snap.method };
       }
       case "fs_append": {
         // Chunked transfer: append a base64 chunk to a file. truncate:true starts a fresh file
@@ -213,10 +243,13 @@ export async function executeJob(tool, args = {}) {
         const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
         if (underAny(args.path, SELF_PROTECT)) return refuse("append under a self-protected dir (the live app / this node)");
         const buf = Buffer.from(String(args.content || ""), args.base64 === false ? "utf8" : "base64");
+        // Only the FIRST chunk of a chunked transfer is a real mutation of prior state; snapshotting
+        // every appended chunk of an 88MB corpus would be absurd and would blow the retention cap.
+        const snap = args.truncate ? beforeMutation("fs_append", args, { node: NODE_NAME }) : { id: null, method: "append-chunk" };
         mkdirSync(dirname(resolve(args.path)), { recursive: true });
         if (args.truncate) writeFileSync(args.path, buf); else appendFileSync(args.path, buf);
         let total = 0; try { total = statSync(args.path).size; } catch {}
-        return { ok: true, path: args.path, appended: buf.length, totalBytes: total };
+        return { ok: true, path: args.path, appended: buf.length, totalBytes: total, snapshot: snap.id, snapshotMethod: snap.method };
       }
       case "fs_list": {
         const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
@@ -248,7 +281,19 @@ export async function executeJob(tool, args = {}) {
         if (DESTRUCTIVE_RE.test(cmdText) && SELF_PROTECT.some((d) => cmdText.toLowerCase().includes(d))) {
           return refuse("destructive command against a self-protected dir (the live app / this node)");
         }
-        return await runShell(cmdText, args.timeoutMs);
+        // Best-effort anchor before an opaque command. See snapshot.mjs for the honest limits:
+        // a repo gets a real rollback point, anything else gets a journal line and nothing more.
+        const snap = beforeMutation("shell_run", args, { node: NODE_NAME, jobId: meta.jobId });
+        const out = await runShell(cmdText, args.timeoutMs, meta.jobId);
+        return { ...out, snapshot: snap.id, snapshotMethod: snap.method, snapshotAnchors: (snap.anchors || []).length || undefined };
+      }
+
+      // ---- reversibility surface: inspect and undo what this node changed --------------------
+      case "snapshot_list":
+        return { ok: true, node: NODE_NAME, snapshots: listSnapshots(args.limit) };
+      case "snapshot_restore": {
+        if (!args.id) return { ok: false, error: "which snapshot? pass id (get one from snapshot_list)" };
+        return restoreSnapshot(String(args.id));
       }
 
       // ---- Wave 3: real browser + desktop reach (Fred's option 2, 2026-07-18) ----
@@ -289,10 +334,25 @@ async function postResult(jobId, result) {
 }
 
 async function handleEvent(ev, data) {
+  // Stop has to reach the machine. A cancel arrives on the same stream as the job and kills the
+  // child process TREE, because killing a PowerShell parent leaves whatever it spawned running.
+  // id "*" is the Fire Alarm: kill everything this node is doing, no questions.
+  if (ev === "cancel") {
+    let c; try { c = JSON.parse(data); } catch { return log("unparseable cancel event"); }
+    const ids = c.id === "*" ? [...RUNNING.keys()] : [c.id];
+    for (const id of ids) {
+      const entry = RUNNING.get(id);
+      if (!entry) continue;
+      killTree(entry.child);
+      entry.cancelled = true;
+      log(`job ${id} CANCELLED (${c.reason || "no reason given"})`);
+    }
+    return;
+  }
   if (ev !== "job") return;   // hb and unknown events only feed the liveness timer
   let job; try { job = JSON.parse(data); } catch { return log("unparseable job event"); }
   const t0 = Date.now();
-  const result = await executeJob(job.tool, job.args || {});
+  const result = await executeJob(job.tool, job.args || {}, { jobId: job.id });
   log(`job ${job.id} ${job.tool} -> ${result.ok ? "ok" : (result.refused ? "REFUSED" : "error")} (${Date.now() - t0}ms)`);
   await postResult(job.id, result);
 }
