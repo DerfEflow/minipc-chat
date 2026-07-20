@@ -186,9 +186,14 @@ function runShell(command, timeoutMs = 60000, jobId = null) {
 
 // ---- the executor: one job in, one result out. Exported so tests hit it directly. -------------
 export async function executeJob(tool, args = {}, meta = {}) {
-  // Carve-outs first, on the raw args blob, for EVERY tool — same order as the tool bus.
-  const guard = assertNotProtected(args);
-  if (!guard.ok) return refuse(guard.reason);
+  // Carve-outs first, on the raw args blob, for every tool that TOUCHES the machine. The Ollama
+  // passthrough (fix C, 2026-07-20) is exempt: its args are model I/O — chat messages and prompts —
+  // not filesystem paths. Scanning them would falsely refuse a legitimate question that merely
+  // mentions "D:\" or "backups", which is the model talking about a topic, not reaching a path.
+  if (!String(tool).startsWith("ollama_")) {
+    const guard = assertNotProtected(args);
+    if (!guard.ok) return refuse(guard.reason);
+  }
   try {
     switch (tool) {
       case "node_info":
@@ -310,11 +315,84 @@ export async function executeJob(tool, args = {}, meta = {}) {
         return await desktopOp(String(args.op || "screenshot"), args, { shotDir: SHOT_DIR, runShell });
       }
 
+      // Streaming self-test hook (not a real capability). Emits N ordered chunks via the emit()
+      // sink then returns the concatenation as the terminal result. Lets hands_stream_test drive
+      // the whole chunk path deterministically without depending on Ollama being up.
+      case "__echo_stream": {
+        const n = Math.min(Math.max(Number(args.count) || 3, 1), 50);
+        const parts = [];
+        for (let i = 0; i < n; i++) {
+          const piece = "chunk" + i + " ";
+          parts.push(piece);
+          if (meta.emit) meta.emit(piece);
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        return { ok: true, text: parts.join(""), chunks: parts.length };
+      }
+
+      // ---- fix C (2026-07-20): local Ollama passthrough ----
+      // The Railway container binds Ollama to 127.0.0.1 only and has no tailnet, so the cloud app
+      // cannot reach the model. This node can reach it trivially. The app dispatches ollama_chat /
+      // ollama_embed; we make the local call and (for chat) stream tokens back so a long 30B answer
+      // keeps the hub deadline alive. The full assembled response is the terminal result — truth —
+      // and the streamed deltas are live text on top.
+      case "ollama_chat":
+        return await localOllamaChat(args.payload || {}, meta.emit);
+      case "ollama_embed":
+        return await localOllamaEmbed(args.payload || {});
+
       default: return { ok: false, error: "unknown tool: " + tool };
     }
   } catch (e) {
     return { ok: false, error: `hands ${tool} failed: ` + (e && e.message || e) };
   }
+}
+
+// ---- local Ollama passthrough (fix C) ---------------------------------------------------------
+// The node reaches Ollama on loopback; the cloud app cannot. OLLAMA_LOCAL_URL overrides the default
+// only if Ollama is bound somewhere unusual on this box.
+const OLLAMA_LOCAL = String(process.env.OLLAMA_LOCAL_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+async function localOllamaChat(payload, emit) {
+  // Force stream:true so we can forward tokens (liveness + hub-deadline rearm). The assembled
+  // message is returned as the terminal result, identical in shape to a stream:false /api/chat
+  // response, so the server's callers (which read message.content / tool_calls / eval_count) are
+  // unchanged.
+  const body = JSON.stringify({ ...payload, stream: true });
+  let res;
+  try { res = await fetch(OLLAMA_LOCAL + "/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body }); }
+  catch (e) { return { ok: false, error: "could not reach local Ollama: " + (e && e.message || e) }; }
+  if (!res.ok) return { ok: false, error: "ollama /api/chat HTTP " + res.status };
+  const dec = new TextDecoder();
+  let buf = "", content = "", toolCalls = null, tail = {};
+  try {
+    for await (const chunk of res.body) {
+      buf += dec.decode(chunk, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        let o; try { o = JSON.parse(line); } catch { continue; }
+        if (o.message) {
+          if (o.message.content) { content += o.message.content; if (emit) emit(o.message.content); }
+          if (o.message.tool_calls) toolCalls = o.message.tool_calls;   // arrive complete in a chunk
+        }
+        if (o.done) tail = o;   // final chunk carries eval_count etc.
+      }
+    }
+  } catch (e) { return { ok: false, error: "ollama stream broke: " + (e && e.message || e) }; }
+  const message = { role: "assistant", content };
+  if (toolCalls) message.tool_calls = toolCalls;
+  return { ok: true, response: { ...tail, message }, chars: content.length };
+}
+async function localOllamaEmbed(payload) {
+  const body = JSON.stringify({ model: payload.model, input: payload.input });
+  let res;
+  try { res = await fetch(OLLAMA_LOCAL + "/api/embed", { method: "POST", headers: { "content-type": "application/json" }, body }); }
+  catch (e) { return { ok: false, error: "could not reach local Ollama: " + (e && e.message || e) }; }
+  if (!res.ok) return { ok: false, error: "ollama /api/embed HTTP " + res.status };
+  let j; try { j = await res.json(); } catch (e) { return { ok: false, error: "embed parse: " + (e && e.message) }; }
+  const vec = (j.embeddings && j.embeddings[0]) || j.embedding || null;
+  return { ok: true, embedding: vec, dim: Array.isArray(vec) ? vec.length : 0 };
 }
 
 // ---- the dial-out loop: one SSE stream in, results POSTed back --------------------------------
@@ -331,6 +409,21 @@ async function postResult(jobId, result) {
     });
     if (!r.ok) log(`result POST for ${jobId} -> HTTP ${r.status}`);
   } catch (e) { log(`result POST for ${jobId} failed: ${e && e.message}`); }
+}
+
+/*
+ * Stream a delta back for a long-running or token-producing tool (added 2026-07-20). Fire and
+ * forget: a lost chunk must never stall generation, and the terminal /hands/result is what
+ * actually settles the job. Chunks are best-effort liveness plus live text; the result is truth.
+ */
+async function postChunk(jobId, seq, delta) {
+  try {
+    await fetch(HANDS_URL + "/hands/chunk", {
+      method: "POST",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ node: NODE_NAME, jobId, seq, delta }),
+    });
+  } catch { /* a dropped chunk is not fatal; the final result carries the whole answer */ }
 }
 
 async function handleEvent(ev, data) {
@@ -352,7 +445,11 @@ async function handleEvent(ev, data) {
   if (ev !== "job") return;   // hb and unknown events only feed the liveness timer
   let job; try { job = JSON.parse(data); } catch { return log("unparseable job event"); }
   const t0 = Date.now();
-  const result = await executeJob(job.tool, job.args || {}, { jobId: job.id });
+  // When the hub dispatched with streaming on, hand the executor an emit() that POSTs ordered
+  // chunks. When it did not, emit is a no-op, so a tool can always call it without checking.
+  let seq = 0;
+  const emit = job.stream ? (delta) => { postChunk(job.id, seq++, String(delta || "")); } : () => {};
+  const result = await executeJob(job.tool, job.args || {}, { jobId: job.id, emit, streaming: !!job.stream });
   log(`job ${job.id} ${job.tool} -> ${result.ok ? "ok" : (result.refused ? "REFUSED" : "error")} (${Date.now() - t0}ms)`);
   await postResult(job.id, result);
 }

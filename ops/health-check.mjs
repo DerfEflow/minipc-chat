@@ -472,7 +472,7 @@ function checkDenials() {
   // The backups the wall exists to protect must actually be running.
   try {
     const raw = execFileSync("ssh", ["Fred@nucbox-k8-plus",
-      "powershell -NoProfile -Command \"if (Test-Path C:\\command-deck\\bridge\\watchdog-status.json) { Get-Content C:\\command-deck\\bridge\\watchdog-status.json -Raw } else { '' }\""],
+      "powershell -NoProfile -Command \"if (Test-Path C:\\dominion-backups\\watchdog-status.json) { Get-Content C:\\dominion-backups\\watchdog-status.json -Raw } else { '' }\""],
       { encoding: "utf8", timeout: 60000, stdio: ["ignore", "pipe", "ignore"] });
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) return warn("feature", "DB backup watchdog", "no watchdog status on the mini-PC — the daily check may not be running.");

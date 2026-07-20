@@ -106,12 +106,41 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
   }
 
   /*
+   * Streaming, added 2026-07-20. A node emits ordered chunks for a long-running or token-producing
+   * tool (Qwen generation, long build output) via POST /hands/chunk, then finishes with the normal
+   * /hands/result. Strictly ADDITIVE: a tool that never chunks behaves byte-identically to before,
+   * because dispatch() (no onChunk) simply has no chunk sink registered and any stray chunk is
+   * dropped harmlessly. seq lets the sink detect a gap; delivery order is the node's contract.
+   */
+  async function handleChunk(req, res, body) {
+    if (!enabled) return disabled(res);
+    const authKey = nodeAuthKey(req);
+    if (!authKey) return deny(res);
+    const { jobId, seq, delta, node } = body || {};
+    const j = jobs.get(jobId);
+    if (!j) return json(res, 200, { ok: false, stale: true });   // job already settled — chunk ignored
+    if (authKey !== "owner" && j.node !== authKey) return deny(res);
+    if (j.onChunk) { try { j.onChunk({ seq: Number(seq) || 0, delta: String(delta || "") }); } catch { /* a sink throw must never break the node */ } }
+    // A chunk is liveness: push the deadline out so a long stream is not killed mid-flight.
+    if (j.timer && j.capMs) { clearTimeout(j.timer); j.timer = setTimeout(() => j.resolve({ ok: false, offline: true, node: j.node, timedOut: true, error: "node went quiet mid-stream" }), j.capMs); }
+    if (entryFor(j)) { const e = entryFor(j); e.lastSeen = Date.now(); }
+    return json(res, 200, { ok: true });
+  }
+  const entryFor = (j) => nodes.get(j.node);
+
+  /*
    * dispatch now takes an AbortSignal. Before 2026-07-19 it did not, which is precisely why Fred's
    * Stop button "sometimes worked": aborting killed the model stream and the round loop, but a job
    * already handed to a node ran to completion on his machine, up to the 600s ceiling, while the UI
    * had moved on. Stop must reach the machine, not just the conversation.
    */
-  function dispatch(node, tool, args = {}, { timeoutMs = 60000, signal = null } = {}) {
+  /*
+   * dispatchStream is the general form. dispatch() below is exactly this with no onChunk sink, so
+   * the non-streaming path is byte-for-byte what it was: same carve-out check, same abort wiring,
+   * same job/result contract. onChunk (when given) receives {seq, delta} as the node streams, and
+   * the final result still arrives via /hands/result to resolve the promise.
+   */
+  function dispatchStream(node, tool, args = {}, { timeoutMs = 60000, signal = null, onChunk = null } = {}) {
     if (!enabled) return Promise.resolve({ ok: false, error: "hands disabled: no HANDS_TOKEN configured" });
     // Hub-side carve-out check (the node re-checks — defense in depth, both directions).
     const blob = JSON.stringify(args || {});
@@ -125,7 +154,7 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     const cap = Math.min(Math.max(Number(timeoutMs) || 60000, 1000), 600000);
     return new Promise((resolve) => {
       let settled = false;
-      const done = (r) => { if (settled) return; settled = true; jobs.delete(id); clearTimeout(timer); if (onAbort && signal) { try { signal.removeEventListener("abort", onAbort); } catch {} } resolve(r); };
+      const done = (r) => { if (settled) return; settled = true; jobs.delete(id); clearTimeout(job.timer); if (onAbort && signal) { try { signal.removeEventListener("abort", onAbort); } catch {} } resolve(r); };
       const timer = setTimeout(() => done({ ok: false, offline: true, node, timedOut: true, error: `hands node "${node}" did not answer within ${Math.round(cap / 1000)}s` }), cap);
 
       // Tell the node to kill the work, then stop waiting. We do not wait for the node to confirm:
@@ -133,11 +162,17 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
       const onAbort = () => { cancelJob(id, "stopped by the user"); done({ ok: false, aborted: true, node, error: "stopped" }); };
       if (signal) { try { signal.addEventListener("abort", onAbort, { once: true }); } catch {} }
 
-      jobs.set(id, { node: String(node).toLowerCase(), resolve: done, timer, sentAt: Date.now(), tool });
+      // capMs is stored so handleChunk can rearm the deadline on each chunk (a long stream is alive).
+      const job = { node: String(node).toLowerCase(), resolve: done, timer, capMs: cap, sentAt: Date.now(), tool, onChunk: typeof onChunk === "function" ? onChunk : null };
+      jobs.set(id, job);
       entry.jobsSent++;
-      try { entry.res.write(`event: job\ndata: ${JSON.stringify({ id, tool, args, deadlineMs: cap })}\n\n`); }
+      try { entry.res.write(`event: job\ndata: ${JSON.stringify({ id, tool, args, deadlineMs: cap, stream: !!onChunk })}\n\n`); }
       catch (e) { done({ ok: false, offline: true, node, error: "the node's stream died mid-dispatch: " + (e && e.message) }); }
     });
+  }
+  // The original signature, unchanged for every existing caller: no streaming sink.
+  function dispatch(node, tool, args = {}, opts = {}) {
+    return dispatchStream(node, tool, args, { ...opts, onChunk: null });
   }
 
   // Push a cancel down the node's stream. The node kills the matching child process tree.
@@ -200,5 +235,5 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
   }
   const nodeNames = () => [...nodes.keys()];
   const stats = () => ({ enabled, nodes: nodes.size, pendingJobs: jobs.size });
-  return { enabled, handleStream, handleResult, handleRun, handleNodes, dispatch, cancelJob, cancelAll, pick, nodeNames, stats };
+  return { enabled, handleStream, handleResult, handleChunk, handleRun, handleNodes, dispatch, dispatchStream, cancelJob, cancelAll, pick, nodeNames, stats };
 }

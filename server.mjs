@@ -120,7 +120,15 @@ const CTX = {
 // dedicated embedding model; if the model isn't pulled or the call fails, retrieval degrades to
 // lexical automatically — nothing blocks on this.
 const EMBED_MODEL = cfgGet("EMBED_MODEL", "nomic-embed-text");
-function embedText(text) {
+async function embedText(text) {
+  // Fix C: embeddings also ride the node when configured, so retrieval and the persona vec cache
+  // work from the cloud. A single quick call, no streaming. Defined before handsHub in file order,
+  // but only invoked at runtime, by which point handsHub is initialized.
+  if (OLLAMA_VIA_HANDS && handsHub && handsHub.enabled) {
+    const r = await handsHub.dispatchStream(OLLAMA_VIA_HANDS, "ollama_embed",
+      { payload: { model: EMBED_MODEL, input: String(text || "").slice(0, 2000) } }, { timeoutMs: 30000 });
+    return r && r.ok ? (r.embedding || null) : null;
+  }
   return new Promise((resolve) => {
     const body = JSON.stringify({ model: EMBED_MODEL, input: String(text || "").slice(0, 2000) });
     // Embeddings run on the always-on light tier (endpointForModel → ouLight for the embed model).
@@ -290,6 +298,11 @@ const safeUrl = (s) => { try { return new URL(s); } catch { return null; } };
 const OLLAMA_LIGHT_URL = cfgGet("OLLAMA_LIGHT_URL", OLLAMA);
 const OLLAMA_HEAVY_URL = cfgGet("OLLAMA_HEAVY_URL", OLLAMA_LIGHT_URL);
 const OLLAMA_KEY = cfgGet("OLLAMA_KEY", "");
+// Fix C (2026-07-20): when set to a node name (e.g. "mini-pc"), local-model calls ride the hands
+// channel to that node instead of a direct HTTP fetch. This is how the cloud app reaches Ollama
+// without a tunnel or a re-bind: the node already holds an authenticated stream, and it can reach
+// Ollama on loopback. Unset = direct HTTP as before (single-box / dev), so nothing changes there.
+const OLLAMA_VIA_HANDS = cfgGet("OLLAMA_VIA_HANDS", "");
 const ouLight = safeUrl(OLLAMA_LIGHT_URL) || ou;
 const ouHeavy = safeUrl(OLLAMA_HEAVY_URL) || ouLight;
 const SPLIT_TIERS = OLLAMA_HEAVY_URL !== OLLAMA_LIGHT_URL;   // are light/heavy on different hosts?
@@ -1373,26 +1386,39 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
   return s;
 }
 
+function buildOllamaPayload(model, messages, opts, stream) {
+  const payload = { model, messages, stream };
+  payload.keep_alive = opts.keep_alive || (model === MAIN_MODEL ? "60m" : "5m");
+  if (!opts.noTools) payload.tools = filterToolDefs(toolDefs(flywheel.activeToolOverlays()), opts.role || "owner", opts.forgeExtra || null);
+  if (opts.format) payload.format = opts.format;
+  if (opts.think === false) payload.think = false;
+  const options = {};
+  if (typeof opts.temperature === "number") options.temperature = opts.temperature;
+  if (typeof opts.num_ctx === "number") options.num_ctx = opts.num_ctx;
+  if (typeof opts.num_predict === "number") options.num_predict = opts.num_predict;
+  if (Object.keys(options).length) payload.options = options;
+  return payload;
+}
+
 async function ollamaChat(model, messages, opts = {}) {
+  // Fix C: route through the mini-PC node when configured. The node streams tokens (keeping the hub
+  // deadline alive on a slow 30B) and returns the assembled response in the SAME shape the direct
+  // HTTP path returns, so every caller is unchanged. Returns null on failure, exactly as before.
+  if (OLLAMA_VIA_HANDS && handsHub && handsHub.enabled) {
+    if (opts.signal && opts.signal.aborted) return null;
+    const payload = buildOllamaPayload(model, messages, opts, true);
+    const r = await handsHub.dispatchStream(OLLAMA_VIA_HANDS, "ollama_chat", { payload }, {
+      timeoutMs: 590000,
+      signal: opts.signal,
+      // Always a live sink so the node streams and each token rearms the deadline. If a caller wants
+      // the tokens (opts.onDelta), forward them; otherwise the stream still keeps a long gen alive.
+      onChunk: (c) => { try { if (opts.onDelta) opts.onDelta(c.delta); } catch { /* a UI sink throw must not break generation */ } },
+    });
+    return r && r.ok ? r.response : null;
+  }
   return await new Promise((resolve) => {
     if (opts.signal && opts.signal.aborted) return resolve(null);
-    const payload = { model, messages, stream: false };
-    // Model residency (RAM pressure fix): the 17.7GB 30B stays hot for an hour; the light model
-    // expires after 5m so IT gets evicted first instead of swapping the big one out mid-conversation.
-    payload.keep_alive = opts.keep_alive || (model === MAIN_MODEL ? "60m" : "5m");
-    // C3: tool defs are assembled LIVE with the flywheel's active description overlays, so mentor
-    // tool-guidance actually changes what the model sees about each tool at prompt time.
-    // Filter to the caller's role. Before 2026-07-19 this handed the local model the FULL registry
-    // regardless of who was asking. Non-owners are redirected off the local model upstream so it
-    // was not exploitable, but an unfiltered payload is a hole waiting for a routing change.
-    if (!opts.noTools) payload.tools = filterToolDefs(toolDefs(flywheel.activeToolOverlays()), opts.role || "owner", opts.forgeExtra || null);
-    if (opts.format) payload.format = opts.format;   // e.g. "json" — forces valid JSON, suppresses thinking spill
-    if (opts.think === false) payload.think = false;  // disable qwen3 reasoning for structured extraction (thinking-on + json grammar collapses to "{}")
-    const options = {};
-    if (typeof opts.temperature === "number") options.temperature = opts.temperature;
-    if (typeof opts.num_ctx === "number") options.num_ctx = opts.num_ctx;
-    if (typeof opts.num_predict === "number") options.num_predict = opts.num_predict;
-    if (Object.keys(options).length) payload.options = options;
+    const payload = buildOllamaPayload(model, messages, opts, false);
     const body = JSON.stringify(payload);
     // Per-model endpoint: MAIN_MODEL / heavy tags → on-demand heavy tier; else always-on light tier.
     // http vs https + bearer are handled by ollamaReq. Single-box mode: both resolve to OLLAMA_URL.
@@ -3851,6 +3877,7 @@ const server = http.createServer(async (req, res) => {
 
     if (path === "/hands/stream" && req.method === "GET") return handsHub.handleStream(req, res, u);
     if (path === "/hands/result" && req.method === "POST") return handsHub.handleResult(req, res, await readJsonBody(req));
+    if (path === "/hands/chunk" && req.method === "POST") return handsHub.handleChunk(req, res, await readJsonBody(req));
     if (path === "/hands/run" && req.method === "POST") return handsHub.handleRun(req, res, await readJsonBody(req));
     if (path === "/hands/nodes" && req.method === "GET") return handsHub.handleNodes(req, res);
 
