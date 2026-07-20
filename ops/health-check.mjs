@@ -421,6 +421,71 @@ function checkPerimeterLog() {
   }
 }
 
+/*
+ * Fred's weekly question, 2026-07-19: "who tried to touch what I forbade, even if they failed?"
+ *
+ * Three sources, because one is not enough:
+ *   app layer   denials.jsonl on the Railway volume - the carve-out regex refusing a tool call
+ *   OS layer    Windows Security 4656/4663 on the mini-PC - attempts the regex never saw, because
+ *               D: carries a failure-audit SACL. This is the one that catches a clever path.
+ *   backups     the watchdog's own verdict, so a dead backup shows up HERE rather than in silence
+ *               for 27 days as it did between 6/22 and 7/19.
+ */
+function checkDenials() {
+  try {
+    const d = JSON.parse(inContainer(`
+      const fs=require('fs');const p=require('path');
+      const f=p.join(process.env.DATA_DIR||'/data','denials.jsonl');
+      let rows=[];try{rows=fs.readFileSync(f,'utf8').trim().split('\\n').filter(Boolean).map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(Boolean)}catch(e){}
+      const since=Date.now()-7*86400000;
+      const recent=rows.filter(r=>Date.parse(r.at)>=since);
+      const byUser={},byTool={};
+      for(const r of recent){byUser[r.user||'?']=(byUser[r.user||'?']||0)+1;byTool[r.tool||'?']=(byTool[r.tool||'?']||0)+1;}
+      console.log(JSON.stringify({total:recent.length,byUser,byTool,last:recent.slice(-3)}));
+    `).trim().split("\n").pop());
+
+    d.total === 0
+      ? ok("security", "carve-out denials (app)", "no blocked attempts in 7 days")
+      : warn("security", "carve-out denials (app)", `${d.total} blocked attempt(s) in 7 days. By user: ${JSON.stringify(d.byUser)}. By tool: ${JSON.stringify(d.byTool)}.`);
+
+    // A NON-owner probing the carve-out is a different event from Fred's own model bumping a wall.
+    const guests = Object.keys(d.byUser || {}).filter((u) => u !== "owner" && u !== "?");
+    if (guests.length) fail("security", "guest probed a carve-out", `non-owner account(s) ${guests.join(", ")} were refused at the wall. Review denials.jsonl.`);
+  } catch (e) {
+    warn("security", "carve-out denials (app)", "UNCHECKED — " + String(e.message).slice(0, 80));
+  }
+
+  // Layer two: what Windows itself refused on the walled volume.
+  try {
+    const raw = execFileSync("ssh", ["Fred@nucbox-k8-plus",
+      "powershell -NoProfile -Command \"$e=Get-WinEvent -FilterHashtable @{LogName='Security';Id=4656,4663;StartTime=(Get-Date).AddDays(-7)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'D:' }; if ($e) { $e.Count } else { 0 }\""],
+      { encoding: "utf8", timeout: 60000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const n = Number(String(raw).split(/\r?\n/).filter(Boolean).pop());
+    if (!Number.isFinite(n)) throw new Error("unparseable: " + raw.slice(0, 40));
+    n === 0
+      ? ok("security", "OS-level denials on D: (mini-PC)", "Windows refused nothing in 7 days")
+      : warn("security", "OS-level denials on D: (mini-PC)", `${n} failed access attempt(s) against the walled backup volume. These are attempts the carve-out regex did NOT catch.`);
+  } catch (e) {
+    warn("security", "OS-level denials on D: (mini-PC)", "UNCHECKED — " + String(e.message).slice(0, 60));
+  }
+
+  // The backups the wall exists to protect must actually be running.
+  try {
+    const raw = execFileSync("ssh", ["Fred@nucbox-k8-plus",
+      "powershell -NoProfile -Command \"if (Test-Path C:\\command-deck\\bridge\\watchdog-status.json) { Get-Content C:\\command-deck\\bridge\\watchdog-status.json -Raw } else { '' }\""],
+      { encoding: "utf8", timeout: 60000, stdio: ["ignore", "pipe", "ignore"] });
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return warn("feature", "DB backup watchdog", "no watchdog status on the mini-PC — the daily check may not be running.");
+    const w = JSON.parse(m[0]);
+    const ageH = (Date.now() - Date.parse(w.checkedAt)) / 3600000;
+    if (!w.ok) fail("feature", "DB backup watchdog", `backups UNHEALTHY: ${(w.problems || []).join(" | ").slice(0, 240)}`);
+    else if (ageH > 36) warn("feature", "DB backup watchdog", `watchdog itself last ran ${ageH.toFixed(1)}h ago — it has stopped checking.`);
+    else ok("feature", "DB backup watchdog", `5 databases backed up, last verified ${ageH.toFixed(1)}h ago`);
+  } catch (e) {
+    warn("feature", "DB backup watchdog", "UNCHECKED — " + String(e.message).slice(0, 60));
+  }
+}
+
 // ---------------------------------------------------------------- report
 
 const W = wallet();
@@ -434,6 +499,7 @@ checkCatalog();
 await checkStripe(W);
 checkBackups();
 checkPerimeterLog();
+checkDenials();
 
 const fails = results.filter((r) => r.level === "FAIL");
 const warns = results.filter((r) => r.level === "WARN");

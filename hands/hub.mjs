@@ -105,30 +105,70 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     return json(res, 200, { ok: true });
   }
 
-  function dispatch(node, tool, args = {}, { timeoutMs = 60000 } = {}) {
+  /*
+   * dispatch now takes an AbortSignal. Before 2026-07-19 it did not, which is precisely why Fred's
+   * Stop button "sometimes worked": aborting killed the model stream and the round loop, but a job
+   * already handed to a node ran to completion on his machine, up to the 600s ceiling, while the UI
+   * had moved on. Stop must reach the machine, not just the conversation.
+   */
+  function dispatch(node, tool, args = {}, { timeoutMs = 60000, signal = null } = {}) {
     if (!enabled) return Promise.resolve({ ok: false, error: "hands disabled: no HANDS_TOKEN configured" });
     // Hub-side carve-out check (the node re-checks — defense in depth, both directions).
     const blob = JSON.stringify(args || {});
     for (const re of PROTECTED_RE) {
       if (re.test(blob)) return Promise.resolve({ ok: false, refused: true, reason: "references a protected resource (app backups / customer DB) — hard carve-out, never touched" });
     }
+    if (signal && signal.aborted) return Promise.resolve({ ok: false, aborted: true, error: "stopped before dispatch" });
     const entry = nodes.get(String(node || "").toLowerCase());
     if (!entry) return Promise.resolve({ ok: false, offline: true, node, error: `hands node "${node}" is not connected (machine asleep, off, or the node service is down)` });
     const id = "hj_" + randomUUID().slice(0, 12);
     const cap = Math.min(Math.max(Number(timeoutMs) || 60000, 1000), 600000);
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        jobs.delete(id);
-        resolve({ ok: false, offline: true, node, timedOut: true, error: `hands node "${node}" did not answer within ${Math.round(cap / 1000)}s` });
-      }, cap);
-      jobs.set(id, { node: String(node).toLowerCase(), resolve, timer, sentAt: Date.now() });
+      let settled = false;
+      const done = (r) => { if (settled) return; settled = true; jobs.delete(id); clearTimeout(timer); if (onAbort && signal) { try { signal.removeEventListener("abort", onAbort); } catch {} } resolve(r); };
+      const timer = setTimeout(() => done({ ok: false, offline: true, node, timedOut: true, error: `hands node "${node}" did not answer within ${Math.round(cap / 1000)}s` }), cap);
+
+      // Tell the node to kill the work, then stop waiting. We do not wait for the node to confirm:
+      // Stop must feel instant, and the node kills its process tree on receipt.
+      const onAbort = () => { cancelJob(id, "stopped by the user"); done({ ok: false, aborted: true, node, error: "stopped" }); };
+      if (signal) { try { signal.addEventListener("abort", onAbort, { once: true }); } catch {} }
+
+      jobs.set(id, { node: String(node).toLowerCase(), resolve: done, timer, sentAt: Date.now(), tool });
       entry.jobsSent++;
       try { entry.res.write(`event: job\ndata: ${JSON.stringify({ id, tool, args, deadlineMs: cap })}\n\n`); }
-      catch (e) {
-        clearTimeout(timer); jobs.delete(id);
-        resolve({ ok: false, offline: true, node, error: "the node's stream died mid-dispatch: " + (e && e.message) });
-      }
+      catch (e) { done({ ok: false, offline: true, node, error: "the node's stream died mid-dispatch: " + (e && e.message) }); }
     });
+  }
+
+  // Push a cancel down the node's stream. The node kills the matching child process tree.
+  function cancelJob(id, reason = "cancelled") {
+    const j = jobs.get(id);
+    if (!j) return false;
+    const entry = nodes.get(j.node);
+    if (entry) { try { entry.res.write(`event: cancel\ndata: ${JSON.stringify({ id, reason })}\n\n`); } catch { /* stream already gone */ } }
+    return true;
+  }
+
+  /*
+   * FIRE ALARM. Kill everything in flight, across every node at once. Owner scope pulls the whole
+   * board; a per-user scope pulls only that user's own node, so a guest hitting their alarm can
+   * never stop Fred's work or another guest's.
+   */
+  function cancelAll({ scope = "owner", reason = "fire alarm" } = {}) {
+    let killed = 0;
+    for (const [id, j] of [...jobs.entries()]) {
+      if (scope !== "owner" && j.node !== String(scope).toLowerCase()) continue;
+      cancelJob(id, reason);
+      j.resolve({ ok: false, aborted: true, node: j.node, error: reason });
+      killed++;
+    }
+    // Belt and braces: tell every node in scope to kill anything it is still running, even jobs the
+    // hub has already given up on (a timed-out dispatch leaves the node's child very much alive).
+    for (const [name, entry] of nodes.entries()) {
+      if (scope !== "owner" && name !== String(scope).toLowerCase()) continue;
+      try { entry.res.write(`event: cancel\ndata: ${JSON.stringify({ id: "*", reason })}\n\n`); } catch {}
+    }
+    return { killed, nodes: [...nodes.keys()].filter((n) => scope === "owner" || n === String(scope).toLowerCase()) };
   }
 
   async function handleRun(req, res, body) {
@@ -160,5 +200,5 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
   }
   const nodeNames = () => [...nodes.keys()];
   const stats = () => ({ enabled, nodes: nodes.size, pendingJobs: jobs.size });
-  return { enabled, handleStream, handleResult, handleRun, handleNodes, dispatch, pick, nodeNames, stats };
+  return { enabled, handleStream, handleResult, handleRun, handleNodes, dispatch, cancelJob, cancelAll, pick, nodeNames, stats };
 }
