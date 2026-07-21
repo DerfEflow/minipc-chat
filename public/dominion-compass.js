@@ -89,8 +89,26 @@
 
   // Which directions are live from where you are standing. On a panel there is exactly one way
   // out, which is what makes the handle a "you are here" marker as well as a control.
+  /*
+   * Is The Crucible available to this account at all? The live bug this answers for: the up
+   * arrow showed for everyone, and the drag then died silently inside openIdeMode's permission
+   * gate, so up "did nothing" while left and right worked. An arrow that exists must work; an
+   * account that is walled off gets no arrow.
+   */
+  const crucibleAllowed = () => !!(window.ideModeAllowed && window.ideModeAllowed());
+
+  // A deliberate upward drag IS consent: when the mode is allowed on the account and merely not
+  // switched on for this device, switch it on rather than refusing a motion the user just made.
+  function armCrucible() {
+    if (!crucibleAllowed()) return false;
+    if (window.ideModeEngaged && !window.ideModeEngaged() && window.ideModeSetEngaged) {
+      window.ideModeSetEngaged(true);
+    }
+    return true;
+  }
+
   function routesFor(surface) {
-    if (surface === "main") return { left: "dial", right: "images", up: "crucible" };
+    if (surface === "main") return { left: "dial", right: "images", ...(crucibleAllowed() ? { up: "crucible" } : {}) };
     if (surface === "images") return { left: "main" };      // it came from the left, so it leaves leftward
     if (surface === "dial") return { right: "main" };
     if (surface === "crucible") return { down: "main" };
@@ -124,6 +142,7 @@
     const p = PANELS[target];
     if (!p) return null;
     let root = $(p.root);
+    if (target === "crucible" && !back && !armCrucible()) return null;
     if (!root && !back) {
       // Cold start: the panel has never been opened, so its DOM does not exist yet. Ask it to
       // open (which builds it), then immediately undo the open state. Nothing has painted between
@@ -216,6 +235,7 @@
           drag = beginDrag(dest, false);
         }
         if (!drag) {                                      // cannot drag this one, so tap it open
+          if (dest === "crucible") armCrucible();
           const fn = PANELS[dest] && PANELS[dest].open_();
           if (typeof fn === "function") fn();
           start = null; return;
@@ -259,6 +279,7 @@
       if (dir && routes[dir]) {
         e.preventDefault();
         const dest = routes[dir];
+        if (dest === "crucible") armCrucible();
         if (dest === "main") { const c = PANELS[current()].close(); if (typeof c === "function") c(); }
         else { const o = PANELS[dest].open_(); if (typeof o === "function") o(); }
         setTimeout(paint, 60);
@@ -270,6 +291,7 @@
       arm.addEventListener("click", () => {
         const dest = routesFor(current())[arm.dataset.dir];
         if (!dest) return;
+        if (dest === "crucible") armCrucible();
         if (dest === "main") { const c = PANELS[current()].close(); if (typeof c === "function") c(); }
         else { const o = PANELS[dest].open_(); if (typeof o === "function") o(); }
         setTimeout(paint, 60);
@@ -283,6 +305,9 @@
   function init() {
     build();
     observer.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+    // allowed resolves from a fetch AFTER the compass first paints, so listen for the change or
+    // the up arrow stays wrong until some unrelated repaint.
+    document.addEventListener("dominion-ide-state", paint);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();

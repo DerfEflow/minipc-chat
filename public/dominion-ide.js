@@ -40,6 +40,9 @@
   const writeEngaged = (on) => {
     try { localStorage.setItem(ENGAGED_KEY, on ? "1" : "0"); } catch {}
   };
+  const announceIdeState = () => {
+    try { document.dispatchEvent(new CustomEvent("dominion-ide-state")); } catch {}
+  };
 
   // ---------- the reveal ----------------------------------------------------------------
   // Built once and KEPT (the Forge Images lifecycle, not the dial's destroy-on-close), so the
@@ -737,6 +740,7 @@
     state.engaged = !!on;
     writeEngaged(state.engaged);
     paintToggle();
+    announceIdeState();
     if (!state.engaged) closePanel();
     else if (reveal) openPanel();
     // Remember it on the ACCOUNT too, so flipping it on the laptop is already on when the phone
@@ -820,6 +824,7 @@
       if (!deviceHasOpinion && s.prefs && s.prefs.engaged === true) {
         setEngaged(true, { reveal: false, push: false });
       }
+      announceIdeState();
     } catch {}
   }
 
@@ -861,6 +866,11 @@
   window.openIdeMode = openPanel;
   window.closeIdeMode = closePanel;
   window.ideModeEngaged = () => state.engaged;
+  // The compass needs both facts: ALLOWED decides whether the up arrow exists at all, and
+  // programmatic engage lets a deliberate upward drag turn the mode on instead of silently
+  // hitting openPanel's engaged gate (the live bug: left and right worked, up did nothing).
+  window.ideModeAllowed = () => state.allowed;
+  window.ideModeSetEngaged = (on) => setEngaged(!!on, { reveal: false, push: true });
   window.ideRefreshJobs = refreshJobs;
   window.ideEnsurePush = ensurePush;
 
