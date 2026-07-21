@@ -116,3 +116,33 @@ per the iteration 1 discipline. Blast radius HIGH, full FITS.
 4. The language question at the front door: keep asking it, or let mode set it silently with a
    change control in settings. RECOMMENDATION: mode sets it silently; one question fewer at
    the door, and the register machinery stays for anyone who wants to override.
+
+## The Furnace doctrine (Fred's ruling 2026-07-21, standing, every build, no exceptions)
+
+Why this exists, in the owner's framing: Replit would claim a fix that was not fixed, break other
+things silently, know nothing about its own interface when asked what a section was for, and
+declare production-ready apps that were 60% built with placeholders and mismatched variables.
+The Crucible's differentiator is therefore:
+
+1. SITUATIONAL AND ENVIRONMENTAL AWARENESS. The AI that talks to the user KNOWS the surface it
+   lives in: what Blueprint and Workshop are, what the compass does, what the modes mean, where
+   the folder picker is, what the preview does, what publish means. Implementation: a single
+   self-knowledge module (idehelp.mjs, CRUCIBLE_GUIDE) injected into the intake interviewer and
+   the build runner so "what is this section for" always gets a true, current answer.
+   STANDING RULE: any change to the Crucible's UI updates idehelp.mjs IN THE SAME COMMIT, the
+   way the SW cache trio moves together. A test enumerates the surface's features and fails if
+   the guide stops mentioning one.
+2. DISCIPLINED WORKFLOW LOGIC (the Furnace pass). Every build ends with an honesty audit before
+   "done" may be said:
+   a. Placeholder sweep (deterministic, engine-side, free): scan every written file for TODO,
+      FIXME, PLACEHOLDER, XXX, lorem ipsum, coming soon, and empty function bodies; anything
+      found is reported plainly, never hidden.
+   b. Vision fidelity check (one model call): compare the AGREED VISION bullets against what was
+      actually written; report each bullet as delivered or as a named gap, in the user's
+      register; offer to close gaps rather than declaring victory.
+   c. "Fixed" claims must be verified claims: a repair is only reported fixed after the
+      project's own check has rerun green.
+3. REAL-TIME ORCHESTRATION: the deterministic router, budget stops, pause-and-ask, and the
+   journal remain the spine; no move is fire-and-forget.
+4. TEACHING COMMUNICATION: every stage explains what just happened and what happens next, at
+   the mode's register and level; the app should leave the user more capable than it found them.
