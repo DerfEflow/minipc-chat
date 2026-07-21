@@ -14,7 +14,10 @@
  * Everything here is pure (no http, no providers), so it tests with plain strings.
  */
 
+import { personaVoice, aestheticsVoice } from "./idemodes.mjs";
+
 export const VISION_MARKER = "VISION READY";
+const MOCKUP_RE = /^\s*MOCKUP:\s*(.+)\s*$/;
 
 const REGISTER_VOICE = {
   plain:
@@ -26,8 +29,9 @@ const REGISTER_VOICE = {
     "Use the technical term and explain it in the same breath, briefly, in parentheses.",
 };
 
-export function intakeSystem(register = "plain") {
+export function intakeSystem(register = "plain", mode = "beginner") {
   const voice = REGISTER_VOICE[register] || REGISTER_VOICE.plain;
+  const aesthetics = aestheticsVoice(mode);
   return [
     "You are the intake interviewer for The Crucible, Dominion's build surface. A person has just",
     "described an app they want built. Your job is to reach a CLEAR, SHARED vision before any",
@@ -56,6 +60,9 @@ export function intakeSystem(register = "plain") {
     "looks like, and anything you were told to avoid. No question in that reply.",
     "",
     "VOICE: " + voice,
+    "",
+    personaVoice(mode),
+    ...(aesthetics ? ["", aesthetics] : []),
   ].join("\n");
 }
 
@@ -65,13 +72,20 @@ export function intakeSystem(register = "plain") {
  */
 export function parseIntake(text) {
   const raw = String(text == null ? "" : text).trim();
-  const lines = raw.split(/\r?\n/);
+  // MOCKUP directives come out first, from anywhere in the reply: each becomes a rendered image
+  // in the chat rather than a line of text the user has to read past.
+  const mockups = [];
+  const lines = raw.split(/\r?\n/).filter((l) => {
+    const m = l.match(MOCKUP_RE);
+    if (m && mockups.length < 2) { mockups.push(m[1].slice(0, 900)); return false; }
+    return true;
+  });
   const at = lines.findIndex((l) => l.trim().toUpperCase() === VISION_MARKER);
-  if (at === -1) return { reply: raw, vision: null };
+  if (at === -1) return { reply: lines.join("\n").trim(), vision: null, mockups };
   const lead = lines.slice(0, at).join("\n").trim();
   const vision = lines.slice(at + 1).join("\n").trim();
-  if (!vision) return { reply: raw, vision: null };   // a bare marker with nothing after it is noise
-  return { reply: lead, vision };
+  if (!vision) return { reply: lines.join("\n").trim(), vision: null, mockups };   // bare marker = noise
+  return { reply: lead, vision, mockups };
 }
 
 /*
@@ -79,12 +93,12 @@ export function parseIntake(text) {
  * user/assistant, content clamped in size, the whole thing capped. The system prompt is always
  * ours, never the client's.
  */
-export function intakeMessages({ register = "plain", history = [] } = {}) {
+export function intakeMessages({ register = "plain", mode = "beginner", history = [] } = {}) {
   const msgs = [];
   for (const m of Array.isArray(history) ? history.slice(-40) : []) {
     const role = m && m.role === "assistant" ? "assistant" : "user";
     const content = String((m && m.content) || "").slice(0, 4000);
     if (content) msgs.push({ role, content });
   }
-  return [{ role: "system", content: intakeSystem(register) }, ...msgs];
+  return [{ role: "system", content: intakeSystem(register, mode) }, ...msgs];
 }

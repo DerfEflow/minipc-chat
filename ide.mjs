@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { routeMove, CLASS_INFO, TASK_CLASSES, DEFAULT_ASSIGNMENTS, IMAGE_ENGINE, PRESETS } from "./iderouter.mjs";
 import { createPushStore } from "./idepush.mjs";
 import { normalizeRegister, DEFAULT_REGISTER } from "./idelang.mjs";
+import { normalizeMode } from "./idemodes.mjs";
 
 export const IDE_MODE_DEFAULT = "owner";
 
@@ -71,7 +72,8 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
   const file = join(home, "state.json");
   mkdirSync(home, { recursive: true });
 
-  const blank = () => ({ prefs: { engaged: false, language: DEFAULT_REGISTER }, workspaces: [], subs: [] });
+  // mode "" means "never chosen": the client shows the three-cards picker exactly once.
+  const blank = () => ({ prefs: { engaged: false, language: DEFAULT_REGISTER, mode: "" }, workspaces: [], subs: [] });
 
   function read() {
     if (!existsSync(file)) return blank();
@@ -130,6 +132,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
       if (patch && typeof patch.engaged === "boolean") s.prefs.engaged = patch.engaged;
       if (patch && patch.assignments && typeof patch.assignments === "object") s.prefs.assignments = patch.assignments;
       if (patch && typeof patch.language === "string") s.prefs.language = normalizeRegister(patch.language);
+      if (patch && typeof patch.mode === "string") s.prefs.mode = normalizeMode(patch.mode);
       write(s);
       return s.prefs;
     },
@@ -369,8 +372,9 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       const job = jobs.create({ uid: T.uid, workspaceId, kind, isOwner: !!T.isOwner });
       log("[ide] job " + job.id + " (" + kind + ") started by " + (T.uid || "owner"));
       if (typeof runner === "function") {
-        try { runner(job, { workspace, prompt, assignments: assignmentsFor(T, workspace),
-          register: (storeFor(T).prefs() || {}).language }); }
+        try { const prefs = storeFor(T).prefs() || {};
+          runner(job, { workspace, prompt, assignments: assignmentsFor(T, workspace),
+          register: prefs.language, mode: prefs.mode }); }
         catch (e) { jobs.emit(job.id, { type: "error", message: String(e && e.message || e) }); }
       }
       return ok({ jobId: job.id, kind, workspaceId });

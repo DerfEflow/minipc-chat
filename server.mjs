@@ -68,6 +68,7 @@ import { routeMove, resolveAssignments } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee } from "./idesee.mjs";
 import { intakeMessages, parseIntake } from "./ideintake.mjs";
+import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
 import { escalationFor, sendWakeups } from "./idepush.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
@@ -1208,7 +1209,8 @@ async function handleIde(req, res, u) {
     const blocked = ideFeature.wall(T) || ideFeature.billableWall(T);
     if (blocked) return send(blocked);
     const reg = normalizeRegister(body.register);
-    const messages = intakeMessages({ register: reg, history: body.messages });
+    const mode = normalizeCrucibleMode(body.mode || ((ideFeature.state(T).body || {}).prefs || {}).mode);
+    const messages = intakeMessages({ register: reg, mode, history: body.messages });
     if (messages.length < 2) return send({ status: 400, body: { error: "Say what you want built first." } });
     // The same brain that will do the engineering conducts the interview: the workspace's
     // build_code assignment, resolved exactly the way the build itself will resolve it.
@@ -1224,7 +1226,21 @@ async function handleIde(req, res, u) {
     if (r.costUsd) { try { await meterTurn(T, r.costUsd, "crucible intake", ""); } catch {} }
     if (!r.ok) return send({ status: 200, body: { error: r.error || "The model could not be reached. Try again." } });
     const parsed = parseIntake(r.content);
-    return send({ status: 200, body: { ok: true, reply: parsed.reply, vision: parsed.vision, costUsd: r.costUsd } });
+    /*
+     * Honesty about money and complexity (the Vibe Coder spine, SOW ruling 2026-07-21): the
+     * moment a vision exists, the server computes what it implies. Flags come from a
+     * deterministic scan, the cost band from move-count and the engineering model's real rates.
+     * Beginners get these facts later, at the deploy talk, in gentler words; the client decides.
+     */
+    let involves = null;
+    if (parsed.vision) {
+      const rec = modelById(model) || {};
+      const moves = Math.max(2, Math.min(12, (parsed.vision.match(/^\s*[-*]/gm) || []).length));
+      const x = visionExtras(parsed.vision, { moves, inCost: rec.inCost || 0, outCost: rec.outCost || 0 });
+      involves = { flags: x.flags, band: costBand(x.est) };
+    }
+    return send({ status: 200, body: { ok: true, reply: parsed.reply, vision: parsed.vision,
+      mockups: parsed.mockups || [], involves, mode, costUsd: r.costUsd } });
   }
 
   if (req.method === "POST" && path === "/ide/job") {
@@ -1332,8 +1348,9 @@ async function ideChatOnce(model, messages, { signal } = {}) {
   return { ok: !!(r && r.ok), content: (r && r.content) || "", error: (r && r.error) || "", costUsd: +costUsd.toFixed(6) };
 }
 
-async function runIdeBuild(job, { T, workspace, prompt, assignments, register }) {
+async function runIdeBuild(job, { T, workspace, prompt, assignments, register, mode }) {
   const reg = normalizeRegister(register);
+  const persona = personaVoice(normalizeCrucibleMode(mode));
   const ac = new AbortController();
   job.stop = () => { try { ac.abort(); } catch {} };
 
@@ -1375,7 +1392,7 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register })
       ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, single: true });
     } else {
       const planned = await chat({ model: planModel, messages: [
-        { role: "system", content: PLANNER_SYSTEM + "\n\n" + plannerVoice(reg) },
+        { role: "system", content: PLANNER_SYSTEM + "\n\n" + plannerVoice(reg) + "\n" + persona },
         { role: "user", content: "PROJECT: " + (workspace.name || workspace.root) + "\n\nBUILD THIS:\n" + prompt },
       ] });
       spend(planned.costUsd);
