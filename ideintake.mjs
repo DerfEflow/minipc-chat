@@ -15,6 +15,7 @@
  */
 
 import { personaVoice, aestheticsVoice } from "./idemodes.mjs";
+import { helpVoice } from "./idehelp.mjs";
 
 export const VISION_MARKER = "VISION READY";
 const MOCKUP_RE = /^\s*MOCKUP:\s*(.+)\s*$/;
@@ -29,9 +30,24 @@ const REGISTER_VOICE = {
     "Use the technical term and explain it in the same breath, briefly, in parentheses.",
 };
 
+/*
+ * For beginner mode: once the vision is approved, guide them to say "build it" when ready.
+ * No menus, just warm invitation to start.
+ */
+function beginnerBuildVoice() {
+  return [
+    "AFTER VISION READY: Once you have listed the vision bullets and the user approves them,",
+    "present no menus or options. Instead, give one warm sentence inviting them to say 'build it'",
+    "when they are ready. Keep answering their questions until they do. When they say they are",
+    "ready to build, that is when the build starts. Do not offer choices or next steps.",
+  ].join("\n");
+}
+
 export function intakeSystem(register = "plain", mode = "beginner") {
   const voice = REGISTER_VOICE[register] || REGISTER_VOICE.plain;
   const aesthetics = aestheticsVoice(mode);
+  const isBeginner = mode === "beginner" || (mode && String(mode).toLowerCase() === "beginner");
+  const buildVoice = isBeginner ? beginnerBuildVoice() : "";
   return [
     "You are the intake interviewer for The Crucible, Dominion's build surface. A person has just",
     "described an app they want built. Your job is to reach a CLEAR, SHARED vision before any",
@@ -63,6 +79,11 @@ export function intakeSystem(register = "plain", mode = "beginner") {
     "",
     personaVoice(mode),
     ...(aesthetics ? ["", aesthetics] : []),
+    ...(buildVoice ? ["", buildVoice] : []),
+    // Furnace doctrine: the interviewer knows the surface it lives in, so "what is this section
+    // for" always gets a true answer instead of an amnesiac introduction.
+    "",
+    helpVoice(),
   ].join("\n");
 }
 

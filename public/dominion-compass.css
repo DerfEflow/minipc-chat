@@ -139,3 +139,53 @@ body.cx-dragging::after { right: 0; background: linear-gradient(270deg, rgba(212
 body.dfd-open #neural-glass { transform: translateX(-108vw) !important; }
 body.dfi-open #neural-glass { transform: translateX(108vw) !important; }
 body.ide-open #neural-glass { transform: translateY(-112vh) !important; }
+
+/* ---------- smooth settle on reveal commit --------------------------------------------------
+ * The four shell pieces and the rising panel share one slow bounce curve while .ide-anim is on, so
+ * the hand-off after a commit reads as one deliberate motion rather than a fast, shaky snap. Only
+ * the TIMING lives here: the open-position transforms come from the reveal-state rules above and
+ * from dominion-ide.css (body.ide-open ...), and the close animation comes from those same rules
+ * relaxing. This transition is deliberately NOT !important: the drag sets `transition:none` inline
+ * to track the finger 1:1, and an !important here would out-rank that inline value and make the
+ * panel lag the entire drag. will-change promotes a compositor layer to stop the shimmer. */
+body.ide-anim #neural-glass,
+body.ide-anim #sidebar,
+body.ide-anim #commandbar,
+body.ide-anim #overlay,
+body.ide-anim #ide-root {
+  will-change: transform;
+  transition: transform 650ms cubic-bezier(0.22, 0.9, 0.32, 1);
+}
+
+/* ---------- crucible divider bar and label -----------------------------------------------
+ * A copper seam pinned to the panel's top edge so the boundary is unmistakable while it travels,
+ * and a label naming the destination. #ide-root already spends both ::before (deck plate) and
+ * ::after (lift seam) in dominion-ide.css, and it is position:fixed as its own containing block,
+ * so these are real child elements: a second ::before would merge into the deck plate, and
+ * position:relative would drop the panel out of fixed. Both are position:absolute so they never
+ * shift the IDE layout, even while hidden. */
+#ide-divider-bar {
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 3px;
+  background: rgba(212, 130, 60, 0.95);
+  box-shadow: 0 -18px 40px rgba(212, 130, 60, 0.35);
+  pointer-events: none;
+  z-index: 2;
+}
+
+#ide-divider-label {
+  position: absolute; top: 16px; left: 0; right: 0;
+  text-align: center;
+  font-size: 15px; font-weight: bold;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(212, 130, 60, 0.85);
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+#ide-divider-label.on {
+  opacity: 1;
+}

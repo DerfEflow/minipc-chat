@@ -1,0 +1,151 @@
+/* ---------- the guided tour ---------------------------------------------------------------
+ * Prominence: a full-screen veil under each popup so the tour cannot be missed. The veil, the
+ * lifted target, and the popup all live inside #ide-root (a fixed, z-index:70, will-change
+ * stacking context), so within that one context the veil (330), the lifted target (335) and the
+ * popup (340) order the way the numbers intend. A veil at document.body level would paint over the
+ * whole panel and the target could never rise above it.
+ *
+ * Every selector is scoped under #ide-root so these rules beat the older tour styles that still
+ * live in dominion-ide.css by specificity, whatever the load order.
+ */
+
+#ide-root .ide-tour-veil {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 12, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  z-index: 330;
+  pointer-events: auto;   /* the veil absorbs stray taps; only the lifted target and popup stay live */
+}
+
+#ide-root .ide-tour-pop {
+  position: fixed;
+  z-index: 340;
+  padding: 12px 14px;
+  border-radius: 5px;
+  background: linear-gradient(137deg, rgba(28,55,85,.6) 0%, rgba(20,35,50,.65) 100%);
+  border: 1px solid rgba(185, 107, 50, 0.45);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+#ide-root .ide-tour-pop::before {
+  content: "";
+  position: absolute;
+  left: var(--ax, 24px);
+  top: -7px;
+  width: 14px;
+  height: 14px;
+  background: inherit;
+  border: inherit;
+  border-right: none;
+  border-bottom: none;
+  transform: translateX(-50%) rotate(45deg);
+}
+
+#ide-root .ide-tour-pop.above::before {
+  top: auto;
+  bottom: -7px;
+  transform: translateX(-50%) rotate(225deg);
+}
+
+#ide-root .ide-tour-pop .tp-num {
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: var(--copper-hot, #d4823c);
+  margin-bottom: 4px;
+}
+
+#ide-root .ide-tour-pop h4 {
+  margin: 0 0 6px;
+  font-size: 19px;
+  font-weight: 800;
+  color: var(--ink, #e8f6ff);
+}
+
+#ide-root .ide-tour-pop p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  font-weight: 600;
+  color: var(--ink, #e8f6ff);
+}
+
+#ide-root .ide-tour-pop .tp-guide {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink, #e8f6ff);
+}
+
+#ide-root .ide-tour-pop .tp-btns {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+#ide-root .ide-tour-pop .tp-btns button {
+  font: inherit;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  padding: 7px 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(118, 255, 104, 0.3);
+  background: transparent;
+  color: rgba(118, 255, 104, 0.8);
+  transition: all 0.2s ease;
+}
+
+#ide-root .ide-tour-pop .tp-btns button:hover {
+  background: rgba(118, 255, 104, 0.1);
+  border-color: rgba(118, 255, 104, 0.6);
+  color: rgba(118, 255, 104, 1);
+}
+
+#ide-root .ide-tour-pop .tp-btns .tp-next {
+  border-color: rgba(118, 255, 104, 0.45);
+}
+
+#ide-root .ide-tour-pop .tp-btns .tp-skip {
+  color: var(--muted, #8ba0ae);
+  border-color: rgba(139, 160, 174, 0.3);
+}
+
+#ide-root .ide-tour-pop .tp-btns .tp-skip:hover {
+  border-color: rgba(139, 160, 174, 0.6);
+  background: rgba(139, 160, 174, 0.05);
+}
+
+#ide-root .tour-hi {
+  outline: 1px solid rgba(118, 255, 104, 0.55);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+#ide-root .tour-lift {
+  position: relative;
+  z-index: 335;
+}
+
+#ide-root #ide-tour-btn {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0;
+  border: 1px solid rgba(185, 107, 50, 0.3);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink, #e8f6ff);
+  transition: all 0.2s ease;
+}
+
+#ide-root #ide-tour-btn:hover {
+  color: var(--copper-hot, #d4823c);
+  border-color: rgba(185, 107, 50, 0.55);
+}

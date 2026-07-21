@@ -33,7 +33,9 @@
   // The four shell pieces every reveal transforms. Kept in one place because all three panels
   // enumerate exactly these, and a fifth element added to the shell must be added here too.
   const SHELL = ["#sidebar", "#commandbar", "#neural-glass", "#overlay"];
-  const COMMIT = 1 / 3;          // Fred's ruling: one third of the screen is the point of no return
+  const COMMIT = 0.18;           // threshold: 18% of screen for distance commit
+  const VELOCITY_COMMIT = 0.35;  // px/ms: flick faster than this commits even below distance
+  const VELOCITY_SAMPLE_MS = 80; // sample window for velocity calculation
   const START_SLOP = 8;          // px before a drag is a drag, so a tap stays a tap
 
   /*
@@ -116,6 +118,9 @@
   }
 
   function paint() {
+    // Whenever the crucible panel exists, make sure its always-on divider bar does too, so the
+    // boundary is present for arrow/keyboard reveals as well as drags.
+    ensureDivider();
     const el = $("#compass");
     if (!el) return;
     const here = current();
@@ -158,7 +163,7 @@
     if (back) document.body.classList.add(p.open);      // dragging OUT of a panel starts fully open
     const els = [...shellEls(), root].filter(Boolean);
     for (const e of els) e.style.transition = "none";
-    return { target, p, root, back, els, progress: back ? 1 : 0 };
+    return { target, p, root, back, els, progress: back ? 1 : 0, posHistory: [] };
   }
 
   function applyProgress(d, progress) {
@@ -190,9 +195,12 @@
       if (d.back) {
         document.body.classList.remove(p.open);
         setTimeout(() => { document.body.classList.remove(p.anim); paint(); }, 500);
+        if (d.target === "crucible") hideDividerLabel();
       } else {
         document.body.classList.add(p.open);
         setTimeout(paint, 60);
+        // Show and manage divider label during crucible settle (arm the hide on the settle).
+        if (d.target === "crucible") showDividerLabel(true);
       }
     } else {
       // Snap back to wherever we started from.
@@ -202,6 +210,7 @@
         setTimeout(() => { document.body.classList.remove(p.anim); }, 500);
       }
       setTimeout(paint, 60);
+      if (d.target === "crucible") hideDividerLabel();
     }
     drag = null;
   }
@@ -241,6 +250,9 @@
           start = null; return;
         }
         decided = dir;
+        // Show divider label when dragging upward toward the crucible. No settle timer yet: the
+        // drag has no transition running, so arming the hide here would fire mid-gesture.
+        if (dir === "up" && drag.target === "crucible") showDividerLabel(false);
       }
       if (!drag) return;
       const span = drag.p.axis === "x" ? window.innerWidth : window.innerHeight;
@@ -250,13 +262,37 @@
       // dial, up for The Crucible), so progress always runs 0 -> 1 the way the panel travels.
       const signed = travel * (drag.back ? -drag.p.sign : drag.p.sign);
       applyProgress(drag, drag.back ? 1 - signed / span : signed / span);
+      // Record position and timestamp for velocity calculation
+      const now = Date.now();
+      drag.posHistory.push({ pos: signed, ts: now });
+      // Keep only recent history for velocity sample window
+      while (drag.posHistory.length > 1 && now - drag.posHistory[0].ts > VELOCITY_SAMPLE_MS) {
+        drag.posHistory.shift();
+      }
       e.preventDefault();
     };
 
     const onUp = () => {
       el.classList.remove("awake");
       if (drag) {
-        const committed = drag.back ? drag.progress <= 1 - COMMIT : drag.progress >= COMMIT;
+        // Decide commit: distance threshold OR velocity threshold
+        let committed = drag.back ? drag.progress <= 1 - COMMIT : drag.progress >= COMMIT;
+        if (!committed && drag.posHistory.length >= 2) {
+          // Check velocity over the last samples
+          const now = Date.now();
+          const recentStart = drag.posHistory[0];
+          const recentEnd = drag.posHistory[drag.posHistory.length - 1];
+          const dtMs = recentEnd.ts - recentStart.ts;
+          if (dtMs > 0) {
+            const posDelta = recentEnd.pos - recentStart.pos;
+            const velocity = Math.abs(posDelta) / dtMs;
+            // pos already runs 0 -> up in the opening direction for BOTH a forward reveal and a
+            // drag back out (applyProgress feeds it drag.back-corrected), so a rising pos always
+            // means "moving toward wherever this drag is headed", back or not.
+            const towardDest = posDelta > 0;
+            if (towardDest && velocity >= VELOCITY_COMMIT) committed = true;
+          }
+        }
         endDrag(drag, committed);
       } else if (start && !moved) {
         // A plain press with no drag: on a panel it goes home, on the main screen it wakes the
@@ -297,6 +333,70 @@
         setTimeout(paint, 60);
       });
     }
+  }
+
+  // Build the divider bar and its label once. #ide-root already spends both ::before and ::after
+  // on its deck plate and lift seam, so these are real child elements rather than pseudos. The bar
+  // is the always-on copper seam; the label is hidden until a crucible reveal is in flight.
+  function ensureDivider() {
+    const root = $("#ide-root");
+    if (!root) return;
+    if (!$("#ide-divider-bar")) {
+      const bar = document.createElement("div");
+      bar.id = "ide-divider-bar";
+      root.insertBefore(bar, root.firstChild);
+    }
+    if (!$("#ide-divider-label")) {
+      const L = window.DominionLexicon ? window.DominionLexicon.L : (k) => k;
+      const label = document.createElement("div");
+      label.id = "ide-divider-label";
+      label.textContent = L("divider_label");
+      root.insertBefore(label, root.firstChild);
+    }
+  }
+
+  // Hide the label (the bar stays: it is always on the panel).
+  function hideDividerLabel() {
+    const label = $("#ide-divider-label");
+    if (!label) return;
+    label.classList.remove("on");
+  }
+
+  let settleTimeoutId = null;
+  let settleTransitionHandler = null;
+
+  // Arm the hide for when the panel comes to rest: the panel's own transform transitionend, with
+  // an 800ms fallback. Guards against a bubbled child transition (the label's own opacity fade)
+  // ending the label early, and clears any handler from a previous arming so nothing leaks on.
+  function armSettleHide() {
+    const root = $("#ide-root");
+    if (settleTimeoutId) { clearTimeout(settleTimeoutId); settleTimeoutId = null; }
+    if (settleTransitionHandler && root) {
+      root.removeEventListener("transitionend", settleTransitionHandler);
+    }
+    settleTransitionHandler = null;
+    if (!root) { settleTimeoutId = setTimeout(hideDividerLabel, 800); return; }
+    const settle = (e) => {
+      if (e && (e.target !== root || e.propertyName !== "transform")) return;
+      root.removeEventListener("transitionend", settle);
+      clearTimeout(settleTimeoutId);
+      settleTimeoutId = null;
+      settleTransitionHandler = null;
+      hideDividerLabel();
+    };
+    settleTransitionHandler = settle;
+    root.addEventListener("transitionend", settle);
+    settleTimeoutId = setTimeout(settle, 800);
+  }
+
+  // Show the label. armHide is true only for the post-commit settle; during the drag itself there
+  // is no transition running, so arming the hide then would fire the fallback mid-gesture.
+  function showDividerLabel(armHide) {
+    ensureDivider();
+    const label = $("#ide-divider-label");
+    if (!label) return;
+    label.classList.add("on");
+    if (armHide) armSettleHide();
   }
 
   // The panels change body classes from their own buttons too, so watch rather than assume.

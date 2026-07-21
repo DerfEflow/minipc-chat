@@ -235,6 +235,40 @@
     preview_wait: ["Starting it up...", "Launching...", "Launching (starting it up)..."],
     preview_close: ["Close the preview", "Stop preview", "Stop preview (close it)"],
     preview_fail: ["It could not be started. Try again in a moment.", "Preview launch failed.", "Preview launch failed (it could not be started)."],
+    // ---- iteration 2.1: Fred's first phone pass (2026-07-21 late night) ---------------------
+    divider_label: ["App Builder", "Dominion Works", "App Builder (Dominion Works)"],
+    flame_working: ["Working", "Working", "Working"],
+    err_timeout: [
+      "That took too long, so I stopped waiting. Nothing was lost. Tap send to try again.",
+      "Request timed out; state preserved. Retry.",
+      "Request timed out (took too long); nothing was lost. Retry.",
+    ],
+    err_network: [
+      "I could not reach the server. Check your connection and try again; nothing was lost.",
+      "Network unreachable; state preserved. Retry.",
+      "Network unreachable (could not reach the server); nothing was lost. Retry.",
+    ],
+    mode_dontshow: ["Don't show this again", "Don't show again", "Don't show again"],
+    chat_build_started: [
+      "I've started building. You can watch it work, or put the phone down: I'll call you if I need you, and everything we talked about is saved.",
+      "Build started. Job persists server-side; notifications on input requests.",
+      "Build started; the job (running build) persists even if you leave, and I'll call you if I need you.",
+    ],
+    start_talk: ["Talk it through with Dominion", "Begin intake", "Begin intake (talk it through)"],
+    draft_restored: [
+      "Picked up right where you left off.",
+      "Draft restored.",
+      "Draft restored (right where you left off).",
+    ],
+    ask_title: ["Your build needs you", "Input required", "Input required (your build needs you)"],
+    log_title: ["Past builds", "Build log", "Build log (past builds)"],
+    log_empty: ["Nothing here yet. Your finished builds will be listed here.", "No completed jobs.", "No completed jobs (finished builds appear here)."],
+    tour_halt_t: ["It's building!", "Build running", "Build running (it's building)"],
+    tour_halt_b: [
+      "That's everything: your app is being built right now. Watch it work below, and I'll pop up if it needs you.",
+      "Tour ended: job started. Monitor below; notifications fire on input requests.",
+      "Tour ended: the job (your build) is running. Watch below; you'll be called if it needs you.",
+    ],
     closing_line: [
       "It is built and working. The next step, whenever you are ready, is putting it online so everyone can use it.",
       "Build complete. Next step: deployment.",

@@ -42,6 +42,17 @@ await t("personas match the ruling: mentor, collaborator, cold executor", () => 
   assert.ok(/zero\s*cheerleading/i.test(personaVoice("engineer")));
 });
 
+await t("beginner persona has the sharpened rules: 8th grade, proactive, next-step, motivation, ambitious", () => {
+  const b = personaVoice("beginner");
+  assert.ok(/8th grade reading level/i.test(b), "beginner must mention 8th grade ceiling");
+  assert.ok(/proactive/i.test(b), "beginner must be proactive");
+  assert.ok(/next step|one question/i.test(b), "beginner must end with next step or question");
+  assert.ok(/motivat/i.test(b), "beginner must ask about motivation");
+  assert.ok(/ambitious/i.test(b), "beginner must acknowledge ambitious apps");
+  assert.ok(/complicated/i.test(b), "beginner must explain why it is complicated");
+  assert.ok(/smaller first version|smaller.*grow/i.test(b), "beginner must offer smaller first version");
+});
+
 await t("aesthetics stage is beginner-only and teaches the MOCKUP protocol", () => {
   const b = aestheticsVoice("beginner");
   assert.ok(/MOCKUP:/.test(b));

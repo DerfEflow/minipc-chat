@@ -459,6 +459,8 @@
     if (path) path.placeholder = L("folder_ph");
     const chatIn = $("#st-chat-in");
     if (chatIn) chatIn.placeholder = L("intake_ph");
+    const goBtn = $("#st-go");
+    if (goBtn) goBtn.textContent = state.mode === "beginner" ? L("start_talk") : L("start_go");
     const lang = $("#st-lang");
     if (lang) {
       lang.value = window.DominionLexicon ? window.DominionLexicon.register : "plain";
@@ -481,6 +483,10 @@
       o.value = "";
       o.textContent = L("no_folder_yet");
       sel.append(o);
+      if (state.mode === "beginner") {
+        const newEl = $("#st-new");
+        if (newEl) newEl.hidden = false;
+      }
     }
     for (const w of state.workspaces) {
       const o = document.createElement("option");
@@ -548,13 +554,13 @@
     const browse = async (path) => {
       tree.hidden = false;
       tree.textContent = L("browse_loading");
-      let j = null;
+      let j = null, err = null;
       try {
         const r = await fetch("/ide/browse", { method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ path: path || "" }) });
         j = await r.json();
-      } catch {}
-      if (!j || j.error) { tree.textContent = j && j.error ? j.error : "The server could not be reached."; return; }
+      } catch (e) { err = e; }
+      if (!j || j.error) { tree.textContent = j && j.error ? j.error : friendlyError(err); return; }
       renderTree(j.path || "", j.dirs || []);
     };
     const renderTree = (path, dirs) => {
@@ -661,16 +667,47 @@
           '<span class="mc-t" data-lex="mode_' + m + '_t"></span>' +
           '<span class="mc-b" data-lex="mode_' + m + '_b"></span>' +
         '</button>').join("") +
+      '<div class="st-modes-lock">' +
+        '<label><input type="checkbox" id="st-mode-lock"> <span data-lex="mode_dontshow"></span></label>' +
+      '</div>' +
       '<p class="st-modes-note" data-lex="mode_note"></p>';
     stage.prepend(el);
     stage.classList.add("picking");
     paintLexicon();
     for (const card of el.querySelectorAll(".st-mode-card")) {
       card.addEventListener("click", () => {
+        const locked = $("#st-mode-lock").checked;
+        if (locked) {
+          try { localStorage.setItem("dominion.crucible.mode.locked.v1", "1"); } catch {}
+        }
         stage.classList.remove("picking");
         applyMode(card.dataset.mode);
         maybeShowIntro();
         document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
+      });
+    }
+  }
+
+  // Show mode picker in compact form (current mode highlighted, one row).
+  function showModePickerCompact() {
+    const stage = $("#ide-stage");
+    if (!stage || $("#st-modes")) return;
+    const el = document.createElement("section");
+    el.className = "st-modes st-modes-compact";
+    el.id = "st-modes";
+    el.innerHTML =
+      MODES.map((m) =>
+        '<button type="button" class="st-mode-card' + (m === state.mode ? ' on' : '') + '" data-mode="' + m + '">' +
+          '<span class="mc-t" data-lex="mode_' + m + '_t"></span>' +
+        '</button>').join("");
+    stage.prepend(el);
+    paintLexicon();
+    for (const card of el.querySelectorAll(".st-mode-card")) {
+      card.addEventListener("click", () => {
+        applyMode(card.dataset.mode);
+        // applyMode drops the picker, so re-mount the compact row so it stays usable, now with
+        // the freshly chosen mode marked.
+        showModePickerCompact();
       });
     }
   }
@@ -751,6 +788,48 @@
     });
   }
 
+  /* ---------- progress flame (Fred's ruling 2026-07-21) -----
+   * A visible indicator that work is being sent, preventing the UI from looking frozen.
+   */
+  window.ideFlame = (() => {
+    let active = false, timer = null, startTime = 0;
+    const show = (label) => {
+      if (active) return;
+      active = true;
+      let flame = $("#ide-flame");
+      if (!flame) {
+        flame = document.createElement("div");
+        flame.id = "ide-flame";
+        flame.innerHTML = '<div class="if-inner"><div class="if-fire"></div></div><strong class="if-label"></strong><div class="if-timer"></div>';
+        document.body.append(flame);
+      }
+      flame.querySelector(".if-label").textContent = label || L("flame_working");
+      flame.classList.add("on");
+      startTime = Date.now();
+      const timerEl = flame.querySelector(".if-timer");
+      timer = setInterval(() => {
+        const sec = Math.floor((Date.now() - startTime) / 1000);
+        const m = Math.floor(sec / 60), s = sec % 60;
+        timerEl.textContent = (m > 0 ? m + ":" : "") + (s < 10 ? "0" : "") + s;
+      }, 1000);
+    };
+    const hide = () => {
+      active = false;
+      if (timer) clearInterval(timer);
+      const flame = $("#ide-flame");
+      if (flame) {
+        flame.classList.remove("on");
+        setTimeout(() => { if (flame && !active) flame.remove(); }, 200);
+      }
+    };
+    return { show, hide };
+  })();
+
+  // Friendly error messages for network and timeout issues.
+  function friendlyError(e) {
+    return (e && e.name === "AbortError") ? L("err_timeout") : L("err_network");
+  }
+
   /* ---------- the intake conversation (Fred's ruling 2026-07-21) ---------------------------
    * The old flow assumed almost everything, which can build an app that looks or acts like
    * nothing the user intended, on their money. Now the model interviews the user, one question
@@ -786,27 +865,38 @@
   async function intakeTurn(status) {
     if (intake.busy) return;
     intake.busy = true;
+    window.ideFlame.show();
     const thinking = chatBubble("ai", L("intake_thinking"));
     thinking.classList.add("cb-thinking");
     let j = null;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
     try {
       const r = await fetch("/ide/intake", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ messages: intake.messages, workspaceId: $("#st-ws").value || "",
           mode: state.mode || "beginner",
-          register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }) });
+          register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }),
+        signal: controller.signal });
       j = await r.json();
-    } catch {}
+    } catch (e) {
+      status(friendlyError(e), true);
+    } finally {
+      clearTimeout(timeout);
+      window.ideFlame.hide();
+    }
     thinking.remove();
     intake.busy = false;
-    if (!j || j.error) { status((j && j.error) || "The server could not be reached.", true); return; }
+    if (!j || j.error) { status((j && j.error) || friendlyError(null), true); return; }
     intake.messages.push({ role: "assistant", content: (j.reply ? j.reply + "\n" : "")
       + (j.mockups || []).map((m) => "MOCKUP: " + m + "\n").join("")
       + (j.vision ? "VISION READY\n" + j.vision : "") });
+    saveDraft();
     if (j.reply) chatBubble("ai", j.reply);
     for (const m of (j.mockups || [])) renderMockup(m);
     if (j.vision) {
       intake.vision = j.vision;
       visionCard(j.vision);
+      saveDraft();
       // Honesty before the button: what this vision actually involves, and the price band.
       // Beginners hear these facts later, at the deploy talk, in gentler words.
       if (j.involves && state.mode !== "beginner") renderInvolves(j.involves);
@@ -827,9 +917,13 @@
     card.innerHTML = '<div class="mk-wait">' + L("mockup_making") + '</div>';
     log.append(card);
     log.scrollTop = log.scrollHeight;
+    window.ideFlame.show();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
     try {
       const r = await fetch("/api/images/generate", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "A clean, beautiful mockup of a phone app screen: " + promptText + ". No device frame text, no watermark.", n: 1 }) });
+        body: JSON.stringify({ prompt: "A clean, beautiful mockup of a phone app screen: " + promptText + ". No device frame text, no watermark.", n: 1 }),
+        signal: controller.signal });
       const j = await r.json();
       const b64 = j && j.images && j.images[0] && j.images[0].b64;
       if (!r.ok || !b64) throw new Error((j && j.error) || "no image");
@@ -846,6 +940,7 @@
         intake.messages.push({ role: "user", content: "I choose this look: " + promptText });
         chatBubble("user", L("mockup_pick") + " ✓");
         $("#st-chat-actions").hidden = true;
+        saveDraft();
         intakeTurn(() => {});
       });
       card.append(img, pick);
@@ -854,6 +949,9 @@
       card.innerHTML = "";
       card.className = "cb cb-ai";
       card.textContent = L("mockup_failed");
+    } finally {
+      clearTimeout(timeout);
+      window.ideFlame.hide();
     }
   }
 
@@ -895,6 +993,11 @@
     if (!workspaceId) { status("Pick or add a folder first.", true); return; }
     if (!prompt) { status("Say what you want built.", true); return; }
     status("");
+    if (intake.messages.length > 0 && intake.messages[0].content === prompt) {
+      const chat = $("#st-chat");
+      chat.hidden = false;
+      return;
+    }
     intake.messages = [{ role: "user", content: prompt }];
     intake.vision = null;
     $("#st-chat-actions").hidden = true;
@@ -904,19 +1007,32 @@
     chat.classList.remove("min");
     $("#st-go").disabled = true;
     chatBubble("user", prompt);
+    saveDraft();
     intakeTurn(status);
   }
 
+  let draftSaveTimer = 0;
   function wireIntake(status) {
     const input = $("#st-chat-in");
+    const affirmative = /^(build|build\s+it|build\s+it\s+now|start|go\s+ahead|do\s+it|yes|let\s+go|lets\s+go)$/i;
     const send = () => {
       const text = input.value.trim();
       if (!text || intake.busy) return;
       input.value = "";
-      intake.messages.push({ role: "user", content: text });
-      chatBubble("user", text);
-      $("#st-chat-actions").hidden = true;
-      intakeTurn(status);
+      if (state.mode === "beginner" && intake.vision && affirmative.test(text)) {
+        const goal = intake.messages[0] ? intake.messages[0].content : $("#st-prompt").value.trim();
+        const full = goal + "\n\nAGREED VISION (approved by the user; build exactly this):\n" + intake.vision;
+        intake.messages.push({ role: "user", content: text });
+        chatBubble("user", text);
+        saveDraft();
+        startBuild(full, status);
+      } else {
+        intake.messages.push({ role: "user", content: text });
+        chatBubble("user", text);
+        $("#st-chat-actions").hidden = true;
+        saveDraft();
+        intakeTurn(status);
+      }
     };
     $("#st-chat-send").addEventListener("click", send);
     input.addEventListener("keydown", (e) => {
@@ -942,24 +1058,40 @@
       startBuild(goal, status);
     });
     // An abandoned interview must never strand the start button: touching the brief re-arms it.
-    $("#st-prompt").addEventListener("input", () => { $("#st-go").disabled = false; });
+    const prompt = $("#st-prompt");
+    if (prompt) {
+      prompt.addEventListener("input", () => {
+        $("#st-go").disabled = false;
+        clearTimeout(draftSaveTimer);
+        draftSaveTimer = setTimeout(() => saveDraft(), 400);
+      });
+      prompt.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey && state.mode === "beginner") {
+          e.preventDefault();
+          beginIntake(status);
+        }
+      });
+    }
   }
 
   async function startBuild(prompt, status) {
     const workspaceId = $("#st-ws").value;
     if (!workspaceId) { status("Pick or add a folder first.", true); return; }
+    window.ideFlame.show();
     const go = $("#st-go");
     go.disabled = true;
     status("Starting...");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
     try {
       const r = await fetch("/ide/job", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind: "build", workspaceId, prompt }) });
+        body: JSON.stringify({ kind: "build", workspaceId, prompt }),
+        signal: controller.signal });
       const j = await r.json();
-      if (!r.ok || j.error) { status(j.error || "The build could not start.", true); go.disabled = false; return; }
+      if (!r.ok || j.error) { status(j.error || "The build could not start.", true); go.disabled = false; window.ideFlame.hide(); return; }
       status("");
-      $("#st-prompt").value = "";
-      $("#st-chat").hidden = true;
-      intake.messages = []; intake.vision = null;
+      const chat = $("#st-chat");
+      if (chat && !chat.hidden) chatBubble("ai", L("chat_build_started"));
       go.disabled = false;
       state.workspaceId = workspaceId;
       // The permission moment: the FIRST real build is when notifications become worth having,
@@ -970,7 +1102,13 @@
       if (window.dominionLenses) { window.dominionLenses.follow(j.jobId); }
       document.dispatchEvent(new CustomEvent("dominion-ide-build-started"));
       refreshJobs();
-    } catch { status("The server could not be reached.", true); go.disabled = false; }
+    } catch (e) {
+      status(friendlyError(e), true);
+      go.disabled = false;
+    } finally {
+      clearTimeout(timeout);
+      window.ideFlame.hide();
+    }
   }
 
   /* ---------- Phase 4: a build you can walk away from ------------------------------------
@@ -1058,7 +1196,7 @@
     card.dataset.jobId = asking.id;
 
     const h = document.createElement("h3");
-    h.textContent = "Your build needs you";
+    h.textContent = L("ask_title");
     const p = document.createElement("p");
     p.className = "q";
     p.textContent = q.question || "It needs an answer to continue.";
@@ -1092,15 +1230,23 @@
 
     card.append(h, p, opts, free, note);
     stage.prepend(card);
+    card.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
   async function answerJob(jobId, questionId, text) {
+    window.ideFlame.show();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
     try {
       await fetch("/ide/job/answer", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ jobId, questionId, answer: text }),
+        signal: controller.signal,
       });
-    } catch {}
+    } catch {} finally {
+      clearTimeout(timeout);
+      window.ideFlame.hide();
+    }
     await refreshJobs();
   }
 
@@ -1173,6 +1319,27 @@
     });
   }
 
+  // Draft persistence: save and load from localStorage.
+  function saveDraft() {
+    const prompt = $("#st-prompt").value.trim();
+    const draft = { prompt, messages: intake.messages, vision: intake.vision, at: Date.now() };
+    try { localStorage.setItem("dominion.crucible.draft.v1", JSON.stringify(draft)); } catch {}
+  }
+  function loadDraft() {
+    try {
+      const stored = localStorage.getItem("dominion.crucible.draft.v1");
+      if (!stored) return null;
+      const draft = JSON.parse(stored);
+      if (!draft || !draft.at) return null;
+      const age = Date.now() - draft.at;
+      if (age > 48 * 3600 * 1000) return null;
+      return draft;
+    } catch { return null; }
+  }
+  function clearDraft() {
+    try { localStorage.removeItem("dominion.crucible.draft.v1"); } catch {}
+  }
+
   function openPanel() {
     if (!state.allowed || !state.engaged) return;
     if (state.open) return;
@@ -1185,11 +1352,40 @@
     // (this device or the account), it re-skins silently; without one, the three cards come
     // first and the intro + tour wait for the answer.
     const chosen = state.mode || readMode();
-    if (chosen) {
+    const locked = (() => { try { return localStorage.getItem("dominion.crucible.mode.locked.v1") === "1"; } catch { return false; } })();
+    if (chosen && locked) {
       applyMode(chosen, { save: false });
+      maybeShowIntro();
+    } else if (chosen) {
+      applyMode(chosen, { save: false });
+      showModePickerCompact();
       maybeShowIntro();
     } else {
       showModePicker();
+    }
+    // Restore draft if it exists.
+    const draft = loadDraft();
+    if (draft && draft.prompt && draft.messages && draft.messages.length > 0) {
+      $("#st-prompt").value = draft.prompt;
+      intake.messages = draft.messages;
+      intake.vision = draft.vision || null;
+      const log = $("#st-chat-log");
+      if (log) {
+        log.textContent = "";
+        for (const msg of draft.messages) {
+          if (msg.role === "user") {
+            chatBubble("user", msg.content);
+          } else if (msg.role === "assistant") {
+            const before = msg.content.split("VISION READY\n");
+            if (before[0]) chatBubble("ai", before[0].replace(/MOCKUP: .+\n/g, ""));
+            if (before[1] && intake.vision) visionCard(intake.vision);
+          }
+        }
+      }
+      const chat = $("#st-chat");
+      if (chat) chat.hidden = false;
+      const status = $("#st-status");
+      if (status) status.textContent = L("draft_restored");
     }
     // Paint from whatever is true right now. The panel is built lazily, so anything reconciled
     // while it did not exist (a question that arrived while the works were closed) has to be
@@ -1344,6 +1540,9 @@
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && state.open) { e.preventDefault(); closePanel(); }
   });
+
+  // Clear draft when build completes successfully.
+  document.addEventListener("dominion-build-done", () => clearDraft());
 
   // The reattach triad. A build that ran while the app was closed reappears on the next of these.
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshJobs(); });

@@ -34,6 +34,8 @@
     showFullPlan: false,    // after a finished build folds itself, this reopens the steps
     doneAnnounced: "",      // job id whose completion event already fired
     previewOn: false,       // the live try-it frame is open
+    doneWitnessedLive: new Set(), // job ids we saw complete live on this page lifetime
+    logOpen: false,         // past-builds log panel visible
   };
 
   // The Crucible's working mode drives how much machinery each lens shows.
@@ -111,6 +113,16 @@
       '</div>' +
       '<div class="cru-meter" id="cru-meter"><span class="lbl">' + L("cost_label") + '</span><span class="val" id="cru-cost">' + L("cost_none") + '</span></div>';
 
+    const logBtn = document.createElement("button");
+    logBtn.type = "button";
+    logBtn.className = "cru-log-btn";
+    logBtn.textContent = L("log_title");
+    logBtn.addEventListener("click", () => {
+      state.logOpen = !state.logOpen;
+      render();
+    });
+    head.append(logBtn);
+
     const body = document.createElement("div");
     body.className = "cru-body";
     body.id = "cru-body";
@@ -148,14 +160,19 @@
    * Attach replays the whole journal from event zero and then live-tails, so opening a build that
    * finished yesterday and watching one that is running right now take the identical path.
    */
-  function follow(jobId) {
+  function follow(jobId, opts) {
     if (!jobId || jobId === state.jobId) return;
+    // A follow of a job we already know is finished (opened from the log) is a REPLAY: its journal
+    // carried its terminal event before we attached, so it can never earn a live publish
+    // invitation. sync() and a fresh build attach live jobs and leave this false.
+    const replay = !!(opts && opts.replay);
     if (state.detach) { try { state.detach(); } catch {} state.detach = null; }
     state.jobId = jobId;
     state.events = [];
     state.openMoves = new Set();
     state.showFullPlan = false;
     state.previewOn = false;
+    state.doneWitnessedLive.clear();
     render();
 
     const es = new EventSource("/ide/job/attach?job=" + encodeURIComponent(jobId) + "&from=0");
@@ -163,7 +180,13 @@
     es.onmessage = (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch { return; }
       if (ev.type === "gone") { es.close(); return; }
-      if (ev.type === "done" || ev.type === "error" || ev.type === "stopped") ended = true;
+      if (ev.type === "done" || ev.type === "error" || ev.type === "stopped") {
+        ended = true;
+        // Witnessing a build finish live on this page is the ONLY thing that earns a publish
+        // invitation. A replayed terminal is marked seen at once so the modal can never surface.
+        if (replay) { try { localStorage.setItem("dominion.publish.seen." + jobId, "1"); } catch {} }
+        else state.doneWitnessedLive.add(jobId);
+      }
       state.events.push(ev);
       render();
     };
@@ -191,17 +214,20 @@
     state.detach = () => { closed = true; es.close(); };
   }
 
-  // Pick what to show: whatever is running, else the most recent build.
+  // Pick what to show: whatever is running. If all builds are done, show fresh empty state.
   async function sync() {
     try {
+      window.ideFlame && window.ideFlame.show();
       const r = await fetch("/ide/jobs", { headers: { accept: "application/json" } });
+      window.ideFlame && window.ideFlame.hide();
       if (!r.ok) return;
       const jobs = (await r.json()).jobs || [];
       const live = jobs.find((j) => !j.done);
-      const pick = live || jobs[0];
-      if (pick) follow(pick.id);
+      if (live) follow(live.id);
       else { state.jobId = ""; state.events = []; render(); }
-    } catch {}
+    } catch {
+      window.ideFlame && window.ideFlame.hide();
+    }
   }
 
   /* ---------- rendering -----------------------------------------------------------------------
@@ -224,25 +250,29 @@
     paintCost(d);
     paintStop(d);
 
-    if (!state.jobId) { body.replaceChildren(emptyState()); return; }
+    if (!state.jobId) { body.replaceChildren(emptyState()); paintLog(); return; }
     body.replaceChildren(state.lens === "blueprint" ? blueprint(d) : workshop(d));
-    maybeOfferPublish(d);
-    // The completion moment, announced exactly once per job: the tour ends on it, and the
-    // closing flow (windows fold, the invitation leads) keys off the same fact.
-    if (d.outcome === "done" && state.doneAnnounced !== state.jobId) {
+    // The completion moment, announced exactly once per job and ONLY when witnessed live: the tour
+    // ends on it, and the closing flow (windows fold, the invitation leads) keys off the same fact.
+    // A replayed done never announces, so reopening an old build stays silent.
+    if (d.outcome === "done" && state.doneWitnessedLive.has(state.jobId) && state.doneAnnounced !== state.jobId) {
       state.doneAnnounced = state.jobId;
       try { document.dispatchEvent(new CustomEvent("dominion-build-done", { detail: { jobId: state.jobId } })); } catch {}
     }
+    maybeOfferPublish(d);
+    paintLog();
   }
 
   /*
    * The publish invitation (Fred's ruling 2026-07-21): when a build finishes, the user sees
    * "Put this online so everyone can use it" in their own register. Behind it sits an HONEST
    * explanation of what that involves; the guided deploy itself ships later, and this card says
-   * so plainly rather than promising a button that does not exist yet. Shown once per build.
+   * so plainly rather than promising a button that does not exist yet. Shown once per build,
+   * only when witnessed live on this page lifetime.
    */
   function maybeOfferPublish(d) {
     if (d.outcome !== "done" || !state.jobId) return;
+    if (!state.doneWitnessedLive.has(state.jobId)) return;
     let seen = null;
     try { seen = localStorage.getItem("dominion.publish.seen." + state.jobId); } catch {}
     if (seen) return;
@@ -250,9 +280,19 @@
     const isBuild = state.events.some((e) => e.type === "job" && e.kind === "build");
     if (!isBuild) return;
 
-    const card = document.createElement("section");
-    card.id = "cru-publish";
-    card.className = "cru-publish";
+    const backdrop = document.createElement("div");
+    backdrop.id = "cru-publish";
+    backdrop.className = "cru-publish-backdrop";
+    // Only a click on the backing itself dismisses; clicks that land on the modal or its buttons
+    // pass through so opening the explanation does not also close the card.
+    backdrop.addEventListener("click", (e) => {
+      if (e.target !== backdrop) return;
+      try { localStorage.setItem("dominion.publish.seen." + state.jobId, "1"); } catch {}
+      backdrop.remove();
+    });
+
+    const modal = document.createElement("div");
+    modal.className = "cru-publish-modal";
     const done = document.createElement("p"); done.className = "pub-done"; done.textContent = L("publish_done_line");
     const cta = document.createElement("h3"); cta.textContent = L("publish_cta");
     const row = document.createElement("div"); row.className = "pub-row";
@@ -260,15 +300,15 @@
     const later = document.createElement("button"); later.type = "button"; later.className = "pub-later"; later.textContent = L("publish_later");
     row.append(show, later);
     const body2 = document.createElement("p"); body2.className = "pub-explain"; body2.hidden = true; body2.textContent = L("publish_explain");
-    card.append(done, cta, row, body2);
+    modal.append(done, cta, row, body2);
 
     show.addEventListener("click", () => { body2.hidden = !body2.hidden; });
     later.addEventListener("click", () => {
       try { localStorage.setItem("dominion.publish.seen." + state.jobId, "1"); } catch {}
-      card.remove();
+      backdrop.remove();
     });
-    const bodyEl = $("#cru-body");
-    if (bodyEl) bodyEl.prepend(card);
+    backdrop.append(modal);
+    document.body.append(backdrop);
   }
 
   // The Stop control exists exactly while there is something to stop.
@@ -286,9 +326,13 @@
       btn.addEventListener("click", async () => {
         btn.disabled = true;
         try {
+          window.ideFlame && window.ideFlame.show();
           await fetch("/ide/job/stop", { method: "POST", headers: { "content-type": "application/json" },
             body: JSON.stringify({ jobId: state.jobId }) });
-        } catch {}
+          window.ideFlame && window.ideFlame.hide();
+        } catch {
+          window.ideFlame && window.ideFlame.hide();
+        }
         btn.disabled = false;
       });
       head.append(btn);
@@ -301,6 +345,77 @@
     if (!state.jobId) { el.textContent = L("cost_none"); return; }
     if (!d.costUsd && !d.costCredits) { el.textContent = L("cost_zero"); return; }
     el.textContent = d.costCredits ? d.costCredits + " credits" : "$" + d.costUsd.toFixed(4);
+  }
+
+  async function paintLog() {
+    let panel = $("#cru-log");
+    if (!state.logOpen) {
+      if (panel) panel.remove();
+      return;
+    }
+    if (panel) return;
+
+    panel = document.createElement("aside");
+    panel.id = "cru-log";
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "cru-log-close";
+    closeBtn.textContent = "x";
+    closeBtn.addEventListener("click", () => { state.logOpen = false; render(); });
+    panel.append(closeBtn);
+
+    const loading = document.createElement("p");
+    loading.className = "cru-log-loading";
+    loading.textContent = L("browse_loading");
+    panel.append(loading);
+
+    const stage = $("#ide-stage");
+    if (stage) stage.append(panel);
+
+    try {
+      window.ideFlame && window.ideFlame.show();
+      const r = await fetch("/ide/jobs", { headers: { accept: "application/json" } });
+      window.ideFlame && window.ideFlame.hide();
+      if (!r.ok) { loading.textContent = L("log_empty"); return; }
+      const jobs = (await r.json()).jobs || [];
+      loading.remove();
+
+      if (!jobs.length) {
+        const empty = document.createElement("p");
+        empty.className = "cru-log-empty";
+        empty.textContent = L("log_empty");
+        panel.append(empty);
+        return;
+      }
+
+      const list = document.createElement("div");
+      list.className = "cru-log-list";
+      for (const job of jobs) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "cru-log-entry";
+        // The richest name the registry hands us: the last move's title, then the job kind.
+        const title = (job.move && job.move.title) || job.kind || "";
+        const dateStr = job.startedAt ? new Date(job.startedAt).toLocaleDateString() : "";
+        // A finished job reads through the outcome register; one still running has no outcome yet.
+        const outcomeWord = job.done ? L("outcome_" + (job.outcome || "done")) : L("st_running");
+        const t = document.createElement("span"); t.className = "log-title"; t.textContent = title || job.kind || "";
+        const meta = document.createElement("span"); meta.className = "log-meta";
+        meta.textContent = (dateStr ? dateStr + " " : "") + outcomeWord;
+        row.append(t, meta);
+        row.addEventListener("click", () => {
+          try { localStorage.setItem("dominion.publish.seen." + job.id, "1"); } catch {}
+          state.logOpen = false;
+          follow(job.id, { replay: !!job.done });
+          render();
+        });
+        list.append(row);
+      }
+      panel.append(list);
+    } catch {
+      window.ideFlame && window.ideFlame.hide();
+      loading.textContent = L("log_empty");
+    }
   }
 
   function emptyState() {
@@ -532,13 +647,15 @@
         open.disabled = true;
         open.textContent = L("preview_wait");
         try {
+          window.ideFlame && window.ideFlame.show();
           const r = await fetch("/ide/preview/start", { method: "POST", headers: { "content-type": "application/json" },
             body: JSON.stringify({ workspaceId: d.workspaceId }) });
+          window.ideFlame && window.ideFlame.hide();
           const j = await r.json();
           if (!r.ok || j.error) { open.textContent = (j && j.error) || L("preview_fail"); open.disabled = false; return; }
           state.previewOn = true;
           render();
-        } catch { open.textContent = L("preview_fail"); open.disabled = false; }
+        } catch { window.ideFlame && window.ideFlame.hide(); open.textContent = L("preview_fail"); open.disabled = false; }
       });
       box.append(open);
       return box;
@@ -555,7 +672,13 @@
     close.textContent = L("preview_close");
     close.addEventListener("click", async () => {
       state.previewOn = false;
-      try { await fetch("/ide/preview/stop", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }); } catch {}
+      try {
+        window.ideFlame && window.ideFlame.show();
+        await fetch("/ide/preview/stop", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        window.ideFlame && window.ideFlame.hide();
+      } catch {
+        window.ideFlame && window.ideFlame.hide();
+      }
       render();
     });
     box.append(frame, close);

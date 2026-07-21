@@ -4,7 +4,7 @@
  * A person who has never made an app gets numbered popups that hover NEXT TO the thing they
  * explain, one step at a time, with Next moving the view. Skippable at the very start, and
  * recallable any time from a small ? button in the panel rail that covers nothing. After the
- * explain pass, Begin switches to guide mode: an arrowed prompt points at the control the user
+ * explain pass, Begin switches to guide mode: an arrowed prompt points at the ONE control the user
  * should touch NOW (folder, brief, start), advancing as they actually do each one. Once seen,
  * it never auto-appears again; the ? brings it back on request.
  *
@@ -19,31 +19,28 @@
   const seen = () => { try { return localStorage.getItem(KEY) === "done"; } catch { return false; } };
   const markDone = () => { try { localStorage.setItem(KEY, "done"); } catch {} };
 
-  const STEPS = [
-    { target: ".st-lang", t: "tour_s1_t", b: "tour_s1_b" },
-    { target: "#st-ws-row", t: "tour_s2_t", b: "tour_s2_b" },
-    { target: "#st-prompt", t: "tour_s3_t", b: "tour_s3_b" },
-    { target: "#st-tools", t: "tour_s4_t", b: "tour_s4_b" },
-    { target: "#st-go", t: "tour_s5_t", b: "tour_s5_b" },
-  ];
-
   let pop = null;          // the one floating card, explain and guide modes both use it
   let hi = null;           // the currently highlighted target
   let stepIndex = -1;      // explain-mode position, -1 = not touring
   let guidePoll = 0;       // guide-mode timer
+  let veil = null;         // the full-screen darkening veil
+  let currentSteps = [];   // steps array for the current mode
+  let repaint = null;      // re-renders the visible card in the active register
 
   function clear() {
     if (pop) { pop.remove(); pop = null; }
-    if (hi) { hi.classList.remove("tour-hi"); hi = null; }
+    if (hi) { hi.classList.remove("tour-hi", "tour-lift"); hi = null; }
+    if (veil) { veil.remove(); veil = null; }
     clearInterval(guidePoll);
     guidePoll = 0;
     stepIndex = -1;
+    repaint = null;
   }
 
   /*
    * Place the card beside its target: below when there is room, above otherwise, arrow pointing
    * at the target either way. position:fixed keeps the math in viewport space, immune to the
-   * stage's own scrolling; a scroll listener re-places it.
+   * stage's own scrolling; a scroll listener re-places it. Clamp maxHeight to keep it on screen.
    */
   function place(target) {
     if (!pop || !target) return;
@@ -57,23 +54,45 @@
     pop.style.top = top + "px";
     pop.style.left = left + "px";
     pop.classList.toggle("above", !below);
+
+    // Clamp maxHeight to keep the card on screen: min(70% of innerHeight, innerHeight - top - 12).
+    const maxH = Math.min(window.innerHeight * 0.7, window.innerHeight - top - 12);
+    pop.style.maxHeight = maxH + "px";
+
     // The arrow slides along the card's edge to keep pointing at the target's center.
     const ax = Math.max(18, Math.min(r.left + r.width / 2 - left, w - 18));
     pop.style.setProperty("--ax", ax + "px");
   }
 
   function highlight(target) {
-    if (hi) hi.classList.remove("tour-hi");
+    if (hi) hi.classList.remove("tour-hi", "tour-lift");
     hi = target;
-    if (hi) hi.classList.add("tour-hi");
+    if (hi) {
+      hi.classList.add("tour-hi", "tour-lift");
+    }
+  }
+
+  // The veil and the card live INSIDE #ide-root on purpose. #ide-root is a fixed, z-index:70,
+  // will-change:transform stacking context, so anything at document.body level (like a body-level
+  // veil) would paint OVER the whole panel and the tour-lift target could never rise above it. Kept
+  // in the same context, the veil (330), the lifted target (335) and the card (340) order the way the
+  // numbers intend. #ide-root fills the viewport (inset:0), so the card's fixed math still lines up.
+  function stageRoot() { return document.getElementById("ide-root") || document.body; }
+
+  function createVeil() {
+    if (veil) veil.remove();
+    veil = document.createElement("div");
+    veil.className = "ide-tour-veil";
+    stageRoot().append(veil);
   }
 
   function card(target, html) {
     if (pop) pop.remove();
+    createVeil();
     pop = document.createElement("div");
     pop.className = "ide-tour-pop";
     pop.innerHTML = html;
-    document.body.append(pop);
+    stageRoot().append(pop);
     highlight(target);
     if (target) target.scrollIntoView({ block: "center", behavior: "smooth" });
     // Two passes: once now, once after the smooth scroll has settled.
@@ -83,15 +102,54 @@
   }
 
   // ---------- the explain pass -------------------------------------------------------------
+  function buildStepsForMode() {
+    const root = document.getElementById("ide-root");
+    const mode = root ? root.dataset.mode : "beginner";
+
+    const baseSteps = [
+      { target: "#st-ws-row", t: "tour_s2_t", b: "tour_s2_b" },
+      { target: "#st-prompt", t: "tour_s3_t", b: "tour_s3_b" },
+      { target: "#st-go", t: "tour_s5_t", b: "tour_s5_b" },
+    ];
+
+    if (mode === "vibe") {
+      baseSteps.splice(2, 0, { target: "#st-tools", t: "tour_s4_t", b: "tour_s4_b" });
+    }
+
+    return baseSteps;
+  }
+
+  function isStepComplete(step) {
+    const target = $(step.target);
+    if (!target) return false;
+
+    if (step.target === "#st-ws-row") {
+      const ws = $("#st-ws");
+      return !!(ws && ws.value);
+    }
+    if (step.target === "#st-prompt") {
+      const prompt = $("#st-prompt");
+      return !!(prompt && prompt.value.trim());
+    }
+    return false;
+  }
+
   function showStep(n) {
-    if (n >= STEPS.length) { beginGuide(); return; }
+    if (n >= currentSteps.length) { beginGuide(); return; }
+
+    // Auto-advance past completed steps.
+    if (isStepComplete(currentSteps[n])) {
+      showStep(n + 1);
+      return;
+    }
+
     stepIndex = n;
-    const step = STEPS[n];
+    const step = currentSteps[n];
     const target = $(step.target);
     if (!target) { showStep(n + 1); return; }
-    const last = n === STEPS.length - 1;
+    const last = n === currentSteps.length - 1;
     const c = card(target,
-      '<div class="tp-num">' + (n + 1) + "/" + STEPS.length + '</div>' +
+      '<div class="tp-num">' + (n + 1) + "/" + currentSteps.length + '</div>' +
       '<h4>' + L(step.t) + '</h4>' +
       '<p>' + L(step.b) + '</p>' +
       '<div class="tp-btns">' +
@@ -101,6 +159,7 @@
     const skip = c.querySelector(".tp-skip");
     if (skip) skip.addEventListener("click", () => { markDone(); clear(); });
     c.querySelector(".tp-next").addEventListener("click", () => showStep(n + 1));
+    repaint = () => showStep(n);
   }
 
   /* ---------- guide mode -------------------------------------------------------------------
@@ -122,6 +181,7 @@
       const target = $(st.target);
       if (!target) return;
       card(target, '<p class="tp-guide">' + L(st.text) + '</p>');
+      repaint = point;
     };
     point();
     clearInterval(guidePoll);
@@ -134,9 +194,28 @@
       clearInterval(guidePoll);
       guidePoll = 0;
       markDone();
-      const target = $("#st-go");
+      repaint = null;   // the halt card is terminal; do not let a register change re-point the guide
+      const target = $("#cru") || $("#ide-stage");
       const c = card(target,
-        '<h4>' + L("tour_done_t") + '</h4><p>' + L("tour_done_b") + '</p>' +
+        '<h4>' + L("tour_halt_t") + '</h4><p>' + L("tour_halt_b") + '</p>' +
+        '<div class="tp-btns"><button type="button" class="tp-next">' + L("intro_ok") + '</button></div>');
+      c.querySelector(".tp-next").addEventListener("click", clear);
+    };
+    document.addEventListener("dominion-ide-build-started", onStarted);
+  }
+
+  // Listen for build start during explain pass and halt the tour.
+  function setupBuildStartHalt() {
+    const onStarted = () => {
+      if (stepIndex === -1) return;  // Not in explain pass, guide mode handles it.
+      document.removeEventListener("dominion-ide-build-started", onStarted);
+      clearInterval(guidePoll);
+      guidePoll = 0;
+      markDone();
+      repaint = null;   // the halt card is terminal; do not let a register change re-render the step
+      const target = $("#cru") || $("#ide-stage");
+      const c = card(target,
+        '<h4>' + L("tour_halt_t") + '</h4><p>' + L("tour_halt_b") + '</p>' +
         '<div class="tp-btns"><button type="button" class="tp-next">' + L("intro_ok") + '</button></div>');
       c.querySelector(".tp-next").addEventListener("click", clear);
     };
@@ -144,7 +223,7 @@
   }
 
   // ---------- entry points -----------------------------------------------------------------
-  function start() { clear(); showStep(0); }
+  function start() { clear(); currentSteps = buildStepsForMode(); setupBuildStartHalt(); showStep(0); }
 
   // The recall control: a small ? in the panel rail, present always, covering nothing.
   function mountRecall() {
@@ -181,10 +260,11 @@
     if (!document.body.classList.contains("ide-open") && (pop || guidePoll)) clear();
   }).observe(document.body, { attributes: true, attributeFilter: ["class"] });
 
-  // Register changes repaint the words in place.
+  // Register changes repaint the words in place: the recall button, and the open card if any.
   document.addEventListener("dominion-register-changed", () => {
     const btn = $("#ide-tour-btn");
     if (btn) { btn.title = L("tour_recall"); btn.setAttribute("aria-label", L("tour_recall")); }
+    if (pop && repaint) repaint();
   });
 
   window.addEventListener("resize", () => { if (pop && hi) place(hi); });
