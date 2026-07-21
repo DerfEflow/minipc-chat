@@ -555,6 +555,10 @@ async function loadModels() {
           // entirely, so a guest's picker never renders one. Deliberately plain, per Fred: it marks
           // "trusted with broad authority", which is a narrower claim than the wrench (tool-capable).
           if (m.broadCapable) o.dataset.broad = "1";
+          // Same owner-only machine-grant mark on the native <select>. The custom panel is what
+          // Fred normally sees, but the native list is still reachable (keyboard, some mobile
+          // browsers), and it should not disagree with the panel about which models can act.
+          if (m.broadAccess) o.dataset.grant = "1";
           o.textContent = `${m.broadCapable ? "★ " : ""}${bench} ${bits.join(" · ")}`;
           const provOk = m.provider === "openrouter" ? avail.openrouter : m.provider === "openai" ? avail.openai : m.provider === "deepseek" ? avail.deepseek : m.provider === "anthropic" ? avail.anthropic : true;
           if (provOk === false) o.dataset.noKey = "1";   // key-vs-privacy annotation applied by applyPrivacyFilter
@@ -582,13 +586,15 @@ const findCatalogModel = (id) => { for (const g of catalogGroups) { const m = (g
 
 function updateModelTrigger() {
   if (!modelCurrent || !modelSel) return;
-  const v = modelSel.value; let name = "Local Qwen", price = "", local = true;
+  const v = modelSel.value; let name = "Local Qwen", price = "", local = true, granted = false;
   if (v && v !== "local") {
     const m = findCatalogModel(v);
-    if (m) { name = m.name; price = (!m.inCost && !m.outCost) ? "Free" : fmtPriceShort(m); local = false; }
+    if (m) { name = m.name; price = (!m.inCost && !m.outCost) ? "Free" : fmtPriceShort(m); local = false; granted = m.broadAccess === true; }
     else { const o = Array.from(modelSel.options).find((x) => x.value === v); name = o ? o.textContent.replace(/\s*\(local\)$/, "").replace(/^[🔧💬]\s*/, "") : v; }
   }
   modelCurrent.classList.toggle("is-local", local);
+  // The picked model's own name carries the same red/bold mark as its row in the list.
+  modelCurrent.classList.toggle("has-machine-grant", granted);
   modelCurrent.innerHTML = escapeHtml(name) + (price ? ` <span class="mc-price">${escapeHtml(price)}</span>` : "");
 }
 
@@ -598,7 +604,7 @@ function modelRowHtml(o, cur, mode) {
   const price = o.free ? `<span class="mr-price is-free">Free</span>` : (o.price ? `<span class="mr-price">${escapeHtml(o.price)}</span>` : "");
   const note = o.blocked ? `<span class="mr-note">blocked · ${escapeHtml(mode)}</span>` : (o.noKey ? `<span class="mr-note">key needed</span>` : "");
   return `<div class="${cls.join(" ")}" data-value="${escapeHtml(o.id)}" ${disabled ? 'aria-disabled="true"' : 'role="option"'}${sel ? ' aria-selected="true"' : ""}>
-    <span class="mr-name"><span class="mr-bench">${o.tool ? "🔧" : "💬"}${o.vis ? "👁" : ""}</span><span class="mr-text">${escapeHtml(o.name)}</span></span>
+    <span class="mr-name"><span class="mr-bench">${o.tool ? "🔧" : "💬"}${o.vis ? "👁" : ""}</span><span class="mr-text${o.broadAccess ? " has-machine-grant" : ""}">${escapeHtml(o.name)}</span></span>
     <span class="mr-meta">${escapeHtml(o.meta || "")}</span>
     <span class="mr-tag">${price}${note}</span></div>`;
 }
@@ -617,6 +623,9 @@ function renderModelPanel() {
       const keyed = m.provider === "openrouter" ? availCache.openrouter : m.provider === "openai" ? availCache.openai : m.provider === "deepseek" ? availCache.deepseek : m.provider === "anthropic" ? availCache.anthropic : true;
       html += modelRowHtml({
         id: m.id, name: m.name, tool: m.toolCapable, vis: !!m.vision, free: (!m.inCost && !m.outCost), price: fmtPriceShort(m),
+        // Owner-only red/bold: the server only sends broadAccess to Fred's payload, so a guest's
+        // rows can never carry the class no matter what the client does.
+        broadAccess: m.broadAccess === true,
         meta: [(m.params && m.params !== "undisclosed") ? m.params : null, fmtCtxShort(m.ctx)].filter(Boolean).join(" · "),
         noKey: keyed === false, blocked: !providerAllowedClient(mode, m.provider),
       }, cur, mode);

@@ -134,6 +134,9 @@ export const FEATURES = [
     what: "Which model answers, how it works, and where the conversation is allowed to go.",
     how: [
       "Model picks the engine. Operating Mode sets the discipline (Fast, Normal, Deep Think, Long Context, Draft, Tool, Mentor, As Fred).",
+      "In the picker: 🔧 means the model can use tools, 💬 means it can only talk, 👁 means it can see pictures.",
+      "In the owner's interface only, a model whose name is RED AND BOLD holds the machine grant: full read and write on the laptop's C, F, G and Z drives through an elevated node, plus administrator PowerShell, Command Prompt and Terminal. A name in the normal colour cannot reach the machines at all. 30 of the 43 models carry the grant.",
+      "Still owner-only, ★ marks the shorter Wildfire roster: models trusted to run broad multi-step work once the Wildfire switch on the Forge dial is armed. Red says CAN reach the machines; ★ says trusted to be turned loose on them.",
       "Privacy: Normal allows every provider, Trusted restricts to OpenAI and Anthropic direct plus local, Private uses the local model only.",
       "A privacy setting is never silently overridden. A disallowed choice is refused and explained.",
     ],

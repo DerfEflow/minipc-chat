@@ -4386,7 +4386,20 @@ const server = http.createServer(async (req, res) => {
        * advertising a control they cannot use.
        */
       payload.wildfire = isOwnerHere;
-      if (!isOwnerHere) {
+      if (isOwnerHere) {
+        /*
+         * broadAccess = "this model actually holds the machine grant" (full read/write on the
+         * laptop's C/F/G/Z through an elevated node, plus admin PowerShell/cmd/Terminal). It is
+         * exactly the tool-capable set, live-probed 2026-07-21: 30 of 43 models emit a real tool
+         * call. Fred's rule: their names render red and bold in HIS interface only, so at a glance
+         * he knows which pick can reach his machines.
+         *
+         * NOTE the spread. catalogByCategory() hands back the SAME objects as the MODELS array, so
+         * assigning a property onto them would stamp the shared catalog permanently and the flag
+         * would ride the very next GUEST payload. Copy, then flag.
+         */
+        for (const g of payload.groups || []) g.models = (g.models || []).map((m) => ({ ...m, broadAccess: m.toolCapable === true }));
+      } else {
         for (const g of payload.groups || []) g.models = (g.models || []).map(({ broadCapable, ...rest }) => rest);
       }
       payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY };

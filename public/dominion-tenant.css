@@ -556,3 +556,39 @@
 @media (prefers-reduced-motion: reduce) {
   .voice-bar[data-state="preparing"] .vb-track i, .mic-status-dot, #mic.busy::after { animation: none !important; }
 }
+
+/* ---- machine-grant mark (OWNER ONLY) ---------------------------------------------------------
+   Fred, 2026-07-21: every model that actually holds the machine grant — full read/write on the
+   laptop's C/F/G/Z through the elevated node, plus admin PowerShell/cmd/Terminal — renders its
+   name in red and bold, everywhere a name appears. At a glance he knows which pick can reach his
+   machines and which is only a conversation.
+
+   The wall is server-side, not here: /api/models only sends `broadAccess` to the owner's payload,
+   so a guest's rows never carry .has-machine-grant and no CSS of theirs can conjure it. This file
+   loads after dominion-ui.css (and its cinematic/rendered @imports), so these win the cascade
+   without !important. */
+:root { --dt-grant: #ff4a3d; --dt-grant-glow: rgba(255, 74, 61, 0.42); }
+
+.mr-name .mr-text.has-machine-grant,
+.model-current.has-machine-grant {
+  color: var(--dt-grant);
+  font-weight: 800;
+  text-shadow: 0 0 10px var(--dt-grant-glow);
+}
+
+/* The selection ceremony flares green on the way in. For a granted model that would settle from
+   green into red and read as a glitch, so it gets its own flare in the same key as the mark. */
+.model-current.has-machine-grant.name-flare { animation: nameFlareGrant 1.7s ease-out 1; }
+@keyframes nameFlareGrant {
+  0%   { color: #fff0ee; text-shadow: 0 0 14px rgba(255, 74, 61, 0.95), 0 0 30px rgba(255, 74, 61, 0.5); }
+  55%  { color: #ff8d82; text-shadow: 0 0 8px rgba(255, 74, 61, 0.55); }
+  100% { color: var(--dt-grant); text-shadow: 0 0 10px var(--dt-grant-glow); }
+}
+
+/* The native <select> list (keyboard nav, some mobile browsers). Native option rows paint on the
+   OS menu surface, which ignores text-shadow and may be light, so this is flat red on no glow. */
+#model option[data-grant="1"] { color: #d21f10; font-weight: 700; }
+
+@media (prefers-reduced-motion: reduce) {
+  .model-current.has-machine-grant.name-flare { animation: none; }
+}
