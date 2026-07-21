@@ -141,7 +141,11 @@ body.ide-open #ide-root { transform: none; }
   z-index: 2;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  /* Vertical scroll only. The stage lives in a fixed full-viewport panel, so ANY child that
+     sizes to its content past the screen turns the whole surface into a horizontal pan, which is
+     exactly what a phone user reported: the page loading with a slice of itself off screen. */
+  overflow-y: auto;
+  overflow-x: clip;
   display: grid;
   place-items: center;
   padding: 32px 22px 48px;
@@ -524,3 +528,22 @@ body.ide-open #ide-root { transform: none; }
 .ide-start .st-lang { gap: 10px; }
 .ide-start .st-lang-label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted, #8ba0ae); }
 .ide-start #st-lang { flex: 0 1 auto; font-size: 12.5px; padding: 8px 10px; }
+
+/* ---------- phone-width honesty ----------------------------------------------------------
+ * A grid's lone auto column happily sizes to a row's UNWRAPPED content (the language row's label
+ * plus its select measured 461px on a 412px phone), and every ancestor then inherits the lie.
+ * minmax(0, 1fr) forces the column to the container, and min-width: 0 lets flex children
+ * actually shrink instead of asserting their content width. */
+.ide-stage > * { max-width: 100%; min-width: 0; }
+#ide-start { grid-template-columns: minmax(0, 1fr); }
+.ide-start .st-row { min-width: 0; }
+.ide-start .st-row > * { min-width: 0; max-width: 100%; }
+.ide-start select, .ide-start input, .ide-start textarea { max-width: 100%; }
+.ide-board, .ide-intro { grid-template-columns: minmax(0, 1fr); }
+
+/* The All-In-One row was the second widener: a select's intrinsic width is its LONGEST option
+   (model name + price = 336px), and the hint span then rides out to 504 on a 412 phone. Let the
+   row wrap and the select shrink; the option text ellipsizes inside the closed control. */
+.ide-allinone { flex-wrap: wrap; min-width: 0; }
+.ide-allinone select { flex: 1 1 200px; min-width: 0; max-width: 100%; }
+.ide-allinone .hint { flex: 1 1 100%; }

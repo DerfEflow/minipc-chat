@@ -173,3 +173,8 @@
 .cru-publish button:hover { border-color: rgba(118, 255, 104, .45); }
 .cru-publish .pub-later { color: var(--muted, #8ba0ae); }
 .cru-publish .pub-explain { margin: 0; font-size: 13px; line-height: 1.7; color: var(--ink-soft, #b9d3e4); max-width: 64ch; }
+
+/* The lens column must never widen the stage either; long diff lines and cost strings shrink
+   inside their own boxes instead of asserting content width. */
+#cru { max-width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); }
+#cru .cru-head, #cru .cru-body { min-width: 0; max-width: 100%; }
