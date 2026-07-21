@@ -26,6 +26,7 @@
     allInOne: "",         // one model for every text class, or "" for the board
     workspaceId: "",      // assignments belong to a workspace once one exists
     jobs: [],             // every job on this ACCOUNT, not just the one on screen
+    workspaces: [],       // the account's workspace pointers, for the front door
     pushKey: "",          // VAPID applicationServerKey, "" when push is not configured
     askedPush: false,     // permission is requested at the first real build, never on load
   };
@@ -83,7 +84,7 @@
     const stage = document.createElement("div");
     stage.className = "ide-stage";
     stage.id = "ide-stage";
-    stage.append(buildBoard());
+    stage.append(buildStarter(), buildBoard());
 
     root.append(rail, stage);
     document.body.append(root);
@@ -92,6 +93,8 @@
     close.addEventListener("click", closePanel);
 
     renderBoard();
+    renderStarter();
+    wireStarter();
     wireProbe();
     const all = $("#ide-allinone");
     if (all) all.addEventListener("change", () => {
@@ -345,6 +348,105 @@
         }),
       })).filter((g) => g.models.length);
     } catch {}
+  }
+
+  /* ---------- the front door: start a build -----------------------------------------------
+   * The mission line promises a beginner ships something in five minutes. Until this existed,
+   * the Crucible could WATCH builds and could not START one, which made the whole surface a
+   * spectator sport. One folder, one sentence, one button.
+   */
+  function buildStarter() {
+    const el = document.createElement("section");
+    el.className = "ide-start";
+    el.id = "ide-start";
+    el.innerHTML =
+      '<h3>Start a build</h3>' +
+      '<div class="st-row">' +
+        '<select id="st-ws" aria-label="Which project folder to build in"></select>' +
+        '<button type="button" id="st-add">Add a folder</button>' +
+      '</div>' +
+      '<div class="st-new" id="st-new" hidden>' +
+        '<input id="st-new-path" type="text" autocomplete="off" spellcheck="false" ' +
+          'placeholder="Full folder path, for example C:\\Projects\\my-app" />' +
+        '<input id="st-new-name" type="text" autocomplete="off" placeholder="Name (optional)" />' +
+        '<button type="button" id="st-new-go">Use this folder</button>' +
+      '</div>' +
+      '<textarea id="st-prompt" rows="3" placeholder="Say what you want built. Plain words work: ' +
+        '&quot;a page that lists my invoices and lets me mark them paid&quot;"></textarea>' +
+      '<div class="st-row">' +
+        '<button type="button" id="st-go" class="st-primary">Start the build</button>' +
+        '<span class="st-status" id="st-status" role="status"></span>' +
+      '</div>';
+    return el;
+  }
+
+  function renderStarter() {
+    const sel = $("#st-ws");
+    if (!sel) return;
+    sel.textContent = "";
+    if (!state.workspaces.length) {
+      const o = document.createElement("option");
+      o.value = "";
+      o.textContent = "No folder yet. Add one.";
+      sel.append(o);
+    }
+    for (const w of state.workspaces) {
+      const o = document.createElement("option");
+      o.value = w.id;
+      o.textContent = w.name + "  (" + w.root + ")";
+      if (w.id === state.workspaceId) o.selected = true;
+      sel.append(o);
+    }
+  }
+
+  function wireStarter() {
+    const status = (msg, bad) => { const el = $("#st-status"); if (el) { el.textContent = msg || ""; el.classList.toggle("bad", !!bad); } };
+
+    $("#st-add").addEventListener("click", () => { const n = $("#st-new"); n.hidden = !n.hidden; if (!n.hidden) $("#st-new-path").focus(); });
+
+    $("#st-new-go").addEventListener("click", async () => {
+      const root = $("#st-new-path").value.trim();
+      const name = $("#st-new-name").value.trim();
+      if (!root) { status("Type the folder path first.", true); return; }
+      try {
+        const r = await fetch("/ide/workspace", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name, root }) });
+        const j = await r.json();
+        if (!r.ok || j.error) { status(j.error || "That folder could not be added.", true); return; }
+        state.workspaces.push(j.workspace);
+        state.workspaceId = j.workspace.id;
+        renderStarter();
+        $("#st-new").hidden = true;
+        $("#st-new-path").value = ""; $("#st-new-name").value = "";
+        status("Folder added.");
+      } catch { status("The server could not be reached.", true); }
+    });
+
+    $("#st-go").addEventListener("click", async () => {
+      const workspaceId = $("#st-ws").value;
+      const prompt = $("#st-prompt").value.trim();
+      if (!workspaceId) { status("Pick or add a folder first.", true); return; }
+      if (!prompt) { status("Say what you want built.", true); return; }
+      const go = $("#st-go");
+      go.disabled = true;
+      status("Starting...");
+      try {
+        const r = await fetch("/ide/job", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ kind: "build", workspaceId, prompt }) });
+        const j = await r.json();
+        if (!r.ok || j.error) { status(j.error || "The build could not start.", true); go.disabled = false; return; }
+        status("");
+        $("#st-prompt").value = "";
+        state.workspaceId = workspaceId;
+        // The permission moment: the FIRST real build is when notifications become worth having,
+        // and a prompt at page load is when people reflexively refuse them.
+        ensurePush().then((p) => {
+          if (p && p.reason === "ios_needs_install" && p.message) status(p.message);
+        });
+        if (window.dominionLenses) { window.dominionLenses.follow(j.jobId); }
+        refreshJobs();
+      } catch { status("The server could not be reached.", true); go.disabled = false; }
+    });
   }
 
   /* ---------- Phase 4: a build you can walk away from ------------------------------------
@@ -640,8 +742,10 @@
       ]);
       if (!s) return;
       state.routing = s.routing || null;
-      const ws = (s.workspaces || [])[0] || null;
+      state.workspaces = s.workspaces || [];
+      const ws = state.workspaces[0] || null;
       state.workspaceId = ws ? ws.id : "";
+      renderStarter();
       const stored = (ws && ws.assignments) || (s.prefs && s.prefs.assignments) || {};
       state.allInOne = stored.allInOne || "";
       state.assignments = {};

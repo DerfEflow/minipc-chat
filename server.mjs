@@ -1289,20 +1289,73 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments }) {
       ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves });
     }
 
-    for (const move of moves.slice(0, MAX_MOVES)) {
+    /*
+     * Ask a question and WAIT. The runner stays alive in-process, spending nothing, until any
+     * device on the account answers. `from` is captured before the emit, because an answer can
+     * land in the gap between asking and listening, and a waiter that misses it would freeze the
+     * build forever (the bug this replaced: answers only ever resumed probes, so a paused BUILD
+     * was unreleasable by anyone).
+     */
+    const ask = async (id, question, options) => {
+      const from = (ideJobs.get(job.id) || { events: [] }).events.length;
+      ideJobs.emit(job.id, { type: "need_input", id, question, options });
+      const ans = await ideJobs.waitForAnswer(job.id, from);
+      return ans ? String(ans.answer || "") : null;    // null = the job was sealed while waiting
+    };
+    const capOriginal = budget.capUsd;
+    // Money for humans. toFixed(2) turned a deliberately tiny test cap into "limit of $0.00,
+    // spent $0.0000", which reads as a broken calculator. Small amounts get honest words.
+    const money = (usd) => {
+      const n = Number(usd) || 0;
+      if (n === 0) return "$0";
+      if (n < 0.01) return "less than a cent";
+      return "$" + n.toFixed(2);
+    };
+
+    const queue = moves.slice(0, MAX_MOVES);
+    for (let i = 0; i < queue.length; i++) {
+      let move = queue[i];
       if (ac.signal.aborted) return;
+
       // Stop BEFORE the move that would break the budget. Stopping after is an apology.
       const est = estimateMove({ manifestBytes: 8000, inCost: (modelById(resolved.build_code) || {}).inCost || 0, outCost: (modelById(resolved.build_code) || {}).outCost || 0 });
       const b = budgetCheck({ spentUsd: budget.spentUsd, capUsd: budget.capUsd, nextEstUsd: est.usd });
       if (b.stop) {
-        return ideJobs.emit(job.id, { type: "need_input", id: "budget",
-          question: "This build has reached its spending limit of $" + budget.capUsd.toFixed(2) + ". Keep going?",
-          options: ["Keep going", "Stop here"] });
+        const answer = await ask("budget",
+          "This build has reached its spending limit of " + money(budget.capUsd) + " (spent " + money(budget.spentUsd) + " so far). Keep going?",
+          ["Keep going", "Stop here"]);
+        if (answer === null) return;
+        if (!/keep|yes|continue|go/i.test(answer)) {
+          return ideJobs.finish(job.id, { type: "stopped", message: "Stopped at the spending limit, at your request." });
+        }
+        // Another allowance of the same size, never an uncapped blank cheque.
+        budget.capUsd += Math.max(capOriginal, 0.5);
       }
+
       const res = await engine.runMove(job, { move, workspace, assignments: resolved, goal: prompt });
       spend(res && res.costUsd);
       if (res && res.blocked) return ideJobs.finish(job.id, { type: "error", message: "Stopped at a hard carve-out. Nothing was written." });
-      if (res && !res.ok) return ideJobs.finish(job.id, { type: "error", message: "A move could not be completed. The detail is above." });
+
+      if (res && !res.ok) {
+        /*
+         * A failed move is a fork in the road, never a dead end. The user picks, from any device,
+         * and free text is treated as GUIDANCE: "use sqlite instead" retries the move with that
+         * sentence attached, so the model actually hears the correction.
+         */
+        const answer = await ask("move-" + move.id,
+          "The move \"" + move.title + "\" could not finish. The detail is above. What now?",
+          ["Try it again", "Skip this move", "Stop the build"]);
+        if (answer === null) return;
+        if (/^skip/i.test(answer)) continue;
+        if (/^stop/i.test(answer)) {
+          return ideJobs.finish(job.id, { type: "stopped", message: "Stopped after a failed move, at your request." });
+        }
+        if (!/^try/i.test(answer)) {
+          queue[i] = { ...move, why: (move.why ? move.why + " " : "") + "The user says: " + answer.slice(0, 500) };
+        }
+        i--;         // run the same slot again, with the guidance if any
+        continue;
+      }
     }
 
     ideJobs.finish(job.id, { type: "done", message: "Build complete." });

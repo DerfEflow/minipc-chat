@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import {
   isSmallAsk, parseBlueprint, parseFileBlocks, carveOutReport, budgetCheck, estimateMove,
-  verifyCommandFor, buildMoveMessages, createIdeEngine, SYSTEM_PREFIX,
+  verifyCommandFor, buildMoveMessages, createIdeEngine, SYSTEM_PREFIX, lineDiff,
 } from "./ideengine.mjs";
 
 let passed = 0, failed = 0;
@@ -252,6 +252,74 @@ await t("the manifest is read straight off the node, not through the truncating 
   const reads = r.calls.filter((c) => c.tool === "fs_read" && !String(c.args.path).endsWith("package.json"));
   assert.equal(reads.length, 2, "one direct read per manifest file");
   assert.ok(reads[0].args.maxBytes >= 100000, "and a real byte budget, not an 8000-char truncation");
+});
+
+await t("a language fence NEVER becomes a file named after the language", () => {
+  const out = parseFileBlocks([
+    "Here is how it works:",
+    "```python", "print('just an explanation')", "```",
+    "```html", "<p>also an explanation</p>", "```",
+    "```path=src/app.py", "print('a real file')", "```",
+    "```Dockerfile", "FROM node:20", "```",
+  ].join("\n"));
+  const paths = out.files.map((f) => f.path).sort();
+  assert.deepEqual(paths, ["Dockerfile", "src/app.py"],
+    "the old whitelist wrote files literally named python and html into the project");
+});
+
+await t("a repair that returns no files FAILS the move instead of passing a red check", async () => {
+  const r = rig({
+    chatReplies: [
+      { ok: true, content: "```path=src/a.ts\nbroken\n```", costUsd: 0.01 },
+      { ok: true, content: "I could not figure out the problem, sorry about that.", costUsd: 0.01 },
+    ],
+    handsImpl: async (tool, args) => {
+      if (tool === "fs_read" && String(args.path).endsWith("package.json")) return { content: '{"scripts":{"test":"x"}}' };
+      if (tool === "fs_read") return { content: "c" };
+      if (tool === "shell_run" && /rev-parse/.test(args.command)) return { stdout: "true" };
+      if (tool === "shell_run" && /commit/.test(args.command)) return { code: 0 };
+      if (tool === "shell_run") return { code: 1, stdout: "still failing" };
+      if (tool === "fs_write") return { ok: true };
+      return {};
+    },
+  });
+  const out = await r.engine.runMove(JOB, { move: MOVE, workspace: WS, assignments: {} });
+  assert.equal(out.ok, false, "a red check with an empty repair must never come back ok");
+  const fail = r.events.find((e) => e.state === "failed");
+  assert.match(fail.message, /returned nothing usable/i);
+});
+
+await t("every written file gets a DIFF event, so the Workshop lens shows real changes", async () => {
+  const r = rig({
+    chatReplies: [{ ok: true, content: "```path=src/a.ts\nline one\nline two changed\nline three\n```", costUsd: 0 }],
+    handsImpl: async (tool, args) => {
+      if (tool === "fs_read" && String(args.path).endsWith("package.json")) return { content: "{}" };
+      if (tool === "fs_read") return { content: "line one\nline two\nline three" };
+      if (tool === "shell_run" && /rev-parse/.test(args.command)) return { stdout: "true" };
+      if (tool === "shell_run") return { code: 0 };
+      if (tool === "fs_write") return { ok: true };
+      return {};
+    },
+  });
+  await r.engine.runMove(JOB, { move: MOVE, workspace: WS, assignments: {} });
+  const diff = r.events.find((e) => e.type === "diff");
+  assert.ok(diff, "a diff event must be emitted");
+  assert.equal(diff.path, "src/a.ts");
+  assert.equal(diff.added, 1);
+  assert.equal(diff.removed, 1);
+  assert.match(diff.diff, /-line two\n/);
+  assert.match(diff.diff, /\+line two changed/);
+});
+
+await t("lineDiff: new files are all additions, huge files degrade to honest counts", () => {
+  const fresh = lineDiff("", "a\nb\nc");
+  assert.equal(fresh.added, 3);
+  assert.equal(fresh.removed, 0);
+  const big = lineDiff("x\n".repeat(500), "y\n".repeat(500));
+  assert.equal(big.truncated, true);
+  assert.match(big.diff, /too large/);
+  const same = lineDiff("a\nb", "a\nb");
+  assert.equal(same.added + same.removed, 0);
 });
 
 console.log("\n" + passed + " passed, " + failed + " failed");

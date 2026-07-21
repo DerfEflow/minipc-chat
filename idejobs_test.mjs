@@ -206,5 +206,39 @@ await t("gc keeps live jobs and evicts only finished ones, deleting their journa
 });
 
 for (const d of dirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
+await t("waitForAnswer releases a frozen build, and survives the ask/listen race", async () => {
+  const dir = freshDir();
+  const jobs = createIdeJobs({ dir });
+  const job = jobs.create({ uid: "u1" });
+
+  // the runner's exact sequence: capture from, emit the question, then wait
+  const from = jobs.get(job.id).events.length;
+  jobs.emit(job.id, { type: "need_input", id: "q1", question: "Continue?", options: ["Yes", "No"] });
+  const waiting = jobs.waitForAnswer(job.id, from);
+  jobs.emit(job.id, { type: "answer", id: "q1", answer: "Yes" });
+  const got = await waiting;
+  assert.equal(got.answer, "Yes");
+
+  // THE RACE: the answer lands BEFORE the waiter attaches. Replay-from-`from` must find it, or a
+  // paused build would freeze forever on a fast answer.
+  const from2 = jobs.get(job.id).events.length;
+  jobs.emit(job.id, { type: "need_input", id: "q2", question: "Again?" });
+  jobs.emit(job.id, { type: "answer", id: "q2", answer: "raced" });
+  const late = await jobs.waitForAnswer(job.id, from2);
+  assert.equal(late.answer, "raced", "an answer that beat the waiter must still be found");
+});
+
+await t("waitForAnswer resolves null when the job seals instead of hanging forever", async () => {
+  const dir = freshDir();
+  const jobs = createIdeJobs({ dir });
+  const job = jobs.create({ uid: "u1" });
+  const from = jobs.get(job.id).events.length;
+  jobs.emit(job.id, { type: "need_input", id: "q1", question: "Continue?" });
+  const waiting = jobs.waitForAnswer(job.id, from);
+  jobs.stop(job.id, "user gave up");
+  assert.equal(await waiting, null, "a sealed job must release its waiter with null");
+  assert.equal(await jobs.waitForAnswer("ide_nope", 0), null, "an unknown job resolves null immediately");
+});
+
 console.log("\n" + passed + " passed, " + failed + " failed");
 process.exit(failed ? 1 : 0);

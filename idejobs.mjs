@@ -244,6 +244,32 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
     return () => { const i = job.listeners.indexOf(onEvent); if (i >= 0) job.listeners.splice(i, 1); };
   }
 
-  return { create, emit, finish, stop, get, listFor, activeFor, attach, loadFromDisk, summarize,
+  /*
+   * Wait for a human's answer to a pending question. The runner calls this right after emitting
+   * need_input and simply awaits: the build function stays alive in-process, frozen at zero
+   * spend, until any device on the account answers.
+   *
+   * `from` must be captured BEFORE the need_input is emitted. The answer can land in the gap
+   * between emitting the question and attaching the waiter, and a waiter that only listens for
+   * future events would miss it and freeze the build forever. Replaying from `from` closes that
+   * race: the answer is found in the replay instead.
+   *
+   * Resolves the answer event, or null when the job seals first (stopped, errored, restarted).
+   */
+  function waitForAnswer(id, from) {
+    const job = INDEX.get(id);
+    if (!job || job.done) return Promise.resolve(null);
+    const start = Math.max(0, Math.floor(Number(from) || 0));
+    return new Promise((resolve) => {
+      let off = () => {};
+      const onEv = (ev) => {
+        if (ev === null) { off(); resolve(null); }
+        else if (ev.type === "answer") { off(); resolve(ev); }
+      };
+      off = attach(id, start, onEv);
+    });
+  }
+
+  return { create, emit, finish, stop, get, listFor, activeFor, attach, loadFromDisk, summarize, waitForAnswer,
            get size() { return INDEX.size; } };
 }

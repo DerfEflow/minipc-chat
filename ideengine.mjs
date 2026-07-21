@@ -112,7 +112,16 @@ export function parseFileBlocks(text) {
     const rawPath = String(m[1] || "").trim().replace(/^["']|["']$/g, "");
     const body = m[2];
     if (/^NEED:/i.test(rawPath)) { needs.push(rawPath.replace(/^NEED:\s*/i, "")); continue; }
-    if (!rawPath || /^(json|js|ts|bash|sh|text|txt|diff)$/i.test(rawPath)) continue;   // a plain language fence
+    if (!rawPath) continue;
+    /*
+     * A language fence must never become a file. The old check was a whitelist of eight language
+     * names, so a model that wrote a ```python or ```html explanation block got a file literally
+     * named "python" written into the project. Reverse the logic: something is a PATH when it
+     * looks like one (a dot or a slash, or one of the well-known extensionless files); a single
+     * bare word is a language tag and is skipped.
+     */
+    const looksLikePath = /[.\/]/.test(rawPath) || /^(dockerfile|makefile|license|procfile|gemfile|rakefile|readme)$/i.test(rawPath);
+    if (!looksLikePath) continue;
     // Traversal and absolute paths are refused rather than normalized: a build that silently
     // rewrites where it is writing is worse than one that stops and says so.
     if (rawPath.includes("..")) { issues.push({ path: rawPath, reason: "path tries to climb out of the workspace" }); continue; }
@@ -222,6 +231,45 @@ export function buildMoveMessages({ move, manifest = [], workspaceName = "", goa
   ];
 }
 
+/*
+ * Line diff for the Workshop lens. Plain LCS, capped: past 400 lines a side it degrades to
+ * honest counts with a note instead of burning CPU on a diff nobody will scroll.
+ */
+export function lineDiff(oldStr, newStr, { cap = 400, maxOut = 200 } = {}) {
+  const a = String(oldStr || "").split("\n");
+  const b = String(newStr || "").split("\n");
+  if (!String(oldStr || "").length) {
+    return { added: b.length, removed: 0, diff: b.slice(0, maxOut).map((l) => "+" + l).join("\n") + (b.length > maxOut ? "\n+ ... " + (b.length - maxOut) + " more lines" : ""), truncated: b.length > maxOut };
+  }
+  if (a.length > cap || b.length > cap) {
+    return { added: b.length, removed: a.length, diff: "(file too large for a line diff: " + a.length + " lines before, " + b.length + " after)", truncated: true };
+  }
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i--) for (let j = n - 1; j >= 0; j--) {
+    dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  }
+  const out = [];
+  let i = 0, j = 0, added = 0, removed = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) { out.push(" " + a[i]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push("-" + a[i]); removed++; i++; }
+    else { out.push("+" + b[j]); added++; j++; }
+  }
+  while (i < m) { out.push("-" + a[i++]); removed++; }
+  while (j < n) { out.push("+" + b[j++]); added++; }
+  // Only changed lines plus one line of context either side; whole-file dumps are not a diff.
+  const keep = [];
+  for (let k = 0; k < out.length; k++) {
+    const changed = out[k][0] !== " ";
+    const near = (out[k - 1] && out[k - 1][0] !== " ") || (out[k + 1] && out[k + 1][0] !== " ");
+    if (changed || near) keep.push(out[k]);
+    else if (keep[keep.length - 1] !== "...") keep.push("...");
+  }
+  const clipped = keep.slice(0, maxOut);
+  return { added, removed, diff: clipped.join("\n") + (keep.length > maxOut ? "\n... " + (keep.length - maxOut) + " more lines" : ""), truncated: keep.length > maxOut };
+}
+
 export const PLANNER_SYSTEM = [
   "You plan software builds. Return ONLY a JSON array of moves, no prose.",
   "",
@@ -299,6 +347,18 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
     return { written, failed };
   }
 
+  // Diff every written file against the manifest's pre-move contents, so the Workshop lens shows
+  // what actually changed rather than an empty panel. New files diff against nothing.
+  function emitDiffs(job, manifest, files) {
+    const before = new Map((manifest || []).map((f) => [f.path, f.missing ? "" : (f.content || "")]));
+    for (const f of files || []) {
+      try {
+        const d = lineDiff(before.get(f.path) || "", f.content || "");
+        jobs.emit(job.id, { type: "diff", path: f.path, added: d.added, removed: d.removed, diff: d.diff });
+      } catch {}
+    }
+  }
+
   async function verify(job, workspace) {
     let pkg = "";
     try {
@@ -372,6 +432,7 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
 
       const { written, failed } = await writeFiles(job, workspace, parsed.files);
       for (const f of failed) jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "warned", message: f.path + ": " + f.reason });
+      emitDiffs(job, manifest, parsed.files);
 
       const v = await verify(job, workspace);
       if (v.ran && !v.ok) {
@@ -391,15 +452,25 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
             jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "blocked", message: carve2.message });
             return { ok: false, costUsd, blocked: true };
           }
-          if (again.files.length) {
-            await writeFiles(job, workspace, again.files);
-            const v2 = await verify(job, workspace);
-            if (!v2.ok) {
-              jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
-                message: "The check still fails after one repair attempt. The output is above; nothing further was tried automatically." });
-              return { ok: false, costUsd, wroteAnyway: true };
-            }
+          if (!again.files.length) {
+            // A repair with no files leaves the check red. Falling through to "done" here is how
+            // a broken build gets reported as a finished one.
+            jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
+              message: "The check failed and the repair attempt returned nothing usable. The output is above." });
+            return { ok: false, costUsd, wroteAnyway: true };
           }
+          await writeFiles(job, workspace, again.files);
+          emitDiffs(job, manifest, again.files);
+          const v2 = await verify(job, workspace);
+          if (!v2.ok) {
+            jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
+              message: "The check still fails after one repair attempt. The output is above; nothing further was tried automatically." });
+            return { ok: false, costUsd, wroteAnyway: true };
+          }
+        } else {
+          jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
+            message: "The check failed and the repair call could not be made. The output is above." });
+          return { ok: false, costUsd, wroteAnyway: true };
         }
       }
 

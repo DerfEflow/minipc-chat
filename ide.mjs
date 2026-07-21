@@ -299,7 +299,18 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
 
     updateWorkspace(T, body) {
       const blocked = wall(T); if (blocked) return blocked;
-      const r = storeFor(T).update(body && body.id, (body && body.patch) || {});
+      /*
+       * Accept the patch nested OR flat. create() takes flat fields, so callers reasonably send
+       * update() the same shape, and the old strict form silently changed NOTHING when they did:
+       * a budget "set" this way never armed, which is a terrible failure mode for the one field
+       * that guards spending. Sibling endpoints get sibling shapes.
+       */
+      const b = body || {};
+      const patch = (b.patch && typeof b.patch === "object") ? b.patch : {
+        name: b.name, root: b.root, node: b.node, assignments: b.assignments,
+        budget: "budget" in b ? b.budget : undefined,
+      };
+      const r = storeFor(T).update(b.id, patch);
       if (r.error) return { status: r.code === "not_found" ? 404 : 400, code: r.code, body: r };
       return ok(r);
     },

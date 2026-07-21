@@ -143,14 +143,35 @@
     render();
 
     const es = new EventSource("/ide/job/attach?job=" + encodeURIComponent(jobId) + "&from=0");
-    let closed = false;
+    let closed = false, ended = false;
     es.onmessage = (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch { return; }
       if (ev.type === "gone") { es.close(); return; }
+      if (ev.type === "done" || ev.type === "error" || ev.type === "stopped") ended = true;
       state.events.push(ev);
       render();
     };
-    es.onerror = () => { if (!closed) { closed = true; es.close(); } };
+    /*
+     * On error, close and RESET rather than merely closing. follow() refuses to re-attach to the
+     * job it thinks it is already following, so closing while keeping state.jobId froze the lens
+     * permanently after any transient network blip. Clearing the id lets the retry re-attach, and
+     * re-attaching replays from zero into an emptied event list, so nothing double-counts.
+     */
+    es.onerror = () => {
+      if (closed) return;
+      closed = true;
+      es.close();
+      /*
+       * Two very different closes share this handler. A finished job's stream ends NORMALLY and
+       * the browser still reports it as an error; treating that as a drop put the lens in a
+       * clear-and-reattach loop every two seconds, flashing empty between cycles. So: terminal
+       * event already seen means the story is complete, keep it on screen and stop. Only a close
+       * with the job still live is a real drop worth resetting and retrying.
+       */
+      if (ended) return;
+      state.jobId = "";
+      setTimeout(() => { if (document.body.classList.contains("ide-open")) sync(); }, 2000);
+    };
     state.detach = () => { closed = true; es.close(); };
   }
 
@@ -167,15 +188,52 @@
     } catch {}
   }
 
-  /* ---------- rendering ----------------------------------------------------------------------- */
+  /* ---------- rendering -----------------------------------------------------------------------
+   * Coalesced to one paint per frame. A replay delivers the whole journal in a burst, and
+   * rebuilding the DOM once per event is work the eye never sees.
+   */
+  let renderQueued = false;
   function render() {
+    if (renderQueued) return;
+    renderQueued = true;
+    // A short TIMER, never requestAnimationFrame: rAF does not fire in hidden tabs at all, so an
+    // rAF debounce leaves the lens permanently blank anywhere the page is considered background
+    // (embedded panes, a PWA behind another app). 16ms batches a replay burst just as well.
+    setTimeout(() => { renderQueued = false; renderNow(); }, 16);
+  }
+  function renderNow() {
     const body = $("#cru-body");
     if (!body) return;
     const d = digest(state.events);
     paintCost(d);
+    paintStop(d);
 
     if (!state.jobId) { body.replaceChildren(emptyState()); return; }
     body.replaceChildren(state.lens === "blueprint" ? blueprint(d) : workshop(d));
+  }
+
+  // The Stop control exists exactly while there is something to stop.
+  function paintStop(d) {
+    const head = $("#cru .cru-head");
+    if (!head) return;
+    let btn = $("#cru-stop");
+    const running = state.jobId && !d.outcome;
+    if (!running) { if (btn) btn.remove(); return; }
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = "cru-stop";
+      btn.textContent = "Stop this build";
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await fetch("/ide/job/stop", { method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ jobId: state.jobId }) });
+        } catch {}
+        btn.disabled = false;
+      });
+      head.append(btn);
+    }
   }
 
   function paintCost(d) {
