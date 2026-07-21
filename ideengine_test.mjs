@@ -322,5 +322,31 @@ await t("lineDiff: new files are all additions, huge files degrade to honest cou
   assert.equal(same.added + same.removed, 0);
 });
 
+await t("an image-classed move runs as design code with placeholder art, never a provider error", async () => {
+  const events = [], calls = [];
+  const imageRouter = () => ({ taskClass: "design_visual", model: "dominion-forge", isImage: true, why: "asks for an image",
+    assignments: { design_code: "test/design-model" } });
+  const engine2 = createIdeEngine({
+    jobs: { emit: (id, ev) => events.push(ev) },
+    chat: async (a) => { calls.push(a); return { ok: true, content: "```path=index.html\n<svg></svg>\n```", costUsd: 0.01 }; },
+    hands: async (tool, args) => {
+      if (tool === "fs_read" && String(args.path).endsWith("package.json")) return { content: "{}" };
+      if (tool === "fs_read") return { content: "" };
+      if (tool === "shell_run" && /rev-parse/.test(args.command)) return { stdout: "true" };
+      if (tool === "shell_run") return { code: 0 };
+      if (tool === "fs_write") return { ok: true };
+      return {};
+    },
+    router: imageRouter, meter: async () => {},
+  });
+  const out = await engine2.runMove(JOB, { move: { id: "m1", title: "Add a hero image", files: ["index.html"] }, workspace: WS, assignments: {} });
+  assert.equal(out.ok, true, "the move must succeed instead of looping a beginner through retry");
+  const chatCall = calls.find((c) => c.model);
+  assert.equal(chatCall.model, "test/design-model", "it runs on the design model, never dominion-forge");
+  assert.match(chatCall.messages[1].content, /placeholder art/i, "the model is told to draw with CSS or SVG");
+  const running = events.find((e) => e.type === "move" && e.state === "running");
+  assert.match(String(running.routeWhy || ""), /separate step/i, "the card explains the reroute honestly");
+});
+
 console.log("\n" + passed + " passed, " + failed + " failed");
 process.exit(failed ? 1 : 0);

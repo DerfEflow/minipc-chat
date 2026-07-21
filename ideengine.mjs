@@ -390,7 +390,21 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
   async function runMove(job, { move, workspace, assignments, goal }) {
     let costUsd = 0;
     try {
-      const decision = router({ title: move.title, description: move.why, files: move.files }, assignments);
+      let decision = router({ title: move.title, description: move.why, files: move.files }, assignments);
+      if (decision.isImage || decision.model === "dominion-forge") {
+        /*
+         * An image-classed move cannot go to a text model: "dominion-forge" is the image engine,
+         * and feeding it to the chat pipeline ends in a provider error (found live: a planner
+         * move titled "Add high-quality hero image" looped a beginner through retry forever).
+         * Until the Forge pipe is wired into builds, these moves run as DESIGN CODE with honest
+         * placeholder art, and the card says so.
+         */
+        const fallbackModel = (decision.assignments && decision.assignments.design_code) || "";
+        decision = { ...decision, taskClass: "design_code", model: fallbackModel,
+          why: (decision.why || "") + "; image generation is a separate step, so this builds the visual with CSS or SVG placeholder art instead" };
+        move = { ...move, why: (move.why ? move.why + " " : "")
+          + "NOTE: do not reference image files that do not exist. Build the visual with CSS gradients or inline SVG placeholder art." };
+      }
       // `why` belongs to the PLAN (what this move is for, in plain English). The router's reason
       // travels as routeWhy so the two never overwrite each other on the card.
       jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",

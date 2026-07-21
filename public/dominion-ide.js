@@ -32,6 +32,8 @@
   };
 
   const $ = (sel) => document.querySelector(sel);
+  // Every user-facing string on this surface goes through the register dictionary.
+  const L = (k) => (window.DominionLexicon ? window.DominionLexicon.L(k) : k);
   const readEngaged = () => {
     try { return localStorage.getItem(ENGAGED_KEY) === "1"; } catch { return false; }
   };
@@ -360,34 +362,59 @@
     el.className = "ide-start";
     el.id = "ide-start";
     el.innerHTML =
-      '<h3>Start a build</h3>' +
+      '<h3 data-lex="start_heading"></h3>' +
+      '<div class="st-row st-lang">' +
+        '<span class="st-lang-label" data-lex="lang_label"></span>' +
+        '<select id="st-lang" aria-label="How Dominion talks to you">' +
+          '<option value="plain"></option><option value="technical"></option><option value="hybrid"></option>' +
+        '</select>' +
+      '</div>' +
       '<div class="st-row">' +
         '<select id="st-ws" aria-label="Which project folder to build in"></select>' +
-        '<button type="button" id="st-add">Add a folder</button>' +
+        '<button type="button" id="st-add" data-lex="add_folder"></button>' +
       '</div>' +
       '<div class="st-new" id="st-new" hidden>' +
-        '<input id="st-new-path" type="text" autocomplete="off" spellcheck="false" ' +
-          'placeholder="Full folder path, for example C:\\Projects\\my-app" />' +
+        '<input id="st-new-path" type="text" autocomplete="off" spellcheck="false" />' +
         '<input id="st-new-name" type="text" autocomplete="off" placeholder="Name (optional)" />' +
-        '<button type="button" id="st-new-go">Use this folder</button>' +
+        '<button type="button" id="st-new-go" data-lex="use_folder"></button>' +
       '</div>' +
-      '<textarea id="st-prompt" rows="3" placeholder="Say what you want built. Plain words work: ' +
-        '&quot;a page that lists my invoices and lets me mark them paid&quot;"></textarea>' +
+      '<textarea id="st-prompt" rows="3"></textarea>' +
       '<div class="st-row">' +
-        '<button type="button" id="st-go" class="st-primary">Start the build</button>' +
+        '<button type="button" id="st-go" class="st-primary" data-lex="start_go"></button>' +
         '<span class="st-status" id="st-status" role="status"></span>' +
       '</div>';
     return el;
   }
 
+  // Pour the chosen register into every tagged element. One function, called on mount and on
+  // every register change, so no string can be left behind in the old voice.
+  function paintLexicon() {
+    for (const el of document.querySelectorAll("[data-lex]")) el.textContent = L(el.dataset.lex);
+    const prompt = $("#st-prompt");
+    if (prompt) prompt.placeholder = L("start_prompt_ph");
+    const path = $("#st-new-path");
+    if (path) path.placeholder = L("folder_ph");
+    const lang = $("#st-lang");
+    if (lang) {
+      lang.value = window.DominionLexicon ? window.DominionLexicon.register : "plain";
+      const opts = lang.querySelectorAll("option");
+      if (opts.length === 3) {
+        opts[0].textContent = L("lang_plain");
+        opts[1].textContent = L("lang_technical");
+        opts[2].textContent = L("lang_hybrid");
+      }
+    }
+  }
+
   function renderStarter() {
     const sel = $("#st-ws");
     if (!sel) return;
+    paintLexicon();
     sel.textContent = "";
     if (!state.workspaces.length) {
       const o = document.createElement("option");
       o.value = "";
-      o.textContent = "No folder yet. Add one.";
+      o.textContent = L("no_folder_yet");
       sel.append(o);
     }
     for (const w of state.workspaces) {
@@ -403,6 +430,17 @@
     const status = (msg, bad) => { const el = $("#st-status"); if (el) { el.textContent = msg || ""; el.classList.toggle("bad", !!bad); } };
 
     $("#st-add").addEventListener("click", () => { const n = $("#st-new"); n.hidden = !n.hidden; if (!n.hidden) $("#st-new-path").focus(); });
+
+    $("#st-lang").addEventListener("change", async () => {
+      const reg = $("#st-lang").value;
+      if (window.DominionLexicon) window.DominionLexicon.set(reg);
+      paintLexicon();
+      // The server phrases its own sentences (questions, endings), so it needs the choice too.
+      try {
+        await fetch("/ide/prefs", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ engaged: state.engaged, language: reg }) });
+      } catch {}
+    });
 
     $("#st-new-go").addEventListener("click", async () => {
       const root = $("#st-new-path").value.trim();
@@ -629,6 +667,26 @@
     return out;
   }
 
+  // Shown once, before the first build. This is the Replit conversation had up front: built on
+  // YOUR computer, running is local, putting it online is a separate offered step.
+  const INTRO_KEY = "dominion.crucible.intro.v1";
+  function maybeShowIntro() {
+    try { if (localStorage.getItem(INTRO_KEY) === "1") return; } catch {}
+    const stage = $("#ide-stage");
+    if (!stage || $("#ide-intro")) return;
+    const card = document.createElement("section");
+    card.className = "ide-intro";
+    card.id = "ide-intro";
+    card.innerHTML = '<h3 data-lex="intro_title"></h3><p data-lex="intro_body"></p>'
+      + '<button type="button" id="ide-intro-ok" data-lex="intro_ok"></button>';
+    stage.prepend(card);
+    paintLexicon();
+    $("#ide-intro-ok").addEventListener("click", () => {
+      try { localStorage.setItem(INTRO_KEY, "1"); } catch {}
+      card.remove();
+    });
+  }
+
   function openPanel() {
     if (!state.allowed || !state.engaged) return;
     if (state.open) return;
@@ -637,6 +695,7 @@
     if (window.closeForgeDial) window.closeForgeDial();
     if (window.closeForgeImages) window.closeForgeImages();
     buildPanel();
+    maybeShowIntro();
     // Paint from whatever is true right now. The panel is built lazily, so anything reconciled
     // while it did not exist (a question that arrived while the works were closed) has to be
     // drawn on the way in, or it stays invisible until the next poll.

@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { routeMove, CLASS_INFO, TASK_CLASSES, DEFAULT_ASSIGNMENTS, IMAGE_ENGINE, PRESETS } from "./iderouter.mjs";
 import { createPushStore } from "./idepush.mjs";
+import { normalizeRegister, DEFAULT_REGISTER } from "./idelang.mjs";
 
 export const IDE_MODE_DEFAULT = "owner";
 
@@ -70,7 +71,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
   const file = join(home, "state.json");
   mkdirSync(home, { recursive: true });
 
-  const blank = () => ({ prefs: { engaged: false }, workspaces: [], subs: [] });
+  const blank = () => ({ prefs: { engaged: false, language: DEFAULT_REGISTER }, workspaces: [], subs: [] });
 
   function read() {
     if (!existsSync(file)) return blank();
@@ -79,6 +80,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
       return {
         prefs: {
           engaged: !!(j && j.prefs && j.prefs.engaged),
+          language: normalizeRegister(j && j.prefs && j.prefs.language),
           // Model assignments made before the first workspace exists, so the board is usable on
           // day one and the first workspace inherits them.
           assignments: (j && j.prefs && j.prefs.assignments && typeof j.prefs.assignments === "object") ? j.prefs.assignments : {},
@@ -126,6 +128,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
       const s = read();
       if (patch && typeof patch.engaged === "boolean") s.prefs.engaged = patch.engaged;
       if (patch && patch.assignments && typeof patch.assignments === "object") s.prefs.assignments = patch.assignments;
+      if (patch && typeof patch.language === "string") s.prefs.language = normalizeRegister(patch.language);
       write(s);
       return s.prefs;
     },
@@ -278,6 +281,7 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       return ok({ prefs: store.setPrefs({
         engaged: !!(body && body.engaged),
         assignments: body && body.assignments,
+        language: body && body.language,
       }) });
     },
 
@@ -364,7 +368,8 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       const job = jobs.create({ uid: T.uid, workspaceId, kind, isOwner: !!T.isOwner });
       log("[ide] job " + job.id + " (" + kind + ") started by " + (T.uid || "owner"));
       if (typeof runner === "function") {
-        try { runner(job, { workspace, prompt, assignments: assignmentsFor(T, workspace) }); }
+        try { runner(job, { workspace, prompt, assignments: assignmentsFor(T, workspace),
+          register: (storeFor(T).prefs() || {}).language }); }
         catch (e) { jobs.emit(job.id, { type: "error", message: String(e && e.message || e) }); }
       }
       return ok({ jobId: job.id, kind, workspaceId });

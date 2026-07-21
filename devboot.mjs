@@ -29,7 +29,12 @@ const env = { ...process.env, PORT: String(APP), OLLAMA_URL: "http://127.0.0.1:"
   FLYWHEEL_DIR: join(dataDir, "flywheel"), LOG_DIR: join(dataDir, "logs"), SANDBOX_DIR: join(dataDir, "sandbox"),
   AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0",
   MULTI_TENANT: "1", OWNER_EMAIL: "owner@dev.local",
-  OPENROUTER_API_KEY: "", OPEN_AI_DOMINION_UI_APIKEY: "", ANTHROPIC_API_KEY: "", STRIPE_SECRET_KEY: "" };
+  // Paid-provider keys are BLANKED by default so a dev rig cannot quietly bill anyone. The blank
+  // is an empty string, which deliberately defeats cfgGet's fallback chain too. DEVBOOT_ALLOW_PAID=1
+  // opts one session in, for live verification that genuinely needs a provider (e.g. the vision
+  // judge). Stripe stays blanked unconditionally: no dev rig ever needs the money rail.
+  ...(process.env.DEVBOOT_ALLOW_PAID === "1" ? {} : { OPENROUTER_API_KEY: "", OPEN_AI_DOMINION_UI_APIKEY: "", ANTHROPIC_API_KEY: "" }),
+  STRIPE_SECRET_KEY: "" };
 const child = spawn(process.execPath, [join(HERE, "server.mjs")], { env, cwd: HERE, stdio: "inherit" });
 process.on("exit", () => { try { child.kill(); } catch {} });
 

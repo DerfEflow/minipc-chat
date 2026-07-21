@@ -56,6 +56,8 @@ import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT } fro
 import { createIdeJobs } from "./idejobs.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES } from "./ideengine.mjs";
 import { routeMove, resolveAssignments } from "./iderouter.mjs";
+import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
+import { createRunAndSee } from "./idesee.mjs";
 import { escalationFor, sendWakeups } from "./idepush.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
@@ -1216,7 +1218,8 @@ function runIdeProbe(job, { ask = false } = {}) {
    The engine never learns which provider it is talking to, and the server never learns how a move
    is assembled. That seam is why the engine is testable with no server at all.
    ============================================================================================ */
-async function runIdeBuild(job, { T, workspace, prompt, assignments }) {
+async function runIdeBuild(job, { T, workspace, prompt, assignments, register }) {
+  const reg = normalizeRegister(register);
   const ac = new AbortController();
   job.stop = () => { try { ac.abort(); } catch {} };
 
@@ -1259,7 +1262,7 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments }) {
     const probe = await handsFor("node_info", {});
     if (!probe || probe.ok === false || probe.offline) {
       return ideJobs.finish(job.id, { type: "error", code: "no_node",
-        message: "No machine is connected. Start your Dominion hands node on the computer holding this project, then run the build again." });
+        message: phrase("no_node", reg) });
     }
 
     const resolved = resolveAssignments(assignments, { allInOne: (assignments && assignments.allInOne) || "", fallback: defaultModelFor(!!T.isOwner) });
@@ -1274,7 +1277,7 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments }) {
       ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, single: true });
     } else {
       const planned = await chat({ model: planModel, messages: [
-        { role: "system", content: PLANNER_SYSTEM },
+        { role: "system", content: PLANNER_SYSTEM + "\n\n" + plannerVoice(reg) },
         { role: "user", content: "PROJECT: " + (workspace.name || workspace.root) + "\n\nBUILD THIS:\n" + prompt },
       ] });
       spend(planned.costUsd);
@@ -1322,11 +1325,11 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments }) {
       const b = budgetCheck({ spentUsd: budget.spentUsd, capUsd: budget.capUsd, nextEstUsd: est.usd });
       if (b.stop) {
         const answer = await ask("budget",
-          "This build has reached its spending limit of " + money(budget.capUsd) + " (spent " + money(budget.spentUsd) + " so far). Keep going?",
-          ["Keep going", "Stop here"]);
+          phrase("budget_question", reg, money(budget.capUsd), money(budget.spentUsd)),
+          [phrase("budget_keep", reg), phrase("budget_stop", reg)]);
         if (answer === null) return;
-        if (!/keep|yes|continue|go/i.test(answer)) {
-          return ideJobs.finish(job.id, { type: "stopped", message: "Stopped at the spending limit, at your request." });
+        if (!ANSWER.keepGoing.test(answer)) {
+          return ideJobs.finish(job.id, { type: "stopped", message: phrase("budget_stopped", reg) });
         }
         // Another allowance of the same size, never an uncapped blank cheque.
         budget.capUsd += Math.max(capOriginal, 0.5);
@@ -1334,7 +1337,7 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments }) {
 
       const res = await engine.runMove(job, { move, workspace, assignments: resolved, goal: prompt });
       spend(res && res.costUsd);
-      if (res && res.blocked) return ideJobs.finish(job.id, { type: "error", message: "Stopped at a hard carve-out. Nothing was written." });
+      if (res && res.blocked) return ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) });
 
       if (res && !res.ok) {
         /*
@@ -1343,14 +1346,14 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments }) {
          * sentence attached, so the model actually hears the correction.
          */
         const answer = await ask("move-" + move.id,
-          "The move \"" + move.title + "\" could not finish. The detail is above. What now?",
-          ["Try it again", "Skip this move", "Stop the build"]);
+          phrase("move_failed_question", reg, move.title),
+          [phrase("move_retry", reg), phrase("move_skip", reg), phrase("move_stop", reg)]);
         if (answer === null) return;
-        if (/^skip/i.test(answer)) continue;
-        if (/^stop/i.test(answer)) {
-          return ideJobs.finish(job.id, { type: "stopped", message: "Stopped after a failed move, at your request." });
+        if (ANSWER.skip.test(answer)) continue;
+        if (ANSWER.stop.test(answer)) {
+          return ideJobs.finish(job.id, { type: "stopped", message: phrase("move_stopped", reg) });
         }
-        if (!/^try/i.test(answer)) {
+        if (!ANSWER.retry.test(answer)) {
           queue[i] = { ...move, why: (move.why ? move.why + " " : "") + "The user says: " + answer.slice(0, 500) };
         }
         i--;         // run the same slot again, with the guidance if any
@@ -1358,11 +1361,48 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments }) {
       }
     }
 
-    ideJobs.finish(job.id, { type: "done", message: "Build complete." });
+    /*
+     * RUN AND SEE (Fred's ruling 2026-07-21). The checks proved it runs; now look at it. The
+     * vision model is picked from what actually has a key, one polish round only, and every
+     * missing piece skips with a sentence instead of failing the build that already succeeded.
+     */
+    try {
+      const visionModel = pickVisionModel();
+      const see = createRunAndSee({ hands: handsFor, chat, jobs: ideJobs, log: (m) => console.log(m) });
+      const writtenFiles = [...new Set((ideJobs.get(job.id) || { events: [] }).events.filter((e) => e.type === "file").map((e) => e.path))];
+      const seen = await see.run(job, {
+        workspace, goal: prompt, visionModel,
+        applyFixes: async (critique) => {
+          const fixMove = { id: "polish", title: reg === "technical" ? "Apply visual review findings" : "Make it look right",
+            why: "The screenshot review found: " + critique.slice(0, 700), files: writtenFiles.slice(0, 12) };
+          const r = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt });
+          spend(r && r.costUsd);
+          return { costUsd: (r && r.costUsd) || 0 };
+        },
+      });
+      if (seen && seen.costUsd) { spend(seen.costUsd); await meterTurn(T, seen.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: +seen.costUsd.toFixed(6), move: "look" }); }
+    } catch (e) {
+      ideJobs.emit(job.id, { type: "run", skipped: true, message: "The look-at-it step hit a problem and was skipped: " + String((e && e.message) || e).slice(0, 200) });
+    }
+
+    ideJobs.finish(job.id, { type: "done", message: phrase("build_done", reg) });
   } catch (e) {
     if (ac.signal.aborted) return;
     ideJobs.finish(job.id, { type: "error", message: String((e && e.message) || e) });
   }
+}
+
+// The first vision-capable catalog model whose provider actually holds a key on this server.
+// Preference order is deliberate: the design anchor first, then the cheaper generalist tiers.
+function pickVisionModel() {
+  const candidates = ["openai/gpt-5.6-terra", "openai/gpt-4o", "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4-5", "moonshotai/kimi-k3"];
+  for (const id of candidates) {
+    const rec = modelById(id);
+    if (!rec || !isVisionCapable(id)) continue;
+    const cfg = PROVIDER_CFG[rec.provider || "openrouter"];
+    if (cfg && cfg.key()) return id;
+  }
+  return "";
 }
 
 function resumeIdeProbe(job) {

@@ -21,6 +21,7 @@
 
   const LENS_KEY = "dominion.crucible.lens.v1";
   const $ = (s, r) => (r || document).querySelector(s);
+  const L = (k) => (window.DominionLexicon ? window.DominionLexicon.L(k) : k);
 
   const state = {
     lens: "blueprint",
@@ -93,10 +94,10 @@
     head.className = "cru-head";
     head.innerHTML =
       '<div class="cru-switch" role="tablist" aria-label="How to view this build">' +
-        '<button type="button" role="tab" data-lens="blueprint">Blueprint</button>' +
-        '<button type="button" role="tab" data-lens="workshop">Workshop</button>' +
+        '<button type="button" role="tab" data-lens="blueprint">' + L("lens_blueprint") + '</button>' +
+        '<button type="button" role="tab" data-lens="workshop">' + L("lens_workshop") + '</button>' +
       '</div>' +
-      '<div class="cru-meter" id="cru-meter"><span class="lbl">Cost</span><span class="val" id="cru-cost">nothing yet</span></div>';
+      '<div class="cru-meter" id="cru-meter"><span class="lbl">' + L("cost_label") + '</span><span class="val" id="cru-cost">' + L("cost_none") + '</span></div>';
 
     const body = document.createElement("div");
     body.className = "cru-body";
@@ -210,6 +211,43 @@
 
     if (!state.jobId) { body.replaceChildren(emptyState()); return; }
     body.replaceChildren(state.lens === "blueprint" ? blueprint(d) : workshop(d));
+    maybeOfferPublish(d);
+  }
+
+  /*
+   * The publish invitation (Fred's ruling 2026-07-21): when a build finishes, the user sees
+   * "Put this online so everyone can use it" in their own register. Behind it sits an HONEST
+   * explanation of what that involves; the guided deploy itself ships later, and this card says
+   * so plainly rather than promising a button that does not exist yet. Shown once per build.
+   */
+  function maybeOfferPublish(d) {
+    if (d.outcome !== "done" || !state.jobId) return;
+    let seen = null;
+    try { seen = localStorage.getItem("dominion.publish.seen." + state.jobId); } catch {}
+    if (seen) return;
+    if ($("#cru-publish")) return;
+    const isBuild = state.events.some((e) => e.type === "job" && e.kind === "build");
+    if (!isBuild) return;
+
+    const card = document.createElement("section");
+    card.id = "cru-publish";
+    card.className = "cru-publish";
+    const done = document.createElement("p"); done.className = "pub-done"; done.textContent = L("publish_done_line");
+    const cta = document.createElement("h3"); cta.textContent = L("publish_cta");
+    const row = document.createElement("div"); row.className = "pub-row";
+    const show = document.createElement("button"); show.type = "button"; show.textContent = L("publish_show");
+    const later = document.createElement("button"); later.type = "button"; later.className = "pub-later"; later.textContent = L("publish_later");
+    row.append(show, later);
+    const body2 = document.createElement("p"); body2.className = "pub-explain"; body2.hidden = true; body2.textContent = L("publish_explain");
+    card.append(done, cta, row, body2);
+
+    show.addEventListener("click", () => { body2.hidden = !body2.hidden; });
+    later.addEventListener("click", () => {
+      try { localStorage.setItem("dominion.publish.seen." + state.jobId, "1"); } catch {}
+      card.remove();
+    });
+    const bodyEl = $("#cru-body");
+    if (bodyEl) bodyEl.prepend(card);
   }
 
   // The Stop control exists exactly while there is something to stop.
@@ -223,7 +261,7 @@
       btn = document.createElement("button");
       btn.type = "button";
       btn.id = "cru-stop";
-      btn.textContent = "Stop this build";
+      btn.textContent = L("stop_build");
       btn.addEventListener("click", async () => {
         btn.disabled = true;
         try {
@@ -239,17 +277,17 @@
   function paintCost(d) {
     const el = $("#cru-cost");
     if (!el) return;
-    if (!state.jobId) { el.textContent = "nothing yet"; return; }
-    if (!d.costUsd && !d.costCredits) { el.textContent = "nothing spent"; return; }
+    if (!state.jobId) { el.textContent = L("cost_none"); return; }
+    if (!d.costUsd && !d.costCredits) { el.textContent = L("cost_zero"); return; }
     el.textContent = d.costCredits ? d.costCredits + " credits" : "$" + d.costUsd.toFixed(4);
   }
 
   function emptyState() {
     const el = document.createElement("div");
     el.className = "cru-empty";
-    el.innerHTML = "<h3>No builds yet</h3>" +
-      "<p>When you start one, it appears here. You can close the app while it runs; " +
-      "it keeps going and calls you back if it needs an answer.</p>";
+    const h = document.createElement("h3"); h.textContent = L("no_builds_title");
+    const pp = document.createElement("p"); pp.textContent = L("no_builds_body");
+    el.append(h, pp);
     return el;
   }
 
@@ -257,10 +295,7 @@
    * A move card says what it will do, why, and what it touched. No jargon on this lens, ever: it
    * is the one a non-programmer reads.
    */
-  const STATE_WORDS = {
-    planned: "Waiting", running: "Working", done: "Done", failed: "Stopped",
-    blocked: "Refused", warned: "Done with a note", repairing: "Fixing a problem",
-  };
+  const stateWord = (st) => L("st_" + st) === "st_" + st ? (st || "") : L("st_" + st);
 
   function blueprint(d) {
     const wrap = document.createElement("div");
@@ -290,7 +325,7 @@
       top.className = "c-top";
       const num = document.createElement("span"); num.className = "c-num"; num.textContent = String(i + 1);
       const title = document.createElement("span"); title.className = "c-title"; title.textContent = m.title || "Move " + (i + 1);
-      const badge = document.createElement("span"); badge.className = "c-state"; badge.textContent = STATE_WORDS[m.state] || m.state || "";
+      const badge = document.createElement("span"); badge.className = "c-state"; badge.textContent = stateWord(m.state);
       top.append(num, title, badge);
       card.append(top);
 
@@ -328,9 +363,8 @@
     if (d.snapshots.length) {
       const s = document.createElement("p");
       s.className = "cru-note";
-      s.textContent = d.snapshots.length === 1
-        ? "A restore point was made before anything was written."
-        : d.snapshots.length + " restore points were made before writing.";
+      s.textContent = d.snapshots.length === 1 ? L("snapshot_note_one")
+        : d.snapshots.length + " " + L("snapshot_note_one").toLowerCase();
       wrap.append(s);
     }
     if (d.outcome) wrap.append(outcomeLine(d));
@@ -341,10 +375,10 @@
     const el = document.createElement("p");
     el.className = "cru-outcome";
     el.dataset.outcome = d.outcome;
-    el.textContent = d.interrupted ? "This build was interrupted when the server restarted. Its work up to that point is on disk."
-      : d.outcome === "done" ? "Finished."
-      : d.outcome === "stopped" ? "Stopped by you."
-      : "Stopped before it finished.";
+    el.textContent = d.interrupted ? L("outcome_interrupted")
+      : d.outcome === "done" ? L("outcome_done")
+      : d.outcome === "stopped" ? L("outcome_stopped")
+      : L("outcome_error");
     return el;
   }
 
@@ -361,7 +395,7 @@
     wrap.className = "cru-workshop";
 
     // Files, as a tree of what this build actually touched.
-    const filesBox = section("Files touched");
+    const filesBox = section(L("files_touched"));
     const files = [...d.files.values()];
     if (!files.length) filesBox.append(note("Nothing written yet."));
     else filesBox.append(tree(files));
@@ -369,13 +403,13 @@
 
     // Diffs, when the engine has produced them.
     const withDiff = files.filter((f) => f.diff);
-    const diffBox = section("Changes");
+    const diffBox = section(L("changes"));
     if (!withDiff.length) diffBox.append(note("No diffs recorded for this build."));
     else for (const f of withDiff) diffBox.append(diffView(f));
     wrap.append(diffBox);
 
     // The console: exactly what ran and what it said.
-    const runBox = section("Checks");
+    const runBox = section(L("checks"));
     if (!d.runs.length) runBox.append(note("Nothing has been run yet."));
     else for (const r of d.runs) runBox.append(runView(r));
     wrap.append(runBox);
@@ -459,7 +493,7 @@
     h.textContent = r.skipped ? "Skipped" : (r.command || "check");
     const badge = document.createElement("span");
     badge.className = "w-run-badge";
-    badge.textContent = r.skipped ? "" : r.ok ? "passed" : "failed";
+    badge.textContent = r.skipped ? "" : r.ok ? L("check_passed") : L("check_failed");
     h.append(badge);
     box.append(h);
     const text = r.message || r.output || "";
@@ -479,6 +513,18 @@
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && document.body.classList.contains("ide-open")) sync();
+  });
+
+  // A register change rebuilds the chrome so every string flips voice at once.
+  document.addEventListener("dominion-register-changed", () => {
+    const root = $("#cru");
+    if (!root) return;
+    const bp = root.querySelector('[data-lens="blueprint"]'), wk = root.querySelector('[data-lens="workshop"]');
+    if (bp) bp.textContent = L("lens_blueprint");
+    if (wk) wk.textContent = L("lens_workshop");
+    const lbl = root.querySelector(".cru-meter .lbl");
+    if (lbl) lbl.textContent = L("cost_label");
+    render();
   });
 
   window.dominionLenses = { mount, sync, follow, setLens, digest, get state() { return state; } };

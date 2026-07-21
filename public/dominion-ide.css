@@ -505,3 +505,22 @@ body.ide-open #ide-root { transform: none; }
 }
 #cru-stop:hover { color: #ffd7d3; border-color: rgba(255, 139, 129, .6); }
 #cru-stop:disabled { opacity: .5; }
+
+/* ---------- the intro card and the language picker ------------------------------------- */
+.ide-intro {
+  display: grid; gap: 11px; margin: 0 0 20px;
+  padding: 17px 19px; border-radius: 3px;
+  border: 1px solid rgba(185, 107, 50, .45);
+  border-left: 3px solid var(--copper-hot, #d4823c);
+  background: linear-gradient(180deg, rgba(34, 20, 9, .82), rgba(8, 5, 2, .94));
+}
+.ide-intro h3 { margin: 0; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--copper-hot, #d4823c); }
+.ide-intro p { margin: 0; font-size: 13.5px; line-height: 1.7; color: var(--ink-soft, #d9c9b8); max-width: 68ch; }
+.ide-intro button { justify-self: start; font: inherit; font-size: 12.5px; cursor: pointer; padding: 9px 16px; border-radius: 3px;
+  color: var(--ink, #e8f6ff); border: 1px solid var(--glass-line, rgba(150,200,230,.2));
+  background: linear-gradient(180deg, rgba(14,33,54,.92), rgba(4,11,20,.96)); }
+.ide-intro button:hover { border-color: rgba(118, 255, 104, .4); }
+
+.ide-start .st-lang { gap: 10px; }
+.ide-start .st-lang-label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted, #8ba0ae); }
+.ide-start #st-lang { flex: 0 1 auto; font-size: 12.5px; padding: 8px 10px; }
