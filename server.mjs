@@ -22,6 +22,7 @@ import { join, normalize, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { TOOL_DEFS, toolDefs, WRITE_TOOLS, runTool, toolMeta, assertNotProtected, isProtectedPath, effectivePermission, needsConfirm, lifecycle, passConfirmGate } from "./tools.mjs";
+import { initDenials, recordDenial, denialSummary, readDenials } from "./denials.mjs";
 import { createMemoryStore } from "./memory.mjs";
 import { createArtifactStore } from "./artifacts.mjs";
 import { createMentor, MENTOR_ROLES } from "./mentor.mjs";
@@ -32,14 +33,22 @@ import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./ro
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
-import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload } from "./models.catalog.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds } from "./models.catalog.mjs";
+
+/*
+ * Does this turn actually ask for work ON a machine? Used only to decide whether the "you forgot
+ * Wildfire" nudge is worth saying. Deliberately narrower than the tool-intent heuristic elsewhere:
+ * a nudge that fires during ordinary conversation is noise, and Fred would switch it off within a
+ * day. Better to miss a few than to cry wolf.
+ */
+const MACHINE_INTENT_RE = /\b(build|deploy|install|refactor|migrate|fix|debug|run|execute|script|commit|push|repo|repository|codebase|server|database|file|folder|directory|terminal|shell|command|laptop|mini-?pc|machine|my computer)\b/i;
 import { screenContent } from "./safety.mjs";
 import { wolfeLogic, tierFor, normalizeTier } from "./wolfe-logic.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createUsersStore } from "./tenancy.mjs";
-import { createTenantResolver, filterToolDefs, FORGE_TOOLS } from "./tenantstores.mjs";
+import { createTenantResolver, filterToolDefs, toolAllowedFor, FORGE_TOOLS } from "./tenantstores.mjs";
 import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors.mjs";
 import { createAccessVerifier } from "./accessjwt.mjs";
 import { createImagesFeature } from "./images.mjs";
@@ -62,6 +71,7 @@ import { escalationFor, sendWakeups } from "./idepush.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
+import { createChatJobs, coalesceEvents } from "./chatjobs.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -95,6 +105,9 @@ const cfgGet = (k, d = "") => process.env[k] ?? localEnv[k] ?? bridgeEnv[k] ?? d
 // Linux/Railway it defaults to the persistent Volume mount at /data. Each specific *_DIR env still
 // wins when set (back-compat), so nothing about the box changes.
 const DATA_DIR = cfgGet("DATA_DIR", process.platform === "win32" ? "C:\\minipc-chat" : "/data");
+// Forbidden-access log. Fred asked for every attempt against a walled path, even the failed ones,
+// surfaced at the weekly security check. See denials.mjs for why there are two layers.
+initDenials({ dir: DATA_DIR });
 const dataPath = (sub) => (process.platform === "win32" ? DATA_DIR + "\\" + sub : DATA_DIR + "/" + sub);
 // The bridge poller's localhost poke listener (see command-deck bridge/poller.mjs) — must match
 // its BRIDGE_POKE_PORT. Used by /bridge/poke (deck app → tailnet → here) and by the forge tools.
@@ -114,7 +127,15 @@ const CTX = {
 // dedicated embedding model; if the model isn't pulled or the call fails, retrieval degrades to
 // lexical automatically — nothing blocks on this.
 const EMBED_MODEL = cfgGet("EMBED_MODEL", "nomic-embed-text");
-function embedText(text) {
+async function embedText(text) {
+  // Fix C: embeddings also ride the node when configured, so retrieval and the persona vec cache
+  // work from the cloud. A single quick call, no streaming. Defined before handsHub in file order,
+  // but only invoked at runtime, by which point handsHub is initialized.
+  if (OLLAMA_VIA_HANDS && handsHub && handsHub.enabled) {
+    const r = await handsHub.dispatchStream(OLLAMA_VIA_HANDS, "ollama_embed",
+      { payload: { model: EMBED_MODEL, input: String(text || "").slice(0, 2000) } }, { timeoutMs: 30000 });
+    return r && r.ok ? (r.embedding || null) : null;
+  }
   return new Promise((resolve) => {
     const body = JSON.stringify({ model: EMBED_MODEL, input: String(text || "").slice(0, 2000) });
     // Embeddings run on the always-on light tier (endpointForModel → ouLight for the embed model).
@@ -145,6 +166,16 @@ CTX.chatlog = chatlog;
 // on the phone continues on the laptop. Distinct from chatlog above, which truncates turns and
 // drops attachments because it exists to be SEARCHED, not to be restored.
 const chatsync = createChatSync({ dir: cfgGet("CHATSYNC_DIR", dataPath("chatsync")) });
+
+// Durable chat jobs (chatjobs.mjs): every /chat run persists to SQLite so long runs survive client
+// disconnects of any length AND server restarts/redeploys. The factory sweeps orphans at boot.
+const jobStore = createChatJobs({ dir: cfgGet("CHATJOBS_DIR", dataPath("chatjobs")) });
+const CHATJOBS_TAIL = Number(cfgGet("CHATJOBS_TAIL", "4096")) || 4096;             // RAM tail cap per job
+const CHATJOBS_FLUSH_MS = Number(cfgGet("CHATJOBS_FLUSH_MS", "2000")) || 2000;     // token-batch window
+const CHATJOBS_MAX_RUNNING = Number(cfgGet("CHATJOBS_MAX_RUNNING", "6")) || 6;     // per-user in-flight cap
+const CHATJOBS_COLLECTED_TTL_MS = Number(cfgGet("CHATJOBS_COLLECTED_TTL_MS", String(86400000))) || 86400000;
+// 0 is meaningful here (= keep uncollected results forever), so no || fallback.
+const CHATJOBS_UNCOLLECTED_TTL_MS = (() => { const n = Number(cfgGet("CHATJOBS_UNCOLLECTED_TTL_MS", String(30 * 86400000))); return Number.isFinite(n) && n >= 0 ? n : 30 * 86400000; })();
 
 // Phase 4: artifact studio. Generated documents become versioned, editable artifacts.
 const ARTIFACT_DIR = cfgGet("ARTIFACT_DIR", dataPath("artifacts"));
@@ -274,6 +305,11 @@ const safeUrl = (s) => { try { return new URL(s); } catch { return null; } };
 const OLLAMA_LIGHT_URL = cfgGet("OLLAMA_LIGHT_URL", OLLAMA);
 const OLLAMA_HEAVY_URL = cfgGet("OLLAMA_HEAVY_URL", OLLAMA_LIGHT_URL);
 const OLLAMA_KEY = cfgGet("OLLAMA_KEY", "");
+// Fix C (2026-07-20): when set to a node name (e.g. "mini-pc"), local-model calls ride the hands
+// channel to that node instead of a direct HTTP fetch. This is how the cloud app reaches Ollama
+// without a tunnel or a re-bind: the node already holds an authenticated stream, and it can reach
+// Ollama on loopback. Unset = direct HTTP as before (single-box / dev), so nothing changes there.
+const OLLAMA_VIA_HANDS = cfgGet("OLLAMA_VIA_HANDS", "");
 const ouLight = safeUrl(OLLAMA_LIGHT_URL) || ou;
 const ouHeavy = safeUrl(OLLAMA_HEAVY_URL) || ouLight;
 const SPLIT_TIERS = OLLAMA_HEAVY_URL !== OLLAMA_LIGHT_URL;   // are light/heavy on different hosts?
@@ -871,9 +907,9 @@ const handsHub = createHandsHub({
 const HANDS_DEFAULT_NODE = cfgGet("HANDS_DEFAULT_NODE", "");
 CTX.hands = {
   target: () => handsHub.pick(HANDS_DEFAULT_NODE),
-  dispatch: (tool, args) => {
+  dispatch: (tool, args, opts = {}) => {
     const n = handsHub.pick(HANDS_DEFAULT_NODE);
-    return n ? handsHub.dispatch(n, tool, args || {}, { timeoutMs: 60000 })
+    return n ? handsHub.dispatch(n, tool, args || {}, { timeoutMs: 60000, ...opts })
              : Promise.resolve({ ok: false, offline: true, error: "No machine is connected. Start your Dominion hands node on the computer you want to reach." });
   },
 };
@@ -1741,23 +1777,39 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
   return s;
 }
 
+function buildOllamaPayload(model, messages, opts, stream) {
+  const payload = { model, messages, stream };
+  payload.keep_alive = opts.keep_alive || (model === MAIN_MODEL ? "60m" : "5m");
+  if (!opts.noTools) payload.tools = filterToolDefs(toolDefs(flywheel.activeToolOverlays()), opts.role || "owner", opts.forgeExtra || null);
+  if (opts.format) payload.format = opts.format;
+  if (opts.think === false) payload.think = false;
+  const options = {};
+  if (typeof opts.temperature === "number") options.temperature = opts.temperature;
+  if (typeof opts.num_ctx === "number") options.num_ctx = opts.num_ctx;
+  if (typeof opts.num_predict === "number") options.num_predict = opts.num_predict;
+  if (Object.keys(options).length) payload.options = options;
+  return payload;
+}
+
 async function ollamaChat(model, messages, opts = {}) {
+  // Fix C: route through the mini-PC node when configured. The node streams tokens (keeping the hub
+  // deadline alive on a slow 30B) and returns the assembled response in the SAME shape the direct
+  // HTTP path returns, so every caller is unchanged. Returns null on failure, exactly as before.
+  if (OLLAMA_VIA_HANDS && handsHub && handsHub.enabled) {
+    if (opts.signal && opts.signal.aborted) return null;
+    const payload = buildOllamaPayload(model, messages, opts, true);
+    const r = await handsHub.dispatchStream(OLLAMA_VIA_HANDS, "ollama_chat", { payload }, {
+      timeoutMs: 590000,
+      signal: opts.signal,
+      // Always a live sink so the node streams and each token rearms the deadline. If a caller wants
+      // the tokens (opts.onDelta), forward them; otherwise the stream still keeps a long gen alive.
+      onChunk: (c) => { try { if (opts.onDelta) opts.onDelta(c.delta); } catch { /* a UI sink throw must not break generation */ } },
+    });
+    return r && r.ok ? r.response : null;
+  }
   return await new Promise((resolve) => {
     if (opts.signal && opts.signal.aborted) return resolve(null);
-    const payload = { model, messages, stream: false };
-    // Model residency (RAM pressure fix): the 17.7GB 30B stays hot for an hour; the light model
-    // expires after 5m so IT gets evicted first instead of swapping the big one out mid-conversation.
-    payload.keep_alive = opts.keep_alive || (model === MAIN_MODEL ? "60m" : "5m");
-    // C3: tool defs are assembled LIVE with the flywheel's active description overlays, so mentor
-    // tool-guidance actually changes what the model sees about each tool at prompt time.
-    if (!opts.noTools) payload.tools = toolDefs(flywheel.activeToolOverlays());
-    if (opts.format) payload.format = opts.format;   // e.g. "json" — forces valid JSON, suppresses thinking spill
-    if (opts.think === false) payload.think = false;  // disable qwen3 reasoning for structured extraction (thinking-on + json grammar collapses to "{}")
-    const options = {};
-    if (typeof opts.temperature === "number") options.temperature = opts.temperature;
-    if (typeof opts.num_ctx === "number") options.num_ctx = opts.num_ctx;
-    if (typeof opts.num_predict === "number") options.num_predict = opts.num_predict;
-    if (Object.keys(options).length) payload.options = options;
+    const payload = buildOllamaPayload(model, messages, opts, false);
     const body = JSON.stringify(payload);
     // Per-model endpoint: MAIN_MODEL / heavy tags → on-demand heavy tier; else always-on light tier.
     // http vs https + bearer are handled by ollamaReq. Single-box mode: both resolve to OLLAMA_URL.
@@ -2798,68 +2850,217 @@ async function handlePersona(req, res, u) {
   return json(404, { error: "not found" });
 }
 
-// ---- durable chat jobs (PWA suspend/resume) ----
+// ---- durable chat jobs (PWA suspend/resume + long runs) ----
 // A phone switching apps suspends the PWA and kills the /chat SSE socket mid-answer. The turn must
-// survive that: every /chat run is a JOB — all SSE events are buffered in RAM as they're emitted,
-// GET /chat/attach?job=<id>&from=<n> replays events[n..] and live-tails until the job ends, and
-// POST /chat/stop is now the ONLY thing that aborts generation (a dead socket never does).
-// Ring-capped + TTL'd with lazy GC — this is a reconnect window, not persistence.
+// survive that: every /chat run is a JOB — SSE events buffer in a capped RAM tail as they're
+// emitted, GET /chat/attach?job=<id>&from=<n> replays events[n..] and live-tails until the job
+// ends, and POST /chat/stop is the ONLY thing that aborts generation (a dead socket never does).
+// The RAM map is a reconnect window; persistence is chatjobs.mjs (jobStore) — every event also
+// lands there in coalesced batches, so a run survives hours-long disconnects AND server restarts.
+// RUNNING jobs are NEVER evicted from RAM (evicting one would orphan a live generation); the TTL
+// and cap apply to finished records only — that finished-window is what keeps exact index-for-index
+// replay for quick reconnects, while older/foreign cursors fall back to the compacted DB replay.
 const CHAT_JOBS = new Map();
 const JOB_CAP = 24, JOB_TTL_MS = 45 * 60 * 1000;
 function gcChatJobs() {
   const now = Date.now();
-  for (const [id, j] of CHAT_JOBS) if (now - (j.endedAt || j.startedAt) > JOB_TTL_MS) CHAT_JOBS.delete(id);
-  while (CHAT_JOBS.size > JOB_CAP) {
-    let victim = null;
-    for (const j of CHAT_JOBS.values()) if (j.done && (!victim || j.startedAt < victim.startedAt)) victim = j;
-    if (!victim) for (const j of CHAT_JOBS.values()) { victim = j; break; }   // all still live: drop the oldest
-    CHAT_JOBS.delete(victim.id);
+  for (const [id, j] of CHAT_JOBS) if (j.done && now - j.endedAt > JOB_TTL_MS) CHAT_JOBS.delete(id);
+  if (CHAT_JOBS.size > JOB_CAP) {
+    const done = [...CHAT_JOBS.values()].filter((j) => j.done).sort((a, b) => a.endedAt - b.endedAt);
+    for (const j of done) { if (CHAT_JOBS.size <= JOB_CAP) break; CHAT_JOBS.delete(j.id); }
   }
 }
-function createChatJob() {
+function createChatJob(T) {
   gcChatJobs();
-  const job = { id: "job_" + randomUUID().slice(0, 12), chatId: "", startedAt: Date.now(), endedAt: 0,
-                events: [], listeners: [], done: false, stopped: false, stop: () => {} };
+  const job = { id: "job_" + randomUUID().slice(0, 12), chatId: "",
+                email: String(T && T.email || "").trim().toLowerCase(), uid: String(T && T.uid || ""),
+                startedAt: Date.now(), endedAt: 0,
+                tail: [], tailStart: 0, eventCount: 0, text: "",
+                pending: [], flushTimer: null, sawDone: false, doneMeta: null, errNote: "",
+                listeners: [], done: false, stopped: false, stop: () => {} };
   CHAT_JOBS.set(job.id, job);
+  try { jobStore.createJob({ id: job.id, email: job.email, uid: job.uid, startedAt: job.startedAt }); } catch {}
   return job;
+}
+// Push this job's pending events to SQLite as one coalesced transaction. Durability must never
+// take down a live turn — a failed flush drops that batch's rows (progress counters catch up on
+// the next flush) rather than throwing into the SSE path.
+function flushJob(job) {
+  if (job.flushTimer) { clearTimeout(job.flushTimer); job.flushTimer = null; }
+  if (!job.pending.length) return;
+  const rows = coalesceEvents(job.pending, job.eventCount - job.pending.length);
+  job.pending = [];
+  try { jobStore.appendRows(job.id, rows, job.eventCount, job.text.length); } catch {}
 }
 function jobEmit(job, o) {
   if (job.done) return;
-  job.events.push(o);
+  job.tail.push(o);
+  while (job.tail.length > CHATJOBS_TAIL) { job.tail.shift(); job.tailStart++; }   // spill: DB has it
+  job.eventCount++;
+  if (o.type === "token") job.text += o.delta || "";
+  else if (o.type === "route") { try { jobStore.bindMeta(job.id, { chatId: job.chatId, model: o.model || "", mode: o.mode || "" }); } catch {} }
+  else if (o.type === "done") { job.sawDone = true; job.doneMeta = o.meta || null; }
+  else if (o.type === "error") { job.errNote = String(o.message || o.code || o.error || "error").slice(0, 300); }
+  job.pending.push(o);
+  // Structural events are natural checkpoints -> flush now; token/working batches ride the timer.
+  if ((o.type !== "token" && o.type !== "working") || job.pending.length >= 64) flushJob(job);
+  else if (!job.flushTimer) job.flushTimer = setTimeout(() => flushJob(job), CHATJOBS_FLUSH_MS);
   for (const l of [...job.listeners]) { try { l(o); } catch {} }
 }
 function finishJob(job) {
   if (job.done) return;
   job.done = true; job.endedAt = Date.now();
+  flushJob(job);
+  const status = job.stopped ? "stopped" : job.sawDone ? "done" : "error";
+  const meta = job.sawDone ? (job.doneMeta || {}) : { note: job.errNote || (job.stopped ? "stopped" : "ended without done") };
+  try { jobStore.finish(job.id, status, meta); } catch {}
   for (const l of [...job.listeners]) { try { l(null); } catch {} }   // null = end-of-stream
   job.listeners.length = 0;
 }
+// Job authorization: jobs are identity-scoped from birth. In single-tenant mode everyone resolves
+// to the owner so this always passes; in multi-tenant mode a caller can only see their OWN jobs —
+// a mismatch answers exactly like a nonexistent job (never leak that someone else's job id exists).
+const jobAuthOk = (req, jobEmail) => {
+  if (!MULTI_TENANT) return true;
+  const T = resolveTenant(req);
+  const caller = String(T && T.email || "").trim().toLowerCase();
+  return !!caller && caller === String(jobEmail || "").trim().toLowerCase();
+};
 // POST /chat/stop {jobId} — the Stop button. Fires the turn's AbortController (in-flight tools +
 // model call); the /chat handler then appends its stopped tail to the buffer and seals the job.
+// A job that only survives in the durable store is by definition already terminal -> alreadyDone.
 async function handleChatStop(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   const b = await readJsonBody(req);
   const job = b && CHAT_JOBS.get(String(b.jobId || ""));
-  if (!job) return json(404, { error: "unknown or expired job" });
+  if (!job) {
+    const row = b && jobStore.get(String(b.jobId || ""));
+    if (row && jobAuthOk(req, row.email)) return json(200, { ok: true, alreadyDone: true, stopped: row.status === "stopped" });
+    return json(404, { error: "unknown or expired job" });
+  }
+  if (!jobAuthOk(req, job.email)) return json(404, { error: "unknown or expired job" });
   if (job.done) return json(200, { ok: true, alreadyDone: true, stopped: job.stopped });
   job.stopped = true;
   try { job.stop(); } catch {}
   console.log(`[dominion-ai] /chat/stop -> ${job.id}`);
   return json(200, { ok: true });
 }
-// GET /chat/attach?job=<id>&from=<n> — SSE: replay events[n..] immediately, then live-tail new
-// events until the job ends. Unknown/expired job -> one {type:"gone"} event, then end.
+/*
+ * POST /chat/fire-alarm — the master kill. Fred, 2026-07-19: "I want to be able to cut its legs off."
+ *
+ * Stop handles the turn you are looking at. The Fire Alarm handles everything at once: every live
+ * chat turn, and every job running on every machine, with a process-tree kill on the node side.
+ *
+ * SCOPE IS THE WHOLE POINT. The owner pulls the entire board. A guest pulls only their own turns and
+ * their own node, so one guest can never stop Fred's work or another guest's. Available to everyone
+ * because an emergency brake that only one person can reach is not an emergency brake.
+ */
+async function handleFireAlarm(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const T = resolveTenant(req);
+  if (!T || T.role === "anon") return json(401, { error: "no_identity" });
+
+  let turns = 0;
+  for (const j of CHAT_JOBS.values()) {
+    if (j.done) continue;
+    if (!T.isOwner && j.uid !== T.uid) continue;    // a guest only ever pulls their own
+    j.stopped = true;
+    try { j.stop(); } catch {}
+    turns++;
+  }
+
+  const scope = T.isOwner ? "owner" : "user:" + T.uid;
+  let machines = { killed: 0, nodes: [] };
+  try { machines = handsHub.cancelAll({ scope, reason: "fire alarm" }); } catch (e) { console.warn("[dominion-ai] fire-alarm cancelAll failed: " + (e && e.message)); }
+
+  console.log(`[dominion-ai] FIRE ALARM by ${T.isOwner ? "owner" : T.uid} -> ${turns} turn(s), ${machines.killed} machine job(s) on [${(machines.nodes || []).join(", ")}]`);
+  return json(200, { ok: true, turns, machineJobs: machines.killed, nodes: machines.nodes, scope: T.isOwner ? "everything" : "your own sessions and machine" });
+}
+
+// GET /chat/attach?job=<id>&from=<n> — SSE catch-up + live-tail, in one of three modes:
+//   1. RAM job, cursor within the tail: exact index-for-index replay, then live-tail (the fast
+//      path every quick reconnect takes — byte-identical to the original contract).
+//   2. RAM job, cursor fell off the tail (a very long run): {type:"reset"} tells the client to
+//      wipe its partial, then a COMPACTED replay from the durable store (token runs come back as
+//      single fat deltas — the client concatenates, so the text reconstitutes exactly), then the
+//      not-yet-flushed pending events, then {type:"cursor",seq} to resync the resume index, then
+//      live-tail. Replay cost is O(answer text), never O(token deltas) — the 18-hour-run answer.
+//   3. No RAM record (server restarted, or the finished-window aged out): compacted replay from
+//      the durable store alone -> cursor -> end (rows there are always terminal: orphan sweep).
+// Unknown/foreign job -> one {type:"gone"} event, then end.
 function handleChatAttach(req, res, u) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
   const write = (o) => { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
-  const job = CHAT_JOBS.get(String(u.searchParams.get("job") || ""));
-  if (!job) { write({ type: "gone" }); return res.end(); }
+  const id = String(u.searchParams.get("job") || "");
   const from = Math.max(0, Math.floor(Number(u.searchParams.get("from")) || 0));
-  for (const ev of job.events.slice(from)) write(ev);   // catch-up replay (same tick as the subscribe — no gap)
+  const job = CHAT_JOBS.get(id);
+  // Replay stored rows starting at `from`; if `from` lands inside a coalesced row, fall back to
+  // reset + everything (the client rebuilds from zero — correct, just a bigger catch-up).
+  const writeDbReplay = () => {
+    let rows = from > 0 ? jobStore.replayRows(id, from) : jobStore.replayRows(id, 0);
+    if (from > 0 && !(rows.length && rows[0].seq === from)) { write({ type: "reset" }); rows = jobStore.replayRows(id, 0); }
+    for (const r of rows) write(r.ev);
+  };
+  if (!job) {
+    const row = jobStore.get(id);
+    if (!row || !jobAuthOk(req, row.email)) { write({ type: "gone" }); return res.end(); }
+    try { writeDbReplay(); } catch { write({ type: "gone" }); return res.end(); }
+    write({ type: "cursor", seq: row.eventCount });
+    return res.end();
+  }
+  if (!jobAuthOk(req, job.email)) { write({ type: "gone" }); return res.end(); }
+  if (from >= job.tailStart) {
+    for (const ev of job.tail.slice(from - job.tailStart)) write(ev);   // same tick as the subscribe — no gap
+  } else {
+    // The cursor predates the RAM tail: compacted DB catch-up + the unflushed pending batch (both
+    // read in this same tick, so together they cover exactly [0, eventCount) with no gap/overlap).
+    write({ type: "reset" });
+    try { for (const r of jobStore.replayRows(id, 0)) write(r.ev); } catch {}
+    for (const r of coalesceEvents(job.pending, 0)) write(r.ev);
+    write({ type: "cursor", seq: job.eventCount });
+  }
   if (job.done) return res.end();
   const listener = (ev) => { if (ev === null) { try { res.end(); } catch {} } else write(ev); };
   job.listeners.push(listener);
   res.on("close", () => { const i = job.listeners.indexOf(listener); if (i >= 0) job.listeners.splice(i, 1); });
+}
+
+// GET /chat/jobs[?chatId=] — the caller's own jobs (running + terminal-uncollected are the ones
+// the client acts on: reattach the running ones, deliver-on-return the finished ones). Merges the
+// live RAM state over the durable rows so a just-started job's status is fresh. Identity-scoped.
+function handleChatJobs(req, res, u) {
+  const T = resolveTenant(req);
+  const chatId = String(u.searchParams.get("chatId") || "");
+  let rows = [];
+  try { rows = jobStore.listFor(T.email, { chatId, limit: 200 }); } catch {}
+  const jobs = rows.map((r) => {
+    const live = CHAT_JOBS.get(r.id);
+    return { id: r.id, chatId: r.chatId, status: live && !live.done ? "running" : r.status,
+             startedAt: r.startedAt, endedAt: r.endedAt, model: r.model, mode: r.mode,
+             textChars: live ? live.text.length : r.textChars, collected: !!r.collectedAt };
+  });
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  res.end(JSON.stringify({ jobs }));
+}
+// GET /chat/result?job=<id> — the assembled result of a finished background run, so the client can
+// merge it into a non-visible chat WITHOUT opening an SSE stream. Identity-scoped.
+function handleChatResult(req, res, u) {
+  const id = String(u.searchParams.get("job") || "");
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  let r = null; try { r = jobStore.resultFor(id); } catch {}
+  if (!r || !jobAuthOk(req, (jobStore.get(id) || {}).email)) return json(404, { error: "unknown or expired job" });
+  return json(200, r);
+}
+// POST /chat/collect {jobId} — the client acknowledges it has merged this job's result into its
+// local history. Idempotent; starts the (short) collected-retention clock. Identity-scoped.
+async function handleChatCollect(req, res) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const b = await readJsonBody(req);
+  const id = b && String(b.jobId || "");
+  const row = id && jobStore.get(id);
+  if (!row || !jobAuthOk(req, row.email)) return json(404, { error: "unknown or expired job" });
+  try { jobStore.collect(id); } catch {}
+  return json(200, { ok: true });
 }
 
 // ---- Dominion work orders (deck orchestrator) -------------------------------------------------
@@ -2886,17 +3087,15 @@ function dominionWorkOrderStatus(woId) {
   const wo = WORK_ORDERS.get(String(woId || "").trim());
   if (!wo) return { error: "no work order with that id (it may predate the last restart)" };
   const job = CHAT_JOBS.get(wo.jobId);
-  if (!job) return { model: wo.model, done: true, expired: true, note: "The job buffer expired; the full transcript is in the chat log under " + wo.chatId + "." };
-  let text = "", meta = null, errors = [];
-  const tools = [];
-  for (const ev of job.events) {
-    if (ev.type === "token" && typeof ev.delta === "string") text += ev.delta;
-    else if (ev.type === "tool" && ev.status && ev.status !== "run") tools.push(ev.name + ":" + ev.status);
-    else if (ev.type === "error") errors.push(String(ev.message || ev.code || "error"));
-    else if (ev.type === "done") meta = ev.meta || null;
-  }
-  return { model: wo.model, done: job.done, runningForSec: Math.round((Date.now() - wo.startedAt) / 1000),
-    tools, errors, costUsd: meta && meta.costUsd, text: text.slice(-6000) };
+  // The durable store always has the structural trail (tools/errors/meta flush immediately); a
+  // live RAM job overrides with its fresher accumulated text (the store can lag one token batch).
+  let r = null;
+  try { r = jobStore.resultFor(wo.jobId); } catch {}
+  if (!job && !r) return { model: wo.model, done: true, expired: true, note: "The job record expired; the full transcript is in the chat log under " + wo.chatId + "." };
+  const text = job ? job.text : (r ? r.text : "");
+  const meta = job && job.doneMeta ? job.doneMeta : (r && r.meta) || null;
+  return { model: wo.model, done: job ? job.done : true, runningForSec: Math.round((Date.now() - wo.startedAt) / 1000),
+    tools: (r && r.tools) || [], errors: (r && r.errors) || [], costUsd: meta && meta.costUsd, text: text.slice(-6000) };
 }
 
 async function handleChat(req, res) {
@@ -2913,10 +3112,14 @@ async function handleChat(req, res) {
   sanitizeChatAttachments(history);
 
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
-  // Durable turn: every SSE event is ALSO buffered in the job so a suspended phone can reattach
-  // (/chat/attach) and catch up mid-stream or after the fact. Generation runs to completion
-  // regardless of the client connection — writes to a dead res are harmless (try/catch below).
-  const job = createChatJob();
+  // Resolve identity BEFORE the job exists so the durable row is scoped to its owner from birth
+  // (attach/stop/list authorization). Synchronous; the gates below reuse this same T.
+  const T = resolveTenant(req);
+  // Durable turn: every SSE event is ALSO buffered in the job (RAM tail + SQLite batches) so a
+  // suspended phone can reattach (/chat/attach) and catch up mid-stream, after the fact, or even
+  // after a server restart. Generation runs to completion regardless of the client connection —
+  // writes to a dead res are harmless (try/catch below).
+  const job = createChatJob(T);
   if (req.onJob) { try { req.onJob(job); } catch {} }   // internal work orders track their job handle
   const sse = (o) => { jobEmit(job, o); try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
   // `aborted` = EXPLICIT stop only (POST /chat/stop). A client disconnect no longer aborts the turn.
@@ -2967,10 +3170,9 @@ async function handleChat(req, res) {
       return endStream();
     }
   }
-  // Multi-tenant: resolve who is asking. Owner short-circuits to the globals (path unchanged); when
-  // MULTI_TENANT is off, this is always the owner. Refuse anon / paused / locked, and refuse the
-  // local model for non-owners (owner-only; never substituted).
-  const T = resolveTenant(req);
+  // Multi-tenant gates on the identity resolved above (`T`). Owner short-circuits to the globals
+  // (path unchanged); when MULTI_TENANT is off, this is always the owner. Refuse anon / paused /
+  // locked, and refuse the local model for non-owners (owner-only; never substituted).
   if (T.role === "anon") { sse({ type: "error", code: "no_identity", message: "Sign in to use Dominion." }); sse({ type: "stopped" }); return endStream(); }
   if (T.status === "paused" || T.status === "locked") {
     sse({ type: "error", code: "account_" + T.status, message: T.status === "locked" ? "Account locked — top off credits to continue." : "Account paused — the monthly cap was reached. Ask Fred to reset it." });
@@ -3004,6 +3206,15 @@ async function handleChat(req, res) {
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
   job.chatId = chatId;
+  try { jobStore.bindMeta(job.id, { chatId }); } catch {}
+  // Long-run concurrency cap (replaces the old buffer cap): a user may have several turns generating
+  // in parallel across chats, but not unbounded — each ties up a model call + the interactive lane.
+  // This job's own row already counts as running, so compare against CAP (>, not >=). Owner exempt:
+  // the deck orchestrator and work orders legitimately fan out. Refuse honestly, never silently drop.
+  if (!T.isOwner && jobStore.runningCountFor(T.email) > CHATJOBS_MAX_RUNNING) {
+    sse({ type: "error", code: "too_many_jobs", message: `You already have ${CHATJOBS_MAX_RUNNING} runs in flight — let one finish or stop it before starting another.` });
+    sse({ type: "stopped", reason: "too_many_jobs" }); return endStream();
+  }
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
 
@@ -3092,7 +3303,43 @@ async function handleChat(req, res) {
   // Phase B: only CHATTING-bench cloud models are barred from tools; doing-bench models keep
   // whatever consumeNeeds decided (chat-only turns still skip the schemas to save tokens).
   if (cloudModel && !isToolCapable(cloudModel)) { attachTools = false; }
+
+  /*
+   * WILDFIRE (Fred, 2026-07-19) — the owner's broad-authority arming switch.
+   *
+   * Deliberately SEPARATE from Forge Mode. Forge Mode stays exactly as it was, for everyone, on
+   * every model, because Fred uses it to experiment with small models and it is a major part of the
+   * guest product. Wildfire is his alone: it arms the full surface for a model on the roster.
+   *
+   * Three outcomes, all of them loud rather than silent, because silent tool-stripping is the exact
+   * failure that made him think the app was never wired up:
+   *   armed + rostered model  -> tools forced ON even in fast mode
+   *   armed + wrong model     -> refuse to arm, and name the models that qualify
+   *   not armed + rostered    -> a nudge, only when he actually asked for machine work
+   */
+  const wildfireAsked = input.wildfire === true;
+  const wildfireEligible = !!cloudModel && isBroadCapable(cloudModel);
+  let wildfireOn = false, wildfireNotice = null;
+
+  if (wildfireAsked && !T.isOwner) {
+    // Guests can never arm it, whatever they post. The wall is server-side, not a hidden button.
+    wildfireNotice = { kind: "denied", text: "Wildfire is not available on this account." };
+    recordDenial({ source: "app", tool: "wildfire", reason: "non-owner attempted to arm Wildfire", args: { model: cloudModel }, model: cloudModel, user: T.uid, role: T.role });
+  } else if (wildfireAsked && T.isOwner) {
+    if (!wildfireEligible) {
+      wildfireNotice = { kind: "blocked", text: `Wildfire refused to arm: ${cloudModel ? "that model is not on the broad-authority roster" : "Wildfire needs a cloud model"}. Models that qualify: ${broadCapableNames().join(", ")}.` };
+      attachTools = false;
+    } else {
+      wildfireOn = true;
+      attachTools = true;   // armed means armed, even on a fast turn
+    }
+  } else if (T.isOwner && wildfireEligible && !wildfireAsked && MACHINE_INTENT_RE.test(lastUserText)) {
+    wildfireNotice = { kind: "nudge", text: "You forgot to turn on Wildfire, dummy. That model can do this job, but it is not armed for broad machine work this turn." };
+  }
+  opts.wildfire = wildfireOn;
+
   opts.noTools = !attachTools;
+  if (wildfireNotice) sse({ type: "wildfire", ...wildfireNotice, armed: wildfireOn });
   // D1: the full routing decision surfaces immediately (spec routing JSON shape)...
   sse({ type: "route", model, mode, route: routeOf(tier, mode), reason, confidence: routeConfidence,
         needs: { tools: attachTools, memory: needs.memory, retrieval: !skipRetrieval, mentor_review: needs.mentorReview }, privacyRisk });
@@ -3117,8 +3364,22 @@ async function handleChat(req, res) {
     const forgeOn = forgeEnabled && (() => { try { return forgeStore.status(T.uid).enabled; } catch { return false; } })();
     if (forgeOn) {
       forgeExtra = FORGE_TOOLS;
-      reqCtx.hands = { dispatch: (tool, args) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000 }) };
+      reqCtx.hands = { dispatch: (tool, args, opts = {}) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000, ...opts, signal: ac.signal }) };
     }
+  }
+  /*
+   * Stop has to reach the machine. Every hands dispatch made during THIS turn carries the turn's
+   * abort signal, so pressing Stop kills the running command on Fred's computer instead of letting
+   * it finish while the UI pretends it stopped. Owners inherit CTX.hands, so it gets wrapped here
+   * rather than at the base, which stays signal-free for background jobs like the corpus backup.
+   */
+  // Carry identity into the local path so its tool payload is filtered like the cloud path's.
+  // MUST sit after forgeExtra is resolved above: reading it earlier is a temporal dead zone and
+  // throws on every single turn. That shipped on 2026-07-19 and is why this line is down here now.
+  opts.role = T.role; opts.forgeExtra = forgeExtra;
+  if (reqCtx.hands === (T.ctxBase || CTX).hands && reqCtx.hands) {
+    const base = reqCtx.hands;
+    reqCtx.hands = { ...base, dispatch: (tool, args, opts = {}) => base.dispatch(tool, args, { ...opts, signal: ac.signal }) };
   }
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
   working("reading context");   // retrieval (embed call + vec cache) can be slow on a cold box
@@ -3258,8 +3519,13 @@ async function handleChat(req, res) {
       // + five connectors = 198 defs, and every OpenAI-direct tool turn 400'd on the length.)
       if (cloudTools && cloudTools.length > TOOL_CAP) {
         const dropped = cloudTools.length - TOOL_CAP;
+        const droppedNames = cloudTools.slice(TOOL_CAP).map((d) => d && d.function && d.function.name).filter(Boolean);
         cloudTools = cloudTools.slice(0, TOOL_CAP);
         console.log(`[dominion-ai] tool defs: offering ${TOOL_CAP} of ${TOOL_CAP + dropped} to ${cloudModel} (${dropped} connector tool(s) past the provider cap dropped)`);
+        // Say it OUT LOUD in the UI. A console line nobody reads is why Fred spent months believing
+        // connectors were never wired: the tools were silently shed and the answer looked normal.
+        sse({ type: "tools_capped", offered: TOOL_CAP, dropped, names: droppedNames.slice(0, 12),
+              text: `${dropped} connector tool(s) did not fit this model's ${TOOL_CAP}-tool limit and were not offered this turn. Core machine tools were kept.` });
       }
       let inTokTotal = 0, outTokTotal = 0, costTotal = 0, sawCost = false, sawTok = false;
       // PROMPT-CACHE VISIBILITY (Fred, 2026-07-19). Every model in the catalog prices cache READS
@@ -3328,7 +3594,11 @@ async function handleChat(req, res) {
         // no endpoint supports tool calling, answer anyway without tools and say so, instead of erroring
         // the whole turn. The catalog is audited (tools_audit.mjs), so this should stay dormant.
         if (!or.ok && toolsThisRound && /tool|function.?call/i.test(String(or.error || "")) && /support|endpoint|not available/i.test(String(or.error || ""))) {
-          sse({ type: "ctx", text: "This model's host can't run tools right now — answering without them." });
+          // Distinct event, not a ctx line. This is the failure mode that most looks like success:
+          // the provider rejects the tool payload, we answer without hands, and the reply reads
+          // perfectly normal while having touched nothing. The UI must badge it, not bury it.
+          sse({ type: "tools_unavailable", model: cloudModel,
+                text: "This model's host refused the tool payload, so this answer was written WITHOUT machine access. Nothing was read or changed." });
           cloudTools = null;
           or = await cloudChatStream(cloudModel, messages,
             { temperature: opts.temperature, num_predict: outCap, signal: ac.signal, tools: null, toolChoice: "none" },
@@ -3373,6 +3643,7 @@ async function handleChat(req, res) {
             const guard = assertNotProtected(name, args);
             if (!guard.ok) {
               life.push("blocked", { reason: guard.reason });
+              recordDenial({ source: "app", tool: name, reason: guard.reason, args, model: cloudModel, user: T && (T.uid || (T.isOwner ? "owner" : null)), role: T && T.role });
               sse({ type: "tool", name, runId, cls, status: "blocked", preview: guard.reason });
               await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "blocked", reason: guard.reason, states: life.states, input: inPrev, chatId, model: cloudModel });
               toolMsg(`BLOCKED: this ${guard.reason}. I cannot do that.`);
@@ -3389,6 +3660,29 @@ async function handleChat(req, res) {
               await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "blocked", reason: "orchestrator wall", states: life.states, input: inPrev, chatId, model: cloudModel });
               toolMsg(`BLOCKED: ${name} is not available in this session. Building happens through work orders, never directly here.`);
               toolSummaries.push(name + " · blocked (wall)");
+              continue;
+            }
+
+            /*
+             * 1a-bis) ROLE WALL, RUNTIME SIDE. Added 2026-07-19.
+             *
+             * filterToolDefs() strips owner-only tools from the SCHEMA a non-owner is shown, and
+             * until now that was the whole wall: presentation only. toolAllowedFor() existed in
+             * tenantstores.mjs and was never imported here, so a guest session that emitted a call
+             * to forge_run, desktop_control or browser_control by hallucination, replay, or a
+             * crafted request would have sailed straight through to execution.
+             *
+             * The orchestrator wall directly above already re-checks at runtime for exactly this
+             * hazard. The role wall simply never got its other half. It has one now, and
+             * guest_wall_test.mjs fails the build if it ever regresses.
+             */
+            if (!toolAllowedFor(T.role, name, forgeExtra)) {
+              life.push("blocked", { reason: "role wall" });
+              recordDenial({ source: "role-wall", tool: name, reason: "non-owner called an owner-only tool", args, model: cloudModel, user: T.uid, role: T.role });
+              sse({ type: "tool", name, runId, cls, status: "blocked", preview: "not available on this account" });
+              await logToolRun({ ts: callStartedAt, runId, name, category: meta.category, cls, status: "blocked", reason: "role wall", states: life.states, input: inPrev, chatId, model: cloudModel });
+              toolMsg(`BLOCKED: ${name} is not available on this account.`);
+              toolSummaries.push(name + " · blocked (role)");
               continue;
             }
 
@@ -3589,10 +3883,25 @@ async function handleChat(req, res) {
           const guard = assertNotProtected(name, args);
           if (!guard.ok) {
             life.push("blocked", { reason: guard.reason });
+            recordDenial({ source: "app-local", tool: name, reason: guard.reason, args, model, user: T && (T.uid || (T.isOwner ? "owner" : null)), role: T && T.role });
             sse({ type: "tool", name, runId, cls, status: "blocked", preview: guard.reason });
             await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "blocked", reason: guard.reason, states: life.states, input: inPrev, chatId, model });
             messages.push({ role: "tool", tool_name: name, content: `BLOCKED: this ${guard.reason}. I cannot do that.` });
             toolSummaries.push(name + " · blocked");
+            continue;
+          }
+
+          // 1a-bis) ROLE WALL, runtime side, local path. Non-owners are redirected off the local
+          // model upstream (see defaultModelFor), so this is defence in depth rather than a live
+          // hole today. It is here because "no gaps" has to mean every path, not the ones we
+          // happen to remember. The local tool payload is filtered to match (see ollamaChat).
+          if (!toolAllowedFor(T.role, name, forgeExtra)) {
+            life.push("blocked", { reason: "role wall" });
+            recordDenial({ source: "role-wall-local", tool: name, reason: "non-owner called an owner-only tool on the local path", args, model, user: T && T.uid, role: T && T.role });
+            sse({ type: "tool", name, runId, cls, status: "blocked", preview: "not available on this account" });
+            await logToolRun({ ts: startedAt, runId, name, category: meta.category, cls, status: "blocked", reason: "role wall", states: life.states, input: inPrev, chatId, model });
+            messages.push({ role: "tool", tool_name: name, content: `BLOCKED: ${name} is not available on this account.` });
+            toolSummaries.push(name + " · blocked (role)");
             continue;
           }
 
@@ -3807,7 +4116,18 @@ const server = http.createServer(async (req, res) => {
       const payload = catalogPayload();
       // Tenant-aware default: the owner lands on the global default; everyone else lands on the tenant
       // default (Hermes 4 70B) so the picker preselects it for them.
-      try { payload.default = defaultModelFor(resolveTenant(req).isOwner); } catch {}
+      let isOwnerHere = false;
+      try { const TT = resolveTenant(req); isOwnerHere = !!TT.isOwner; payload.default = defaultModelFor(isOwnerHere); } catch {}
+      /*
+       * The Wildfire star is OWNER-ONLY (Fred, 2026-07-19: "in my version ONLY"). Strip the flag
+       * from a guest's payload rather than hiding it in CSS, so a guest's picker has no idea the
+       * roster exists. Wildfire itself is refused server-side regardless; this is about the UI not
+       * advertising a control they cannot use.
+       */
+      payload.wildfire = isOwnerHere;
+      if (!isOwnerHere) {
+        for (const g of payload.groups || []) g.models = (g.models || []).map(({ broadCapable, ...rest }) => rest);
+      }
       payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY };
       // Phase 2: tell the UI the privacy modes + which providers each mode permits, so the picker can
       // filter and the switch can render. The server ALSO enforces (privacy.mjs) — this is display only.
@@ -3948,12 +4268,36 @@ const server = http.createServer(async (req, res) => {
 
     if (path === "/hands/stream" && req.method === "GET") return handsHub.handleStream(req, res, u);
     if (path === "/hands/result" && req.method === "POST") return handsHub.handleResult(req, res, await readJsonBody(req));
+    if (path === "/hands/chunk" && req.method === "POST") return handsHub.handleChunk(req, res, await readJsonBody(req));
+    /*
+     * Local-tier self-check (fix C). Bearer-gated (HANDS_TOKEN), so it proves the server->node->Ollama
+     * path through the SAME ollamaChat()/embedText() the app uses, without faking owner auth under CF
+     * Access enforce. Also a standing probe that Qwen is reachable from the cloud.
+     */
+    if (path === "/hands/selftest-ollama" && req.method === "GET") {
+      if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }
+      const t0 = Date.now();
+      let chat = null, embed = null, chatErr = null;
+      try { chat = await ollamaChat(LIGHT_MODEL, [{ role: "user", content: "Reply with exactly: ALIVE" }], { noTools: true, think: false, num_predict: 12 }); }
+      catch (e) { chatErr = String(e && e.message || e); }
+      try { embed = await embedText("probe"); } catch { /* embed reported via null below */ }
+      const content = chat && chat.message && chat.message.content ? String(chat.message.content).trim() : null;
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({
+        ok: !!content, viaHands: OLLAMA_VIA_HANDS || "(direct http)", ms: Date.now() - t0,
+        chat: content, chatErr, embedDim: Array.isArray(embed) ? embed.length : 0,
+      }));
+    }
     if (path === "/hands/run" && req.method === "POST") return handsHub.handleRun(req, res, await readJsonBody(req));
     if (path === "/hands/nodes" && req.method === "GET") return handsHub.handleNodes(req, res);
 
     if (path === "/chat" && req.method === "POST") return handleChat(req, res);
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
+    if (path === "/chat/fire-alarm" && req.method === "POST") return handleFireAlarm(req, res);
     if (path === "/chat/attach" && req.method === "GET") return handleChatAttach(req, res, u);
+    if (path === "/chat/jobs" && req.method === "GET") return handleChatJobs(req, res, u);
+    if (path === "/chat/result" && req.method === "GET") return handleChatResult(req, res, u);
+    if (path === "/chat/collect" && req.method === "POST") return handleChatCollect(req, res);
     if (path === "/memory" || path.startsWith("/memory/")) return handleMemory(req, res, u);
     if (path === "/toolruns" && req.method === "GET") return handleToolRuns(req, res);
     if (path === "/tool-confirm" && req.method === "POST") return handleToolConfirm(req, res);
@@ -4008,6 +4352,11 @@ server.listen(PORT, HOST, () => {
   const ms = memory.stats();
   console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  gating=${ms.gating}${ms.gatedLax ? " (" + ms.gatedLax + " lax-auto-approved)" : ""}${ms.unverified ? " · " + ms.unverified + " unverified mentor claim(s) pending" : ""}  ·  scope-filtered retrieval  ·  vectors=${EMBED_MODEL} (${ms.embedded} embedded)  ·  dir=${MEMORY_DIR}`);
   console.log(`[dominion-ai] chatlog: ${chatlog.stats().chats} conversation(s) indexed  ·  episodic summaries via /memory/summarize-session`);
+  const js = jobStore.stats();
+  console.log(`[dominion-ai] chatjobs: durable (${JSON.stringify(js.byStatus)})  ·  ${js.uncollected} uncollected result(s) waiting  ·  ${jobStore.orphanedAtBoot} orphaned this boot  ·  max-running/user=${CHATJOBS_MAX_RUNNING}  ·  survives restart+redeploy`);
+  // Retention sweep: running jobs are never touched; collected results shed events after
+  // CHATJOBS_COLLECTED_TTL_MS, uncollected after CHATJOBS_UNCOLLECTED_TTL_MS (0 = keep forever).
+  setInterval(() => { try { jobStore.gcRetention({ collectedTtlMs: CHATJOBS_COLLECTED_TTL_MS, uncollectedTtlMs: CHATJOBS_UNCOLLECTED_TTL_MS }); } catch {} }, 3600000).unref?.();
   console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed (incl. 6 formatting on the light model)  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON (interactive)" : "auto-approve (LAX, recorded)"}  ·  9-state lifecycle persisted  ·  ${flywheel.stats().activeToolOverlays} active description overlay(s)  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl (${toolRunTail.length} reloaded)`);
   const as = artifacts.stats();
   console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  native exports: docx/pdf/xlsx/csv (Forge = docx/pdf fallback only)  ·  export gate: ${EXPORT_SAFETY_LAX ? "LAX (warn+proceed, sensitive blocks)" : "SPEC (confirm on warnings)"}  ·  9 review triggers server-side  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review|duplicate|transform]`);

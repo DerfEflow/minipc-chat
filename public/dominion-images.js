@@ -36,6 +36,7 @@
 
   const state = {
     open: false,
+    parked: false,            // the glass door: pane shoved aside, backdrop exposed
     quality: "medium",
     aspect: "square",
     batch: false,
@@ -186,8 +187,18 @@
   <div class="scene" aria-hidden="true">
     <div class="scene-grid"></div>
     <div class="scene-reactor"></div>
+    <div class="scene-furnace-edge furnace-left"></div>
+    <div class="scene-furnace-edge furnace-right"></div>
+    <div class="scene-smoke"><i></i><i></i><i></i></div>
     <div class="scene-sparks"><i></i><i></i><i></i><i></i><i></i><i></i></div>
   </div>
+
+  <!-- The glass-door "SLIDE" handle (park the pane aside to reveal the backdrop) was REMOVED
+       2026-07-20: shipped unverified, it hid the entire Forge Images UI behind decorative
+       artwork and the only way back was a tiny edge tab, which read as a freeze. It is a purely
+       cosmetic flourish with no functional value, so it is gone rather than half-fixed. The park
+       CSS/JS below is now inert (resetDoor's null checks keep it safe). Rebuild with real motion
+       verification if it is ever wanted back. -->
 
   <div class="app-shell">
     <header class="command-rail">
@@ -216,15 +227,18 @@
     <main class="forge-layout">
       <aside class="control-deck glass-panel">
         <div class="panel-specular" aria-hidden="true"></div>
+        <div class="furnace-seam" aria-hidden="true"><i></i><i></i><i></i></div>
         <section class="deck-section directive-section">
           <div class="section-heading">
             <div><span>01</span><p>CREATIVE DIRECTIVE</p></div>
-            <small id="prompt-count">0 / ${PROMPT_CAP}</small>
+            <div class="section-heading-tools">
+              <button type="button" id="dfi-refine" aria-label="Enhance prompt"><svg viewBox="0 0 24 24"><path d="m12 3 1.4 4.2L18 9l-4.6 1.8L12 15l-1.4-4.2L6 9l4.6-1.8L12 3ZM18.5 15l.7 2.1 2.3.9-2.3.9-.7 2.1-.7-2.1-2.3-.9 2.3-.9.7-2.1Z"/></svg><span>Refine</span></button>
+              <small id="prompt-count">0 / ${PROMPT_CAP}</small>
+            </div>
           </div>
           <div class="prompt-frame">
             <textarea id="prompt" maxlength="${PROMPT_CAP}" aria-label="Image prompt" placeholder="Describe the vision to forge…"></textarea>
             <div class="prompt-tools">
-              <button type="button" id="dfi-refine" aria-label="Enhance prompt"><svg viewBox="0 0 24 24"><path d="m12 3 1.4 4.2L18 9l-4.6 1.8L12 15l-1.4-4.2L6 9l4.6-1.8L12 3ZM18.5 15l.7 2.1 2.3.9-2.3.9-.7 2.1-.7-2.1-2.3-.9 2.3-.9.7-2.1Z"/></svg><span>Refine</span></button>
               <button type="button" id="dfi-clear" aria-label="Clear prompt"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button>
             </div>
           </div>
@@ -284,6 +298,7 @@
 
       <section class="vault glass-panel">
         <div class="panel-specular" aria-hidden="true"></div>
+        <div class="vault-caustic" aria-hidden="true"></div>
         <header class="vault-header">
           <div>
             <p class="eyebrow"><span class="pulse-dot"></span> LOCAL CREATION VAULT</p>
@@ -321,6 +336,9 @@
   // ---------- wiring ----------
   function wirePanel(root) {
     $$(".back-button, .close-button", root).forEach((b) => b.addEventListener("click", closePanel));
+
+    const doorHandle = $("#dfi-door-handle", root);
+    if (doorHandle) doorHandle.addEventListener("click", () => setDoor(!state.parked));
 
     $$("[data-quality]", root).forEach((b) => b.addEventListener("click", () => {
       state.quality = b.dataset.quality;
@@ -698,6 +716,9 @@
     $("#dfi-vault-title").textContent = recs.length ? "LOCAL VAULT HEALTHY" : "LOCAL VAULT";
     $("#dfi-vault-stats").textContent = `${recs.length} creation${recs.length === 1 ? "" : "s"}`;
     updateStorage(recs.length);
+    // Cards are rebuilt from scratch here, so their reflections start at the default position.
+    // Seed them now rather than leaving every card identically lit until the next scroll.
+    updateOptics();
   }
   const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : "");
   async function updateStorage(count) {
@@ -748,6 +769,109 @@
     $("#dfi-root").append(scrim);
   }
 
+  // ---------- the glass door (park + return) ----------
+  // A second motion on top of open/close: this shoves the whole pane to the right and leaves the
+  // surface behind it exposed, then pulls it back. Open/close moves #dfi-root; the door moves
+  // .app-shell inside it, so the two never fight over the same transform.
+  function setDoor(parked) {
+    const handle = $("#dfi-door-handle");
+    if (!handle || !state.open) return;
+    if (document.body.classList.contains("dfi-door-moving")) return;   // ignore taps mid-travel
+    state.parked = parked;
+    document.body.classList.add("dfi-door-moving");
+    document.body.classList.toggle("dfi-parked", parked);
+    handle.setAttribute("aria-expanded", String(!parked));
+    handle.setAttribute("aria-label", parked
+      ? "Slide the Forge Images pane back into view"
+      : "Slide the Forge Images pane aside");
+
+    // transitionend is the accurate signal but it is not guaranteed: it never fires when reduced
+    // motion zeroes the duration, and it is dropped if the transition is interrupted. The timer
+    // is the floor, and `done` keeps whichever arrives first from being undone by the other.
+    let done = false;
+    const settle = () => { if (done) return; done = true; document.body.classList.remove("dfi-door-moving"); };
+    const shell = $("#dfi-root .app-shell");
+    if (shell) {
+      // A parked pane is off-screen but still in the tab order, so a keyboard user would fall into
+      // controls they cannot see. inert takes the whole deck out of focus and hit-testing until it
+      // comes back.
+      shell.inert = parked;
+      shell.addEventListener("transitionend", settle, { once: true });
+    }
+    setTimeout(settle, 1100);
+  }
+  function resetDoor() {
+    state.parked = false;
+    document.body.classList.remove("dfi-parked", "dfi-door-moving");
+    const handle = $("#dfi-door-handle");
+    if (handle) {
+      handle.setAttribute("aria-expanded", "true");
+      handle.setAttribute("aria-label", "Slide the Forge Images pane aside");
+    }
+  }
+
+  // ---------- glass optics ----------
+  // Scroll moves each card's specular streak independently; the pointer moves the vault's caustic.
+  // Both only write CSS custom properties, so the compositor does the animating and this never
+  // touches layout. Bound on open and unbound on close: nothing runs while the panel is shut.
+  let opticsTimer = 0;
+  function updateOptics() {
+    opticsTimer = 0;
+    const root = $("#dfi-root");
+    if (!root) return;
+    // #dfi-root is the scroll container (overflow-y:auto), not the window, so the offset comes
+    // from scrollTop. Reading window.scrollY here would return a constant 0 and freeze the glare.
+    const scroll = root.scrollTop || 0;
+    const h = window.innerHeight || 1;
+    root.style.setProperty("--scroll-glare", scroll + "px");
+    $$(".creation-card", root).forEach((card, i) => {
+      const r = card.getBoundingClientRect();
+      const travel = ((r.top + r.height / 2) / h - 0.5) * 150;
+      card.style.setProperty("--card-glare-y", travel.toFixed(1) + "px");
+      card.style.setProperty("--card-glare-x", ((scroll * 0.085 + i * 19) % Math.max(180, r.width + 90)).toFixed(1) + "px");
+    });
+  }
+  const onOpticsScroll = () => { if (!opticsTimer) opticsTimer = setTimeout(updateOptics, 36); };
+  function onVaultPointer(e) {
+    const vault = $("#dfi-root .vault");
+    if (!vault) return;
+    const r = vault.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const x = Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100));
+    const y = Math.max(0, Math.min(100, ((e.clientY - r.top) / r.height) * 100));
+    vault.style.setProperty("--pointer-x", x.toFixed(1) + "%");
+    vault.style.setProperty("--pointer-y", y.toFixed(1) + "%");
+  }
+  function onVaultLeave() {
+    const vault = $("#dfi-root .vault");
+    if (!vault) return;
+    vault.style.setProperty("--pointer-x", "72%");
+    vault.style.setProperty("--pointer-y", "18%");
+  }
+  function bindOptics() {
+    const root = $("#dfi-root");
+    if (!root) return;
+    root.addEventListener("scroll", onOpticsScroll, { passive: true });
+    window.addEventListener("resize", onOpticsScroll, { passive: true });
+    const vault = $("#dfi-root .vault");
+    if (vault) {
+      vault.addEventListener("pointermove", onVaultPointer);
+      vault.addEventListener("pointerleave", onVaultLeave);
+    }
+    updateOptics();
+  }
+  function unbindOptics() {
+    const root = $("#dfi-root");
+    if (root) root.removeEventListener("scroll", onOpticsScroll);
+    window.removeEventListener("resize", onOpticsScroll);
+    const vault = $("#dfi-root .vault");
+    if (vault) {
+      vault.removeEventListener("pointermove", onVaultPointer);
+      vault.removeEventListener("pointerleave", onVaultLeave);
+    }
+    if (opticsTimer) { clearTimeout(opticsTimer); opticsTimer = 0; }
+  }
+
   // ---------- open/close (the slide) ----------
   function openPanel() {
     if (window.closeForgeDial) window.closeForgeDial();   // one reveal at a time
@@ -763,11 +887,19 @@
     refreshJobs();
     if (state.pollTimer) clearInterval(state.pollTimer);
     state.pollTimer = setInterval(() => { if (state.open) refreshJobs({ quiet: true }); }, 60000);
+    resetDoor();      // never reopen parked, even if a previous close was interrupted
+    bindOptics();
   }
   function closePanel() {
     state.open = false;
     document.body.classList.remove("dfi-open");
-    setTimeout(() => { if (!state.open) document.body.classList.remove("dfi-anim"); }, 500);
+    unbindOptics();
+    // Must outlast --dfi-slide-dur (.86s). This used to be 500ms against a 450ms slide; leaving it
+    // there after the retune would hit display:none mid-flight and make the pane vanish instead of
+    // leaving. If the slide duration changes again, this floor changes with it.
+    setTimeout(() => {
+      if (!state.open) { document.body.classList.remove("dfi-anim"); resetDoor(); }
+    }, 950);
     if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
   }
   async function refreshConfig() {

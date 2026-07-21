@@ -34,6 +34,7 @@ import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { initSnapshots, beforeMutation, listSnapshots, restoreSnapshot, journal } from "./snapshot.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const IS_WIN = process.platform === "win32";
@@ -115,6 +116,14 @@ const BROWSER_PROFILE = String(process.env.HANDS_BROWSER_PROFILE || join(HERE, "
 const SHOT_DIR = String(process.env.HANDS_SHOT_DIR || join(HERE, ".shots"));
 const DESKTOP_ON = String(process.env.HANDS_DESKTOP || "") === "1";
 
+// ---- reversibility: nothing mutates this machine without a snapshot first ----------------------
+// Fred's standing rule. See hands/snapshot.mjs for exactly what is and is not recoverable: file
+// writes are exact, shell commands get a git anchor when they touch a repo, everything is
+// journalled. Snapshots live off the node dir by default so a rollback of the node itself does
+// not take the snapshots with it.
+const SNAP_DIR = String(process.env.HANDS_SNAP_DIR || join(HERE, ".snapshots"));
+initSnapshots({ dir: SNAP_DIR });
+
 function norm(p) { const r = resolve(String(p || "")); return IS_WIN ? r.toLowerCase() : r; }
 function underAny(target, dirs) {
   const t = norm(target);
@@ -128,8 +137,21 @@ export function withinRoots(p) {
 }
 const refuse = (reason) => ({ ok: false, refused: true, reason });
 
+// ---- cancellation: Stop must cut the legs off, not wait politely ------------------------------
+// Every running shell is tracked by job id so a cancel event can reach it. Killing the immediate
+// child is not enough on Windows: PowerShell spawns its own children (npm, git, node), and killing
+// the parent orphans them. taskkill /T takes the whole tree.
+const RUNNING = new Map();   // jobId -> { child, cancelled }
+function killTree(child) {
+  if (!child || child.killed) return;
+  try {
+    if (IS_WIN) spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+    else { try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); } }
+  } catch { try { child.kill("SIGKILL"); } catch {} }
+}
+
 // ---- shell (PowerShell on Windows via -EncodedCommand — the machines.mjs quoting-proof trick) --
-function runShell(command, timeoutMs = 60000) {
+function runShell(command, timeoutMs = 60000, jobId = null) {
   return new Promise((res) => {
     const t0 = Date.now();
     // The child must never see the hands secret.
@@ -142,10 +164,17 @@ function runShell(command, timeoutMs = 60000) {
       cmd = "sh"; args = ["-c", String(command)];
     }
     let child;
-    try { child = spawn(cmd, args, { windowsHide: true, env }); }
+    try { child = spawn(cmd, args, { windowsHide: true, env, detached: !IS_WIN }); }
     catch (e) { return res({ ok: false, error: "could not launch shell: " + (e && e.message) }); }
+    const track = jobId ? { child, cancelled: false } : null;
+    if (jobId) RUNNING.set(jobId, track);
     let stdout = "", stderr = "", done = false;
-    const finish = (r) => { if (done) return; done = true; try { child.kill(); } catch {} res(r); };
+    const finish = (r) => {
+      if (done) return; done = true;
+      if (jobId) RUNNING.delete(jobId);
+      killTree(child);
+      res(track && track.cancelled ? { ...r, ok: false, cancelled: true, error: "stopped by the user" } : r);
+    };
     const cap = Math.min(Math.max(Number(timeoutMs) || 60000, 1000), 600000);
     const timer = setTimeout(() => finish({ ok: false, timedOut: true, code: -1, stdout: stdout.slice(0, 8000), stderr: stderr.slice(0, 2000), ms: Date.now() - t0 }), cap);
     child.stdout.on("data", (d) => (stdout += d));
@@ -156,10 +185,15 @@ function runShell(command, timeoutMs = 60000) {
 }
 
 // ---- the executor: one job in, one result out. Exported so tests hit it directly. -------------
-export async function executeJob(tool, args = {}) {
-  // Carve-outs first, on the raw args blob, for EVERY tool — same order as the tool bus.
-  const guard = assertNotProtected(args);
-  if (!guard.ok) return refuse(guard.reason);
+export async function executeJob(tool, args = {}, meta = {}) {
+  // Carve-outs first, on the raw args blob, for every tool that TOUCHES the machine. The Ollama
+  // passthrough (fix C, 2026-07-20) is exempt: its args are model I/O — chat messages and prompts —
+  // not filesystem paths. Scanning them would falsely refuse a legitimate question that merely
+  // mentions "D:\" or "backups", which is the model talking about a topic, not reaching a path.
+  if (!String(tool).startsWith("ollama_")) {
+    const guard = assertNotProtected(args);
+    if (!guard.ok) return refuse(guard.reason);
+  }
   try {
     switch (tool) {
       case "node_info":
@@ -202,9 +236,10 @@ export async function executeJob(tool, args = {}) {
         const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
         if (underAny(args.path, SELF_PROTECT)) return refuse("write under a self-protected dir (the live app / this node) — the box is the mission's fallback");
         const buf = args.base64 ? Buffer.from(String(args.content || ""), "base64") : Buffer.from(String(args.content ?? ""), "utf8");
+        const snap = beforeMutation("fs_write", args, { node: NODE_NAME });
         mkdirSync(dirname(resolve(args.path)), { recursive: true });
         writeFileSync(args.path, buf);
-        return { ok: true, path: args.path, bytes: buf.length };
+        return { ok: true, path: args.path, bytes: buf.length, snapshot: snap.id, snapshotMethod: snap.method };
       }
       case "fs_append": {
         // Chunked transfer: append a base64 chunk to a file. truncate:true starts a fresh file
@@ -213,10 +248,13 @@ export async function executeJob(tool, args = {}) {
         const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
         if (underAny(args.path, SELF_PROTECT)) return refuse("append under a self-protected dir (the live app / this node)");
         const buf = Buffer.from(String(args.content || ""), args.base64 === false ? "utf8" : "base64");
+        // Only the FIRST chunk of a chunked transfer is a real mutation of prior state; snapshotting
+        // every appended chunk of an 88MB corpus would be absurd and would blow the retention cap.
+        const snap = args.truncate ? beforeMutation("fs_append", args, { node: NODE_NAME }) : { id: null, method: "append-chunk" };
         mkdirSync(dirname(resolve(args.path)), { recursive: true });
         if (args.truncate) writeFileSync(args.path, buf); else appendFileSync(args.path, buf);
         let total = 0; try { total = statSync(args.path).size; } catch {}
-        return { ok: true, path: args.path, appended: buf.length, totalBytes: total };
+        return { ok: true, path: args.path, appended: buf.length, totalBytes: total, snapshot: snap.id, snapshotMethod: snap.method };
       }
       case "fs_list": {
         const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
@@ -248,7 +286,19 @@ export async function executeJob(tool, args = {}) {
         if (DESTRUCTIVE_RE.test(cmdText) && SELF_PROTECT.some((d) => cmdText.toLowerCase().includes(d))) {
           return refuse("destructive command against a self-protected dir (the live app / this node)");
         }
-        return await runShell(cmdText, args.timeoutMs);
+        // Best-effort anchor before an opaque command. See snapshot.mjs for the honest limits:
+        // a repo gets a real rollback point, anything else gets a journal line and nothing more.
+        const snap = beforeMutation("shell_run", args, { node: NODE_NAME, jobId: meta.jobId });
+        const out = await runShell(cmdText, args.timeoutMs, meta.jobId);
+        return { ...out, snapshot: snap.id, snapshotMethod: snap.method, snapshotAnchors: (snap.anchors || []).length || undefined };
+      }
+
+      // ---- reversibility surface: inspect and undo what this node changed --------------------
+      case "snapshot_list":
+        return { ok: true, node: NODE_NAME, snapshots: listSnapshots(args.limit) };
+      case "snapshot_restore": {
+        if (!args.id) return { ok: false, error: "which snapshot? pass id (get one from snapshot_list)" };
+        return restoreSnapshot(String(args.id));
       }
 
       // ---- Wave 3: real browser + desktop reach (Fred's option 2, 2026-07-18) ----
@@ -265,11 +315,214 @@ export async function executeJob(tool, args = {}) {
         return await desktopOp(String(args.op || "screenshot"), args, { shotDir: SHOT_DIR, runShell });
       }
 
+      // Streaming self-test hook (not a real capability). Emits N ordered chunks via the emit()
+      // sink then returns the concatenation as the terminal result. Lets hands_stream_test drive
+      // the whole chunk path deterministically without depending on Ollama being up.
+      case "__echo_stream": {
+        const n = Math.min(Math.max(Number(args.count) || 3, 1), 50);
+        const parts = [];
+        for (let i = 0; i < n; i++) {
+          const piece = "chunk" + i + " ";
+          parts.push(piece);
+          if (meta.emit) meta.emit(piece);
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        return { ok: true, text: parts.join(""), chunks: parts.length };
+      }
+
+      /*
+       * claude_code (2026-07-20): run Claude Code headless in a repo on this machine. This is the
+       * capability that lets Command Deck's work orders (and Dominion's own models) reach ONE
+       * machine-access channel instead of the parallel bridge. It mirrors the bridge poller's
+       * execClaude exactly: a git baseline snapshot BEFORE any change so rollback always exists, the
+       * same headless `claude -p` invocation, the same delete-protection restore, and a plain summary.
+       * Output streams back (Step 3) so a long agent run keeps the hub deadline alive.
+       *
+       * Roots + carve-outs still hold: dir must be within an allowed root, and the args blob was
+       * already scanned for D:/backups at the top of executeJob.
+       */
+      case "claude_code": {
+        const dir = String(args.dir || args.repo || "");
+        if (!dir) return { ok: false, error: "claude_code needs a dir (the repo folder to work in)" };
+        const w = withinRoots(dir); if (!w.ok) return refuse(w.reason);
+        if (!existsSync(dir)) return { ok: false, error: "not found: " + dir };
+        const canDelete = args.canDelete === true;
+        const instructions = String(args.instructions || args.title || "").trim();
+        if (!instructions) return { ok: false, error: "claude_code needs instructions" };
+        return await runClaudeCode({ dir, title: args.title, instructions, canDelete, emit: meta.emit, timeoutMs: args.timeoutMs });
+      }
+
+      // ---- fix C (2026-07-20): local Ollama passthrough ----
+      // The Railway container binds Ollama to 127.0.0.1 only and has no tailnet, so the cloud app
+      // cannot reach the model. This node can reach it trivially. The app dispatches ollama_chat /
+      // ollama_embed; we make the local call and (for chat) stream tokens back so a long 30B answer
+      // keeps the hub deadline alive. The full assembled response is the terminal result — truth —
+      // and the streamed deltas are live text on top.
+      case "ollama_chat":
+        return await localOllamaChat(args.payload || {}, meta.emit);
+      case "ollama_embed":
+        return await localOllamaEmbed(args.payload || {});
+
       default: return { ok: false, error: "unknown tool: " + tool };
     }
   } catch (e) {
     return { ok: false, error: `hands ${tool} failed: ` + (e && e.message || e) };
   }
+}
+
+// ---- claude_code: headless Claude Code runner (the single-channel consolidation, 2026-07-20) ----
+// Mirrors command-deck/bridge/poller.mjs execClaude so behaviour is identical to the bridge it
+// replaces: git baseline first, `claude -p` headless, delete-protection restore, plain summary.
+const CLAUDE_CMD = process.env.HANDS_CLAUDE_CMD || "claude";
+const CLAUDE_ARGS = String(process.env.HANDS_CLAUDE_ARGS || "--permission-mode acceptEdits").split(/\s+/).filter(Boolean);
+const CLAUDE_TIMEOUT_MS = Number(process.env.HANDS_CLAUDE_TIMEOUT_MS || 15 * 60 * 1000);
+const NOHOOKS_DIR = join(HERE, ".nohooks");
+
+/*
+ * Claude Code auth: the machine's OAuth login was revoked, so headless runs use ANTHROPIC_API_KEY
+ * instead, which Fred placed in the wallet (~/.app-secrets.env) on both machines. An API key does
+ * not expire the way an interactive OAuth session can, which is the right choice for an always-on
+ * agent. We read it from the env first, then the wallet, and inject ONLY that one key into Claude's
+ * child env — never the whole wallet. NOTE: this bills work orders against the API key.
+ */
+function walletValue(name) {
+  if (process.env[name]) return process.env[name];
+  try {
+    const home = process.env.USERPROFILE || process.env.HOME || "";
+    const txt = readFileSync(join(home, ".app-secrets.env"), "utf8");
+    const m = txt.match(new RegExp("^\\s*(?:export\\s+)?" + name + "\\s*=\\s*(.*)$", "m"));
+    if (m) return m[1].trim().replace(/^["']|["']$/g, "");
+  } catch { /* no wallet on this box */ }
+  return "";
+}
+
+function gitIn(dir, gitArgs, timeoutMs = 30000) {
+  return new Promise((res) => {
+    // Committer identity MUST match the bridge's ("Command Deck Bridge" / Fred's real email): a
+    // fresh git repo has no user.name/email so commits fail without it, AND the existing revert
+    // safety gate (poller.mjs revertJob) only rolls back commits authored by that exact name. Same
+    // email so Vercel team-deploys are not blocked by an unrecognized author.
+    const child = spawn("git", [
+      "-c", "safe.directory=*", "-c", "core.hooksPath=" + NOHOOKS_DIR, "-c", "core.fsmonitor=false",
+      "-c", "user.email=fredwolfe@gmail.com", "-c", "user.name=Command Deck Bridge",
+      ...gitArgs,
+    ], { cwd: dir, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+    let out = "", err = "";
+    const t = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, timeoutMs);
+    child.stdout.on("data", (d) => (out += d)); child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => { clearTimeout(t); res({ code: -1, out, err: String(e && e.message) }); });
+    child.on("close", (code) => { clearTimeout(t); res({ code, out, err }); });
+  });
+}
+
+async function claudeBaseline(dir) {
+  try { mkdirSync(NOHOOKS_DIR, { recursive: true }); } catch {}
+  const isRepo = (await gitIn(dir, ["rev-parse", "--is-inside-work-tree"])).out.trim() === "true";
+  if (!isRepo) {
+    await gitIn(dir, ["init"]);
+    await gitIn(dir, ["add", "-A"]);
+    await gitIn(dir, ["commit", "--allow-empty", "-m", "hands: baseline snapshot"]);
+  } else {
+    const dirty = (await gitIn(dir, ["status", "--porcelain"])).out.trim();
+    if (dirty) { await gitIn(dir, ["add", "-A"]); await gitIn(dir, ["commit", "-m", "hands: pre-job snapshot"]); }
+  }
+  return (await gitIn(dir, ["rev-parse", "HEAD"])).out.trim();
+}
+
+async function runClaudeCode({ dir, title, instructions, canDelete, emit, timeoutMs }) {
+  const baseline = await claudeBaseline(dir);
+  const deleteRule = canDelete ? "" :
+    "IMPORTANT: This folder is delete-protected. You may create and edit files, but do NOT delete files or remove their contents wholesale.\n";
+  const prompt =
+    "You are Claude Code running headless on Fred's machine via the Dominion hands node.\n" +
+    'Work order: "' + (title || "(untitled)") + '"\n' + deleteRule +
+    "If the request is unclear, contradictory, unsafe, or you cannot do it correctly, make NO changes and instead explain the problem in plain language. Do not guess. Do NOT run git or commit; the node handles version control. End with a short, plain-English summary of exactly what you did, or why you couldn't.\n\n" +
+    "--- INSTRUCTIONS ---\n" + instructions;
+
+  const cap = Math.min(Math.max(Number(timeoutMs) || CLAUDE_TIMEOUT_MS, 5000), 30 * 60 * 1000);
+  const scrubbed = { ...process.env }; delete scrubbed.HANDS_TOKEN; delete scrubbed.HANDS_CF_CLIENT_SECRET;
+  // Give Claude Code the API key from the wallet (OAuth on these machines is revoked).
+  const apiKey = walletValue("ANTHROPIC_API_KEY");
+  if (apiKey) scrubbed.ANTHROPIC_API_KEY = apiKey;
+  const useShell = IS_WIN;
+  let child;
+  try {
+    child = useShell
+      ? spawn([CLAUDE_CMD, ...CLAUDE_ARGS, "-p"].join(" "), [], { cwd: dir, shell: true, env: scrubbed, windowsHide: true })
+      : spawn(CLAUDE_CMD, [...CLAUDE_ARGS, "-p"], { cwd: dir, shell: false, env: scrubbed, windowsHide: true });
+  } catch (e) { return { ok: false, error: "could not launch Claude Code: " + (e && e.message) }; }
+
+  let out = "", err = "";
+  const killer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, cap);
+  try { child.stdin.write(prompt); child.stdin.end(); } catch {}
+  child.stdout.on("data", (d) => { const s = d.toString(); out += s; if (emit) emit(s); });
+  child.stderr.on("data", (d) => (err += d.toString()));
+  const code = await new Promise((r) => { child.on("error", (e) => { err += "\n" + e.message; r(-1); }); child.on("close", r); });
+  clearTimeout(killer);
+
+  const text = (out + (err ? "\n[stderr]\n" + err : "")).trim();
+  const summary = text.split("\n").filter(Boolean).slice(-12).join("\n") || "Done.";
+  if (code !== 0) return { ok: false, baseline, error: "Claude Code couldn't finish (exit " + code + "). " + text.slice(0, 240), log: text.slice(-6000) };
+
+  // Delete-protection: restore anything Claude removed under a protected root.
+  const restored = [];
+  if (!canDelete) {
+    const st = await gitIn(dir, ["-c", "core.quotepath=false", "-c", "status.renames=false", "status", "--porcelain", "-z"]);
+    const deleted = st.out.split("\0").filter(Boolean).filter((e) => e.slice(0, 2).includes("D")).map((e) => e.slice(3)).filter(Boolean);
+    for (const f of deleted) { const co = await gitIn(dir, ["checkout", "--", f]); if (co.code === 0) restored.push(f); }
+  }
+  // Record the post-work state as a rollback point (the node commits, so revert is always possible).
+  await gitIn(dir, ["add", "-A"]);
+  await gitIn(dir, ["commit", "-m", "hands: " + String(title || "work order").slice(0, 60)]);
+  const head = (await gitIn(dir, ["rev-parse", "HEAD"])).out.trim();
+  return { ok: true, baseline, commit: head, summary, restored, chars: text.length };
+}
+
+// ---- local Ollama passthrough (fix C) ---------------------------------------------------------
+// The node reaches Ollama on loopback; the cloud app cannot. OLLAMA_LOCAL_URL overrides the default
+// only if Ollama is bound somewhere unusual on this box.
+const OLLAMA_LOCAL = String(process.env.OLLAMA_LOCAL_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+async function localOllamaChat(payload, emit) {
+  // Force stream:true so we can forward tokens (liveness + hub-deadline rearm). The assembled
+  // message is returned as the terminal result, identical in shape to a stream:false /api/chat
+  // response, so the server's callers (which read message.content / tool_calls / eval_count) are
+  // unchanged.
+  const body = JSON.stringify({ ...payload, stream: true });
+  let res;
+  try { res = await fetch(OLLAMA_LOCAL + "/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body }); }
+  catch (e) { return { ok: false, error: "could not reach local Ollama: " + (e && e.message || e) }; }
+  if (!res.ok) return { ok: false, error: "ollama /api/chat HTTP " + res.status };
+  const dec = new TextDecoder();
+  let buf = "", content = "", toolCalls = null, tail = {};
+  try {
+    for await (const chunk of res.body) {
+      buf += dec.decode(chunk, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        let o; try { o = JSON.parse(line); } catch { continue; }
+        if (o.message) {
+          if (o.message.content) { content += o.message.content; if (emit) emit(o.message.content); }
+          if (o.message.tool_calls) toolCalls = o.message.tool_calls;   // arrive complete in a chunk
+        }
+        if (o.done) tail = o;   // final chunk carries eval_count etc.
+      }
+    }
+  } catch (e) { return { ok: false, error: "ollama stream broke: " + (e && e.message || e) }; }
+  const message = { role: "assistant", content };
+  if (toolCalls) message.tool_calls = toolCalls;
+  return { ok: true, response: { ...tail, message }, chars: content.length };
+}
+async function localOllamaEmbed(payload) {
+  const body = JSON.stringify({ model: payload.model, input: payload.input });
+  let res;
+  try { res = await fetch(OLLAMA_LOCAL + "/api/embed", { method: "POST", headers: { "content-type": "application/json" }, body }); }
+  catch (e) { return { ok: false, error: "could not reach local Ollama: " + (e && e.message || e) }; }
+  if (!res.ok) return { ok: false, error: "ollama /api/embed HTTP " + res.status };
+  let j; try { j = await res.json(); } catch (e) { return { ok: false, error: "embed parse: " + (e && e.message) }; }
+  const vec = (j.embeddings && j.embeddings[0]) || j.embedding || null;
+  return { ok: true, embedding: vec, dim: Array.isArray(vec) ? vec.length : 0 };
 }
 
 // ---- the dial-out loop: one SSE stream in, results POSTed back --------------------------------
@@ -288,11 +541,45 @@ async function postResult(jobId, result) {
   } catch (e) { log(`result POST for ${jobId} failed: ${e && e.message}`); }
 }
 
+/*
+ * Stream a delta back for a long-running or token-producing tool (added 2026-07-20). Fire and
+ * forget: a lost chunk must never stall generation, and the terminal /hands/result is what
+ * actually settles the job. Chunks are best-effort liveness plus live text; the result is truth.
+ */
+async function postChunk(jobId, seq, delta) {
+  try {
+    await fetch(HANDS_URL + "/hands/chunk", {
+      method: "POST",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ node: NODE_NAME, jobId, seq, delta }),
+    });
+  } catch { /* a dropped chunk is not fatal; the final result carries the whole answer */ }
+}
+
 async function handleEvent(ev, data) {
+  // Stop has to reach the machine. A cancel arrives on the same stream as the job and kills the
+  // child process TREE, because killing a PowerShell parent leaves whatever it spawned running.
+  // id "*" is the Fire Alarm: kill everything this node is doing, no questions.
+  if (ev === "cancel") {
+    let c; try { c = JSON.parse(data); } catch { return log("unparseable cancel event"); }
+    const ids = c.id === "*" ? [...RUNNING.keys()] : [c.id];
+    for (const id of ids) {
+      const entry = RUNNING.get(id);
+      if (!entry) continue;
+      killTree(entry.child);
+      entry.cancelled = true;
+      log(`job ${id} CANCELLED (${c.reason || "no reason given"})`);
+    }
+    return;
+  }
   if (ev !== "job") return;   // hb and unknown events only feed the liveness timer
   let job; try { job = JSON.parse(data); } catch { return log("unparseable job event"); }
   const t0 = Date.now();
-  const result = await executeJob(job.tool, job.args || {});
+  // When the hub dispatched with streaming on, hand the executor an emit() that POSTs ordered
+  // chunks. When it did not, emit is a no-op, so a tool can always call it without checking.
+  let seq = 0;
+  const emit = job.stream ? (delta) => { postChunk(job.id, seq++, String(delta || "")); } : () => {};
+  const result = await executeJob(job.tool, job.args || {}, { jobId: job.id, emit, streaming: !!job.stream });
   log(`job ${job.id} ${job.tool} -> ${result.ok ? "ok" : (result.refused ? "REFUSED" : "error")} (${Date.now() - t0}ms)`);
   await postResult(job.id, result);
 }

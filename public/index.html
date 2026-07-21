@@ -14,8 +14,8 @@
 <link rel="stylesheet" href="/dominion-ui.css?v=39" />
 <link rel="stylesheet" href="/dominion-tenant.css?v=8" />
 <link rel="stylesheet" href="/dominion-vault.css?v=1" />
-<link rel="stylesheet" href="/dominion-forge.css?v=3" />
-<link rel="stylesheet" href="/dominion-images.css?v=3" />
+<link rel="stylesheet" href="/dominion-forge.css?v=4" />
+<link rel="stylesheet" href="/dominion-images.css?v=4" />
 <link rel="stylesheet" href="/dominion-ide.css?v=5" />
 <link rel="stylesheet" href="/dominion-compass.css?v=5" />
 <link rel="stylesheet" href="/dominion-lenses.css?v=3" />
@@ -114,7 +114,7 @@
     </div>
     <div class="sb-search">
       <svg class="field-glyph"><use href="#i-search"></use></svg>
-      <input id="chatsearch" type="search" placeholder="Search conversationsâ€¦" autocomplete="off" />
+      <input id="chatsearch" type="search" placeholder="Search conversations…" autocomplete="off" />
     </div>
     <div id="chatlist"></div>
     <!-- Dominion Works toggle. Hidden until GET /account reports ideMode:true, so guests see
@@ -125,9 +125,9 @@
       <span class="ide-switch" aria-hidden="true"></span>
     </button>
     <button id="sb-setup" class="sb-setup" type="button" title="Connectors, credits, and account setup">
-      <span class="sb-setup-core" aria-hidden="true"></span><span>Setup Â· Connectors &amp; Credits</span>
+      <span class="sb-setup-core" aria-hidden="true"></span><span>Setup · Connectors &amp; Credits</span>
     </button>
-    <div class="sb-foot">Dominion AI <span>Â·</span> by Frederick Wolfe</div>
+    <div class="sb-foot">Dominion AI <span>·</span> by Frederick Wolfe</div>
   </aside>
 
   <header id="commandbar">
@@ -141,7 +141,7 @@
       </span>
       <div class="brand-copy">
         <span class="title">Dominion AI</span>
-        <span class="brand-motto">Master Â· Strategize Â· Transcend</span>
+        <span class="brand-motto">Master · Strategize · Transcend</span>
         <span id="activity-status" class="brand-status" aria-live="polite">System ready</span>
       </div>
     </div>
@@ -155,7 +155,7 @@
         </button>
         <!-- Hidden native select = the state holder; all model logic drives this, the panel mirrors it. -->
         <select id="model" aria-label="Model" class="model-native" tabindex="-1" aria-hidden="true">
-          <optgroup label="Local (free Â· private)" id="model-local-group">
+          <optgroup label="Local (free · private)" id="model-local-group">
             <option value="local">Local Qwen (free)</option>
           </optgroup>
         </select>
@@ -183,9 +183,9 @@
         <svg class="glyph control-glyph"><use href="#i-network"></use></svg>
         <span class="control-copy"><small>Privacy</small>
           <select id="privacy-mode" aria-label="Privacy mode" title="Which brains may be called. A disallowed pick is refused, never substituted.">
-            <option value="normal">Normal Â· all providers</option>
-            <option value="trusted">Trusted Â· OpenAI/Anthropic + local</option>
-            <option value="private">Private Â· local only</option>
+            <option value="normal">Normal · all providers</option>
+            <option value="trusted">Trusted · OpenAI/Anthropic + local</option>
+            <option value="private">Private · local only</option>
           </select>
         </span>
       </label>
@@ -269,7 +269,7 @@
           <button id="attach" class="mic attach" title="Attach a picture or file" aria-label="Attach a picture or file">
             <svg class="glyph"><use href="#i-attach"></use></svg>
           </button>
-          <button id="forge-trigger" class="forge-trigger" data-tier="ember" title="Forge intensity â€” Ember / Flame / Furnace" aria-label="Open the Forge intensity dial">
+          <button id="forge-trigger" class="forge-trigger" data-tier="ember" title="Forge intensity — Ember / Flame / Furnace" aria-label="Open the Forge intensity dial">
             <svg viewBox="0 0 24 26" aria-hidden="true">
               <defs>
                 <linearGradient id="ft-g" x1="0" y1="1" x2="0" y2="0">
@@ -280,8 +280,20 @@
               <path fill="#ffe9c4" d="M12 10c.9 3 4 4.5 4 8a4 4 0 0 1-8 0c0-2.7 2.4-3.4 2.4-6 0-1 .6-1.6 1.6-2z"/>
             </svg>
           </button>
+          <!--
+            FIRE ALARM. Stops everything at once: every live turn and every job running on every
+            connected machine, with a process-tree kill node-side. Available to every account, not
+            just Fred: an emergency brake only one person can reach is not an emergency brake. A
+            guest's pull is scoped server-side to their own sessions and their own node.
+          -->
+          <button id="fire-alarm" class="fire-alarm" type="button" title="Fire Alarm — stop everything, everywhere, now" aria-label="Fire Alarm: stop all work on all machines">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="currentColor" d="M12 2a6 6 0 0 0-6 6v3.6l-1.4 2.6a1 1 0 0 0 .9 1.5h13a1 1 0 0 0 .9-1.5L18 11.6V8a6 6 0 0 0-6-6z"/>
+              <path fill="currentColor" d="M9.5 18a2.5 2.5 0 0 0 5 0z"/>
+            </svg>
+          </button>
         </div>
-        <textarea id="input" rows="1" placeholder="Give Dominion a directiveâ€¦" autocomplete="off"></textarea>
+        <textarea id="input" rows="1" placeholder="Give Dominion a directive…" autocomplete="off"></textarea>
         <div id="bar-mid"></div>
         <button id="speak" class="mic" title="Speak answers aloud (off)" aria-label="Toggle spoken answers">
           <svg class="glyph"><use href="#i-speaker"></use></svg>
@@ -305,10 +317,10 @@
           <option value="concise">Concise</option>
           <option value="brainstorm">Brainstorm partner</option>
           <option value="code">Coding helper</option>
-          <option value="custom">Customâ€¦</option>
+          <option value="custom">Custom…</option>
         </select>
       </label>
-      <textarea id="persona-custom" placeholder="Custom persona / system styleâ€¦" hidden></textarea>
+      <textarea id="persona-custom" placeholder="Custom persona / system style…" hidden></textarea>
       <p class="frow-note">Persona sets the assistant's <em>voice and style</em>: how it talks. The header's Operating Mode sets <em>how hard it thinks</em>: speed, depth, context length, or a special discipline like As&nbsp;Fred. They stack: a Concise persona in Deep&nbsp;Think mode thinks deeply and reports briefly.</p>
       <label class="frow">Creativity (temperature): <span id="temp-val">0.7</span>
         <input id="temp" type="range" min="0" max="1.2" step="0.1" value="0.7" />
@@ -323,9 +335,9 @@
       <label class="toggle"><input type="checkbox" id="confirm-tools" /> Ask before risky tools (e.g. forge_send)</label>
       <label class="frow">Mentor privacy (external mentors only; local reviews never leave the box)
         <select id="privacy-sel">
-          <option value="local_only">Local only â€” never send content out</option>
-          <option value="redacted_external">Redacted â€” scrub secrets/PII first</option>
-          <option value="approved_external">Approved â€” send as-is</option>
+          <option value="local_only">Local only — never send content out</option>
+          <option value="redacted_external">Redacted — scrub secrets/PII first</option>
+          <option value="approved_external">Approved — send as-is</option>
         </select>
       </label>
       <button id="ssave" class="sb-new">Save settings</button>
@@ -336,7 +348,7 @@
     <div class="sheet">
       <div class="sheet-h">Memory <span id="mstats" class="mstats"></span> <button id="mclose" class="icon close-icon" aria-label="Close"><svg class="glyph"><use href="#i-close"></use></svg></button></div>
       <div class="mrow-add">
-        <textarea id="madd" rows="1" placeholder="Add a durable fact or preferenceâ€¦"></textarea>
+        <textarea id="madd" rows="1" placeholder="Add a durable fact or preference…"></textarea>
         <button id="msave" class="sb-new">Add</button>
       </div>
       <div class="mfilter">Show
@@ -378,7 +390,7 @@
         <div class="itab" data-tab="finetune">Finetune</div>
       </div>
       <div class="mrow-add">
-        <textarea id="iadd" rows="1" placeholder="Addâ€¦"></textarea>
+        <textarea id="iadd" rows="1" placeholder="Add…"></textarea>
         <button id="iaddbtn" class="sb-new">Add</button>
       </div>
       <div id="ilist" class="mlist"></div>
@@ -390,7 +402,7 @@
       <div class="sheet-h">Persona Forge <span id="pstats" class="mstats"></span> <button id="pclose" class="icon close-icon" aria-label="Close"><svg class="glyph"><use href="#i-close"></use></svg></button></div>
       <div id="pprofile" class="pprofile"></div>
       <div class="mrow-add">
-        <textarea id="padd" rows="2" placeholder="Paste your own writing â€” a joke, maxim, essay, poem, stray thought, plan, favorite, or an AI chatâ€¦"></textarea>
+        <textarea id="padd" rows="2" placeholder="Paste your own writing — a joke, maxim, essay, poem, stray thought, plan, favorite, or an AI chat…"></textarea>
       </div>
       <div class="prow">
         <select id="pkind">
@@ -409,7 +421,7 @@
         <button id="paddbtn" class="sb-new">Add</button>
       </div>
       <div class="prow">
-        <input id="purl" type="url" placeholder="https://your-site.com/page to scrapeâ€¦" autocomplete="off" />
+        <input id="purl" type="url" placeholder="https://your-site.com/page to scrape…" autocomplete="off" />
         <button id="pscrape" class="ghost">Scrape</button>
         <button id="pscan" class="ghost" title="Ingest files dropped in the mini-PC inbox folder">Scan inbox</button>
         <button id="pdistill" class="sb-new" title="Analyze the corpus and (re)build Fred's voice profile">Refresh profile</button>
@@ -422,13 +434,13 @@
     </div>
   </div>
 
-  <script src="/dominion-forge.js?v=3"></script>
-  <script src="/dominion-images.js?v=3" defer></script>
+  <script src="/dominion-forge.js?v=4"></script>
+  <script src="/dominion-images.js?v=5" defer></script>
   <script src="/dominion-lexicon.js?v=1"></script>
   <script src="/dominion-ide.js?v=9" defer></script>
   <script src="/dominion-compass.js?v=4" defer></script>
   <script src="/dominion-lenses.js?v=6" defer></script>
-  <script src="/app.js?v=45"></script>
+  <script src="/app.js?v=46"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=4" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>

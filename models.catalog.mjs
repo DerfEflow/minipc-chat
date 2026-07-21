@@ -280,6 +280,53 @@ export const modelById = (id) => BY_ID.get(id) || null;
 export const providerOf = (id) => { const m = BY_ID.get(id); return m ? m.provider : ""; };
 // Whether a model is allowed to use this box's tools (doing bench).
 export const isToolCapable = (id) => { const m = BY_ID.get(id); return !!(m && m.toolCapable); };
+
+/*
+ * WILDFIRE ROSTER — the models Fred trusts with broad, multi-step authority over his machines.
+ *
+ * This is a DIFFERENT question from toolCapable. 31 models in this catalog accept tool calls; only
+ * these can be relied on to plan and execute a real piece of work across an infrastructure without
+ * losing the thread. Starring all 31 would be worse than starring none: Fred would pick a small
+ * free model for a big job, watch it flounder, and reasonably conclude the wiring is broken again.
+ *
+ * Curated with Fred on 2026-07-19. Two of his calls, recorded so nobody quietly "corrects" them:
+ *   - GPT-5.6 Sol was REMOVED at his direction. The OpenAI chat-completions path forces
+ *     reasoning_effort:"none" whenever tools are attached (server.mjs ~506), so it would run its
+ *     broad tasks with reasoning off. His words: "not worth it."
+ *   - DeepSeek R1 and Nemotron 3 Ultra were ADDED at his direction over my hesitation. R1 in
+ *     particular sometimes emits reasoning where a clean tool call belongs. Logged as accepted risk.
+ *
+ * GPT-4o stays because the reasoning-off rule only matches ^gpt-5 and ^o\d, so it is unaffected.
+ */
+// NOTE: these are catalog ids, NOT provider ids. Direct-provider models carry a "<provider>/" prefix
+// here and a bare directId on the wire (anthropic/claude-opus-4-8 vs claude-opus-4-8). Mixing the
+// two silently unstars a model, so isBroadCapable is covered by a test that asserts all 13 resolve.
+const WILDFIRE_ROSTER = new Set([
+  "anthropic/claude-opus-4-8",
+  "anthropic/claude-sonnet-5",
+  "anthropic/claude-haiku-4-5",
+  "moonshotai/kimi-k3",
+  "moonshotai/kimi-k2.6",
+  "deepseek/deepseek-v4-pro",
+  "deepseek/deepseek-r1",
+  "qwen/qwen3-235b-a22b-2507",
+  "qwen/qwen3-coder",
+  "x-ai/grok-4.20",
+  "z-ai/glm-5.2",
+  "openai/gpt-4o",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+]);
+
+// Stamp it onto every model record so it rides the /api/models payload to the picker without a
+// second lookup. Runs AFTER finalize(), so toolCapable is already resolved.
+for (const m of MODELS) m.broadCapable = WILDFIRE_ROSTER.has(m.id) && m.toolCapable === true;
+
+// Can this model be trusted with Wildfire's broad authority? Tool capability is a prerequisite:
+// a model that cannot call tools can never be armed, whatever the roster says.
+export const isBroadCapable = (id) => WILDFIRE_ROSTER.has(id) && isToolCapable(id);
+// The roster as names, for the block message that tells Fred what he COULD have picked.
+export const broadCapableNames = () => MODELS.filter((m) => isBroadCapable(m.id)).map((m) => m.name);
+export const broadCapableIds = () => MODELS.filter((m) => isBroadCapable(m.id)).map((m) => m.id);
 // Whether a model is a chain-of-thought reasoner whose hidden thinking is billed against output.
 export const isReasoning = (id) => { const m = BY_ID.get(id); return !!(m && m.reasoning); };
 // Whether a model accepts image input (picture attachments may route to it). Explicit flag only.

@@ -43,6 +43,37 @@ node gen-icons.mjs      # once, to (re)create the icons
 node server.mjs         # http://127.0.0.1:8088  (needs Ollama on 11434)
 ```
 
+## Durable long runs (server-owned turns)
+
+Every `/chat` turn runs as a **job the server owns**, not work the browser tab holds. The tab is
+just a viewer: it POSTs to `/chat`, gets a `job` id, and streams events — but the model call and the
+whole agent loop run server-side with server-held keys. If the phone minimizes, switches chats, drops
+wifi, or reloads, the run **keeps generating**; the client reattaches via `/chat/attach?job=&from=`
+and catches up mid-stream or straight to the finished answer. Stop is a real server call
+(`/chat/stop`), so a dead socket never cancels a run.
+
+Jobs are persisted to SQLite (`chatjobs.mjs`, in `DATA_DIR/chatjobs`), which is what makes **very
+long runs** (hours — an overnight job is fine) safe:
+
+- **Survives a server restart / redeploy.** On reboot the server replays a finished run's full answer
+  from disk, and turns a run that was still generating into an honest **orphaned** result — the
+  partial output is preserved with a "server restarted mid-run" note and a one-tap **Continue**.
+- **No 45-minute expiry for results.** A finished answer waits until the client collects it
+  (`/chat/collect`), then a short retention window; uncollected results persist for weeks
+  (`CHATJOBS_UNCOLLECTED_TTL_MS`, `0` = forever).
+- **Concurrency.** Several chats can stream at once (a sidebar dot marks each running chat); switching
+  chats never drops a run, and finished background runs are delivered into their chat on return, even
+  if you never opened it (`/chat/jobs` + `/chat/result` reconcile on boot and on focus).
+
+The same code serves both deployments — the **mini-PC** (always-on, so restarts are rare) and
+**Railway** (redeploys exercise the orphan path). The durability work is exactly what makes them
+equivalent for long runs; no external queue, worker, or third-party service is involved.
+
+Tuning knobs (env): `CHATJOBS_MAX_RUNNING` (per-user in-flight cap, default 6),
+`CHATJOBS_TAIL` (RAM replay window per job), `CHATJOBS_FLUSH_MS` (token-batch flush interval),
+`CHATJOBS_COLLECTED_TTL_MS`, `CHATJOBS_UNCOLLECTED_TTL_MS`, `CHATJOBS_DIR`.
+Tests: `node chatjobs_unit_test.mjs`, `node chatjobs_test.mjs`, `node chatjobs_persist_test.mjs`.
+
 ## Notes / next features
 
 - Model list auto-loads from Ollama; conversation persists on the device; `New` clears it.

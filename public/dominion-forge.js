@@ -115,10 +115,39 @@
     localStorage.setItem(MODE_KEY, on ? "1" : "0");
     if (triggerEl) triggerEl.setAttribute("data-forge", on ? "on" : "off");
   }
+
+  /*
+   * WILDFIRE (Fred, 2026-07-19). A THIRD, independent control, deliberately not folded into either
+   * of the two above.
+   *
+   * The dial is reasoning effort. Forge Mode is machine reach, and it stays exactly as it was for
+   * everyone, including guests and Fred's small-model experiments. Wildfire is broad authority: the
+   * full tool surface, both machines, auto-approved, for a model on the roster.
+   *
+   * It is owner-only and the server enforces that independently (a guest posting the flag is
+   * refused and logged). This only decides whether the switch is drawn at all.
+   *
+   * It does NOT persist across sessions. Broad authority should be a thing you turn on for a job,
+   * not a thing you left on three weeks ago and forgot. Session storage, so a reload keeps it and
+   * a new tab does not.
+   */
+  const WILDFIRE_KEY = "dominion.wildfireArmed";
+  const isOwner = () => window.dominionIsOwner === true;
+  const getWildfire = () => isOwner() && sessionStorage.getItem(WILDFIRE_KEY) === "1";
+  function setWildfire(on) {
+    if (!isOwner()) on = false;
+    sessionStorage.setItem(WILDFIRE_KEY, on ? "1" : "0");
+    if (triggerEl) triggerEl.setAttribute("data-wildfire", on ? "on" : "off");
+    document.body.classList.toggle("wildfire-armed", !!on);
+  }
   // The dial chooses reasoning effort. Forge Mode is a separate, explicit tool/agent gate.
   window.forgeTierValue = getTier;
   window.forgeModeValue = getForgeMode;
   window.forgeCurrentTier = getTier;
+  window.wildfireValue = getWildfire;
+  window.setWildfire = setWildfire;
+  // Re-assert the body class after a reload so the armed glow survives a refresh.
+  try { if (getWildfire()) document.body.classList.add("wildfire-armed"); } catch {}
 
   let triggerEl = null;
   let dialRoot = null;
@@ -159,6 +188,7 @@
         '<button class="dial-step dial-station dial-station-flame" data-t="flame"><span>Flame</span></button>' +
         '<button class="dial-step dial-station dial-station-furnace" data-t="furnace"><span>Furnace</span></button>' +
         '<button class="dial-forge-mode" type="button" aria-pressed="false"><span>Forge Mode</span><small>Standby</small></button>' +
+        (isOwner() ? '<button class="dial-wildfire" type="button" aria-pressed="false" title="Broad authority across both machines, for a starred model"><span>Wildfire</span><small>Contained</small></button>' : "") +
         '<div class="dial-glass-live" aria-hidden="true"></div>' +
         '<div class="dial-spark s1"></div><div class="dial-spark s2"></div><div class="dial-spark s3"></div>' +
       '</div>' +
@@ -174,9 +204,11 @@
     const descEl = card.querySelector(".dial-tier-desc");
     const costEl = card.querySelector(".dial-cost");
     const forgeButton = card.querySelector(".dial-forge-mode");
+    const wildfireButton = card.querySelector(".dial-wildfire");
     const steps = Array.prototype.slice.call(card.querySelectorAll(".dial-step"));
 
     let live = cur;
+    let wildOn = getWildfire();
     function paint(t) {
       stage.setAttribute("data-tier", t);
       card.setAttribute("data-tier", t);
@@ -192,9 +224,37 @@
       forgeButton.setAttribute("aria-pressed", forgeOn ? "true" : "false");
       forgeButton.querySelector("small").textContent = forgeOn ? "Engaged" : "Standby";
     }
+    /*
+     * The armed state names the currently selected model, because the roster is the whole point:
+     * arming Wildfire on a model that is not starred does nothing except earn a refusal from the
+     * server. Saying so here, at the moment of arming, beats discovering it mid-job.
+     */
+    function paintWildfire() {
+      if (!wildfireButton) return;
+      const sel = document.getElementById("model");
+      const opt = sel && sel.selectedOptions && sel.selectedOptions[0];
+      const starred = !!(opt && opt.dataset && opt.dataset.broad === "1");
+      card.setAttribute("data-wildfire", wildOn ? "on" : "off");
+      wildfireButton.setAttribute("aria-pressed", wildOn ? "true" : "false");
+      wildfireButton.classList.toggle("dial-wildfire-mismatch", wildOn && !starred);
+      wildfireButton.querySelector("small").textContent =
+        !wildOn ? "Contained"
+        : starred ? "ARMED"
+        : "Armed, but this model is not starred";
+    }
     function apply(t, persist) { live = t; paint(t); if (persist !== false) setTier(t); }
     paint(cur);
     paintForge();
+    paintWildfire();
+
+    if (wildfireButton) {
+      wildfireButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        wildOn = !wildOn;
+        setWildfire(wildOn);
+        paintWildfire();
+      });
+    }
 
     knob.addEventListener("click", (e) => { e.stopPropagation(); apply(TIERS[(TIERS.indexOf(live) + 1) % TIERS.length]); });
     stage.addEventListener("wheel", (e) => {
