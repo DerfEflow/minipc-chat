@@ -220,3 +220,41 @@ EPERM pre-existing; images_test parallel-only port collision, passes alone).
   beginner-facing, engineer auto-marks done, so exposure is low).
 - Mockup loop and per-mode intake verified at the parse/prompt level and by earlier live intake;
   a full beginner mockup round on the phone is Fred's first-run item.
+
+## Iteration 2.1 ship record (2026-07-22 early, Fred's first phone pass answered)
+
+Process, per Fred's directive: Fable 5 chunked the work and wrote specs, five Haiku agents wrote
+five disjoint-file chunks in parallel (told: never git, only your files), an Opus 4.8 agent
+reviewed and corrected each as it landed, Fable did the final fidelity pass. Verdict on the
+process: Haiku shipped real defects in four of five chunks (a position:fixed override, a veil
+that dimmed its own target through a stacking-context miss, an inverted publish gate that
+suppressed the modal permanently, a draft cleared on build start); Opus caught and fixed all of
+them; Fable's pass then caught a drawer-grid width regression (the lone-auto-column trap, third
+occurrence in this project) and the missing lock tick on the compact picker. The layered crew
+earned its keep.
+
+Fixes shipped (cache v89-furnace, commits 2dd9282 + caa3696 + d34b376):
+- Compass: commit 0.18 of screen + flick-velocity commit (0.35 px/ms / 80ms window), 650ms
+  cubic-bezier travel, solid copper divider bar (#ide-divider-bar) with orange bleed, App
+  Builder label during drag/travel that fades at rest.
+- Tour: blurred veil INSIDE #ide-root (body-level would paint over the whole panel), target
+  lifted above it, 19px/800 titles, viewport clamping, per-mode steps (language step deleted),
+  auto-advance past done steps, hard halt with a closing card on dominion-ide-build-started.
+- Front door: mode cards under the header, don't-show-again tick on BOTH picker forms (tick =
+  dismissal; header switch remains the stable control), drafts saved 400ms-debounced and
+  restored under 48h, cleared only on completion; Start resumes an active interview; beginner
+  has no button cluster and says "build it" in chat; flame indicator with timer on every work
+  order; friendly timeout/network failures; needs-you card glows and scrolls into view.
+- Lenses: bold Blueprint/Workshop header, publish is a live-completion-only modal (replayed
+  done jobs auto-marked seen), sync never follows corpses, Past-builds log panel.
+- Server: beginner mentor at an 8th grade ceiling, proactive, motivation question, ambitious-
+  app encouragement, say-build-it invitation; EVERY mode's interviewer carries idehelp's
+  CRUCIBLE_GUIDE (environmental awareness).
+- THE FURNACE PASS (standing doctrine, d34b376): every build ends with a deterministic
+  placeholder sweep + a vision fidelity audit (per-bullet Delivered/Missing on the review
+  model) that becomes a Close-them-now / Finish-as-is question. idehelp must be updated in the
+  same commit as any UI change; idefurnace_test enforces the guide's feature roll-call.
+
+Verified in dev browser at 412: width clean, drafts round-trip, compact picker + lock, no
+stale publish, per-mode tour with veil, log panel rows, flame API. Motion feel and the full
+beginner mockup round remain Fred's phone items. Suite 48/50 (two known pre-existing).
