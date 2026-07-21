@@ -193,12 +193,12 @@
     <div class="scene-sparks"><i></i><i></i><i></i><i></i><i></i><i></i></div>
   </div>
 
-  <div class="glass-door-sheen" aria-hidden="true"></div>
-  <button id="dfi-door-handle" class="glass-door-handle" type="button" aria-expanded="true" aria-label="Slide the Forge Images pane aside">
-    <span class="handle-light" aria-hidden="true"></span>
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7M8 12h10"/></svg>
-    <small>SLIDE</small>
-  </button>
+  <!-- The glass-door "SLIDE" handle (park the pane aside to reveal the backdrop) was REMOVED
+       2026-07-20: shipped unverified, it hid the entire Forge Images UI behind decorative
+       artwork and the only way back was a tiny edge tab, which read as a freeze. It is a purely
+       cosmetic flourish with no functional value, so it is gone rather than half-fixed. The park
+       CSS/JS below is now inert (resetDoor's null checks keep it safe). Rebuild with real motion
+       verification if it is ever wanted back. -->
 
   <div class="app-shell">
     <header class="command-rail">

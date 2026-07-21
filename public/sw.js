@@ -1,5 +1,5 @@
 // Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v64-wildfire";
+const CACHE = "dominion-ai-v65-images-fix";
 const SHELL = [
   "/",
   "/index.html",
@@ -8,7 +8,7 @@ const SHELL = [
   "/dominion-tenant.js?v=4",
   "/dominion-vault.css?v=1",
   "/dominion-images.css?v=4",
-  "/dominion-images.js?v=4",
+  "/dominion-images.js?v=5",
   "/app.js?v=45",
   "/dominion-ui.css?v=39",
   "/dominion-ui.js?v=39",
