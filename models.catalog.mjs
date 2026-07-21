@@ -184,8 +184,15 @@ export const MODELS = [
   { id: "thedrummer/rocinante-12b", name: "Rocinante 12B", origin: "TheDrummer (community)",
     category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.17, outCost: 0.43, ctx: 65536,
     specialty: "Cheapest free-thinking storyteller: punches above 12B" },
+  // LIVE-PROBED 2026-07-21 and DOWNGRADED to chat-only. OpenRouter's `supported_parameters` advertises
+  // "tools" for this model, which is why the weekly audit passed it, but the host serving it was never
+  // started with --enable-auto-tool-choice/--tool-call-parser: every tool_choice (omitted, auto,
+  // required) returns HTTP 400. Worse, with tool_choice "none" it answers "I have written the text
+  // HELLO to the file..." having called nothing at all. A model that narrates machine work it cannot
+  // perform is the exact failure this catalog exists to prevent, so the flag follows the probe, not
+  // the provider's metadata. Re-probe before flipping it back.
   { id: "thedrummer/unslopnemo-12b", name: "UnslopNemo 12B", origin: "TheDrummer (community)",
-    category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.40, outCost: 0.40, ctx: 32000, toolCapable: true,   // audited: tool endpoints live
+    category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.40, outCost: 0.40, ctx: 32000, toolCapable: false,
     specialty: "'De-slopped': kills purple-prose GPT-isms" },
   { id: "tencent/hy3-preview", name: "Tencent Hy3", origin: "Tencent",
     category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.06, outCost: 0.21, ctx: 262144, toolCapable: true,   // audited: tools live; ctx was 8x understated

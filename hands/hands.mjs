@@ -124,6 +124,14 @@ const DESKTOP_ON = String(process.env.HANDS_DESKTOP || "") === "1";
 const SNAP_DIR = String(process.env.HANDS_SNAP_DIR || join(HERE, ".snapshots"));
 initSnapshots({ dir: SNAP_DIR });
 
+// Create the parent directory for a file we are about to write, unless it already exists. The
+// existsSync guard matters at a drive root: on Windows, mkdir("C:\\") throws EPERM even under
+// recursive:true, so calling it unconditionally made a write to any drive root impossible.
+function ensureDir(p) {
+  const dir = dirname(resolve(String(p || "")));
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+}
+
 function norm(p) { const r = resolve(String(p || "")); return IS_WIN ? r.toLowerCase() : r; }
 function underAny(target, dirs) {
   const t = norm(target);
@@ -267,7 +275,7 @@ export async function executeJob(tool, args = {}, meta = {}) {
         if (underAny(args.path, SELF_PROTECT)) return refuse("write under a self-protected dir (the live app / this node) — the box is the mission's fallback");
         const buf = args.base64 ? Buffer.from(String(args.content || ""), "base64") : Buffer.from(String(args.content ?? ""), "utf8");
         const snap = beforeMutation("fs_write", args, { node: NODE_NAME });
-        mkdirSync(dirname(resolve(args.path)), { recursive: true });
+        ensureDir(args.path);
         writeFileSync(args.path, buf);
         return { ok: true, path: args.path, bytes: buf.length, snapshot: snap.id, snapshotMethod: snap.method };
       }
@@ -281,7 +289,7 @@ export async function executeJob(tool, args = {}, meta = {}) {
         // Only the FIRST chunk of a chunked transfer is a real mutation of prior state; snapshotting
         // every appended chunk of an 88MB corpus would be absurd and would blow the retention cap.
         const snap = args.truncate ? beforeMutation("fs_append", args, { node: NODE_NAME }) : { id: null, method: "append-chunk" };
-        mkdirSync(dirname(resolve(args.path)), { recursive: true });
+        ensureDir(args.path);
         if (args.truncate) writeFileSync(args.path, buf); else appendFileSync(args.path, buf);
         let total = 0; try { total = statSync(args.path).size; } catch {}
         return { ok: true, path: args.path, appended: buf.length, totalBytes: total, snapshot: snap.id, snapshotMethod: snap.method };
