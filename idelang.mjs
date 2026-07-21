@@ -68,6 +68,14 @@ const D = {
     technical: "Move failed; see log above.",
     hybrid: "A move (build step) failed; the log is above.",
   },
+  // The Furnace pass (doctrine 2026-07-21): honesty before "done".
+  furnace_question: {
+    plain: (n) => "Before calling this done, the work was checked honestly. " + n + " thing" + (n === 1 ? " is" : "s are") + " unfinished or missing; the list is above. Want them closed now?",
+    technical: (n) => "Furnace audit: " + n + " finding" + (n === 1 ? "" : "s") + " (above). Close now?",
+    hybrid: (n) => "Furnace audit (the honesty check before done): " + n + " finding" + (n === 1 ? "" : "s") + ", listed above. Close now?",
+  },
+  furnace_fix: { plain: "Close them now", technical: "Fix findings", hybrid: "Fix (close them now)" },
+  furnace_finish: { plain: "Finish as is", technical: "Accept as is", hybrid: "Accept (finish as is)" },
 };
 
 /*
@@ -97,6 +105,7 @@ export const ANSWER = {
   stop: /stop|abort|halt|cancel/i,
   retry: /try|retry|again/i,
   skip: /skip|leave/i,
+  fix: /close|fix|repair|yes|now/i,
 };
 
 export const DICT_KEYS = Object.keys(D);

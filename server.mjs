@@ -69,6 +69,8 @@ import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
 import { intakeMessages, parseIntake } from "./ideintake.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
+import { sweepFindings, sweepReport, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
+import { helpVoice } from "./idehelp.mjs";
 import { escalationFor, sendWakeups } from "./idepush.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
@@ -1616,6 +1618,68 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
       if (seen && seen.costUsd) { spend(seen.costUsd); await meterTurn(T, seen.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: +seen.costUsd.toFixed(6), move: "look" }); }
     } catch (e) {
       ideJobs.emit(job.id, { type: "run", skipped: true, message: "The look-at-it step hit a problem and was skipped: " + String((e && e.message) || e).slice(0, 200) });
+    }
+
+    /*
+     * THE FURNACE PASS (doctrine 2026-07-21): honesty before "done", on every build.
+     * 1. Placeholder sweep, deterministic and free: the marks of unfinished work are reported
+     *    plainly, never hidden. 2. Vision fidelity audit, one model call: every agreed bullet is
+     *    answered delivered-or-gap. Findings become a QUESTION, never a silent pass: the user
+     *    chooses Close-them-now (one combined fix move) or Finish-as-is. A rival IDE's habit of
+     *    declaring 60%-built apps production ready is the exact failure this exists to prevent.
+     */
+    try {
+      const written = [...new Set((ideJobs.get(job.id) || { events: [] }).events
+        .filter((e) => e.type === "file").map((e) => e.path))].slice(0, 12);
+      const rootPath = String(workspace.root || "").replace(/[\\/]+$/, "");
+      const texts = [];
+      for (const p of written) {
+        try {
+          const r = await handsFor("fs_read", { path: rootPath + "/" + p, maxBytes: 60000 });
+          if (r && r.ok !== false && (r.text || r.content)) texts.push({ path: p, text: r.text || r.content });
+        } catch {}
+      }
+      if (texts.length) {
+        const findings = sweepFindings(texts);
+        ideJobs.emit(job.id, { type: "run", command: "furnace sweep", ok: findings.length === 0, output: sweepReport(findings) });
+
+        let gaps = [];
+        const vision = visionFromPrompt(prompt);
+        if (vision) {
+          const auditModel = resolved.review || resolved.build_code || defaultModelFor(!!T.isOwner);
+          const audited = await chat({ model: auditModel, messages: fidelityMessages({ vision, files: texts, register: reg }) });
+          spend(audited.costUsd);
+          if (audited.costUsd) { await meterTurn(T, audited.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: audited.costUsd, move: "furnace" }); }
+          if (audited.ok) {
+            const fid = parseFidelity(audited.content);
+            gaps = fid.gaps;
+            ideJobs.emit(job.id, { type: "run", command: "furnace audit", ok: gaps.length === 0,
+              output: fid.ok.map((b) => "Delivered: " + b)
+                .concat(gaps.map((g) => "Missing: " + g.bullet + (g.why ? " (" + g.why + ")" : ""))).join("\n")
+                || "The audit returned nothing readable; treat the build as unaudited." });
+          } else {
+            ideJobs.emit(job.id, { type: "run", skipped: true, message: "The vision audit could not run: " + (audited.error || "model unavailable") + ". The sweep above still stands." });
+          }
+        }
+
+        const findingCount = findings.length + gaps.length;
+        if (findingCount) {
+          const answer = await ask("furnace", phrase("furnace_question", reg, findingCount),
+            [phrase("furnace_fix", reg), phrase("furnace_finish", reg)]);
+          if (answer === null) return;
+          if (ANSWER.fix.test(answer)) {
+            const fixMove = { id: "furnace-fix",
+              title: reg === "technical" ? "Close the audit findings" : "Finish the unfinished pieces",
+              why: "The honesty audit found: " + findings.map((f) => f.path + ":" + f.line + " " + f.kind)
+                .concat(gaps.map((g) => g.bullet + " :: " + g.why)).join("; ").slice(0, 900),
+              files: written };
+            const fixed = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt });
+            spend(fixed && fixed.costUsd);
+          }
+        }
+      }
+    } catch (e) {
+      ideJobs.emit(job.id, { type: "run", skipped: true, message: "The honesty audit hit a problem and was skipped: " + String((e && e.message) || e).slice(0, 200) });
     }
 
     ideJobs.finish(job.id, { type: "done", message: phrase("build_done", reg) });
