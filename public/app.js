@@ -945,9 +945,23 @@ function processEvent(st, ev) {
     scroll();
   } else if (ev.type === "tools_capped") {
     // The 128-tool ceiling silently shed connector tools for months. Never again silently.
+    // The headline stays in plain sight; the raw tool identifiers fold behind a tap so a list
+    // of internal names cannot bury the actual reply on a phone screen.
     const note = document.createElement("div");
     note.className = "ctx tools-capped";
-    note.textContent = "⚠ " + (ev.text || "") + (ev.names && ev.names.length ? " Dropped: " + ev.names.join(", ") : "");
+    const head = document.createElement("div");
+    head.textContent = "⚠ " + (ev.text || "");
+    note.appendChild(head);
+    if (ev.names && ev.names.length) {
+      const det = document.createElement("details");
+      const sum = document.createElement("summary");
+      sum.textContent = "which tools were dropped (" + ev.names.length + ")";
+      const list = document.createElement("div");
+      list.className = "capped-names";
+      list.textContent = ev.names.join(", ");
+      det.append(sum, list);
+      note.appendChild(det);
+    }
     inner.insertBefore(note, tools);
     scroll();
   } else if (ev.type === "tools_unavailable") {
