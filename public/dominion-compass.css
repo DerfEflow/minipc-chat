@@ -1,0 +1,141 @@
+/*
+ * Dominion Compass: one handle in place of three buttons.
+ *
+ * WHAT WAS WRONG. The composer had grown a button per surface: the dial, the image forge, and
+ * then The Crucible. On a 320px phone that put seven controls totalling 296px inside a 270px
+ * grid, in five different sizes (43, 40, 34, 38, 55), and they physically overlapped. Two of them
+ * are injected by script after layout, which is why a button was sometimes seen landing on top of
+ * another one.
+ *
+ * WHAT THIS DOES. Retires the three surface buttons in favour of one handle, and gives that
+ * handle its own lane in both layouts. Deliberately does NOT restyle the surviving controls: with
+ * the three odd sizes gone, what remains was already consistent (attach and mic match, send is
+ * larger because it is the primary action). Fewer overrides, less to go wrong.
+ */
+
+/* ---------- retire the three surface triggers ------------------------------------------- */
+/* Their JavaScript still works and still registers window.openForgeDial and friends, which the
+   compass calls. Restoring the buttons is a matter of deleting this one rule. */
+#forge-trigger, #dfi-trigger, #ide-trigger { display: none !important; }
+
+/* ---------- the handle's lane ------------------------------------------------------------
+ * Desktop: .bar is flex (dominion-cinematic-03.css), #input takes flex:1, so the lane just needs
+ * to hold its own width and sit between the input and the voice controls. */
+#bar-mid {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  min-width: 0;
+}
+
+/* Desktop only. The bar is align-items:flex-end there, so a centred lane floats about 11px above
+   the buttons it sits between. Bottom-align the lane and lift the handle by half the difference
+   between its 44px height and the 57px controls beside it, so the dot lands on their centre line. */
+@media (min-width: 621px) {
+  #bar-mid { align-self: flex-end; margin-bottom: 6px; }
+}
+
+/* Mobile: .bar becomes a grid and every child is placed by hand (dominion-rendered-v2.css:576),
+   and dominion-tenant.css then re-enables #speak and pins it to row 2 / column 2. A new child
+   auto-flows onto a row of its own, and anything placed at column 2 lands underneath #speak. So
+   the whole row is declared here, in one place, rather than inherited from two sheets that each
+   knew about a different set of controls. */
+@media (max-width: 620px) {
+  .bar { grid-template-columns: auto auto minmax(0, 1fr) auto auto; }
+  #input    { grid-column: 1 / -1; grid-row: 1; }
+  #bar-left { grid-column: 1; grid-row: 2; align-self: center; }
+  #speak    { grid-column: 2; grid-row: 2; align-self: center; justify-self: center; }
+  #bar-mid  { grid-column: 3; grid-row: 2; align-self: center; }
+  #mic      { grid-column: 4; grid-row: 2; align-self: center; }
+  #send     { grid-column: 5; grid-row: 2; align-self: center; }
+
+  /* Four tap targets and a handle inside 270px only fits if they agree on a size. This is also
+     the answer to the row reading as ragged: they were 43, 40, 34, 38 and 55, bottom-aligned, so
+     every top edge sat at a different height. One size, one centre line, send larger because it
+     is the primary action. */
+  #attach, #speak, #mic { width: 42px; height: 42px; }
+  #send { width: 50px; height: 50px; }
+}
+
+@media (max-width: 380px) {
+  .bar { gap: 5px; }
+  #attach, #speak, #mic { width: 39px; height: 39px; }
+  #send { width: 46px; height: 46px; }
+}
+
+/* ---------- the handle -------------------------------------------------------------------- */
+#compass {
+  --cx-progress: 0;
+  display: inline-flex; align-items: center; gap: 3px;
+  height: 44px;
+  touch-action: none;                 /* the drag is ours; the page must not scroll under it */
+  user-select: none; -webkit-user-select: none;
+}
+#compass .cx-core { display: grid; justify-items: center; gap: 2px; }
+
+/* At rest: a dim copper pinpoint sitting in space that was empty anyway. Nothing pulses, nothing
+   competes with the conversation. */
+#compass .cx-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: radial-gradient(circle at 38% 34%, #f6c089, #b96b32 60%, #6d3a17);
+  box-shadow: 0 0 0 1px rgba(255, 190, 130, .24), 0 0 8px rgba(185, 107, 50, .35);
+  cursor: grab;
+  transition: width .18s ease, height .18s ease, box-shadow .22s ease;
+}
+#compass .cx-dot:focus-visible { outline: 2px solid var(--energy, #76ff68); outline-offset: 5px; }
+#compass:hover .cx-dot, #compass.awake .cx-dot, #compass.hint .cx-dot {
+  width: 13px; height: 13px;
+  box-shadow: 0 0 0 1px rgba(255, 208, 158, .42), 0 0 14px rgba(212, 130, 60, .62);
+}
+body.cx-dragging #compass .cx-dot { cursor: grabbing; }
+
+/* Arrows stay out of sight until the handle is touched, hovered, or pressed for a hint. That is
+   what keeps a navigation control from reading as clutter. */
+#compass .cx-arm {
+  width: 16px; height: 16px; padding: 0; border: 0; background: none;
+  display: none; align-items: center; justify-content: center;
+  cursor: pointer; opacity: 0;
+  transition: opacity .2s ease;
+}
+#compass .cx-arm.on { display: inline-flex; }
+#compass:hover .cx-arm.on,
+#compass.awake .cx-arm.on,
+#compass.hint .cx-arm.on { opacity: .85; }
+#compass .cx-arm svg {
+  width: 14px; height: 14px; fill: none;
+  stroke: #d4823c; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
+}
+#compass .cx-arm:hover svg { stroke: var(--energy-hot, #9dff92); }
+
+/* Inside a panel there is exactly one way out, and it stays visible: the handle doubles as a
+   "you are here" marker. */
+#compass:not([data-surface="main"]) .cx-arm.on { opacity: .72; }
+
+@media (prefers-reduced-motion: reduce) {
+  #compass .cx-dot, #compass .cx-arm { transition: none; }
+}
+
+/* ---------- edge feedback ----------------------------------------------------------------
+ * The first design put warm bars on the screen edges as the touch target. They cannot be one: the
+ * OS owns every edge (Android claims both sides for back and the bottom for home, iOS the left).
+ * So the warm edge survives as pure feedback, brightening as the drag nears its commit point. */
+body.cx-dragging::before,
+body.cx-dragging::after {
+  content: ""; position: fixed; top: 0; bottom: 0; width: 3px;
+  z-index: 65; pointer-events: none;
+  opacity: calc(var(--cx-progress, 0) * 1.5);
+}
+body.cx-dragging::before { left: 0; background: linear-gradient(90deg, rgba(212, 130, 60, .6), transparent); }
+body.cx-dragging::after { right: 0; background: linear-gradient(270deg, rgba(212, 130, 60, .6), transparent); }
+
+/* ---------- pre-existing bug: the chat surface never actually slid ------------------------
+ * dominion-rendered-v2.css:325 sets `.neural-glass { transform: none !important }` to keep the
+ * cursor-glare effect from moving the geometry. That intent is right, but !important is a blunt
+ * instrument: it also outranks the reveal choreography, so in ALL THREE reveals the sidebar,
+ * header and overlay slide while the conversation panel stays frozen. It went unnoticed because
+ * the arriving panel covers the viewport by the time the motion ends.
+ *
+ * These restore the slide for the reveal states only. Cursor movement still cannot move it.
+ */
+body.dfd-open #neural-glass { transform: translateX(-108vw) !important; }
+body.dfi-open #neural-glass { transform: translateX(108vw) !important; }
+body.ide-open #neural-glass { transform: translateY(-112vh) !important; }

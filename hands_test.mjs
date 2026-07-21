@@ -29,6 +29,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // The node executor reads HANDS_ROOTS at import time — set the jail BEFORE importing it.
 const WORK = mkdtempSync(join(tmpdir(), "hands-test-"));
 process.env.HANDS_ROOTS = WORK;
+// And clear the whole-machine override. It is set in the real environment on machines that run a
+// hands node, and it grants every drive, which silently turns the roots test below into a no-op:
+// the "outside the roots" path is genuinely allowed, so nothing is refused and the assertion reads
+// undefined. A test must state its own preconditions rather than inherit them from the box.
+delete process.env.HANDS_MAX_ACCESS;
 const { executeJob, assertNotProtected } = await import("./hands/hands.mjs");
 
 const TOKEN = "test-token-" + Math.random().toString(36).slice(2);
