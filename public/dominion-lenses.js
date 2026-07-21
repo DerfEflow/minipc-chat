@@ -29,6 +29,16 @@
     events: [],
     detach: null,
     mounted: false,
+    openMoves: new Set(),   // which plan rows the user expanded (survives re-renders)
+    codeOpen: false,        // non-engineers opt INTO the code view; engineers get it standing open
+    showFullPlan: false,    // after a finished build folds itself, this reopens the steps
+    doneAnnounced: "",      // job id whose completion event already fired
+  };
+
+  // The Crucible's working mode drives how much machinery each lens shows.
+  const modeOf = () => {
+    const root = document.getElementById("ide-root");
+    return (root && root.dataset.mode) || "beginner";
   };
 
   const readLens = () => { try { return localStorage.getItem(LENS_KEY) || "blueprint"; } catch { return "blueprint"; } };
@@ -141,6 +151,8 @@
     if (state.detach) { try { state.detach(); } catch {} state.detach = null; }
     state.jobId = jobId;
     state.events = [];
+    state.openMoves = new Set();
+    state.showFullPlan = false;
     render();
 
     const es = new EventSource("/ide/job/attach?job=" + encodeURIComponent(jobId) + "&from=0");
@@ -212,6 +224,12 @@
     if (!state.jobId) { body.replaceChildren(emptyState()); return; }
     body.replaceChildren(state.lens === "blueprint" ? blueprint(d) : workshop(d));
     maybeOfferPublish(d);
+    // The completion moment, announced exactly once per job: the tour ends on it, and the
+    // closing flow (windows fold, the invitation leads) keys off the same fact.
+    if (d.outcome === "done" && state.doneAnnounced !== state.jobId) {
+      state.doneAnnounced = state.jobId;
+      try { document.dispatchEvent(new CustomEvent("dominion-build-done", { detail: { jobId: state.jobId } })); } catch {}
+    }
   }
 
   /*
@@ -316,49 +334,88 @@
       wrap.append(p);
     }
 
-    moves.forEach((m, i) => {
-      const card = document.createElement("article");
-      card.className = "cru-card";
-      card.dataset.state = m.state;
+    /*
+     * ONE container of compact rows, never a stack of fifteen identical boxes (Fred's ruling
+     * 2026-07-21 night: repeating every action in its own container is literally a waste of a
+     * beginner's time). A row is a line: number, title, state. Tapping it opens the detail
+     * (why, message, files, model) for exactly that row. Engineers get the detail chips inline
+     * because density is the point for them.
+     */
+    const mode = modeOf();
+    const foldDone = d.outcome === "done" && mode !== "engineer" && !state.showFullPlan;
 
-      const top = document.createElement("div");
-      top.className = "c-top";
-      const num = document.createElement("span"); num.className = "c-num"; num.textContent = String(i + 1);
-      const title = document.createElement("span"); title.className = "c-title"; title.textContent = m.title || "Move " + (i + 1);
-      const badge = document.createElement("span"); badge.className = "c-state"; badge.textContent = stateWord(m.state);
-      top.append(num, title, badge);
-      card.append(top);
+    if (foldDone && moves.length) {
+      // The build is finished and this reader is here for the result: the steps fold into one
+      // honest sentence, reopenable, and the invitation card above leads.
+      const filesTotal = d.files.size;
+      const sum = document.createElement("button");
+      sum.type = "button";
+      sum.className = "cru-plansum";
+      sum.textContent = moves.length + (moves.length === 1 ? " step" : " steps") + ", "
+        + filesTotal + (filesTotal === 1 ? " file" : " files") + " " + stateWord("done").toLowerCase();
+      sum.addEventListener("click", () => { state.showFullPlan = true; render(); });
+      wrap.append(sum);
+    } else if (moves.length) {
+      const plan = document.createElement("div");
+      plan.className = "cru-plan";
+      moves.forEach((m, i) => {
+        const row = document.createElement("div");
+        row.className = "cru-row";
+        row.dataset.state = m.state;
+        const open = state.openMoves.has(m.id) || mode === "engineer";
 
-      if (m.why) { const why = document.createElement("p"); why.className = "c-why"; why.textContent = m.why; card.append(why); }
-      if (m.message) { const msg = document.createElement("p"); msg.className = "c-msg"; msg.textContent = m.message; card.append(msg); }
+        const line = document.createElement("button");
+        line.type = "button";
+        line.className = "r-line";
+        const num = document.createElement("span"); num.className = "c-num"; num.textContent = String(i + 1);
+        const title = document.createElement("span"); title.className = "c-title"; title.textContent = m.title || "Move " + (i + 1);
+        const badge = document.createElement("span"); badge.className = "c-state"; badge.textContent = stateWord(m.state);
+        line.append(num, title, badge);
+        row.append(line);
 
-      const foot = document.createElement("div");
-      foot.className = "c-foot";
-      if (m.files && m.files.length) {
-        const f = document.createElement("span");
-        f.className = "c-files";
-        f.textContent = m.files.length === 1 ? "1 file" : m.files.length + " files";
-        f.title = m.files.join("\n");
-        foot.append(f);
-      }
-      if (typeof m.fileCount === "number" && m.state === "done") {
-        const w = document.createElement("span"); w.className = "c-files";
-        w.textContent = m.fileCount + (m.fileCount === 1 ? " file written" : " files written");
-        foot.append(w);
-      }
-      // The model is named, and the router's reason with it, because a build you cannot audit is
-      // a build you cannot trust.
-      if (m.model && m.model !== "dominion-forge") {
-        const chip = document.createElement("span"); chip.className = "c-model"; chip.textContent = friendly(m.model);
-        if (m.reason) chip.title = m.reason;
-        foot.append(chip);
-      } else if (m.model === "dominion-forge") {
-        const chip = document.createElement("span"); chip.className = "c-model is-forge"; chip.textContent = "Dominion Forge";
-        foot.append(chip);
-      }
-      if (foot.children.length) card.append(foot);
-      wrap.append(card);
-    });
+        if (open) {
+          const det = document.createElement("div");
+          det.className = "r-detail";
+          if (m.why) { const why = document.createElement("p"); why.className = "c-why"; why.textContent = m.why; det.append(why); }
+          if (m.message) { const msg = document.createElement("p"); msg.className = "c-msg"; msg.textContent = m.message; det.append(msg); }
+          const foot = document.createElement("div");
+          foot.className = "c-foot";
+          if (m.files && m.files.length) {
+            const f = document.createElement("span");
+            f.className = "c-files";
+            f.textContent = m.files.length === 1 ? "1 file" : m.files.length + " files";
+            f.title = m.files.join("\n");
+            foot.append(f);
+          }
+          if (typeof m.fileCount === "number" && m.state === "done") {
+            const w = document.createElement("span"); w.className = "c-files";
+            w.textContent = m.fileCount + (m.fileCount === 1 ? " file written" : " files written");
+            foot.append(w);
+          }
+          // The model is named, and the router's reason with it, because a build you cannot
+          // audit is a build you cannot trust.
+          if (m.model && m.model !== "dominion-forge") {
+            const chip = document.createElement("span"); chip.className = "c-model"; chip.textContent = friendly(m.model);
+            if (m.reason) chip.title = m.reason;
+            foot.append(chip);
+          } else if (m.model === "dominion-forge") {
+            const chip = document.createElement("span"); chip.className = "c-model is-forge"; chip.textContent = "Dominion Forge";
+            foot.append(chip);
+          }
+          if (foot.children.length) det.append(foot);
+          if (det.children.length) row.append(det);
+        }
+
+        if (mode !== "engineer") {
+          line.addEventListener("click", () => {
+            if (state.openMoves.has(m.id)) state.openMoves.delete(m.id); else state.openMoves.add(m.id);
+            render();
+          });
+        }
+        plan.append(row);
+      });
+      wrap.append(plan);
+    }
 
     if (d.snapshots.length) {
       const s = document.createElement("p");
@@ -389,14 +446,37 @@
     return tail.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   }
 
-  /* ---------- WORKSHOP: the lens for someone who wants the machinery ---------------------------- */
+  /* ---------- WORKSHOP: where the thing exists --------------------------------------------------
+   * Code reveal is AUTOMATIC for engineers and a toggle for everyone else (Fred's ruling): a
+   * beginner opens the Workshop to see their app, never to read a diff, so the machinery waits
+   * behind one honest button.
+   */
   function workshop(d) {
     const wrap = document.createElement("div");
     wrap.className = "cru-workshop";
 
+    const mode = modeOf();
+    const codeVisible = mode === "engineer" || state.codeOpen;
+    const files = [...d.files.values()];
+
+    // The console: exactly what ran and what it said. Proof belongs to everyone.
+    const runBox = section(L("checks"));
+    if (!d.runs.length) runBox.append(note("Nothing has been run yet."));
+    else for (const r of d.runs) runBox.append(runView(r));
+    wrap.append(runBox);
+
+    if (!codeVisible) {
+      const show = document.createElement("button");
+      show.type = "button";
+      show.className = "w-code-toggle";
+      show.textContent = L("code_show");
+      show.addEventListener("click", () => { state.codeOpen = true; render(); });
+      wrap.append(show);
+      return wrap;
+    }
+
     // Files, as a tree of what this build actually touched.
     const filesBox = section(L("files_touched"));
-    const files = [...d.files.values()];
     if (!files.length) filesBox.append(note("Nothing written yet."));
     else filesBox.append(tree(files));
     wrap.append(filesBox);
@@ -408,11 +488,14 @@
     else for (const f of withDiff) diffBox.append(diffView(f));
     wrap.append(diffBox);
 
-    // The console: exactly what ran and what it said.
-    const runBox = section(L("checks"));
-    if (!d.runs.length) runBox.append(note("Nothing has been run yet."));
-    else for (const r of d.runs) runBox.append(runView(r));
-    wrap.append(runBox);
+    if (mode !== "engineer") {
+      const hide = document.createElement("button");
+      hide.type = "button";
+      hide.className = "w-code-toggle";
+      hide.textContent = L("code_hide");
+      hide.addEventListener("click", () => { state.codeOpen = false; render(); });
+      wrap.append(hide);
+    }
 
     return wrap;
   }

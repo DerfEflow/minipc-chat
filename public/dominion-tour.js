@@ -165,6 +165,10 @@
   document.addEventListener("dominion-crucible-open", () => {
     mountRecall();
     if (seen()) return;
+    // Auto-show is for beginners (mode ruling): engineers skipped school on purpose, and vibe
+    // coders get it too since the surface is new to everyone. The ? recalls it for all modes.
+    const root = document.getElementById("ide-root");
+    if (root && root.dataset.mode === "engineer") { markDone(); return; }
     // The intro card (built-vs-deployed) goes first; the tour begins when it is acknowledged.
     const intro = $("#ide-intro");
     if (!intro) { setTimeout(start, 450); return; }

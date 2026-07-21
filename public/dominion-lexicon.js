@@ -177,6 +177,60 @@
       "Recall the tour any time from the ? control.",
       "Recall the tour (this walkthrough) any time from the ? control.",
     ],
+
+    // ---- the three modes ------------------------------------------------------------------
+    mode_q: ["Which sounds most like you?", "Select working mode", "Select working mode (which sounds most like you?)"],
+    mode_note: [
+      "This shapes how everything here looks and talks. Change it any time with the switch above.",
+      "Sets layout density, terminology and defaults. Switchable at any time.",
+      "Sets layout, terminology and defaults; switch any time with the control above.",
+    ],
+    mode_beginner_t: ["I'm new to this", "Beginner", "Beginner (new to this)"],
+    mode_beginner_b: [
+      "You describe it, we talk it through, and it gets built. No technical words, ever.",
+      "Chat-first surface, curated defaults, zero configuration.",
+      "Chat-first surface with curated defaults (no configuration, no jargon).",
+    ],
+    mode_vibe_t: ["I build with AI", "Vibe coder", "Vibe coder (builds with AI)"],
+    mode_vibe_b: [
+      "You know what you want and roughly how this works. Clear options, honest costs, no clutter.",
+      "Intentional feature set with upfront cost and complexity.",
+      "Intentional features with upfront cost and complexity (no clutter).",
+    ],
+    mode_engineer_t: ["I'm a software engineer", "Software engineer", "Software engineer"],
+    mode_engineer_b: [
+      "Full control in labelled drawers: models, budgets, code, diffs. Terse and precise.",
+      "Full control surface: assignments, budgets, diffs, code. Terse.",
+      "Full control surface in drawers (assignments, budgets, diffs, code). Terse.",
+    ],
+    mode_name_beginner: ["New to this", "Beginner", "Beginner"],
+    mode_name_vibe: ["Vibe coder", "Vibe coder", "Vibe coder"],
+    mode_name_engineer: ["Engineer", "Engineer", "Engineer"],
+
+    // ---- the vibe coder model line + honesty card -------------------------------------------
+    model_line_intro: ["Who does the work:", "Assignments:", "Assignments (who does the work):"],
+    model_line_change: ["Change", "Edit", "Edit (change who does what)"],
+    involves_title: ["What this involves", "Scope implications", "Scope implications (what this involves)"],
+    involves_cost: ["Building it should cost", "Estimated build cost", "Estimated build cost (what building it should cost)"],
+    involves_none: [
+      "Nothing complicated: no accounts, no database, no outside services.",
+      "No external dependencies implied.",
+      "No external dependencies implied (no accounts, database, or outside services).",
+    ],
+
+    // ---- mockups in the chat -----------------------------------------------------------------
+    mockup_making: ["Painting that for you...", "Rendering mockup...", "Rendering mockup (painting that for you)..."],
+    mockup_pick: ["That one", "Select", "Select (that one)"],
+    mockup_failed: ["That picture could not be made. Describe it in words and we keep going.", "Mockup render failed; continue textually.", "Mockup render failed (the picture could not be made); continue in words."],
+
+    // ---- the workshop code toggle + closing flow ----------------------------------------------
+    code_show: ["Show me the code", "Show code", "Show code (the files being written)"],
+    code_hide: ["Hide the code", "Hide code", "Hide code"],
+    closing_line: [
+      "It is built and working. The next step, whenever you are ready, is putting it online so everyone can use it.",
+      "Build complete. Next step: deployment.",
+      "Build complete. Next step: deployment (putting it online so everyone can use it).",
+    ],
   };
 
   let register = (() => {

@@ -17,8 +17,14 @@
   "use strict";
 
   const ENGAGED_KEY = "dominion.ide.enabled.v1";
+  const MODE_KEY = "dominion.crucible.mode.v1";
+  // Mode sets the register silently (ruling 4a): the machinery underneath stays, one question
+  // fewer at the door.
+  const MODE_REG = { beginner: "plain", vibe: "hybrid", engineer: "technical" };
+  const MODES = ["beginner", "vibe", "engineer"];
 
   const state = {
+    mode: "",             // "" = never chosen on this device or account: show the picker once
     allowed: false, engaged: false, open: false,
     routing: null,        // class labels/blurbs/defaults, from the server
     catalog: [],          // the model list, from the SAME /api/models the chat picker uses
@@ -284,6 +290,7 @@
     const payload = wsId ? { id: wsId, patch: body } : { engaged: state.engaged, ...body };
     fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) })
       .catch(() => {});
+    paintModelLine();   // the vibe coder's one-line summary must never contradict the board
   }
 
   // Live routing preview: type a job, see where it would go and why. Costs nothing: the server
@@ -365,7 +372,14 @@
     el.className = "ide-start";
     el.id = "ide-start";
     el.innerHTML =
-      '<h3 data-lex="start_heading"></h3>' +
+      '<div class="st-head-row">' +
+        '<h3 data-lex="start_heading"></h3>' +
+        '<div class="st-mode-switch" id="st-mode-switch" role="tablist" aria-label="Working mode">' +
+          '<button type="button" data-mode="beginner" data-lex="mode_name_beginner"></button>' +
+          '<button type="button" data-mode="vibe" data-lex="mode_name_vibe"></button>' +
+          '<button type="button" data-mode="engineer" data-lex="mode_name_engineer"></button>' +
+        '</div>' +
+      '</div>' +
       '<div class="st-row st-lang">' +
         '<span class="st-lang-label" data-lex="lang_label"></span>' +
         '<select id="st-lang" aria-label="How Dominion talks to you">' +
@@ -388,6 +402,7 @@
       '<textarea id="st-prompt" rows="3"></textarea>' +
       '<div class="st-tools" id="st-tools">' +
         '<span class="st-tools-label" data-lex="tools_label"></span>' +
+        '<div class="st-model-line" id="st-model-line" hidden></div>' +
         '<div class="st-tools-btns">' +
           '<button type="button" id="st-tools-default" data-lex="tools_default"></button>' +
           '<button type="button" id="st-tools-custom" data-lex="tools_customize"></button>' +
@@ -498,6 +513,10 @@
     wireTools();
     wireIntake(status);
 
+    for (const b of document.querySelectorAll("#st-mode-switch button")) {
+      b.addEventListener("click", () => applyMode(b.dataset.mode));
+    }
+
     $("#st-go").addEventListener("click", () => beginIntake(status));
   }
 
@@ -572,26 +591,117 @@
     });
   }
 
+  /* ---------- the three modes (SOW docs/CRUCIBLE-MODES-ROADMAP.md, rulings 1a/2a/4a) --------
+   * One switch changes everything downstream. The user picks from three cards exactly once
+   * (never inferred: a robot guessing "you seem like a beginner" is a bad first date), and a
+   * small persistent switch in the starter head changes it any time. Mode drives layout via
+   * data-mode CSS, the register silently, the board's visibility, the tour, and the persona.
+   */
+  const readMode = () => { try { const v = localStorage.getItem(MODE_KEY); return MODES.includes(v) ? v : ""; } catch { return ""; } };
+
+  function applyMode(m, { save = true } = {}) {
+    if (!MODES.includes(m)) return;
+    state.mode = m;
+    try { localStorage.setItem(MODE_KEY, m); } catch {}
+    const root = $("#ide-root");
+    if (root) root.dataset.mode = m;
+    const picker = $("#st-modes");
+    if (picker) picker.remove();
+    // Register follows the mode (ruling 4a); the lang select stays as the engineer's override.
+    if (window.DominionLexicon) window.DominionLexicon.set(MODE_REG[m]);
+    paintLexicon();
+    paintModeSwitch();
+    paintTools();
+    paintModelLine();
+    if (save) {
+      fetch("/ide/prefs", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ engaged: state.engaged, mode: m, language: MODE_REG[m] }) }).catch(() => {});
+    }
+  }
+
+  function paintModeSwitch() {
+    for (const b of document.querySelectorAll("#st-mode-switch button")) {
+      b.classList.toggle("on", b.dataset.mode === state.mode);
+    }
+  }
+
+  // The three cards, shown once. Everything else in the stage hides until the choice is made:
+  // the first question the surface asks is who it is talking to.
+  function showModePicker() {
+    const stage = $("#ide-stage");
+    if (!stage || $("#st-modes")) return;
+    const el = document.createElement("section");
+    el.className = "st-modes";
+    el.id = "st-modes";
+    el.innerHTML =
+      '<h3 data-lex="mode_q"></h3>' +
+      MODES.map((m) =>
+        '<button type="button" class="st-mode-card" data-mode="' + m + '">' +
+          '<span class="mc-t" data-lex="mode_' + m + '_t"></span>' +
+          '<span class="mc-b" data-lex="mode_' + m + '_b"></span>' +
+        '</button>').join("") +
+      '<p class="st-modes-note" data-lex="mode_note"></p>';
+    stage.prepend(el);
+    stage.classList.add("picking");
+    paintLexicon();
+    for (const card of el.querySelectorAll(".st-mode-card")) {
+      card.addEventListener("click", () => {
+        stage.classList.remove("picking");
+        applyMode(card.dataset.mode);
+        maybeShowIntro();
+        document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
+      });
+    }
+  }
+
+  // The vibe coder sees one honest sentence instead of a board: who does the work, at what rate.
+  function paintModelLine() {
+    const line = $("#st-model-line");
+    if (!line || !state.routing) return;
+    const name = (id) => { const m = findModel(id); return m ? m.name : ""; };
+    const eng = state.allInOne || state.assignments.build_code || (state.routing.defaults && state.routing.defaults.build_code) || "";
+    const des = state.allInOne || state.assignments.design_code || (state.routing.defaults && state.routing.defaults.design_code) || "";
+    const engM = findModel(eng);
+    const parts = [];
+    parts.push((name(eng) || "Your main model") + (engM && engM.priceShort ? " (" + engM.priceShort + ")" : ""));
+    if (des && des !== eng && name(des)) parts.push(name(des) + " for design");
+    parts.push("Dominion Forge for pictures");
+    line.textContent = L("model_line_intro") + " " + parts.join(" · ");
+  }
+
   /* ---------- tools choice (Fred's ruling 2026-07-21) -------------------------------------
    * The Assignment Board is expert furniture, so it hides behind "Customize". "Use all the
    * default tools" is the recommended one-tap answer and clears any customization, so what the
-   * button says is what the build does.
+   * button says is what the build does. Mode outranks it: beginners never see the choice at
+   * all, engineers get the board standing open.
    */
   const TOOLS_KEY = "dominion.crucible.tools.v1";
+  let toolsChoice = "default";
+
+  function paintTools() {
+    const board = $("#ide-board");
+    const btnDef = $("#st-tools-default"), btnCus = $("#st-tools-custom");
+    if (!btnDef) return;
+    if (board) {
+      board.hidden = state.mode === "beginner" ? true
+        : state.mode === "engineer" ? false
+        : toolsChoice !== "custom";
+    }
+    btnDef.classList.toggle("on", toolsChoice !== "custom");
+    btnCus.classList.toggle("on", toolsChoice === "custom");
+  }
+
   function wireTools() {
     const board = $("#ide-board");
     const btnDef = $("#st-tools-default"), btnCus = $("#st-tools-custom");
-    const paint = (mode) => {
-      if (board) board.hidden = mode !== "custom";
-      btnDef.classList.toggle("on", mode !== "custom");
-      btnCus.classList.toggle("on", mode === "custom");
-    };
-    let mode = "default";
-    try { mode = localStorage.getItem(TOOLS_KEY) === "custom" ? "custom" : "default"; } catch {}
+    const paint = () => paintTools();
+    try { toolsChoice = localStorage.getItem(TOOLS_KEY) === "custom" ? "custom" : "default"; } catch {}
+    let mode = toolsChoice;
     paint(mode);
     btnDef.addEventListener("click", () => {
+      toolsChoice = "default";
       try { localStorage.setItem(TOOLS_KEY, "default"); } catch {}
-      paint("default");
+      paint();
       // Defaults MEAN defaults: the server stores NO keys (deleted, not blanked, since an empty
       // string counts as a choice and routes to the main model instead of the curated default).
       state.allInOne = "";
@@ -610,10 +720,12 @@
       const all = $("#ide-allinone");
       if (all) all.value = "";
       renderBoard();
+      paintModelLine();
     });
     btnCus.addEventListener("click", () => {
+      toolsChoice = "custom";
       try { localStorage.setItem(TOOLS_KEY, "custom"); } catch {}
-      paint("custom");
+      paint();
       if (board) board.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   }
@@ -659,20 +771,101 @@
     try {
       const r = await fetch("/ide/intake", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ messages: intake.messages, workspaceId: $("#st-ws").value || "",
+          mode: state.mode || "beginner",
           register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }) });
       j = await r.json();
     } catch {}
     thinking.remove();
     intake.busy = false;
     if (!j || j.error) { status((j && j.error) || "The server could not be reached.", true); return; }
-    intake.messages.push({ role: "assistant", content: (j.reply ? j.reply + "\n" : "") + (j.vision ? "VISION READY\n" + j.vision : "") });
+    intake.messages.push({ role: "assistant", content: (j.reply ? j.reply + "\n" : "")
+      + (j.mockups || []).map((m) => "MOCKUP: " + m + "\n").join("")
+      + (j.vision ? "VISION READY\n" + j.vision : "") });
     if (j.reply) chatBubble("ai", j.reply);
+    for (const m of (j.mockups || [])) renderMockup(m);
     if (j.vision) {
       intake.vision = j.vision;
       visionCard(j.vision);
+      // Honesty before the button: what this vision actually involves, and the price band.
+      // Beginners hear these facts later, at the deploy talk, in gentler words.
+      if (j.involves && state.mode !== "beginner") renderInvolves(j.involves);
       $("#st-chat-actions").hidden = false;
       document.dispatchEvent(new CustomEvent("dominion-ide-vision"));
     }
+  }
+
+  /*
+   * A MOCKUP directive becomes a real picture in the chat (the beginner aesthetics loop): the
+   * Forge pipeline paints it, the user taps "That one", and the choice is spoken back into the
+   * interview so the model folds it into the vision.
+   */
+  async function renderMockup(promptText) {
+    const log = $("#st-chat-log");
+    const card = document.createElement("div");
+    card.className = "cb cb-mock";
+    card.innerHTML = '<div class="mk-wait">' + L("mockup_making") + '</div>';
+    log.append(card);
+    log.scrollTop = log.scrollHeight;
+    try {
+      const r = await fetch("/api/images/generate", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "A clean, beautiful mockup of a phone app screen: " + promptText + ". No device frame text, no watermark.", n: 1 }) });
+      const j = await r.json();
+      const b64 = j && j.images && j.images[0] && j.images[0].b64;
+      if (!r.ok || !b64) throw new Error((j && j.error) || "no image");
+      card.innerHTML = "";
+      const img = document.createElement("img");
+      img.src = "data:image/png;base64," + b64;
+      img.alt = promptText;
+      img.addEventListener("click", () => img.classList.toggle("zoom"));
+      const pick = document.createElement("button");
+      pick.type = "button";
+      pick.className = "mk-pick";
+      pick.textContent = L("mockup_pick");
+      pick.addEventListener("click", () => {
+        intake.messages.push({ role: "user", content: "I choose this look: " + promptText });
+        chatBubble("user", L("mockup_pick") + " ✓");
+        $("#st-chat-actions").hidden = true;
+        intakeTurn(() => {});
+      });
+      card.append(img, pick);
+      log.scrollTop = log.scrollHeight;
+    } catch {
+      card.innerHTML = "";
+      card.className = "cb cb-ai";
+      card.textContent = L("mockup_failed");
+    }
+  }
+
+  // The vibe coder's honesty card: the cost band and every real-world commitment the vision
+  // implies, before the Build button, never after the money is gone.
+  function renderInvolves(inv) {
+    const log = $("#st-chat-log");
+    const card = document.createElement("div");
+    card.className = "cb cb-involves";
+    const h = document.createElement("h4");
+    h.textContent = L("involves_title");
+    card.append(h);
+    const cost = document.createElement("div");
+    cost.className = "inv-cost";
+    cost.textContent = L("involves_cost") + " " + (inv.band || "");
+    card.append(cost);
+    const flags = Array.isArray(inv.flags) ? inv.flags : [];
+    if (!flags.length) {
+      const ok = document.createElement("div");
+      ok.className = "inv-none";
+      ok.textContent = L("involves_none");
+      card.append(ok);
+    } else {
+      const ul = document.createElement("ul");
+      for (const f of flags) {
+        const li = document.createElement("li");
+        li.textContent = f.label;
+        ul.append(li);
+      }
+      card.append(ul);
+    }
+    log.append(card);
+    log.scrollTop = log.scrollHeight;
   }
 
   function beginIntake(status) {
@@ -967,7 +1160,16 @@
     if (window.closeForgeDial) window.closeForgeDial();
     if (window.closeForgeImages) window.closeForgeImages();
     buildPanel();
-    maybeShowIntro();
+    // The first question the surface asks is who it is talking to. With a mode already chosen
+    // (this device or the account), it re-skins silently; without one, the three cards come
+    // first and the intro + tour wait for the answer.
+    const chosen = state.mode || readMode();
+    if (chosen) {
+      applyMode(chosen, { save: false });
+      maybeShowIntro();
+    } else {
+      showModePicker();
+    }
     // Paint from whatever is true right now. The panel is built lazily, so anything reconciled
     // while it did not exist (a question that arrived while the works were closed) has to be
     // drawn on the way in, or it stays invisible until the next poll.
@@ -979,7 +1181,7 @@
     void $("#ide-root").offsetWidth;
     document.body.classList.add("ide-open");
     // The guided tour listens for this; it decides for itself whether to appear.
-    document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
+    if (chosen) document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
   }
 
   function closePanel() {
@@ -1095,6 +1297,13 @@
       if (!deviceHasOpinion && s.prefs && s.prefs.engaged === true) {
         setEngaged(true, { reveal: false, push: false });
       }
+      // The account remembers the mode the same way it remembers the switch: a device that has
+      // never chosen adopts it, a device that HAS chosen keeps its own opinion.
+      if (!readMode() && s.prefs && MODES.includes(s.prefs.mode)) {
+        state.mode = s.prefs.mode;
+        try { localStorage.setItem(MODE_KEY, s.prefs.mode); } catch {}
+      }
+      if (state.open && (state.mode || readMode())) applyMode(state.mode || readMode(), { save: false });
       announceIdeState();
     } catch {}
   }

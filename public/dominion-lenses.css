@@ -178,3 +178,29 @@
    inside their own boxes instead of asserting content width. */
 #cru { max-width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); }
 #cru .cru-head, #cru .cru-body { min-width: 0; max-width: 100%; }
+
+/* ============================== ITERATION 2: modes in the lenses =========================== */
+/* One container of compact rows, never fifteen boxes. */
+.cru-plan { display: grid; gap: 0; border: 1px solid var(--glass-line, rgba(150,200,230,.18));
+  border-radius: 4px; overflow: hidden; min-width: 0; }
+.cru-row { min-width: 0; border-bottom: 1px solid rgba(150,200,230,.08); }
+.cru-row:last-child { border-bottom: 0; }
+.cru-row .r-line { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  font: inherit; cursor: pointer; border: 0; padding: 10px 12px; min-width: 0;
+  background: linear-gradient(180deg, rgba(10,24,40,.55), rgba(4,10,18,.55)); color: inherit; }
+.cru-row .r-line:hover { background: rgba(16, 34, 54, .65); }
+.cru-row .c-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 13px; color: var(--ink, #e8f6ff); }
+.cru-row[data-state="running"] .c-title { text-shadow: 0 0 14px rgba(118,255,104,.25); }
+.cru-row .r-detail { padding: 4px 12px 12px 34px; display: grid; gap: 6px; min-width: 0;
+  background: rgba(4, 10, 18, .5); }
+.cru-plansum { font: inherit; font-size: 13px; cursor: pointer; text-align: left; padding: 12px 14px;
+  border-radius: 4px; color: var(--ink-soft, #d9c9b8);
+  border: 1px solid var(--glass-line, rgba(150,200,230,.18));
+  background: linear-gradient(180deg, rgba(10,24,40,.55), rgba(4,10,18,.55)); }
+.cru-plansum:hover { border-color: rgba(185, 107, 50, .5); }
+.w-code-toggle { font: inherit; font-size: 12.5px; cursor: pointer; padding: 9px 16px;
+  border-radius: 3px; justify-self: start; color: var(--ink-soft, #d9c9b8);
+  border: 1px solid var(--glass-line, rgba(150,200,230,.2));
+  background: linear-gradient(180deg, rgba(14,33,54,.9), rgba(4,11,20,.95)); }
+.w-code-toggle:hover { border-color: rgba(118, 255, 104, .4); }
