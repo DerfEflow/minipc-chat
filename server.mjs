@@ -67,6 +67,7 @@ import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove,
 import { routeMove, resolveAssignments } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee } from "./idesee.mjs";
+import { intakeMessages, parseIntake } from "./ideintake.mjs";
 import { escalationFor, sendWakeups } from "./idepush.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
@@ -1175,6 +1176,57 @@ async function handleIde(req, res, u) {
   if (req.method === "POST" && path === "/ide/job/answer") return send(ideFeature.answerJob(T, body));
   if (req.method === "POST" && path === "/ide/push/subscribe") return send(ideFeature.subscribePush(T, body));
   if (req.method === "POST" && path === "/ide/push/unsubscribe") return send(ideFeature.unsubscribePush(T, body));
+  /*
+   * POST /ide/browse {path}: the folder picker's engine. Fred's report 2026-07-21: "It does not
+   * bring a browser picker for the folder." A native <input type=file> picker cannot exist here,
+   * because the folder lives on the BUILD machine (the hands node), not inside the phone's
+   * browser sandbox. So the node lists its own drives and folders and the phone taps through
+   * them. No path = the drive list; carve-outs are refused by the node itself.
+   */
+  if (req.method === "POST" && path === "/ide/browse") {
+    const blocked = ideFeature.wall(T);
+    if (blocked) return send(blocked);
+    try {
+      const r = await ideHandsFor(T)("fs_browse", { path: String(body.path || "") });
+      if (!r || r.ok === false) {
+        return send({ status: 200, body: { error: (r && r.error) || "The computer that runs builds is not reachable right now." } });
+      }
+      return send({ status: 200, body: { ok: true, path: r.path || "", dirs: Array.isArray(r.dirs) ? r.dirs.slice(0, 500) : [] } });
+    } catch {
+      return send({ status: 200, body: { error: "The computer that runs builds is not reachable right now." } });
+    }
+  }
+
+  /*
+   * POST /ide/intake {messages, register}: the clarifying conversation that runs BEFORE a build.
+   * The model asks one question at a time, judges the user's experience level from their own
+   * words, and when the vision is clear answers with a bullet description the user approves.
+   * That approved vision rides along with the build prompt, so the engine builds what was agreed
+   * rather than what was assumed.
+   */
+  if (req.method === "POST" && path === "/ide/intake") {
+    const blocked = ideFeature.wall(T) || ideFeature.billableWall(T);
+    if (blocked) return send(blocked);
+    const reg = normalizeRegister(body.register);
+    const messages = intakeMessages({ register: reg, history: body.messages });
+    if (messages.length < 2) return send({ status: 400, body: { error: "Say what you want built first." } });
+    // The same brain that will do the engineering conducts the interview: the workspace's
+    // build_code assignment, resolved exactly the way the build itself will resolve it.
+    let stored = {};
+    try {
+      const ws = body.workspaceId ? (ideFeature.listWorkspaces(T).body.workspaces || []).find((w) => w.id === body.workspaceId) : null;
+      stored = (ws && ws.assignments && Object.keys(ws.assignments).length ? ws.assignments : null)
+        || ((ideFeature.state(T).body.prefs || {}).assignments || {});
+    } catch {}
+    const resolved = resolveAssignments(stored, { allInOne: stored.allInOne || "", fallback: defaultModelFor(!!T.isOwner) });
+    const model = resolved.build_code || defaultModelFor(!!T.isOwner);
+    const r = await ideChatOnce(model, messages);
+    if (r.costUsd) { try { await meterTurn(T, r.costUsd, "crucible intake", ""); } catch {} }
+    if (!r.ok) return send({ status: 200, body: { error: r.error || "The model could not be reached. Try again." } });
+    const parsed = parseIntake(r.content);
+    return send({ status: 200, body: { ok: true, reply: parsed.reply, vision: parsed.vision, costUsd: r.costUsd } });
+  }
+
   if (req.method === "POST" && path === "/ide/job") {
     const ask = !!(body && body.ask);
     return send(ideFeature.startJob(T, body, {
@@ -1254,31 +1306,41 @@ function runIdeProbe(job, { ask = false } = {}) {
    The engine never learns which provider it is talking to, and the server never learns how a move
    is assembled. That seam is why the engine is testable with no server at all.
    ============================================================================================ */
+// Which machine answers for this tenant: the owner's connected node, or a guest's own uid-bound
+// node. Never both. Shared by the build runner and the folder-picker endpoint so they can never
+// disagree about whose computer is being touched.
+function ideHandsFor(T) {
+  return T.isOwner
+    ? (tool, args) => CTX.hands.dispatch(tool, args)
+    : (tool, args) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000 });
+}
+
+// One model call with the build pipeline's cost arithmetic: prefer what the provider actually
+// charged, else derive from catalog prices (the OCR path's rule).
+async function ideChatOnce(model, messages, { signal } = {}) {
+  const r = await cloudChatStream(model, messages, { signal });
+  let costUsd = 0;
+  const rec = modelById(model);
+  if (r && r.usage) {
+    if (typeof r.usage.cost === "number") costUsd = r.usage.cost;
+    else if (rec) {
+      const inTok = r.usage.prompt_tokens ?? r.usage.input_tokens ?? 0;
+      const outTok = r.usage.completion_tokens ?? r.usage.output_tokens ?? 0;
+      costUsd = ((inTok * (rec.inCost || 0)) + (outTok * (rec.outCost || 0))) / 1e6;
+    }
+  }
+  return { ok: !!(r && r.ok), content: (r && r.content) || "", error: (r && r.error) || "", costUsd: +costUsd.toFixed(6) };
+}
+
 async function runIdeBuild(job, { T, workspace, prompt, assignments, register }) {
   const reg = normalizeRegister(register);
   const ac = new AbortController();
   job.stop = () => { try { ac.abort(); } catch {} };
 
-  const handsFor = T.isOwner
-    ? (tool, args) => CTX.hands.dispatch(tool, args)
-    : (tool, args) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000 });
+  const handsFor = ideHandsFor(T);
 
-  // One model call. Cost prefers what the provider actually charged; otherwise it is derived from
-  // the catalog, which is the same rule the chat and OCR paths use.
-  const chat = async ({ model, messages }) => {
-    const r = await cloudChatStream(model, messages, { signal: ac.signal });
-    let costUsd = 0;
-    const rec = modelById(model);
-    if (r && r.usage) {
-      if (typeof r.usage.cost === "number") costUsd = r.usage.cost;
-      else if (rec) {
-        const inTok = r.usage.prompt_tokens ?? r.usage.input_tokens ?? 0;
-        const outTok = r.usage.completion_tokens ?? r.usage.output_tokens ?? 0;
-        costUsd = ((inTok * (rec.inCost || 0)) + (outTok * (rec.outCost || 0))) / 1e6;
-      }
-    }
-    return { ok: !!(r && r.ok), content: (r && r.content) || "", error: (r && r.error) || "", costUsd: +costUsd.toFixed(6) };
-  };
+  // One model call, cost arithmetic shared with the intake endpoint via ideChatOnce.
+  const chat = ({ model, messages }) => ideChatOnce(model, messages, { signal: ac.signal });
 
   const engine = createIdeEngine({
     jobs: ideJobs,

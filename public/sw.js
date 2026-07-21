@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v85-fits-the-phone";
+const CACHE = "dominion-ai-v86-crucible-intake";
 const SHELL = [
   "/",
   "/index.html",
@@ -10,12 +10,13 @@ const SHELL = [
   "/dominion-images.css?v=4",
   "/dominion-images.js?v=5",
   "/dominion-compass.css?v=5",
-  "/dominion-lexicon.js?v=1",
+  "/dominion-lexicon.js?v=2",
   "/dominion-lenses.css?v=4",
   "/dominion-lenses.js?v=6",
   "/dominion-compass.js?v=5",
-  "/dominion-ide.css?v=7",
-  "/dominion-ide.js?v=10",
+  "/dominion-ide.css?v=8",
+  "/dominion-ide.js?v=11",
+  "/dominion-tour.js?v=1",
   "/app.js?v=46",
   "/dominion-ui.css?v=39",
   "/dominion-ui.js?v=39",

@@ -103,6 +103,80 @@
     ],
     publish_show: ["Show me what that involves", "Details", "Details (what deploying involves)"],
     publish_later: ["Later", "Dismiss", "Dismiss (maybe later)"],
+
+    // ---- the folder picker --------------------------------------------------------------------
+    browse_btn: ["Browse my computer", "Browse", "Browse (pick from your computer's folders)"],
+    browse_up: ["Back up one level", "Up", "Up (back one level)"],
+    browse_here: ["Build in this folder", "Select this folder", "Select (build in this folder)"],
+    browse_empty: ["Nothing inside this folder yet. You can still build here.", "Empty directory.", "Empty directory (nothing inside; you can still build here)."],
+    browse_loading: ["Looking...", "Listing...", "Listing (looking inside)..."],
+
+    // ---- tools choice (assignment board is opt-in) --------------------------------------------
+    tools_label: ["Which tools should Dominion use?", "Model assignments", "Model assignments (which AI does which work)"],
+    tools_default: ["Use all the default tools (recommended)", "Defaults (recommended)", "Defaults (recommended; Dominion's standard picks)"],
+    tools_customize: ["Customize", "Customize", "Customize (choose each model yourself)"],
+
+    // ---- the intake conversation --------------------------------------------------------------
+    intake_title: ["Let's get this exactly right", "Scope conversation", "Scope conversation (getting the plan exactly right)"],
+    intake_hint: [
+      "Before spending anything, Dominion asks a few questions so it builds what you actually pictured.",
+      "Pre-build requirements pass: the model interviews you before any spend.",
+      "A requirements pass (a few questions first) so the build matches what you pictured, before anything is spent.",
+    ],
+    intake_ph: ["Type your answer...", "Reply...", "Reply (type your answer)..."],
+    intake_send: ["Send", "Send", "Send"],
+    intake_thinking: ["Thinking about your answer...", "Processing...", "Processing (thinking about your answer)..."],
+    intake_vision_title: ["Here is what I will build:", "Agreed scope:", "Agreed scope (what will be built):"],
+    intake_build: ["Build this", "Build this", "Build this"],
+    intake_more: ["Keep talking first", "Refine further", "Refine further (keep talking first)"],
+    intake_skip: ["Skip the questions and build now", "Skip intake, build now", "Skip intake (no questions, build now)"],
+    intake_min: ["Hide this conversation", "Minimize", "Minimize (hide this conversation)"],
+    intake_recall: ["Show the conversation", "Restore chat", "Restore chat (show the conversation)"],
+
+    // ---- the guided tour ----------------------------------------------------------------------
+    tour_skip: ["Skip the walkthrough", "Skip tour", "Skip tour (the walkthrough)"],
+    tour_next: ["Next", "Next", "Next"],
+    tour_begin: ["Begin", "Begin", "Begin"],
+    tour_recall: ["Show me around", "Tour", "Tour (show me around)"],
+    tour_s1_t: ["1. How Dominion talks", "1. Register", "1. Register (how Dominion talks)"],
+    tour_s1_b: [
+      "Pick how Dominion speaks to you: plain English, full technical terms, or technical terms explained as it goes. You can change this anytime.",
+      "Choose the terminology register for this surface. Changeable at any time.",
+      "Choose the register (the kind of language used everywhere here): plain, technical, or technical-with-explanations. Changeable anytime.",
+    ],
+    tour_s2_t: ["2. Where it gets built", "2. Workspace", "2. Workspace (where it gets built)"],
+    tour_s2_b: [
+      "Your app is built inside a folder on YOUR computer. Pick one here, or tap Browse to walk through your computer's folders. A save point is made before anything is touched.",
+      "Select or register the workspace root on the build machine. Browse lists the node's drives. A snapshot precedes all writes.",
+      "Pick the workspace (the folder on your computer where files land), or Browse your machine's folders. A snapshot (save point) is taken before anything is touched.",
+    ],
+    tour_s3_t: ["3. Say what you want", "3. The brief", "3. The brief (say what you want)"],
+    tour_s3_b: [
+      "Describe the app in your own words. Dominion will then ask you a few questions, one at a time, and show you exactly what it plans to build before it starts. Nothing is spent until you approve.",
+      "Describe the target. An intake pass interviews you, then presents the agreed scope for approval before any spend.",
+      "Describe the app in your own words. An intake pass (a short interview) follows, and the agreed scope is shown for approval before any spend.",
+    ],
+    tour_s4_t: ["4. The tools", "4. Assignments", "4. Assignments (the tools)"],
+    tour_s4_b: [
+      "Dominion already knows which AI is best for each kind of work, so 'Use all the default tools' is the right choice for almost everyone. Customize is there if you want to pick each one yourself.",
+      "Default model assignments are curated per task class. Customize exposes the full assignment board.",
+      "Default assignments (which AI handles which kind of work) are curated; Customize opens the full board if you want to choose each model yourself.",
+    ],
+    tour_s5_t: ["5. Start it", "5. Run", "5. Run (start it)"],
+    tour_s5_b: [
+      "This starts the build. You can close the app or put your phone away: the work keeps going and Dominion calls you back if it has a question. When it finishes, you get the invitation to put it online.",
+      "Starts the job. Jobs persist server-side across disconnects; push notifications fire on input requests and completion. Deploy is offered post-build.",
+      "Starts the job (the running build). It keeps going even if you close the app, and a notification calls you back for questions. Deploy (putting it online) is offered when it finishes.",
+    ],
+    tour_go_folder: ["First: pick or add your folder here", "Step 1: select a workspace", "Step 1: select a workspace (pick or add your folder)"],
+    tour_go_prompt: ["Now describe what you want built", "Step 2: write the brief", "Step 2: write the brief (describe what you want)"],
+    tour_go_start: ["Ready. Tap here to start", "Step 3: run the build", "Step 3: run the build (tap to start)"],
+    tour_done_t: ["That's the whole loop", "Tour complete", "Tour complete (that's the whole loop)"],
+    tour_done_b: [
+      "You now know everything you need. Tap the compass question mark any time to see this again.",
+      "Recall the tour any time from the ? control.",
+      "Recall the tour (this walkthrough) any time from the ? control.",
+    ],
   };
 
   let register = (() => {

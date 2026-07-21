@@ -372,16 +372,43 @@
           '<option value="plain"></option><option value="technical"></option><option value="hybrid"></option>' +
         '</select>' +
       '</div>' +
-      '<div class="st-row">' +
+      '<div class="st-row" id="st-ws-row">' +
         '<select id="st-ws" aria-label="Which project folder to build in"></select>' +
         '<button type="button" id="st-add" data-lex="add_folder"></button>' +
       '</div>' +
       '<div class="st-new" id="st-new" hidden>' +
         '<input id="st-new-path" type="text" autocomplete="off" spellcheck="false" />' +
         '<input id="st-new-name" type="text" autocomplete="off" placeholder="Name (optional)" />' +
-        '<button type="button" id="st-new-go" data-lex="use_folder"></button>' +
+        '<div class="st-new-btns">' +
+          '<button type="button" id="st-browse" data-lex="browse_btn"></button>' +
+          '<button type="button" id="st-new-go" data-lex="use_folder"></button>' +
+        '</div>' +
+        '<div class="st-tree" id="st-tree" hidden></div>' +
       '</div>' +
       '<textarea id="st-prompt" rows="3"></textarea>' +
+      '<div class="st-tools" id="st-tools">' +
+        '<span class="st-tools-label" data-lex="tools_label"></span>' +
+        '<div class="st-tools-btns">' +
+          '<button type="button" id="st-tools-default" data-lex="tools_default"></button>' +
+          '<button type="button" id="st-tools-custom" data-lex="tools_customize"></button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="st-chat" id="st-chat" hidden>' +
+        '<div class="st-chat-head">' +
+          '<span data-lex="intake_title"></span>' +
+          '<button type="button" id="st-chat-min" data-lex="intake_min"></button>' +
+        '</div>' +
+        '<div class="st-chat-log" id="st-chat-log" aria-live="polite"></div>' +
+        '<div class="st-chat-row" id="st-chat-row">' +
+          '<textarea id="st-chat-in" rows="1"></textarea>' +
+          '<button type="button" id="st-chat-send" data-lex="intake_send"></button>' +
+        '</div>' +
+        '<div class="st-chat-actions" id="st-chat-actions" hidden>' +
+          '<button type="button" id="st-chat-build" class="st-primary" data-lex="intake_build"></button>' +
+          '<button type="button" id="st-chat-more" data-lex="intake_more"></button>' +
+        '</div>' +
+        '<button type="button" id="st-chat-skip" class="st-link" data-lex="intake_skip"></button>' +
+      '</div>' +
       '<div class="st-row">' +
         '<button type="button" id="st-go" class="st-primary" data-lex="start_go"></button>' +
         '<span class="st-status" id="st-status" role="status"></span>' +
@@ -397,6 +424,8 @@
     if (prompt) prompt.placeholder = L("start_prompt_ph");
     const path = $("#st-new-path");
     if (path) path.placeholder = L("folder_ph");
+    const chatIn = $("#st-chat-in");
+    if (chatIn) chatIn.placeholder = L("intake_ph");
     const lang = $("#st-lang");
     if (lang) {
       lang.value = window.DominionLexicon ? window.DominionLexicon.register : "plain";
@@ -446,7 +475,8 @@
     });
 
     $("#st-new-go").addEventListener("click", async () => {
-      const root = $("#st-new-path").value.trim();
+      // The server strips wrapping quotes too, but doing it here keeps the visible field honest.
+      const root = $("#st-new-path").value.trim().replace(/^["'“”]+|["'“”]+$/g, "").trim();
       const name = $("#st-new-name").value.trim();
       if (!root) { status("Type the folder path first.", true); return; }
       try {
@@ -460,34 +490,273 @@
         $("#st-new").hidden = true;
         $("#st-new-path").value = ""; $("#st-new-name").value = "";
         status("Folder added.");
+        document.dispatchEvent(new CustomEvent("dominion-ide-workspace"));
       } catch { status("The server could not be reached.", true); }
     });
 
-    $("#st-go").addEventListener("click", async () => {
-      const workspaceId = $("#st-ws").value;
-      const prompt = $("#st-prompt").value.trim();
-      if (!workspaceId) { status("Pick or add a folder first.", true); return; }
-      if (!prompt) { status("Say what you want built.", true); return; }
-      const go = $("#st-go");
-      go.disabled = true;
-      status("Starting...");
+    wireBrowse(status);
+    wireTools();
+    wireIntake(status);
+
+    $("#st-go").addEventListener("click", () => beginIntake(status));
+  }
+
+  /* ---------- the folder picker (Fred's ruling 2026-07-21) --------------------------------
+   * The folder lives on the BUILD machine, so no native browser picker can reach it. The hands
+   * node lists its own drives and folders (fs_browse, carve-outs refused at the node) and the
+   * phone taps through them.
+   */
+  function wireBrowse(status) {
+    const tree = $("#st-tree");
+    const browse = async (path) => {
+      tree.hidden = false;
+      tree.textContent = L("browse_loading");
+      let j = null;
       try {
-        const r = await fetch("/ide/job", { method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ kind: "build", workspaceId, prompt }) });
-        const j = await r.json();
-        if (!r.ok || j.error) { status(j.error || "The build could not start.", true); go.disabled = false; return; }
-        status("");
-        $("#st-prompt").value = "";
-        state.workspaceId = workspaceId;
-        // The permission moment: the FIRST real build is when notifications become worth having,
-        // and a prompt at page load is when people reflexively refuse them.
-        ensurePush().then((p) => {
-          if (p && p.reason === "ios_needs_install" && p.message) status(p.message);
+        const r = await fetch("/ide/browse", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ path: path || "" }) });
+        j = await r.json();
+      } catch {}
+      if (!j || j.error) { tree.textContent = j && j.error ? j.error : "The server could not be reached."; return; }
+      renderTree(j.path || "", j.dirs || []);
+    };
+    const renderTree = (path, dirs) => {
+      tree.textContent = "";
+      const bar = document.createElement("div");
+      bar.className = "tr-bar";
+      const where = document.createElement("span");
+      where.className = "tr-where";
+      where.textContent = path || "…";
+      bar.append(where);
+      if (path) {
+        const up = document.createElement("button");
+        up.type = "button"; up.className = "tr-up"; up.textContent = L("browse_up");
+        // Parent of "F:\Projects" is "F:\"; parent of a drive root is the drive list.
+        up.addEventListener("click", () => {
+          const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+          if (parts.length <= 1) { browse(""); return; }
+          const parent = parts.slice(0, -1).join("\\");
+          browse(parts.length === 2 ? parts[0] + "\\" : parent);
         });
-        if (window.dominionLenses) { window.dominionLenses.follow(j.jobId); }
-        refreshJobs();
-      } catch { status("The server could not be reached.", true); go.disabled = false; }
+        const use = document.createElement("button");
+        use.type = "button"; use.className = "tr-use"; use.textContent = L("browse_here");
+        use.addEventListener("click", () => {
+          $("#st-new-path").value = path;
+          tree.hidden = true;
+          $("#st-new-go").click();
+        });
+        bar.append(up, use);
+      }
+      tree.append(bar);
+      if (!dirs.length && path) {
+        const none = document.createElement("div");
+        none.className = "tr-empty";
+        none.textContent = L("browse_empty");
+        tree.append(none);
+        return;
+      }
+      for (const d of dirs) {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "tr-dir";
+        b.textContent = d.name;
+        b.addEventListener("click", () => browse(d.path));
+        tree.append(b);
+      }
+    };
+    $("#st-browse").addEventListener("click", () => {
+      if (!tree.hidden) { tree.hidden = true; return; }
+      // Start where the user already works: the newest workspace's drive, else the drive list.
+      const last = state.workspaces[state.workspaces.length - 1];
+      const start = last && last.root ? last.root.replace(/[\\/][^\\/]*$/, "") || "" : "";
+      browse(start);
     });
+  }
+
+  /* ---------- tools choice (Fred's ruling 2026-07-21) -------------------------------------
+   * The Assignment Board is expert furniture, so it hides behind "Customize". "Use all the
+   * default tools" is the recommended one-tap answer and clears any customization, so what the
+   * button says is what the build does.
+   */
+  const TOOLS_KEY = "dominion.crucible.tools.v1";
+  function wireTools() {
+    const board = $("#ide-board");
+    const btnDef = $("#st-tools-default"), btnCus = $("#st-tools-custom");
+    const paint = (mode) => {
+      if (board) board.hidden = mode !== "custom";
+      btnDef.classList.toggle("on", mode !== "custom");
+      btnCus.classList.toggle("on", mode === "custom");
+    };
+    let mode = "default";
+    try { mode = localStorage.getItem(TOOLS_KEY) === "custom" ? "custom" : "default"; } catch {}
+    paint(mode);
+    btnDef.addEventListener("click", () => {
+      try { localStorage.setItem(TOOLS_KEY, "default"); } catch {}
+      paint("default");
+      // Defaults MEAN defaults: the server stores NO keys (deleted, not blanked, since an empty
+      // string counts as a choice and routes to the main model instead of the curated default).
+      state.allInOne = "";
+      const wsId = state.workspaceId;
+      const body = { assignments: { allInOne: "" } };
+      fetch(wsId ? "/ide/workspace/update" : "/ide/prefs", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify(wsId ? { id: wsId, patch: body } : { engaged: state.engaged, ...body }),
+      }).catch(() => {});
+      // The hidden board repaints to the curated defaults, so Customize later opens on the truth.
+      state.assignments = {};
+      for (const cls of CARD_ORDER) {
+        if (cls === "design_visual") continue;
+        state.assignments[cls] = (state.routing && state.routing.defaults && state.routing.defaults[cls]) || "";
+      }
+      const all = $("#ide-allinone");
+      if (all) all.value = "";
+      renderBoard();
+    });
+    btnCus.addEventListener("click", () => {
+      try { localStorage.setItem(TOOLS_KEY, "custom"); } catch {}
+      paint("custom");
+      if (board) board.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
+  /* ---------- the intake conversation (Fred's ruling 2026-07-21) ---------------------------
+   * The old flow assumed almost everything, which can build an app that looks or acts like
+   * nothing the user intended, on their money. Now the model interviews the user, one question
+   * at a time, judges their experience level from their own words, and states the vision back
+   * as bullets. The user approves the bullets; THAT is what gets built. A skip link keeps the
+   * old fast path for people who know exactly what they typed.
+   */
+  const intake = { messages: [], vision: null, busy: false };
+
+  function chatBubble(role, text) {
+    const log = $("#st-chat-log");
+    const b = document.createElement("div");
+    b.className = "cb " + (role === "user" ? "cb-user" : "cb-ai");
+    b.textContent = text;
+    log.append(b);
+    log.scrollTop = log.scrollHeight;
+    return b;
+  }
+
+  function visionCard(vision) {
+    const log = $("#st-chat-log");
+    const card = document.createElement("div");
+    card.className = "cb cb-vision";
+    const h = document.createElement("h4");
+    h.textContent = L("intake_vision_title");
+    const body = document.createElement("div");
+    body.textContent = vision;
+    card.append(h, body);
+    log.append(card);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function intakeTurn(status) {
+    if (intake.busy) return;
+    intake.busy = true;
+    const thinking = chatBubble("ai", L("intake_thinking"));
+    thinking.classList.add("cb-thinking");
+    let j = null;
+    try {
+      const r = await fetch("/ide/intake", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: intake.messages, workspaceId: $("#st-ws").value || "",
+          register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }) });
+      j = await r.json();
+    } catch {}
+    thinking.remove();
+    intake.busy = false;
+    if (!j || j.error) { status((j && j.error) || "The server could not be reached.", true); return; }
+    intake.messages.push({ role: "assistant", content: (j.reply ? j.reply + "\n" : "") + (j.vision ? "VISION READY\n" + j.vision : "") });
+    if (j.reply) chatBubble("ai", j.reply);
+    if (j.vision) {
+      intake.vision = j.vision;
+      visionCard(j.vision);
+      $("#st-chat-actions").hidden = false;
+      document.dispatchEvent(new CustomEvent("dominion-ide-vision"));
+    }
+  }
+
+  function beginIntake(status) {
+    const workspaceId = $("#st-ws").value;
+    const prompt = $("#st-prompt").value.trim();
+    if (!workspaceId) { status("Pick or add a folder first.", true); return; }
+    if (!prompt) { status("Say what you want built.", true); return; }
+    status("");
+    intake.messages = [{ role: "user", content: prompt }];
+    intake.vision = null;
+    $("#st-chat-actions").hidden = true;
+    $("#st-chat-log").textContent = "";
+    const chat = $("#st-chat");
+    chat.hidden = false;
+    chat.classList.remove("min");
+    $("#st-go").disabled = true;
+    chatBubble("user", prompt);
+    intakeTurn(status);
+  }
+
+  function wireIntake(status) {
+    const input = $("#st-chat-in");
+    const send = () => {
+      const text = input.value.trim();
+      if (!text || intake.busy) return;
+      input.value = "";
+      intake.messages.push({ role: "user", content: text });
+      chatBubble("user", text);
+      $("#st-chat-actions").hidden = true;
+      intakeTurn(status);
+    };
+    $("#st-chat-send").addEventListener("click", send);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    $("#st-chat-min").addEventListener("click", () => {
+      const chat = $("#st-chat");
+      chat.classList.toggle("min");
+      $("#st-chat-min").textContent = chat.classList.contains("min") ? L("intake_recall") : L("intake_min");
+    });
+    $("#st-chat-more").addEventListener("click", () => {
+      $("#st-chat-actions").hidden = true;
+      input.focus();
+    });
+    $("#st-chat-build").addEventListener("click", () => {
+      const goal = intake.messages[0] ? intake.messages[0].content : $("#st-prompt").value.trim();
+      const full = intake.vision ? goal + "\n\nAGREED VISION (approved by the user; build exactly this):\n" + intake.vision : goal;
+      startBuild(full, status);
+    });
+    $("#st-chat-skip").addEventListener("click", () => {
+      const goal = intake.messages[0] ? intake.messages[0].content : $("#st-prompt").value.trim();
+      if (!goal) { status("Say what you want built.", true); return; }
+      startBuild(goal, status);
+    });
+    // An abandoned interview must never strand the start button: touching the brief re-arms it.
+    $("#st-prompt").addEventListener("input", () => { $("#st-go").disabled = false; });
+  }
+
+  async function startBuild(prompt, status) {
+    const workspaceId = $("#st-ws").value;
+    if (!workspaceId) { status("Pick or add a folder first.", true); return; }
+    const go = $("#st-go");
+    go.disabled = true;
+    status("Starting...");
+    try {
+      const r = await fetch("/ide/job", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind: "build", workspaceId, prompt }) });
+      const j = await r.json();
+      if (!r.ok || j.error) { status(j.error || "The build could not start.", true); go.disabled = false; return; }
+      status("");
+      $("#st-prompt").value = "";
+      $("#st-chat").hidden = true;
+      intake.messages = []; intake.vision = null;
+      go.disabled = false;
+      state.workspaceId = workspaceId;
+      // The permission moment: the FIRST real build is when notifications become worth having,
+      // and a prompt at page load is when people reflexively refuse them.
+      ensurePush().then((p) => {
+        if (p && p.reason === "ios_needs_install" && p.message) status(p.message);
+      });
+      if (window.dominionLenses) { window.dominionLenses.follow(j.jobId); }
+      document.dispatchEvent(new CustomEvent("dominion-ide-build-started"));
+      refreshJobs();
+    } catch { status("The server could not be reached.", true); go.disabled = false; }
   }
 
   /* ---------- Phase 4: a build you can walk away from ------------------------------------
@@ -709,6 +978,8 @@
     // Force a style flush between the two classes so the lift transitions instead of jumping.
     void $("#ide-root").offsetWidth;
     document.body.classList.add("ide-open");
+    // The guided tour listens for this; it decides for itself whether to appear.
+    document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
   }
 
   function closePanel() {

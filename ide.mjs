@@ -103,7 +103,8 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
    * at pick time beats a mystery failure three moves into a build.
    */
   function validateRoot(raw) {
-    const root = String(raw == null ? "" : raw).trim();
+    // Windows "Copy as path" wraps in quotes; phones paste them too. Parse, never punish.
+    const root = String(raw == null ? "" : raw).trim().replace(/^["'“”]+|["'“”]+$/g, "").trim();
     if (!root) return { ok: false, error: "Pick a folder for this workspace.", code: "root_required" };
     if (root.length > MAX_ROOT) return { ok: false, error: "That path is too long.", code: "root_too_long" };
     const absolute = /^[a-zA-Z]:[\\/]/.test(root) || root.startsWith("/") || root.startsWith("\\\\");

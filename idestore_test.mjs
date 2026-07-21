@@ -57,6 +57,13 @@ await t("roots must be present, absolute, and not absurdly long", () => {
   assert.equal(s.create({ root: "C:\\" + "x".repeat(500) }).code, "root_too_long");
   assert.equal(s.create({ root: "/home/fred/app" }).ok, true, "posix absolute is fine");
   assert.equal(s.create({ root: "\\\\nas\\share\\app" }).ok, true, "UNC is fine");
+  // Windows "Copy as path" wraps in quotes; phones paste smart quotes. Parsed, never punished.
+  const quoted = s.create({ root: '"C:\\Projects\\pasted-app"' });
+  assert.equal(quoted.ok, true, "double-quoted paste is accepted");
+  assert.equal(quoted.workspace.root, "C:\\Projects\\pasted-app", "quotes are stripped from the stored root");
+  const smart = s.create({ root: "“C:\\Projects\\smart-app”" });
+  assert.equal(smart.ok, true, "smart-quoted paste is accepted");
+  assert.equal(smart.workspace.root, "C:\\Projects\\smart-app");
 });
 
 await t("two workspaces cannot point at the same folder; the name defaults to the folder", () => {
