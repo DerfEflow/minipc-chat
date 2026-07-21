@@ -796,3 +796,10 @@ body.ide-open #ide-root { transform: none; }
 /* Which drawers exist per mode. */
 #ide-root[data-mode="beginner"] #dr-models, #ide-root[data-mode="beginner"] #dr-session { display: none; }
 #ide-root[data-mode="vibe"] #dr-session { display: none; }
+
+/* The drawer wrapper is a grid, and a grid's lone auto column happily sizes to a select's
+   longest option (the workspace path measured 464px on a 412 phone). Same clamp discipline as
+   the stage: the column takes the container, children may shrink. */
+.st-drawer { grid-template-columns: minmax(0, 1fr); }
+.st-drawer > * { min-width: 0; max-width: 100%; }
+#st-ws { width: 100%; min-width: 0; }

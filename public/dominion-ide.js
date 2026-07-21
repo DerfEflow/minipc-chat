@@ -699,7 +699,8 @@
       MODES.map((m) =>
         '<button type="button" class="st-mode-card' + (m === state.mode ? ' on' : '') + '" data-mode="' + m + '">' +
           '<span class="mc-t" data-lex="mode_' + m + '_t"></span>' +
-        '</button>').join("");
+        '</button>').join("") +
+      '<label class="st-modes-lock"><input type="checkbox" id="st-mode-lock"> <span data-lex="mode_dontshow"></span></label>';
     stage.prepend(el);
     paintLexicon();
     for (const card of el.querySelectorAll(".st-mode-card")) {
@@ -710,6 +711,13 @@
         showModePickerCompact();
       });
     }
+    // Ticking the box IS the dismissal: the row leaves immediately and stays gone (the mode
+    // switch in the starter head remains the stable way to change modes; ruling 1a).
+    el.querySelector("#st-mode-lock").addEventListener("change", (e) => {
+      if (!e.target.checked) return;
+      try { localStorage.setItem("dominion.crucible.mode.locked.v1", "1"); } catch {}
+      el.remove();
+    });
   }
 
   // The vibe coder sees one honest sentence instead of a board: who does the work, at what rate.
