@@ -5,3 +5,8 @@ docs/
 .devdata/
 *_test.mjs
 *.output
+
+# The local git history (700M+ of loose objects) is never part of the runtime image and
+# was timing out the upload. Exclude it and node_modules from what railway up ships.
+.git/
+node_modules/
