@@ -14,7 +14,11 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const PORT = 8700 + Math.floor(process.uptime() * 7) % 200;
+// Seeded from the PID, NOT process.uptime(). Under `node --test` the runner starts test files in
+// parallel, so two files using an uptime-derived port land in the same bucket and the second dies
+// with EADDRINUSE. PIDs are distinct across concurrent processes by definition. Step of 3 because
+// each file claims PORT, PORT+1 and PORT+2 (app, mock Ollama, mock OpenAI).
+const PORT = 8700 + (process.pid * 3) % 300;
 const MOCK_OLLAMA = PORT + 1;
 const MOCK_OPENAI = PORT + 2;
 const OWNER = "owner@test.com";

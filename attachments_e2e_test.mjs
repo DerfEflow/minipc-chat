@@ -21,7 +21,10 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const PORT = 8700 + Math.floor(process.uptime() * 7) % 200;
+// PID-seeded, not uptime-seeded — see the same note in images_test.mjs. Two test files that both
+// derived this from process.uptime() collided on EADDRINUSE whenever `node --test` ran them
+// concurrently, which made the whole suite non-deterministic.
+const PORT = 8700 + (process.pid * 3) % 300;
 const MOCK_OLLAMA = PORT + 1;
 const MOCK_OR = PORT + 2;
 const OWNER = "owner@test.com";
