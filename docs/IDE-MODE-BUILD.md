@@ -161,3 +161,62 @@ kimi-k3 on the workspace to exercise intake locally.
 
 Open after 1.1: Fred's phone pass on the new furniture; guided deploy (the publish card still says
 upcoming); L-8 vision judge in one continuous run; L-4 real-device push; guest flip.
+
+## Iteration 2 ship record (2026-07-21 night, "no phases: all things as decided, commit each")
+
+Fred's rulings: 1a (user picks mode, stable switch), 2a (simpler intentional layout), 3a (real
+tunnel), 4a (mode sets register silently). Commits 975caad, 174550f, e8f0510, 9d335e5; cache
+v88-live-preview.
+
+**Three modes.** idemodes.mjs: normalizeMode fails safe to beginner; MODE_DEFAULTS carry register/
+tour/board/code-lens; personaVoice (mentor / sharp collaborator / cold executor) reaches the
+intake interviewer AND the planner; aestheticsVoice teaches the beginner interviewer the MOCKUP
+protocol; visionExtras flags database/accounts/payments/messaging/external deterministically and
+prices a cost BAND from move count and model rates. prefs.mode stores "" as never-chosen so the
+three-cards picker appears exactly once; a segmented switch in the starter head changes mode any
+time; the account remembers mode, the device keeps the last word.
+
+**Per-mode surface.** Beginner: chat + folder picker, no register question, no tools, no board,
+tour auto. Vibe: one honest model sentence (never contradicts the board: saveAssignments repaints
+it) + Customize; involves card (cost band + commitment flags) lands before Build this. Engineer:
+four labelled drawers in dependency order (Workspace, Brief, Assignments, Register), closed by
+default, board inside Assignments; technical register; no auto-tour (marked done on sight).
+Non-engineers see zero drawer chrome (summary hidden, details forced open by applyMode).
+
+**Lenses.** Blueprint: ONE container of compact rows replaces the fifteen-boxes stack; tap a row
+for detail (engineers inline); a finished build folds to one sentence for non-engineers
+(reopenable) so the publish card leads. Workshop: Try-your-app live preview section for all;
+code automatic for engineers, Show-the-code toggle otherwise; checks visible to everyone;
+side-by-side code + sticky preview for engineers at >=900px. dominion-build-done fires once per
+completed job.
+
+**The tunnel (ruling 3a).** hands/2 preview_fetch: reaches ONLY 127.0.0.1:37311, GET/POST/HEAD,
+bounded bodies (2MB up / 6MB down), no websockets. /ide/preview/p/* relays iframe requests over
+the hands channel (raw-body POST handled before JSON parse); HTML gets <base> + absolute-path
+rewrite (href/src/action="/..." and url(/...)); redirects re-prefixed. /ide/preview/start runs
+deps + detached launch + port poll via createRunAndSee's exported internals; stop kills the tree;
+one preview per account, 20-minute hard lifetime. Mini-PC node UPDATED to hands/2 over SSH
+(backup at C:\dominion-hands\hands.mjs.bak-v1) and confirmed running.
+
+**BUG THAT MATTERED (and closed half of L-8):** PS 5.1 Start-Process joins ArgumentList elements
+UNQUOTED, so the static server's -e one-liner (contains spaces) arrived at node as dozens of
+arguments and the preview NEVER listened; run-and-see's static path could never have served a
+page. Elements now carry their own double quotes; a guard keeps the one-liner double-quote-free;
+proven live by hand and through the whole tunnel.
+
+**Verified live (devboot + local hands node):** picker (three cards, everything else hidden),
+all three mode skins incl. register flips, drawers closed/open per mode with board inside,
+tunnel end-to-end (base injected, relative kept, absolute rewritten, 404 honest, stop kills),
+width honest at 412 throughout. Suite: 47/49 with the two known non-regressions (chatjobs_unit
+EPERM pre-existing; images_test parallel-only port collision, passes alone).
+
+**OPEN (ledgered):**
+- L-9: engineer's docked-at-bottom chat in the Workshop (the intake chat lives on the front
+  door; moving it per-lens is a state refactor, not done tonight).
+- L-10: beginner closing flow is publish-card-led; the "chat becomes prominent and walks through
+  hosting" moment still speaks through the publish explainer, not a live chat turn.
+- L-11: SPA absolute-path fetches inside the relay can 404 (honest scope; engine products fine).
+- L-12: guided tour steps not yet re-pointed at the drawer layout for engineer mode (tour is
+  beginner-facing, engineer auto-marks done, so exposure is low).
+- Mockup loop and per-mode intake verified at the parse/prompt level and by earlier live intake;
+  a full beginner mockup round on the phone is Fred's first-run item.
