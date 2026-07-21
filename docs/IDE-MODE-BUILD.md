@@ -90,6 +90,17 @@ rather than being guessed silently. Done is not declared with OPEN high-impact i
   index.html `?v=` query.
 - Snapshot before every write batch; rollback path recorded before any deploy.
 
+## Ship record
+
+**ITERATION 1 DEPLOYED 2026-07-21** (merge b3059e9 fast-forwarded to main, pushed to GitHub,
+`railway up` from the main worktree, boot verified: all four providers keyed, mini-pc + laptop
+hands nodes connected, all four Crucible assets serving 200 from the live container, SW cache
+`dominion-ai-v82-crucible-ships`). IDE_MODE is unset in prod so the surface is OWNER-ONLY; guests
+see nothing until Phase 9 flips it. VAPID keys live on Railway (DOMINION_IDE_VAPID_*), so push is
+armed. Rollback: redeploy b8f4fb2 (git checkout + railway up), or the Railway dashboard's previous
+deployment. Known pre-existing failure shipped WITH main: chatjobs_unit_test EPERM on temp cleanup
+(fails identically on untouched main; ledgered, never an assertion).
+
 ## Phase log
 
 | Phase | State | Notes |
