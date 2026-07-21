@@ -88,11 +88,17 @@ export function createRunAndSee({ hands, chat, jobs, log = () => {} } = {}) {
     return { ok: code === 0, output: out };
   }
 
-  // Launch detached and capture the PID, so the preview can be stopped no matter what happens
-  // in between. PowerShell -EncodedCommand on the node side makes the quoting survivable.
+  /*
+   * Launch detached and capture the PID, so the preview can be stopped no matter what happens
+   * in between. PS 5.1 trap that broke the static path live (2026-07-21): Start-Process joins
+   * ArgumentList elements UNQUOTED, so an -e script containing spaces arrived at node as many
+   * arguments and the server never started. The elements carry their own double quotes now
+   * (the one-liner contains no double quotes by construction; the assert keeps it that way).
+   */
   async function launch(job, root, plan) {
+    if (STATIC_SERVER_JS.includes('"')) return { ok: false, error: "static server script must stay double-quote-free" };
     const ps = plan.mode === "static"
-      ? "$p = Start-Process node -ArgumentList @('-e', '" + STATIC_SERVER_JS.replace(/'/g, "''") + "', '" + root.replace(/'/g, "''") + "') -WindowStyle Hidden -PassThru; $p.Id"
+      ? "$p = Start-Process node -ArgumentList @('-e', '\"" + STATIC_SERVER_JS.replace(/'/g, "''") + "\"', '\"" + root.replace(/'/g, "''") + "\"') -WindowStyle Hidden -PassThru; $p.Id"
       : "$env:PORT='" + PREVIEW_PORT + "'; $p = Start-Process cmd -ArgumentList @('/c', 'cd /d \"" + root + "\" && " + plan.command + "') -WindowStyle Hidden -PassThru; $p.Id";
     const r = await hands("shell_run", { command: ps, timeoutMs: 30000 });
     const pid = parseInt(String((r && (r.stdout || r.output)) || "").trim().split(/\s+/).pop(), 10);
