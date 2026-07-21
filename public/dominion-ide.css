@@ -719,3 +719,23 @@ body.ide-open #ide-root { transform: none; }
 .st-chat-log .cb-involves .inv-none { font-size: 12.5px; color: var(--muted, #8ba0ae); }
 .st-chat-log .cb-involves ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
 .st-chat-log .cb-involves li { font-size: 12.5px; line-height: 1.55; color: var(--ink-soft, #d9c9b8); }
+
+/* ---------- drawers (the engineer's surface; invisible chrome for everyone else) ----------- */
+.st-drawer { min-width: 0; }
+.st-drawer > summary { list-style: none; cursor: pointer; }
+.st-drawer > summary::-webkit-details-marker { display: none; }
+/* Non-engineers never see drawer chrome: the sections read as one open page. */
+#ide-root:not([data-mode="engineer"]) .st-drawer > summary { display: none; }
+#ide-root:not([data-mode="engineer"]) .st-drawer { display: grid; gap: 12px; }
+/* The engineer's drawers: labelled, closed by default, one clean line each. */
+#ide-root[data-mode="engineer"] .st-drawer { border: 1px solid var(--glass-line, rgba(150,200,230,.18));
+  border-radius: 4px; background: linear-gradient(180deg, rgba(8,20,34,.7), rgba(3,9,17,.8)); }
+#ide-root[data-mode="engineer"] .st-drawer > summary { padding: 11px 14px; font-size: 11.5px;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--ink-soft, #d9c9b8); }
+#ide-root[data-mode="engineer"] .st-drawer > summary::before { content: "\25B8"; margin-right: 8px;
+  color: var(--copper-hot, #d4823c); display: inline-block; transition: transform .18s ease; }
+#ide-root[data-mode="engineer"] .st-drawer[open] > summary::before { transform: rotate(90deg); }
+#ide-root[data-mode="engineer"] .st-drawer > :not(summary) { margin: 0 12px 12px; }
+/* Which drawers exist per mode. */
+#ide-root[data-mode="beginner"] #dr-models, #ide-root[data-mode="beginner"] #dr-session { display: none; }
+#ide-root[data-mode="vibe"] #dr-session { display: none; }

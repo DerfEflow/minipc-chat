@@ -33,6 +33,7 @@
     codeOpen: false,        // non-engineers opt INTO the code view; engineers get it standing open
     showFullPlan: false,    // after a finished build folds itself, this reopens the steps
     doneAnnounced: "",      // job id whose completion event already fired
+    previewOn: false,       // the live try-it frame is open
   };
 
   // The Crucible's working mode drives how much machinery each lens shows.
@@ -50,10 +51,11 @@
    */
   function digest(events) {
     const d = { title: "", moves: new Map(), files: new Map(), runs: [], costUsd: 0, costCredits: 0,
-                snapshots: [], question: null, outcome: "", interrupted: false, started: 0, ended: 0 };
+                snapshots: [], question: null, outcome: "", interrupted: false, started: 0, ended: 0,
+                workspaceId: "" };
     for (const ev of events) {
       switch (ev.type) {
-        case "job": d.started = ev.at || 0; break;
+        case "job": d.started = ev.at || 0; d.workspaceId = ev.workspaceId || ""; break;
         case "plan":
           d.title = ev.title || d.title;
           for (const m of (ev.moves || [])) {
@@ -153,6 +155,7 @@
     state.events = [];
     state.openMoves = new Set();
     state.showFullPlan = false;
+    state.previewOn = false;
     render();
 
     const es = new EventSource("/ide/job/attach?job=" + encodeURIComponent(jobId) + "&from=0");
@@ -454,10 +457,18 @@
   function workshop(d) {
     const wrap = document.createElement("div");
     wrap.className = "cru-workshop";
+    wrap.dataset.mode = modeOf();
 
     const mode = modeOf();
     const codeVisible = mode === "engineer" || state.codeOpen;
     const files = [...d.files.values()];
+
+    /*
+     * The live preview (ruling 3a): the built app, running on the build machine, tapped through
+     * from here via the /ide/preview relay. For a beginner this IS the Workshop; engineers get
+     * it beside the code.
+     */
+    wrap.append(previewSection(d));
 
     // The console: exactly what ran and what it said. Proof belongs to everyone.
     const runBox = section(L("checks"));
@@ -498,6 +509,57 @@
     }
 
     return wrap;
+  }
+
+  /*
+   * The try-it loop: start the app on the build machine, load it in an iframe through the
+   * relay, tap around, close it. State survives re-renders; a new job resets it.
+   */
+  function previewSection(d) {
+    const box = document.createElement("div");
+    box.className = "w-section w-preview";
+    const h = document.createElement("h4");
+    h.textContent = L("preview_title");
+    box.append(h);
+
+    if (!state.previewOn) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "w-preview-open";
+      open.textContent = L("preview_open");
+      open.disabled = !d.workspaceId;
+      open.addEventListener("click", async () => {
+        open.disabled = true;
+        open.textContent = L("preview_wait");
+        try {
+          const r = await fetch("/ide/preview/start", { method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ workspaceId: d.workspaceId }) });
+          const j = await r.json();
+          if (!r.ok || j.error) { open.textContent = (j && j.error) || L("preview_fail"); open.disabled = false; return; }
+          state.previewOn = true;
+          render();
+        } catch { open.textContent = L("preview_fail"); open.disabled = false; }
+      });
+      box.append(open);
+      return box;
+    }
+
+    const frame = document.createElement("iframe");
+    frame.className = "w-preview-frame";
+    frame.src = "/ide/preview/p/?t=" + encodeURIComponent(state.jobId || "");
+    frame.setAttribute("sandbox", "allow-scripts allow-forms allow-same-origin");
+    frame.title = L("preview_title");
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "w-preview-close";
+    close.textContent = L("preview_close");
+    close.addEventListener("click", async () => {
+      state.previewOn = false;
+      try { await fetch("/ide/preview/stop", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }); } catch {}
+      render();
+    });
+    box.append(frame, close);
+    return box;
   }
 
   function section(title) {

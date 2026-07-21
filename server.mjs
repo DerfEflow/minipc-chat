@@ -66,7 +66,7 @@ import { createIdeJobs } from "./idejobs.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES } from "./ideengine.mjs";
 import { routeMove, resolveAssignments } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
-import { createRunAndSee } from "./idesee.mjs";
+import { createRunAndSee, runPlanFor } from "./idesee.mjs";
 import { intakeMessages, parseIntake } from "./ideintake.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
 import { escalationFor, sendWakeups } from "./idepush.mjs";
@@ -1162,6 +1162,38 @@ async function handleIde(req, res, u) {
     return;
   }
 
+  /*
+   * The live-preview relay: every request the iframe makes lands here and rides the hands
+   * channel to the ONE port the node will serve (37311). Handled before the JSON body parse
+   * because a form POST arrives as a raw body, not JSON.
+   */
+  if (path === "/ide/preview/p" || path.startsWith("/ide/preview/p/")) {
+    const blocked = ideFeature.wall(T);
+    if (blocked) return send(blocked);
+    const sub = (path.slice("/ide/preview/p".length) || "/") + (u.search || "");
+    let bodyB64, ctype = "";
+    if (req.method === "POST") {
+      const raw = await readRawBody(req, 2 * 1024 * 1024);
+      if (raw === null) return sjson(res, 413, { error: "too large for the preview relay" });
+      bodyB64 = raw.toString("base64");
+      ctype = String(req.headers["content-type"] || "");
+    }
+    let r = null;
+    try { r = await ideHandsFor(T)("preview_fetch", { path: sub, method: req.method, body: bodyB64, contentType: ctype }); } catch {}
+    if (!r || r.ok === false) return sjson(res, 502, { error: (r && r.error) || "The preview is not running." });
+    const ct = r.contentType || "application/octet-stream";
+    const headers = { "content-type": ct, "cache-control": "no-store" };
+    if (r.status >= 301 && r.status <= 308 && r.location) {
+      headers.location = r.location.startsWith("/") ? "/ide/preview/p" + r.location : r.location;
+      res.writeHead(r.status, headers);
+      return res.end();
+    }
+    let buf = Buffer.from(r.base64 || "", "base64");
+    if (/text\/html/i.test(ct)) buf = Buffer.from(groundPreviewHtml(buf.toString("utf8")), "utf8");
+    res.writeHead(r.status || 200, headers);
+    return res.end(buf);
+  }
+
   if (req.method === "GET" && path === "/ide/state") return send(ideFeature.state(T));
   if (req.method === "GET" && path === "/ide/jobs") return send(ideFeature.listJobs(T));
   if (req.method === "GET" && path === "/ide/workspaces") return send(ideFeature.listWorkspaces(T));
@@ -1196,6 +1228,22 @@ async function handleIde(req, res, u) {
     } catch {
       return send({ status: 200, body: { error: "The computer that runs builds is not reachable right now." } });
     }
+  }
+
+  // The preview host: start serves the workspace's built app on the node; stop kills it. One
+  // per account, 20-minute hard lifetime, and the relay above is the only way in.
+  if (req.method === "POST" && path === "/ide/preview/start") {
+    const blocked = ideFeature.wall(T);
+    if (blocked) return send(blocked);
+    const ws = (ideFeature.listWorkspaces(T).body.workspaces || []).find((w) => w.id === String(body.workspaceId || ""));
+    if (!ws) return send({ status: 404, body: { error: "No such workspace." } });
+    try { return send({ status: 200, body: await startIdePreview(T, ws) }); }
+    catch (e) { return send({ status: 200, body: { error: String((e && e.message) || e).slice(0, 300) } }); }
+  }
+  if (req.method === "POST" && path === "/ide/preview/stop") {
+    const blocked = ideFeature.wall(T);
+    if (blocked) return send(blocked);
+    return send({ status: 200, body: await stopIdePreview(T) });
   }
 
   /*
@@ -1322,6 +1370,76 @@ function runIdeProbe(job, { ask = false } = {}) {
    The engine never learns which provider it is talking to, and the server never learns how a move
    is assembled. That seam is why the engine is testable with no server at all.
    ============================================================================================ */
+/* ============================================================================================
+   The live preview host (Crucible iteration 2, ruling 3a).
+
+   A built app runs on the BUILD machine; the phone taps through it via /ide/preview/p/* which
+   relays each request over the hands channel (preview_fetch reaches only port 37311 on the
+   node). One preview per account, a hard lifetime so an abandoned phone never leaves a stray
+   server running, and HTML gets a <base> plus best-effort absolute-path rewriting so ordinary
+   pages built by the engine navigate correctly inside the relay. Websockets are out of scope.
+   ============================================================================================ */
+const IDE_PREVIEW_LIFE_MS = 20 * 60 * 1000;
+const idePreviews = new Map();   // uid -> { pid, workspaceId, until, timer }
+
+async function startIdePreview(T, workspace) {
+  const hands = ideHandsFor(T);
+  const stubJobs = { emit: () => {} };
+  const see = createRunAndSee({ hands, chat: async () => ({ ok: false }), jobs: stubJobs, log: () => {} });
+  const job0 = { id: "preview" };
+  const root = String(workspace.root || "").replace(/[\\/]+$/, "");
+
+  let pkg = "", hasIndex = false;
+  try { const r = await hands("fs_read", { path: root + "/package.json", maxBytes: 40000 }); pkg = (r && (r.content || r.text)) || ""; } catch {}
+  try { const r = await hands("fs_list", { path: root }); hasIndex = ((r && r.entries) || []).map((e) => (typeof e === "string" ? e : e.name)).includes("index.html"); } catch {}
+  const plan = runPlanFor(pkg, { hasIndexHtml: hasIndex });
+  if (!plan.mode) return { error: "Nothing runnable in that folder yet: " + plan.why + "." };
+
+  await stopIdePreview(T);   // one preview per account; the newest wins
+  const dep = await see.ensureDeps(job0, root, pkg);
+  if (!dep.ok) return { error: "The project's dependencies did not install, so it could not be started." };
+  const started = await see.launch(job0, root, plan);
+  if (!started.ok) return { error: "It could not be started: " + started.error + "." };
+
+  // Poll the port through the node before answering, so the first iframe request finds a page.
+  let up = false;
+  for (let i = 0; i < 10 && !up; i++) {
+    const r = await hands("preview_fetch", { path: "/" }).catch(() => null);
+    if (r && r.ok) up = true; else await new Promise((res) => setTimeout(res, 700));
+  }
+  if (!up) { await see.stopPreview(started.pid); return { error: "The preview started and then never answered. Try again." }; }
+
+  const until = Date.now() + IDE_PREVIEW_LIFE_MS;
+  const timer = setTimeout(() => { stopIdePreview(T).catch(() => {}); }, IDE_PREVIEW_LIFE_MS);
+  if (timer.unref) timer.unref();
+  idePreviews.set(T.uid, { pid: started.pid, workspaceId: workspace.id, until, timer });
+  return { ok: true, until };
+}
+
+async function stopIdePreview(T) {
+  const cur = idePreviews.get(T.uid);
+  if (!cur) return { ok: true, stopped: false };
+  idePreviews.delete(T.uid);
+  try { clearTimeout(cur.timer); } catch {}
+  try {
+    const hands = ideHandsFor(T);
+    await hands("shell_run", { command: "taskkill /F /T /PID " + cur.pid, timeoutMs: 20000 });
+  } catch {}
+  return { ok: true, stopped: true };
+}
+
+// Best-effort URL grounding for relayed HTML: a <base> for relative paths, and rewrites for the
+// absolute ones a <base> cannot save. A SPA fetching hardcoded absolute routes may still 404;
+// the engine's own products navigate fine, and that is the honest scope of iteration 2.
+function groundPreviewHtml(html) {
+  let s = String(html);
+  s = s.replace(/(href|src|action)=(["'])\//gi, "$1=$2/ide/preview/p/");
+  s = s.replace(/url\(\s*\//g, "url(/ide/preview/p/");
+  if (/<head[^>]*>/i.test(s)) s = s.replace(/<head([^>]*)>/i, '<head$1><base href="/ide/preview/p/">');
+  else s = '<base href="/ide/preview/p/">' + s;
+  return s;
+}
+
 // Which machine answers for this tenant: the owner's connected node, or a guest's own uid-bound
 // node. Never both. Shared by the build runner and the folder-picker endpoint so they can never
 // disagree about whose computer is being touched.

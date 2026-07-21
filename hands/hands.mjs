@@ -42,7 +42,7 @@ const IS_WIN = process.platform === "win32";
 const HANDS_URL = String(process.env.HANDS_URL || "").replace(/\/$/, "");
 const HANDS_TOKEN = process.env.HANDS_TOKEN || "";
 const NODE_NAME = (process.env.HANDS_NODE || hostname() || "unnamed").toLowerCase();
-const VERSION = "hands/1";
+const VERSION = "hands/2";   // hands/2: preview_fetch (the Crucible's live-preview relay)
 // Optional Cloudflare Access service token — when the orchestrator sits behind Access, the node
 // presents these so its dial-out passes the Access layer; HANDS_TOKEN still authorizes at the app.
 const CF_ID = process.env.HANDS_CF_CLIENT_ID || "";
@@ -205,6 +205,36 @@ export async function executeJob(tool, args = {}, meta = {}) {
         const accepted = incoming.filter((r) => assertNotProtected({ path: r }).ok && !underAny(r, SELF_PROTECT));
         ROOTS = accepted;
         return { ok: true, roots: ROOTS, dropped: incoming.length - accepted.length };
+      }
+      case "preview_fetch": {
+        /*
+         * The live-preview proxy (Crucible iteration 2, ruling 3a): the phone taps through the
+         * built app via the cloud relay. This tool reaches ONE address only, the local preview
+         * server the build engine launches on 37311. It is not a general proxy: any other port
+         * or host is refused, bodies are bounded, and websockets are out of scope by design.
+         */
+        const port = Number(args.port) || 37311;
+        if (port !== 37311) return refuse("preview proxy reaches only the preview port");
+        const path = String(args.path || "/");
+        if (!path.startsWith("/")) return { ok: false, error: "path must start with /" };
+        const method = String(args.method || "GET").toUpperCase();
+        if (!["GET", "POST", "HEAD"].includes(method)) return { ok: false, error: "method not supported: " + method };
+        const headers = {};
+        if (args.contentType) headers["content-type"] = String(args.contentType).slice(0, 200);
+        let body;
+        if (method === "POST" && args.body) {
+          body = Buffer.from(String(args.body), "base64");
+          if (body.length > 2_000_000) return { ok: false, error: "request body too large" };
+        }
+        try {
+          const r = await fetch("http://127.0.0.1:" + port + path, { method, headers, body, redirect: "manual" });
+          const buf = Buffer.from(await r.arrayBuffer());
+          if (buf.length > 6_000_000) return { ok: false, error: "response too large for the preview relay (" + buf.length + " bytes)" };
+          return { ok: true, status: r.status, contentType: r.headers.get("content-type") || "",
+                   location: r.headers.get("location") || "", base64: buf.toString("base64") };
+        } catch (e) {
+          return { ok: false, error: "preview not answering: " + String((e && e.message) || e).slice(0, 200) };
+        }
       }
       case "fs_browse": {
         // Folder navigation for the picker: list DRIVES (no path) or immediate SUBFOLDERS of a path.

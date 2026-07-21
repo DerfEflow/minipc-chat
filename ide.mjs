@@ -132,7 +132,8 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
       if (patch && typeof patch.engaged === "boolean") s.prefs.engaged = patch.engaged;
       if (patch && patch.assignments && typeof patch.assignments === "object") s.prefs.assignments = patch.assignments;
       if (patch && typeof patch.language === "string") s.prefs.language = normalizeRegister(patch.language);
-      if (patch && typeof patch.mode === "string") s.prefs.mode = normalizeMode(patch.mode);
+      // "" stays "": that is the never-chosen state that makes the picker appear exactly once.
+      if (patch && typeof patch.mode === "string") s.prefs.mode = patch.mode === "" ? "" : normalizeMode(patch.mode);
       write(s);
       return s.prefs;
     },

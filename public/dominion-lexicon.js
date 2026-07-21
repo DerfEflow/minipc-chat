@@ -226,6 +226,15 @@
     // ---- the workshop code toggle + closing flow ----------------------------------------------
     code_show: ["Show me the code", "Show code", "Show code (the files being written)"],
     code_hide: ["Hide the code", "Hide code", "Hide code"],
+    drawer_folder: ["Where it gets built", "Workspace", "Workspace (where it gets built)"],
+    drawer_brief: ["What to build", "Brief", "Brief (what to build)"],
+    drawer_models: ["The tools", "Assignments", "Assignments (the tools)"],
+    drawer_session: ["How Dominion talks", "Register", "Register (how Dominion talks)"],
+    preview_title: ["Try your app", "Live preview", "Live preview (try your app)"],
+    preview_open: ["See it working", "Start preview", "Start preview (see it working)"],
+    preview_wait: ["Starting it up...", "Launching...", "Launching (starting it up)..."],
+    preview_close: ["Close the preview", "Stop preview", "Stop preview (close it)"],
+    preview_fail: ["It could not be started. Try again in a moment.", "Preview launch failed.", "Preview launch failed (it could not be started)."],
     closing_line: [
       "It is built and working. The next step, whenever you are ready, is putting it online so everyone can use it.",
       "Build complete. Next step: deployment.",

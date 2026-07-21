@@ -95,7 +95,12 @@
     const stage = document.createElement("div");
     stage.className = "ide-stage";
     stage.id = "ide-stage";
-    stage.append(buildStarter(), buildBoard());
+    const starter = buildStarter();
+    stage.append(starter);
+    // The board lives INSIDE the Models drawer now: for the engineer it is one labelled drawer
+    // among drawers; for everyone else the drawer chrome is invisible and mode CSS decides.
+    const slot = starter.querySelector("#dr-models-slot");
+    (slot || stage).append(buildBoard());
 
     root.append(rail, stage);
     document.body.append(root);
@@ -380,34 +385,25 @@
           '<button type="button" data-mode="engineer" data-lex="mode_name_engineer"></button>' +
         '</div>' +
       '</div>' +
-      '<div class="st-row st-lang">' +
-        '<span class="st-lang-label" data-lex="lang_label"></span>' +
-        '<select id="st-lang" aria-label="How Dominion talks to you">' +
-          '<option value="plain"></option><option value="technical"></option><option value="hybrid"></option>' +
-        '</select>' +
-      '</div>' +
-      '<div class="st-row" id="st-ws-row">' +
-        '<select id="st-ws" aria-label="Which project folder to build in"></select>' +
-        '<button type="button" id="st-add" data-lex="add_folder"></button>' +
-      '</div>' +
-      '<div class="st-new" id="st-new" hidden>' +
-        '<input id="st-new-path" type="text" autocomplete="off" spellcheck="false" />' +
-        '<input id="st-new-name" type="text" autocomplete="off" placeholder="Name (optional)" />' +
-        '<div class="st-new-btns">' +
-          '<button type="button" id="st-browse" data-lex="browse_btn"></button>' +
-          '<button type="button" id="st-new-go" data-lex="use_folder"></button>' +
+      '<details class="st-drawer" id="dr-folder" open>' +
+        '<summary data-lex="drawer_folder"></summary>' +
+        '<div class="st-row" id="st-ws-row">' +
+          '<select id="st-ws" aria-label="Which project folder to build in"></select>' +
+          '<button type="button" id="st-add" data-lex="add_folder"></button>' +
         '</div>' +
-        '<div class="st-tree" id="st-tree" hidden></div>' +
-      '</div>' +
-      '<textarea id="st-prompt" rows="3"></textarea>' +
-      '<div class="st-tools" id="st-tools">' +
-        '<span class="st-tools-label" data-lex="tools_label"></span>' +
-        '<div class="st-model-line" id="st-model-line" hidden></div>' +
-        '<div class="st-tools-btns">' +
-          '<button type="button" id="st-tools-default" data-lex="tools_default"></button>' +
-          '<button type="button" id="st-tools-custom" data-lex="tools_customize"></button>' +
+        '<div class="st-new" id="st-new" hidden>' +
+          '<input id="st-new-path" type="text" autocomplete="off" spellcheck="false" />' +
+          '<input id="st-new-name" type="text" autocomplete="off" placeholder="Name (optional)" />' +
+          '<div class="st-new-btns">' +
+            '<button type="button" id="st-browse" data-lex="browse_btn"></button>' +
+            '<button type="button" id="st-new-go" data-lex="use_folder"></button>' +
+          '</div>' +
+          '<div class="st-tree" id="st-tree" hidden></div>' +
         '</div>' +
-      '</div>' +
+      '</details>' +
+      '<details class="st-drawer" id="dr-brief" open>' +
+        '<summary data-lex="drawer_brief"></summary>' +
+        '<textarea id="st-prompt" rows="3"></textarea>' +
       '<div class="st-chat" id="st-chat" hidden>' +
         '<div class="st-chat-head">' +
           '<span data-lex="intake_title"></span>' +
@@ -424,6 +420,28 @@
         '</div>' +
         '<button type="button" id="st-chat-skip" class="st-link" data-lex="intake_skip"></button>' +
       '</div>' +
+      '</details>' +
+      '<details class="st-drawer" id="dr-models" open>' +
+        '<summary data-lex="drawer_models"></summary>' +
+        '<div class="st-tools" id="st-tools">' +
+          '<span class="st-tools-label" data-lex="tools_label"></span>' +
+          '<div class="st-model-line" id="st-model-line" hidden></div>' +
+          '<div class="st-tools-btns">' +
+            '<button type="button" id="st-tools-default" data-lex="tools_default"></button>' +
+            '<button type="button" id="st-tools-custom" data-lex="tools_customize"></button>' +
+          '</div>' +
+        '</div>' +
+        '<div id="dr-models-slot"></div>' +
+      '</details>' +
+      '<details class="st-drawer" id="dr-session" open>' +
+        '<summary data-lex="drawer_session"></summary>' +
+        '<div class="st-row st-lang">' +
+          '<span class="st-lang-label" data-lex="lang_label"></span>' +
+          '<select id="st-lang" aria-label="How Dominion talks to you">' +
+            '<option value="plain"></option><option value="technical"></option><option value="hybrid"></option>' +
+          '</select>' +
+        '</div>' +
+      '</details>' +
       '<div class="st-row">' +
         '<button type="button" id="st-go" class="st-primary" data-lex="start_go"></button>' +
         '<span class="st-status" id="st-status" role="status"></span>' +
@@ -607,6 +625,9 @@
     if (root) root.dataset.mode = m;
     const picker = $("#st-modes");
     if (picker) picker.remove();
+    // Engineers get closed drawers, named by function, in dependency order (the ruling). For
+    // everyone else the drawer chrome disappears and the sections read as one open page.
+    for (const d of document.querySelectorAll(".st-drawer")) d.open = m !== "engineer";
     // Register follows the mode (ruling 4a); the lang select stays as the engineer's override.
     if (window.DominionLexicon) window.DominionLexicon.set(MODE_REG[m]);
     paintLexicon();
