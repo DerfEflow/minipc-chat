@@ -117,3 +117,47 @@ deployment. Known pre-existing failure shipped WITH main: chatjobs_unit_test EPE
 | 6 Two lenses | not started | |
 | 7 Scale tier | not started | |
 | 8 Hardening + guest rollout | not started | |
+
+## Iteration 1.1 ship record (2026-07-21 evening, main 2c3b737, cache v86-crucible-intake)
+
+Four Fred rulings landed in one wave after iteration 1 went live, all verified against the live
+container (`railway ssh` sw.js probe returned v86-crucible-intake):
+
+1. **Folder picker.** POST `/ide/browse` dispatches `fs_browse` on the tenant's hands node via the
+   shared `ideHandsFor(T)` (owner node vs guest uid-bound node, never both). No path = drive list;
+   carve-outs refused at the node. Client tree walker in the front door: Browse, tap through,
+   "Build in this folder" registers the workspace in one motion. Confirmed the mini-PC node already
+   carries fs_browse (shipped de96963 on 07-17; node file dated 07-20).
+2. **Quoted paths parse.** validateRoot and the client field strip wrapping straight and smart
+   quotes (Windows "Copy as path", phone clipboards). idestore_test covers both shapes.
+3. **Assignment Board is opt-in.** Hidden behind "Use all the default tools (recommended)" /
+   "Customize" (per-device `dominion.crucible.tools.v1`). Choosing defaults DELETES stored keys
+   rather than blanking them: an empty-string assignment counts as a choice in resolveAssignments
+   and routes to the main model instead of the curated default.
+4. **Intake interview.** `ideintake.mjs` + POST `/ide/intake`: the workspace's build_code model
+   (resolved exactly as the build resolves it) interviews one question at a time with a
+   three-question floor, judges experience level from the user's own words (results-talk for
+   beginners and vibe coders, precision for engineers), calls out contradictions, then emits a
+   VISION READY marker plus bullets. parseIntake honours the marker only on its own line; a bare
+   marker is noise. The approved vision rides into the build prompt as AGREED VISION; a skip link
+   keeps the fast path; the chat minimizes to its head bar. Live-proven in dev on kimi-k3: three
+   real clarifying questions to an approved bullet vision, then Build this / Keep talking.
+5. **Guided tour** (`public/dominion-tour.js`). Numbered popups hover beside the section they
+   explain (fixed-position card, arrow slides along its edge via --ax), Next moves the view, Skip
+   offered at the start, a small ? in the rail recalls it forever. Begin flips to guide mode: an
+   arrowed prompt points at the ONE control to touch now and advances by watching real state
+   (folder picked, brief written), ending when the first build starts. `dominion.crucible.tour.v1`
+   prevents re-shows; the tour waits for the intro card's OK so the two never stack.
+
+Tests: ideintake_test 8/8 new, idestore quoted-path cases, full suite green in isolation
+(chatjobs_unit EPERM pre-existing; images_test red only under parallel port contention, passes
+alone). Width honesty held at 412 and 320 with the new furniture. New DOM events for the tour:
+dominion-crucible-open, dominion-ide-vision, dominion-ide-workspace, dominion-ide-build-started.
+
+Dev lesson: devboot inherits its environment, so the wallet must be sourced in the SAME shell
+(`set -a; . ~/.app-secrets.env; set +a; DEVBOOT_ALLOW_PAID=1 node devboot.mjs`) or ALLOW_PAID has
+no keys to keep. defaultModelFor in dev resolves to DeepSeek direct which has no dev key; assign
+kimi-k3 on the workspace to exercise intake locally.
+
+Open after 1.1: Fred's phone pass on the new furniture; guided deploy (the publish card still says
+upcoming); L-8 vision judge in one continuous run; L-4 real-device push; guest flip.
