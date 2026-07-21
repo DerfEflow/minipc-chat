@@ -326,8 +326,10 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
     let costUsd = 0;
     try {
       const decision = router({ title: move.title, description: move.why, files: move.files }, assignments);
+      // `why` belongs to the PLAN (what this move is for, in plain English). The router's reason
+      // travels as routeWhy so the two never overwrite each other on the card.
       jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
-        taskClass: decision.taskClass, model: decision.model, why: decision.why });
+        why: move.why || "", taskClass: decision.taskClass, model: decision.model, routeWhy: decision.why });
 
       const manifest = await readManifest(workspace.root, move.files || []);
       const messages = buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal });

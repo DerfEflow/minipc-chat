@@ -1155,7 +1155,9 @@ function runIdeProbe(job, { ask = false } = {}) {
     { id: "m1", title: "Confirm the job survives the client" },
     { id: "m2", title: "Confirm the journal replays" },
   ] });
-  step(400, () => ideJobs.emit(job.id, { type: "move", id: "m1", title: "Confirm the job survives the client", state: "running" }));
+  step(400, () => ideJobs.emit(job.id, { type: "move", id: "m1", title: "Confirm the job survives the client", state: "running",
+    why: "Proves the job keeps running with no client attached.",
+    taskClass: "mechanical", model: "deepseek/deepseek-v4-flash", routeWhy: "based on the wording of the request" }));
   step(1200, () => ideJobs.emit(job.id, { type: "move", id: "m1", title: "Confirm the job survives the client", state: "done" }));
 
   if (ask) {
@@ -1170,8 +1172,21 @@ function runIdeProbe(job, { ask = false } = {}) {
     return;
   }
 
-  step(1600, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "running" }));
-  step(2400, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "done" }));
+  step(1500, () => ideJobs.emit(job.id, { type: "snapshot", kind: "git", message: "Restore point taken before writing." }));
+  step(1600, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "running",
+    why: "Proves the journal replays identically after a reload.",
+    taskClass: "build_code", model: "moonshotai/kimi-k3", routeWhy: "based on the wording of the request" }));
+  step(1800, () => ideJobs.emit(job.id, { type: "file", path: "src/probe/spine.ts", bytes: 412 }));
+  step(1900, () => ideJobs.emit(job.id, { type: "file", path: "src/probe/readme.md", bytes: 96 }));
+  step(2000, () => ideJobs.emit(job.id, { type: "diff", path: "src/probe/spine.ts", added: 3, removed: 1,
+    diff: [
+      "-export const spine = null;",
+      "+export const spine = {",
+      "+  durable: true,",
+      "+};",
+    ].join(String.fromCharCode(10)) }));
+  step(2200, () => ideJobs.emit(job.id, { type: "run", command: "npm run test --silent", ok: true, output: "probe: 2 passing" }));
+  step(2400, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "done", files: 2 }));
   step(2600, () => ideJobs.emit(job.id, { type: "cost", usd: 0, credits: 0, note: "Probe jobs never spend." }));
   step(2800, () => ideJobs.finish(job.id, { type: "done", message: "Spine probe complete." }));
 }

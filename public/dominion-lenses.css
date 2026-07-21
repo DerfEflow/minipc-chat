@@ -1,0 +1,157 @@
+/*
+ * The Crucible's two lenses.
+ *
+ * Both read the same build. Blueprint is the plain-English one and the default; Workshop is the
+ * machinery. Per the visual north star: command records rather than messenger bubbles, machined
+ * frames with real mass, copper as metal, green reserved for energy and state.
+ */
+
+#cru { display: grid; gap: 16px; margin: 0 0 20px; }
+
+/* ---------- head: the lens switch and the live cost ------------------------------------- */
+.cru-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  flex-wrap: wrap;
+}
+
+.cru-switch {
+  display: inline-flex; padding: 3px; border-radius: 11px;
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .2));
+  background: linear-gradient(180deg, rgba(4, 13, 22, .9), rgba(2, 8, 14, .95));
+  box-shadow: inset 0 2px 7px rgba(0, 0, 0, .7);
+}
+.cru-switch button {
+  font: inherit; font-size: 12px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 8px 17px; border: 0; border-radius: 9px; cursor: pointer;
+  color: var(--muted, #7d8f9c); background: none;
+  transition: color .18s ease, background .18s ease, box-shadow .18s ease;
+}
+.cru-switch button:hover { color: var(--ink, #dff1fb); }
+.cru-switch button.on {
+  color: var(--ink, #e8f6ff);
+  background: linear-gradient(180deg, rgba(21, 48, 74, .95), rgba(7, 20, 34, .98));
+  box-shadow: inset 0 1px 0 rgba(210, 240, 255, .17), 0 1px 5px rgba(0, 0, 0, .5);
+}
+
+.cru-meter { display: inline-flex; align-items: baseline; gap: 9px; font-size: 12px; }
+.cru-meter .lbl { color: var(--muted, #7d8f9c); letter-spacing: .12em; text-transform: uppercase; font-size: 10.5px; }
+.cru-meter .val { color: var(--copper-hot, #d4823c); font-variant-numeric: tabular-nums; font-size: 13.5px; }
+
+/* ---------- blueprint ------------------------------------------------------------------- */
+.cru-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink, #e8f6ff); letter-spacing: .02em; }
+.cru-blueprint { display: grid; gap: 11px; }
+
+/* A command record, not a chat bubble: square shoulders, a recessed face, a state edge. */
+.cru-card {
+  display: grid; gap: 8px;
+  padding: 15px 17px;
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .18));
+  border-left: 3px solid rgba(125, 143, 156, .5);
+  border-radius: 3px;
+  background: linear-gradient(180deg, rgba(11, 27, 44, .82), rgba(3, 10, 18, .93));
+  box-shadow: inset 0 1px 0 rgba(210, 240, 255, .08), 0 8px 20px rgba(0, 0, 0, .42);
+}
+.cru-card[data-state="running"]   { border-left-color: var(--energy, #76ff68); }
+.cru-card[data-state="done"]      { border-left-color: rgba(118, 255, 104, .55); }
+.cru-card[data-state="repairing"] { border-left-color: var(--copper-hot, #d4823c); }
+.cru-card[data-state="failed"],
+.cru-card[data-state="blocked"]   { border-left-color: #e2544a; }
+
+.c-top { display: flex; align-items: center; gap: 11px; }
+.c-num {
+  flex: 0 0 auto; width: 23px; height: 23px; border-radius: 3px;
+  display: grid; place-items: center;
+  font-size: 11.5px; font-variant-numeric: tabular-nums;
+  color: var(--copper-hot, #d4823c);
+  border: 1px solid rgba(185, 107, 50, .4);
+  background: linear-gradient(180deg, rgba(48, 24, 10, .8), rgba(12, 6, 3, .9));
+}
+.c-title { flex: 1 1 auto; font-size: 14.5px; color: var(--ink, #e8f6ff); }
+.c-state {
+  flex: 0 0 auto; font-size: 10px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--muted, #7d8f9c);
+}
+.cru-card[data-state="running"] .c-state { color: var(--energy-hot, #9dff92); }
+.cru-card[data-state="failed"] .c-state,
+.cru-card[data-state="blocked"] .c-state { color: #ff8b81; }
+
+.c-why { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--ink-soft, #b9d3e4); }
+.c-msg {
+  margin: 0; padding: 9px 11px; border-radius: 3px;
+  font-size: 12.5px; line-height: 1.55; color: #ffc9a8;
+  border-left: 2px solid rgba(212, 130, 60, .55);
+  background: rgba(48, 24, 10, .3);
+}
+.c-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.c-files, .c-model {
+  font-size: 11px; padding: 3px 9px; border-radius: 999px;
+  color: var(--muted, #8ba0ae);
+  border: 1px solid rgba(150, 200, 230, .16);
+  background: rgba(6, 17, 28, .7);
+}
+.c-model { color: var(--ink-soft, #b9d3e4); }
+.c-model.is-forge { color: var(--copper-hot, #d4823c); border-color: rgba(185, 107, 50, .35); }
+
+.cru-note { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--muted, #7d8f9c); }
+.cru-outcome { margin: 0; font-size: 13px; color: var(--ink-soft, #b9d3e4); }
+.cru-outcome[data-outcome="done"] { color: var(--energy-hot, #9dff92); }
+.cru-outcome[data-outcome="error"] { color: #ff8b81; }
+
+.cru-empty { display: grid; gap: 9px; padding: 26px 4px; }
+.cru-empty h3 { margin: 0; font-size: 15px; color: var(--ink, #e8f6ff); font-weight: 600; }
+.cru-empty p { margin: 0; max-width: 46ch; font-size: 13.5px; line-height: 1.65; color: var(--muted, #8ba0ae); }
+
+/* ---------- workshop -------------------------------------------------------------------- */
+.cru-workshop { display: grid; gap: 18px; }
+.w-section { display: grid; gap: 9px; }
+.w-section h4 {
+  margin: 0; font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--copper-hot, #d4823c);
+}
+
+.w-tree { list-style: none; margin: 0; padding: 0 0 0 13px; font-size: 12.5px; }
+.w-tree .w-tree { border-left: 1px solid rgba(150, 200, 230, .13); }
+.w-tree li { padding: 2.5px 0; color: var(--ink-soft, #b9d3e4); }
+.w-tree li.is-dir { color: var(--muted, #8ba0ae); }
+.w-tree li.is-dir::before { content: "/ "; color: rgba(185, 107, 50, .6); }
+.w-tree li.is-file::before { content: "\00b7 "; color: rgba(150, 200, 230, .4); }
+.w-bytes { margin-left: 8px; font-size: 11px; color: var(--muted, #6f8492); font-variant-numeric: tabular-nums; }
+
+.w-diff, .w-run {
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .16));
+  border-radius: 3px;
+  background: linear-gradient(180deg, rgba(6, 17, 28, .8), rgba(2, 8, 14, .92));
+  overflow: hidden;
+}
+.w-diff-head, .w-run-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 12px; font-size: 12px; color: var(--ink-soft, #b9d3e4);
+  border-bottom: 1px solid rgba(150, 200, 230, .12);
+  background: rgba(11, 27, 44, .6);
+}
+.w-diff-stat { font-size: 11px; color: var(--muted, #8ba0ae); font-variant-numeric: tabular-nums; }
+.w-run-badge { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
+.w-run[data-ok="yes"] .w-run-badge { color: var(--energy-hot, #9dff92); }
+.w-run[data-ok="no"] .w-run-badge { color: #ff8b81; }
+.w-run[data-ok="no"] { border-color: rgba(226, 84, 74, .35); }
+
+.w-diff pre, .w-run pre {
+  margin: 0; padding: 11px 12px; max-height: 320px; overflow: auto;
+  font: 400 11.5px/1.55 "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  color: var(--ink-soft, #b9d3e4);
+  white-space: pre-wrap; word-break: break-word;
+}
+.w-diff pre .add { color: #9dff92; }
+.w-diff pre .del { color: #ff8b81; }
+.w-diff pre .ctx { color: var(--muted, #8ba0ae); }
+
+/* ---------- phone ------------------------------------------------------------------------
+ * Blueprint has to be fully usable on a phone, because approving a build from anywhere is the
+ * point of the whole background-persistence design. Workshop stays readable but is desktop-first. */
+@media (max-width: 620px) {
+  .cru-head { gap: 10px; }
+  .cru-switch button { padding: 8px 13px; font-size: 11px; }
+  .cru-card { padding: 13px 14px; }
+  .c-title { font-size: 14px; }
+  .w-diff pre, .w-run pre { font-size: 11px; max-height: 220px; }
+}
