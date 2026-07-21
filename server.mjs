@@ -54,6 +54,8 @@ import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore } from "./forge.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT } from "./ide.mjs";
 import { createIdeJobs } from "./idejobs.mjs";
+import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES } from "./ideengine.mjs";
+import { routeMove, resolveAssignments } from "./iderouter.mjs";
 import { escalationFor, sendWakeups } from "./idepush.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
@@ -1137,7 +1139,11 @@ async function handleIde(req, res, u) {
   if (req.method === "POST" && path === "/ide/push/unsubscribe") return send(ideFeature.unsubscribePush(T, body));
   if (req.method === "POST" && path === "/ide/job") {
     const ask = !!(body && body.ask);
-    return send(ideFeature.startJob(T, body, { runner: (job) => runIdeProbe(job, { ask }) }));
+    return send(ideFeature.startJob(T, body, {
+      runner: (job, extra) => (job.kind === "build"
+        ? runIdeBuild(job, { T, ...extra })
+        : runIdeProbe(job, { ask })),
+    }));
   }
   return sjson(res, 404, { error: "unknown ide route" });
 }
@@ -1195,6 +1201,117 @@ function runIdeProbe(job, { ask = false } = {}) {
  * An answered probe finishes the work it was frozen mid-way through. The real engine (Phase 5)
  * resumes its move loop here; the probe just proves the freeze lifts and the job completes.
  */
+/* ============================================================================================
+   The real build runner (Phase 5 wiring).
+
+   Everything expensive or dangerous already lives in ideengine.mjs; this is the wiring that
+   gives it a provider, a machine, a router and a meter. Four adapters, nothing clever:
+
+     chat   -> cloudChatStream, with cost taken from the provider when it reports one and derived
+               from catalog prices when it does not (the OCR path's rule, same arithmetic)
+     hands  -> the owner's connected node, or a guest's own uid-bound node. Never both.
+     router -> routeMove against the board the user actually set
+     meter  -> meterTurn, once per move, from the engine's finally path
+
+   The engine never learns which provider it is talking to, and the server never learns how a move
+   is assembled. That seam is why the engine is testable with no server at all.
+   ============================================================================================ */
+async function runIdeBuild(job, { T, workspace, prompt, assignments }) {
+  const ac = new AbortController();
+  job.stop = () => { try { ac.abort(); } catch {} };
+
+  const handsFor = T.isOwner
+    ? (tool, args) => CTX.hands.dispatch(tool, args)
+    : (tool, args) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000 });
+
+  // One model call. Cost prefers what the provider actually charged; otherwise it is derived from
+  // the catalog, which is the same rule the chat and OCR paths use.
+  const chat = async ({ model, messages }) => {
+    const r = await cloudChatStream(model, messages, { signal: ac.signal });
+    let costUsd = 0;
+    const rec = modelById(model);
+    if (r && r.usage) {
+      if (typeof r.usage.cost === "number") costUsd = r.usage.cost;
+      else if (rec) {
+        const inTok = r.usage.prompt_tokens ?? r.usage.input_tokens ?? 0;
+        const outTok = r.usage.completion_tokens ?? r.usage.output_tokens ?? 0;
+        costUsd = ((inTok * (rec.inCost || 0)) + (outTok * (rec.outCost || 0))) / 1e6;
+      }
+    }
+    return { ok: !!(r && r.ok), content: (r && r.content) || "", error: (r && r.error) || "", costUsd: +costUsd.toFixed(6) };
+  };
+
+  const engine = createIdeEngine({
+    jobs: ideJobs,
+    chat,
+    hands: handsFor,
+    router: (move, assign) => routeMove(move, assign),
+    meter: async (usd) => { await meterTurn(T, usd, prompt, ""); },
+    log: (m) => console.log(m),
+  });
+
+  const budget = { spentUsd: 0, capUsd: Number(workspace && workspace.budget && workspace.budget.capUsd) || 0 };
+  const spend = (usd) => { budget.spentUsd += Number(usd) || 0; };
+
+  try {
+    // A machine has to be reachable before anything is planned, so nobody pays for a blueprint
+    // that could never have been executed.
+    const probe = await handsFor("node_info", {});
+    if (!probe || probe.ok === false || probe.offline) {
+      return ideJobs.finish(job.id, { type: "error", code: "no_node",
+        message: "No machine is connected. Start your Dominion hands node on the computer holding this project, then run the build again." });
+    }
+
+    const resolved = resolveAssignments(assignments, { allInOne: (assignments && assignments.allInOne) || "", fallback: defaultModelFor(!!T.isOwner) });
+    const planModel = resolved.build_code || defaultModelFor(!!T.isOwner);
+
+    // Small asks skip planning entirely. A blueprint for "fix the typo in the header" is ceremony
+    // that costs a model call and the user's patience.
+    const small = isSmallAsk(prompt);
+    let moves;
+    if (small.small) {
+      moves = [{ id: "m1", title: prompt.slice(0, 140), why: small.why, files: [], verify: "" }];
+      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, single: true });
+    } else {
+      const planned = await chat({ model: planModel, messages: [
+        { role: "system", content: PLANNER_SYSTEM },
+        { role: "user", content: "PROJECT: " + (workspace.name || workspace.root) + "\n\nBUILD THIS:\n" + prompt },
+      ] });
+      spend(planned.costUsd);
+      await meterTurn(T, planned.costUsd, prompt, "");
+      if (planned.costUsd) ideJobs.emit(job.id, { type: "cost", usd: planned.costUsd, move: "plan" });
+      if (!planned.ok) {
+        return ideJobs.finish(job.id, { type: "error", message: planned.error || "The planner could not be reached." });
+      }
+      const parsed = parseBlueprint(planned.content);
+      if (!parsed.ok) return ideJobs.finish(job.id, { type: "error", message: parsed.error });
+      moves = parsed.moves;
+      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves });
+    }
+
+    for (const move of moves.slice(0, MAX_MOVES)) {
+      if (ac.signal.aborted) return;
+      // Stop BEFORE the move that would break the budget. Stopping after is an apology.
+      const est = estimateMove({ manifestBytes: 8000, inCost: (modelById(resolved.build_code) || {}).inCost || 0, outCost: (modelById(resolved.build_code) || {}).outCost || 0 });
+      const b = budgetCheck({ spentUsd: budget.spentUsd, capUsd: budget.capUsd, nextEstUsd: est.usd });
+      if (b.stop) {
+        return ideJobs.emit(job.id, { type: "need_input", id: "budget",
+          question: "This build has reached its spending limit of $" + budget.capUsd.toFixed(2) + ". Keep going?",
+          options: ["Keep going", "Stop here"] });
+      }
+      const res = await engine.runMove(job, { move, workspace, assignments: resolved, goal: prompt });
+      spend(res && res.costUsd);
+      if (res && res.blocked) return ideJobs.finish(job.id, { type: "error", message: "Stopped at a hard carve-out. Nothing was written." });
+      if (res && !res.ok) return ideJobs.finish(job.id, { type: "error", message: "A move could not be completed. The detail is above." });
+    }
+
+    ideJobs.finish(job.id, { type: "done", message: "Build complete." });
+  } catch (e) {
+    if (ac.signal.aborted) return;
+    ideJobs.finish(job.id, { type: "error", message: String((e && e.message) || e) });
+  }
+}
+
 function resumeIdeProbe(job) {
   const step = (ms, fn) => setTimeout(() => { try { fn(); } catch {} }, ms);
   step(200, () => ideJobs.emit(job.id, { type: "move", id: "m2", title: "Confirm the journal replays", state: "running" }));

@@ -219,6 +219,14 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
   const err = (status, code, error) => ({ status, code, body: { error, code } });
 
   // Identity + account state + exposure. Everything below this line assumes a real, allowed user.
+  // Workspace assignments win, else the account-level board, exactly as /ide/route/preview reads
+  // them. One source of truth: the build must never route differently from what the board shows.
+  function assignmentsFor(T, workspace) {
+    const store = storeFor(T);
+    const ws = workspace && workspace.assignments && Object.keys(workspace.assignments).length ? workspace.assignments : null;
+    return ws || ((store.prefs() || {}).assignments || {});
+  }
+
   function wall(T) {
     if (!T || T.role === "anon") return err(401, "no_identity", "Sign in to use Dominion.");
     if (T.status === "paused" || T.status === "locked") {
@@ -324,16 +332,30 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       const billBlocked = billableWall(T); if (billBlocked) return billBlocked;
 
       const kind = String((body && body.kind) || "probe");
-      if (kind !== "probe") {
-        return err(400, "unknown_kind", "The build engine lands in Phase 5. Only 'probe' runs today.");
+      if (kind !== "probe" && kind !== "build") {
+        return err(400, "unknown_kind", "A job is either a probe or a build.");
       }
       const workspaceId = String((body && body.workspaceId) || "");
-      if (workspaceId && !storeFor(T).get(workspaceId)) {
-        return err(404, "not_found", "No such workspace.");
+      const workspace = workspaceId ? storeFor(T).get(workspaceId) : null;
+      if (workspaceId && !workspace) return err(404, "not_found", "No such workspace.");
+
+      const prompt = String((body && body.prompt) || "").trim().slice(0, 4000);
+      if (kind === "build") {
+        // A build writes real files on a real machine, so it needs to know WHERE before it starts.
+        if (!workspace) return err(400, "workspace_required", "Pick a workspace folder before starting a build.");
+        if (!prompt) return err(400, "prompt_required", "Say what you want built.");
+        // One build per workspace. Two builds writing the same tree is the concurrency bug that
+        // this whole design exists to avoid, so it is refused at the door rather than survived.
+        const busy = jobs.activeFor(T.uid).find((j) => j.workspaceId === workspaceId && !j.done);
+        if (busy) return err(409, "workspace_busy", "That workspace already has a build running. Let it finish or stop it first.");
       }
+
       const job = jobs.create({ uid: T.uid, workspaceId, kind, isOwner: !!T.isOwner });
       log("[ide] job " + job.id + " (" + kind + ") started by " + (T.uid || "owner"));
-      if (typeof runner === "function") { try { runner(job); } catch (e) { jobs.emit(job.id, { type: "error", message: String(e && e.message || e) }); } }
+      if (typeof runner === "function") {
+        try { runner(job, { workspace, prompt, assignments: assignmentsFor(T, workspace) }); }
+        catch (e) { jobs.emit(job.id, { type: "error", message: String(e && e.message || e) }); }
+      }
       return ok({ jobId: job.id, kind, workspaceId });
     },
 

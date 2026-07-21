@@ -172,12 +172,31 @@ await t("the owner never hits the billable wall, multi-tenant on and zero credit
   assert.equal(f.startJob(OWNER, { kind: "probe" }).status, 200);
 });
 
-await t("only the probe kind runs today, and it says why instead of failing vaguely", () => {
+await t("a build demands a workspace and a prompt BEFORE anything runs", () => {
   const f = featureFor("owner");
-  const r = f.startJob(OWNER, { kind: "build" });
-  assert.equal(r.status, 400);
-  assert.equal(r.code, "unknown_kind");
-  assert.match(r.body.error, /Phase 5/);
+  // no workspace: refused with the reason, since a build writes real files and must know where
+  const noWs = f.startJob(OWNER, { kind: "build", prompt: "make a thing" });
+  assert.equal(noWs.status, 400);
+  assert.equal(noWs.code, "workspace_required");
+  // a workspace but nothing to do: refused too, and the wording tells the user what to type
+  const ws = f.createWorkspace(OWNER, { name: "W", root: "C:/Projects/demo-app" }).body.workspace;
+  const noPrompt = f.startJob(OWNER, { kind: "build", workspaceId: ws.id });
+  assert.equal(noPrompt.status, 400);
+  assert.equal(noPrompt.code, "prompt_required");
+  // and an invented kind still gets a plain refusal
+  const junk = f.startJob(OWNER, { kind: "banana" });
+  assert.equal(junk.status, 400);
+  assert.equal(junk.code, "unknown_kind");
+});
+
+await t("one build per workspace: a second one is refused at the door", () => {
+  const f = featureFor("owner");
+  const ws = f.createWorkspace(OWNER, { name: "Busy", root: "C:/Projects/busy-app" }).body.workspace;
+  const first = f.startJob(OWNER, { kind: "build", workspaceId: ws.id, prompt: "build it" });
+  assert.equal(first.status, 200, "the first build starts");
+  const second = f.startJob(OWNER, { kind: "build", workspaceId: ws.id, prompt: "build it again" });
+  assert.equal(second.status, 409, "two builds writing one tree is the bug this design exists to avoid");
+  assert.equal(second.code, "workspace_busy");
 });
 
 await t("starting a job against a workspace id you do not own is a 404", () => {

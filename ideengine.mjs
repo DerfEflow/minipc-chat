@@ -271,7 +271,8 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       const isRepo = await hands("shell_run", { command: "git -C \"" + root + "\" rev-parse --is-inside-work-tree", timeoutMs: 20000 });
       const inRepo = /true/i.test(String((isRepo && (isRepo.stdout || isRepo.output)) || ""));
       if (inRepo) {
-        await hands("shell_run", { command: "git -C \"" + root + "\" add -A && git -C \"" + root + "\" commit -m \"Dominion Works snapshot\" --allow-empty", timeoutMs: 60000 });
+        // ";" not "&&": PowerShell 5.1. A failed add makes commit capture less, never break more.
+        await hands("shell_run", { command: "git -C \"" + root + "\" add -A; git -C \"" + root + "\" commit -m \"Dominion Works snapshot\" --allow-empty", timeoutMs: 60000 });
         jobs.emit(job.id, { type: "snapshot", kind: "git", message: "Committed a restore point in the repo before writing." });
         return { ok: true, kind: "git" };
       }
@@ -307,7 +308,11 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
     const { cmd, why } = verifyCommandFor(pkg);
     if (!cmd) { jobs.emit(job.id, { type: "run", skipped: true, message: "Nothing to verify: " + why + "." }); return { ran: false, ok: true }; }
     try {
-      const r = await hands("shell_run", { command: "cd \"" + workspace.root + "\" && " + cmd, timeoutMs: VERIFY_TIMEOUT_MS });
+      // No "&&": the node runs PowerShell 5.1 on Windows, where "&&" is a PARSE ERROR (the
+      // standing house lesson, relearned live when the first real build failed its check on
+      // exactly this). ";" is a statement separator in both PowerShell and sh, and set-location
+      // failing on a missing folder makes the check fail loudly rather than run somewhere else.
+      const r = await hands("shell_run", { command: "cd \"" + workspace.root + "\"; " + cmd, timeoutMs: VERIFY_TIMEOUT_MS });
       const code = (r && (r.code ?? r.exitCode)) || 0;
       const output = String((r && (r.stdout || r.output)) || "") + String((r && r.stderr) || "");
       jobs.emit(job.id, { type: "run", command: cmd, ok: code === 0, output: output.slice(-4000) });
