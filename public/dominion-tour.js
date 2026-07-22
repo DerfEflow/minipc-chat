@@ -38,30 +38,47 @@
   }
 
   /*
-   * Place the card beside its target: below when there is room, above otherwise, arrow pointing
-   * at the target either way. position:fixed keeps the math in viewport space, immune to the
-   * stage's own scrolling; a scroll listener re-places it. Clamp maxHeight to keep it on screen.
+   * Place the card CENTERED horizontally (a card hugging the target's left edge read as
+   * off-center and wonky on Fred's phone), below the target when there is room, above when
+   * not, dead-center on screen as the last resort. The arrow still points at the target via
+   * --ax. The card is a flex column whose BODY scrolls, so the buttons can never be pushed
+   * off the bottom no matter how long the text runs.
    */
   function place(target) {
     if (!pop || !target) return;
     const r = target.getBoundingClientRect();
-    const w = Math.min(320, window.innerWidth - 24);
+    const w = Math.min(340, window.innerWidth - 24);
     pop.style.width = w + "px";
-    const ph = pop.offsetHeight || 160;
-    const below = r.bottom + ph + 18 < window.innerHeight;
-    const top = below ? r.bottom + 12 : Math.max(8, r.top - ph - 12);
-    const left = Math.max(12, Math.min(r.left, window.innerWidth - w - 12));
-    pop.style.top = top + "px";
+    const left = Math.max(8, Math.round((window.innerWidth - w) / 2));
     pop.style.left = left + "px";
-    pop.classList.toggle("above", !below);
 
-    // Clamp maxHeight to keep the card on screen: min(70% of innerHeight, innerHeight - top - 12).
-    const maxH = Math.min(window.innerHeight * 0.7, window.innerHeight - top - 12);
-    pop.style.maxHeight = maxH + "px";
+    const ph = Math.min(pop.offsetHeight || 160, window.innerHeight * 0.7);
+    const fitsBelow = r.bottom + ph + 18 < window.innerHeight;
+    const fitsAbove = r.top - ph - 12 > 8;
+    let top;
+    if (fitsBelow) top = r.bottom + 12;
+    else if (fitsAbove) top = r.top - ph - 12;
+    else top = Math.max(8, Math.round((window.innerHeight - ph) / 2));
+    pop.style.top = top + "px";
+    pop.classList.toggle("above", !fitsBelow && fitsAbove);
+    pop.classList.toggle("floating", !fitsBelow && !fitsAbove);
+
+    // The card never leaves the screen: the body region scrolls inside the clamp instead of
+    // the text running past the container (Fred's phone, round two).
+    pop.style.maxHeight = Math.min(window.innerHeight * 0.7, window.innerHeight - top - 12) + "px";
 
     // The arrow slides along the card's edge to keep pointing at the target's center.
     const ax = Math.max(18, Math.min(r.left + r.width / 2 - left, w - 18));
     pop.style.setProperty("--ax", ax + "px");
+  }
+
+  // A target buried in a closed drawer cannot be pointed at: open its ancestors first.
+  function reveal(target) {
+    let el = target;
+    while (el && el !== document.body) {
+      if (el.tagName === "DETAILS" && !el.open) el.open = true;
+      el = el.parentElement;
+    }
   }
 
   function highlight(target) {
@@ -86,13 +103,30 @@
     stageRoot().append(veil);
   }
 
-  function card(target, html) {
+  /*
+   * Every card gets an X to leave the tour (Fred's round two: a card with no way out is a
+   * wall), and its content rides inside .tp-body, the scrollable region, so the buttons stay
+   * pinned and visible however long the text runs. Guide-mode cards pass veil:false: the whole
+   * point of guide mode is that the user TOUCHES the app, so nothing may stand between them
+   * and the control being pointed at (the deadlock Fred hit: a veil, a card with no buttons,
+   * and a field he was told to type in but could not reach).
+   */
+  function card(target, html, { veil: wantVeil = true } = {}) {
     if (pop) pop.remove();
-    createVeil();
+    if (wantVeil) createVeil();
+    else if (veil) { veil.remove(); veil = null; }
     pop = document.createElement("div");
-    pop.className = "ide-tour-pop";
-    pop.innerHTML = html;
+    pop.className = "ide-tour-pop" + (wantVeil ? "" : " guide");
+    pop.innerHTML =
+      '<button type="button" class="tp-x" aria-label="' + L("tour_skip") + '">×</button>' +
+      '<div class="tp-body">' + html + '</div>';
+    // The buttons pin to the card's bottom OUTSIDE the scroll region, so however long the text
+    // runs, Next and Skip are always on screen.
+    const btns = pop.querySelector(".tp-btns");
+    if (btns) pop.append(btns);
     stageRoot().append(pop);
+    pop.querySelector(".tp-x").addEventListener("click", () => { markDone(); clear(); });
+    if (target) reveal(target);
     highlight(target);
     if (target) target.scrollIntoView({ block: "center", behavior: "smooth" });
     // Two passes: once now, once after the smooth scroll has settled.
@@ -116,7 +150,12 @@
       baseSteps.splice(2, 0, { target: "#st-tools", t: "tour_s4_t", b: "tour_s4_b" });
     }
 
-    return baseSteps;
+    /*
+     * Steps already satisfied are dropped BEFORE numbering (Fred's round two: the first card he
+     * ever saw said "2/3", because a pre-picked folder skipped step one after the count was
+     * fixed). The chip is the only number anywhere: the titles carry none.
+     */
+    return baseSteps.filter((s) => !isStepComplete(s));
   }
 
   function isStepComplete(step) {
@@ -180,7 +219,8 @@
       const st = stages[g];
       const target = $(st.target);
       if (!target) return;
-      card(target, '<p class="tp-guide">' + L(st.text) + '</p>');
+      // veil:false is the whole point of guide mode: the user must reach the app.
+      card(target, '<p class="tp-guide">' + L(st.text) + '</p>', { veil: false });
       repaint = point;
     };
     point();
