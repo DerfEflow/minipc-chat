@@ -2323,7 +2323,12 @@ function machinesBlock(T) {
   const head = "\n\nENVIRONMENT (read from the machines themselves, live this turn):\n" +
     "You run in the cloud. You have NO filesystem of your own beyond your private sandbox: every real file lives on a machine you reach through a connected node. ";
   if (!mine.length) {
-    return head + "RIGHT NOW NO MACHINE IS CONNECTED, so file and command tools will fail until one reconnects. Say that plainly instead of guessing at paths.";
+    // A guest with no node is NORMAL, not broken. Wording this as an outage taught the model to
+    // apologise for a fault that does not exist, and to imply a user should have machines they
+    // never signed up for. The owner with nothing connected IS an outage, so he gets the alarm.
+    return head + ((T && T.isOwner)
+      ? "RIGHT NOW NO MACHINE IS CONNECTED, so file and command tools will fail until one reconnects. Say that plainly instead of guessing at paths."
+      : "No computer is connected to this account, which is the normal setup: you cannot read or write files on anyone's machine, and you should never imply otherwise. Work in your sandbox and with documents instead. If the user wants Dominion to reach their own computer, they can connect it from the Forge panel.");
   }
   const lines = mine.map((n) => {
     const i = info[n] || {};
@@ -3164,7 +3169,12 @@ async function saveExportToMachine(r, T, hands) {
     const dispatch = hands && typeof hands.dispatch === "function" ? hands.dispatch : (CTX.hands && CTX.hands.dispatch);
     if (typeof dispatch !== "function") return { ok: false, reason: "no machine channel" };
     const target = docVaultTarget(T);
-    if (!target.dir) return { ok: false, reason: "no machine connected, so it stayed on the server" };
+    // No node at all: for a guest that is the ordinary state, so say NOTHING and leave their reply
+    // exactly as it was before the vault existed (title, size, download link). Only the owner, whose
+    // machines are supposed to be up, gets told that a save did not happen.
+    if (!target.dir) return (T && T.isOwner)
+      ? { ok: false, reason: "no machine connected, so it stayed on the server" }
+      : { ok: false };
     let bytes;
     try { bytes = readFileSync(r.path); } catch (e) { return { ok: false, reason: "could not read the export: " + (e && e.message) }; }
     const dest = target.dir + "\\" + (r.fileName || basename(r.path));
@@ -5054,15 +5064,21 @@ const server = http.createServer(async (req, res) => {
     if (path === "/hands/selftest-docvault" && req.method === "GET") {
       if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }
       const t0 = Date.now();
+      // ?as=guest simulates a paying user with no node of their own. That path is the one I broke
+      // and then fixed: a guest must get their reply EXACTLY as before the vault existed, with no
+      // note about machines they never had. Proving it needs a non-owner tenant, not reasoning.
+      const asGuest = String(u.searchParams.get("as") || "") === "guest";
+      const who = asGuest ? { role: "member", isOwner: false, uid: "selftest-guest" } : OWNER_T;
       let made = null, out = null, err = null;
       try {
         made = artifacts.create({ title: "Dominion vault self-test", type: "docx", content: "# Vault self-test\n\nIf you are reading this file on disk, document routing works.", model: "selftest" });
         if (made.error) throw new Error(made.error);
-        out = await exportGated(made.item.id, "docx", { destination: "selftest", tenant: OWNER_T, hands: CTX.hands });
+        out = await exportGated(made.item.id, "docx", { destination: "selftest", tenant: who, hands: CTX.hands });
       } catch (e) { err = String(e && e.message || e); }
       try { if (made && made.item) artifacts.remove(made.item.id); } catch {}
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify({
+        as: asGuest ? "guest" : "owner",
         ok: !!(out && out.savedTo), savedTo: (out && out.savedTo) || null, synced: !!(out && out.savedSynced),
         saveNote: (out && out.saveNote) || null, serverPath: (out && out.path) || null,
         bytes: (out && out.bytes) || 0, downloadUrl: (out && out.downloadUrl) || null, error: err, ms: Date.now() - t0,
