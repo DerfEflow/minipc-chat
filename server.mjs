@@ -3025,7 +3025,7 @@ async function handleArtifacts(req, res, u) {
     if (p === "/artifacts/export") {
       // E2: the single gated export path (safety checks + native generation + Forge fallback), against
       // the CALLER's artifact store so non-owners export only their own documents.
-      const r = await exportGated(body.id, body.format, { destination: body.destination, overrideSensitive: body.override_sensitive === true }, artifacts);
+      const r = await exportGated(body.id, body.format, { destination: body.destination, overrideSensitive: body.override_sensitive === true, tenant: T, hands: (T.ctxBase || CTX).hands }, artifacts);
       if (!r.error && !r.blocked) sweep(body.id, { exported: true });
       return json(200, r);
     }
@@ -3077,7 +3077,62 @@ async function transformArtifact(id, kind) {
 // the default LAX posture returns the warnings and proceeds — EXCEPT sensitive-data, which
 // requires an explicit override in both modes.
 const EXPORT_SAFETY_LAX = String(cfgGet("EXPORT_SAFETY", "lax")).toLowerCase() !== "spec";
-async function exportGated(id, format, { destination = "", overrideSensitive = false, confirmed = false } = {}, store = artifacts) {
+
+/*
+ * DOCUMENT VAULT — put produced files on a disk the user can actually open.
+ *
+ * Until now create_docx/create_pdf/create_spreadsheet wrote into the server container. The model
+ * would report a path, Fred would go looking, and there would be nothing there: the file lived in
+ * an ephemeral Railway filesystem that vanishes on redeploy. Same shape of failure as the machine
+ * map (a confident answer about a place the user cannot reach).
+ *
+ * Destination is resolved from what the machines actually report, never hardcoded:
+ *   DOC_VAULT_DIR (env)  -> explicit override, wins outright
+ *   a node with G:\      -> "G:\My Drive\Dominion Documents", because Google Drive syncs it to
+ *                           every device he owns, including the phone, for free
+ *   else first non-C:    -> that drive's "Dominion Documents"
+ *   nothing connected    -> "" (auto-save off; the server copy + download link still work)
+ *
+ * The server copy and download link are ALWAYS kept. This adds a location, it never replaces one,
+ * so a node that is offline or refuses the write costs a note in the reply and nothing else.
+ */
+function docVaultTarget(T) {
+  const override = String(cfgGet("DOC_VAULT_DIR", "")).trim();
+  if (override) return { dir: override.replace(/[\\/]+$/, "") };
+  let info = {};
+  try { info = (typeof handsHub.nodeInfo === "function" ? handsHub.nodeInfo() : {}) || {}; } catch { info = {}; }
+  // Scope follows the guest wall: the owner's machines, or a guest's own node, never across.
+  const mine = Object.keys(info).filter((n) => (T && T.isOwner) ? !n.startsWith("user:") : n === `user:${T && T.uid}`);
+  const rootsOf = (n) => (info[n] && Array.isArray(info[n].roots)) ? info[n].roots.map((r) => String(r).trim()) : [];
+  for (const n of mine) for (const r of rootsOf(n)) {
+    if (/^g:\\?$/i.test(r)) return { dir: "G:\\My Drive\\Dominion Documents", node: n, synced: true };
+  }
+  for (const n of mine) for (const r of rootsOf(n)) {
+    if (!/^c:\\?$/i.test(r)) return { dir: r.replace(/[\\/]+$/, "") + "\\Dominion Documents", node: n };
+  }
+  return { dir: "" };
+}
+
+// Copy a finished export onto a real machine. Best effort by contract: every failure path returns
+// a reason string rather than throwing, because losing the download link to save a copy would be a
+// strictly worse product than the bug this fixes.
+async function saveExportToMachine(r, T, hands) {
+  try {
+    if (!r || !r.path || r.error) return { ok: false };
+    const dispatch = hands && typeof hands.dispatch === "function" ? hands.dispatch : (CTX.hands && CTX.hands.dispatch);
+    if (typeof dispatch !== "function") return { ok: false, reason: "no machine channel" };
+    const target = docVaultTarget(T);
+    if (!target.dir) return { ok: false, reason: "no machine connected, so it stayed on the server" };
+    let bytes;
+    try { bytes = readFileSync(r.path); } catch (e) { return { ok: false, reason: "could not read the export: " + (e && e.message) }; }
+    const dest = target.dir + "\\" + (r.fileName || basename(r.path));
+    // The drive letter in `dest` selects the machine on its own (see pathNode) — no node named here.
+    const w = await dispatch("fs_write", { path: dest, content: bytes.toString("base64"), base64: true }, { timeoutMs: 45000 });
+    if (w && w.ok) return { ok: true, path: dest, synced: !!target.synced };
+    return { ok: false, reason: (w && (w.error || w.reason)) || "the machine refused the write" };
+  } catch (e) { return { ok: false, reason: String(e && e.message || e) }; }
+}
+async function exportGated(id, format, { destination = "", overrideSensitive = false, confirmed = false, tenant = null, hands = null } = {}, store = artifacts) {
   const a = store.get(id); if (!a) return { error: "not found" };
   const gate = exportSafetyGate({ artifact: a, format, destination: destination || "local exports folder", overrideSensitive, lax: EXPORT_SAFETY_LAX, confirmed });
   if (!gate.ok) {
@@ -3094,6 +3149,10 @@ async function exportGated(id, format, { destination = "", overrideSensitive = f
   // Discoverability: hand back a same-origin download link + filename so the model can give Fred a
   // clickable link and the UI can render a Download button — not just an opaque server-side path.
   if (r.path) { r.fileName = basename(r.path); r.downloadUrl = "/exports/" + encodeURIComponent(r.fileName); }
+  // ...and put a copy on a real disk. Additive: the server copy and the link above survive either way.
+  const saved = await saveExportToMachine(r, tenant, hands);
+  if (saved.ok) { r.savedTo = saved.path; r.savedSynced = saved.synced; console.log(`[dominion-ai] export saved to machine: ${saved.path}`); }
+  else if (saved.reason) r.saveNote = saved.reason;
   return { ...r, gate: { checks: gate.checks, warnings: gate.warnings } };
 }
 CTX.exportGated = exportGated;   // the tool bus goes through the same gate (bypass closed)
@@ -3957,7 +4016,9 @@ async function handleChat(req, res) {
     : tierFor({ asFred: mode === "as_fred", hardProblem: (mode === "deep_think" || mode === "long_context") });
   const forgeEnabled = input.forgeMode === true || (!!legacyForgeTier && normalizeTier(legacyForgeTier) !== "ember");
   // Per-request tool context: the base CTX plus the live chat/mode (B2 scope for memory tools).
-  const reqCtx = { ...(T.ctxBase || CTX), chatId, mode, model };
+  // `tenant` rides the tool ctx so tools that reach a machine (document auto-save) can scope to the
+  // right node without re-resolving identity, and so a guest can never land a file on Fred's disk.
+  const reqCtx = { ...(T.ctxBase || CTX), chatId, mode, model, tenant: T };
   // Per-user Forge: a non-owner who has ENABLED their own Forge node AND engaged Forge Mode this turn
   // (flame/furnace) may reach THEIR OWN machine. Route forge_* to their node only ("user:<uid>"), and
   // add the Forge tools to their wall for this turn. Carve-outs still hold node-side + hub-side.
@@ -4941,6 +5002,30 @@ const server = http.createServer(async (req, res) => {
      * a real drive did not exist. Being able to read the block back, on demand, is what turns that
      * from a mystery into a one-line check. Bearer-gated like the other self-tests.
      */
+    /*
+     * Document-vault self-test: create a throwaway artifact, run it through the REAL export gate,
+     * and report where the file actually landed. Cleans up the artifact afterwards so a health
+     * check never litters the studio. Proves the whole chain (native writer -> export gate ->
+     * base64 over the hands channel -> a path on a disk Fred can open), not just that a helper
+     * returns a plausible string.
+     */
+    if (path === "/hands/selftest-docvault" && req.method === "GET") {
+      if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }
+      const t0 = Date.now();
+      let made = null, out = null, err = null;
+      try {
+        made = artifacts.create({ title: "Dominion vault self-test", type: "docx", content: "# Vault self-test\n\nIf you are reading this file on disk, document routing works.", model: "selftest" });
+        if (made.error) throw new Error(made.error);
+        out = await exportGated(made.item.id, "docx", { destination: "selftest", tenant: OWNER_T, hands: CTX.hands });
+      } catch (e) { err = String(e && e.message || e); }
+      try { if (made && made.item) artifacts.remove(made.item.id); } catch {}
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({
+        ok: !!(out && out.savedTo), savedTo: (out && out.savedTo) || null, synced: !!(out && out.savedSynced),
+        saveNote: (out && out.saveNote) || null, serverPath: (out && out.path) || null,
+        bytes: (out && out.bytes) || 0, downloadUrl: (out && out.downloadUrl) || null, error: err, ms: Date.now() - t0,
+      }));
+    }
     if (path === "/hands/selftest-environment" && req.method === "GET") {
       if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }
       const owner = machinesBlock({ isOwner: true, uid: "" });

@@ -449,7 +449,14 @@ function describeExportResult(r) {
   // Give Fred a clickable download link (same-origin) — the primary way to get the file, not the
   // internal server path. Present the Download link to the user verbatim.
   const dl = r.downloadUrl ? ` Download: ${r.downloadUrl}` : "";
-  return `Exported "${(r.gate && r.gate.checks && r.gate.checks.title) || "artifact"}" as ${r.format} (${r.bytes} bytes).${dl} Source versions preserved.${warns}${forge}`;
+  // Where the file actually landed on a real disk. Say this FIRST and verbatim: the whole point of
+  // the document vault is that the user can go open the file, so the path is the useful answer and
+  // the download link is the backup. When the save didn't happen, say so plainly rather than
+  // implying a location that isn't there.
+  const at = r.savedTo
+    ? ` SAVED ON YOUR MACHINE AT: ${r.savedTo}${r.savedSynced ? " (in Google Drive, so it syncs to your other devices)" : ""}.`
+    : (r.saveNote ? ` NOTE: it is not on your machine (${r.saveNote}); use the download link.` : "");
+  return `Exported "${(r.gate && r.gate.checks && r.gate.checks.title) || "artifact"}" as ${r.format} (${r.bytes} bytes).${at}${dl} Source versions preserved.${warns}${forge}`;
 }
 
 // ===================== dispatcher =====================
@@ -675,7 +682,7 @@ export async function runTool(name, args, ctx, signal = null) {
         // E2: the model-facing export goes through the SAME server-side safety gate as the REST
         // endpoint (ctx.exportGated, wired by server.mjs) — the old direct-store bypass is closed.
         if (typeof ctx.exportGated !== "function") return "Export isn't available right now (no export gate wired on the server).";
-        const r = await ctx.exportGated(args.id, args.format, { overrideSensitive: args.acknowledge_sensitive === true, destination: "local exports folder (tool call)" });
+        const r = await ctx.exportGated(args.id, args.format, { overrideSensitive: args.acknowledge_sensitive === true, destination: "local exports folder (tool call)", tenant: ctx.tenant, hands: ctx.hands });
         return describeExportResult(r);
       }
       case "create_docx":
@@ -692,7 +699,7 @@ export async function runTool(name, args, ctx, signal = null) {
         const made = ctx.artifacts.create({ title: args.title, type, content: args.content, model: "qwen-local", sourceChatId: prov.sourceChatId, sourceContextRefs: prov.sourceContextRefs, sourceToolRunIds: prov.sourceToolRunIds, promptSummary: prov.promptSummary });
         if (made.error) return "Couldn't save the document as an artifact: " + made.error;
         if (typeof ctx.artifactTriggers === "function") try { ctx.artifactTriggers(made.item.id, {}); } catch {}
-        const r = await ctx.exportGated(made.item.id, fmt, { overrideSensitive: args.acknowledge_sensitive === true, destination: "local exports folder (tool call)" });
+        const r = await ctx.exportGated(made.item.id, fmt, { overrideSensitive: args.acknowledge_sensitive === true, destination: "local exports folder (tool call)", tenant: ctx.tenant, hands: ctx.hands });
         return `Saved artifact "${made.item.title}" (id ${made.item.id.slice(0, 8)}, v1). ` + describeExportResult(r);
       }
       case "sandbox_append": { const t = jail(ctx, args.filename); appendFileSync(t, args.content ?? "", "utf8"); return `Appended ${Buffer.byteLength(args.content || "")} bytes to ${args.filename}.`; }
