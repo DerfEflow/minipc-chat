@@ -181,3 +181,36 @@ the same panel, distinguished by wording; v1 is the partition pipeline above.
 Proven in anger before it was a feature: iteration 2.1 itself was built exactly this way
 (Fable divided into 5 disjoint-file chunks with specs, 5 Haiku wrote in parallel, Opus 4.8
 reviewed each, Fable did final QC). The defects each layer caught are logged in the build pack.
+
+## The conversation IS the surface (Fred's ruling 2026-07-22, supersedes earlier front-door layouts)
+
+BEGINNER: a large chat window and nothing else. The AI opens unprompted: "Howdy, what can I
+help you build?" The whole journey is conversational:
+- User answers with their dream. If no computer is connected, the AI itself explains, folksy
+  and plain: it needs somewhere to store the work, this app uses YOUR computer for that; if
+  you are on your phone, turn your computer on, open a web browser, type app.dominion.tools,
+  and install this same app there; then the two talk to each other and you can build from
+  anywhere. "Let me know when it is set up, and if you get stuck, just ask me for help."
+  (Canned client-side beats in Fred's voice, zero model spend; the app polls for the node and
+  fires the next beat when it connects.)
+- On connection: "I see you got my buddy all set up on the computer... we have already had a
+  conversation and we have decided we like you." Then it resumes with the dream they already
+  told it (never make them repeat), or offers suggestions if they have none.
+- The interview arc, in order: the dream; personal use or making money with it (motivation);
+  colors and style ("I can make it look like nearly anything. Take your time."); then the AI
+  suggests giving it a FIRST SHOT (the MVP) and they tweak from there through conversation,
+  iterations and refinement.
+- The AI asks if they are happy, because it never gets tired of helping. When they say yes, it
+  explains in rudimentary language how an app is put online and what that requires, promises
+  step-by-step directions, and reassures: everything is saved on the computer it is talking
+  to, safe to refine later or put on the internet for the world to admire.
+
+VIBE CODER: the same chat window, plus all the options BELOW it in the clean closed-drawer
+organization (the engineer's discipline with plain-English drawer names). They can get as
+technical as they want or just talk; the AI guides either way.
+
+ENGINEER: drawers first, chat UNDER them: secondary, but a useful helper.
+
+Context for the ruling: Fred toured all three profiles and found the engineer page (closed
+labelled drawers) cleaner and more sensible than the pages meant to be easier. The fix is
+subtraction for beginners (chat only) and the drawer discipline for everyone else.
