@@ -3144,12 +3144,20 @@ const EXPORT_SAFETY_LAX = String(cfgGet("EXPORT_SAFETY", "lax")).toLowerCase() !
  * so a node that is offline or refuses the write costs a note in the reply and nothing else.
  */
 function docVaultTarget(T) {
+  const isOwner = !!(T && T.isOwner);
   const override = String(cfgGet("DOC_VAULT_DIR", "")).trim();
-  if (override) {
-    // DOC_VAULT_NODE is REQUIRED whenever the pinned path is on a drive more than one machine has.
-    // C:\ is the obvious case: without a node the dispatch would fall back to pick() and drop
-    // documents on whichever machine answered last, which is the same coin flip that started all
-    // of this. An explicit node makes the destination one place, permanently.
+  /*
+   * OWNER ONLY. DOC_VAULT_DIR names a folder on FRED'S machine, so it must never be consulted for
+   * anyone else. Shipping it without this check meant a guest's document was written straight into
+   * C:\Users\rjfla\OneDrive\Documents on his laptop: a guest-wall breach caught by the guest
+   * self-test one deploy after I added the pin. The tenant check belongs on the FIRST branch, not
+   * only on the fallback path below, because an override that ignores identity ignores the wall.
+   *
+   * DOC_VAULT_NODE is required alongside it whenever the pinned path sits on a drive more than one
+   * machine has. C:\ is the obvious case: without a node the dispatch falls back to pick() and drops
+   * documents on whichever machine answered last, the same coin flip this work exists to kill.
+   */
+  if (override && isOwner) {
     const node = String(cfgGet("DOC_VAULT_NODE", "")).trim();
     return { dir: override.replace(/[\\/]+$/, ""), node, pinned: true };
   }
