@@ -63,7 +63,9 @@ import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore } from "./forge.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs } from "./idejobs.mjs";
-import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES } from "./ideengine.mjs";
+import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, parseFileBlocks, carveOutReport, buildMoveMessages } from "./ideengine.mjs";
+import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor } from "./ideaf.mjs";
+import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } from "./ideafrun.mjs";
 import { routeMove, resolveAssignments } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
@@ -1583,30 +1585,6 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
     const resolved = resolveAssignments(assignments, { allInOne: (assignments && assignments.allInOne) || "", fallback: defaultModelFor(!!T.isOwner) });
     const planModel = resolved.build_code || defaultModelFor(!!T.isOwner);
 
-    // Small asks skip planning entirely. A blueprint for "fix the typo in the header" is ceremony
-    // that costs a model call and the user's patience.
-    const small = isSmallAsk(prompt);
-    let moves;
-    if (small.small) {
-      moves = [{ id: "m1", title: prompt.slice(0, 140), why: small.why, files: [], verify: "" }];
-      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, single: true });
-    } else {
-      const planned = await chat({ model: planModel, messages: [
-        { role: "system", content: PLANNER_SYSTEM + "\n\n" + plannerVoice(reg) + "\n" + persona },
-        { role: "user", content: "PROJECT: " + (workspace.name || workspace.root) + "\n\nBUILD THIS:\n" + prompt },
-      ] });
-      spend(planned.costUsd);
-      await meterTurn(T, planned.costUsd, prompt, "");
-      if (planned.costUsd) ideJobs.emit(job.id, { type: "cost", usd: planned.costUsd, move: "plan" });
-      if (!planned.ok) {
-        return ideJobs.finish(job.id, { type: "error", message: planned.error || "The planner could not be reached." });
-      }
-      const parsed = parseBlueprint(planned.content);
-      if (!parsed.ok) return ideJobs.finish(job.id, { type: "error", message: parsed.error });
-      moves = parsed.moves;
-      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves });
-    }
-
     /*
      * Ask a question and WAIT. The runner stays alive in-process, spending nothing, until any
      * device on the account answers. `from` is captured before the emit, because an answer can
@@ -1630,7 +1608,217 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
       return "$" + n.toFixed(2);
     };
 
-    const queue = moves.slice(0, MAX_MOVES);
+    // Small asks skip planning entirely. A blueprint for "fix the typo in the header" is ceremony
+    // that costs a model call and the user's patience.
+    const small = isSmallAsk(prompt);
+    let moves;
+
+    /*
+     * THE AF PIPELINE (Fred's design 2026-07-22, SOW "AF: the Agentic Workflow window").
+     * When the workspace carries an enabled AF crew, the build runs as a relay: the divider
+     * writes contracts and grants each part EXCLUSIVE files, the referee verifies disjointness
+     * in code and refuses overlaps, the workers' MODEL CALLS run in parallel (the slow part),
+     * the writes land one at a time (nothing races on disk: one snapshot, one verify per stage),
+     * then the reviewer fixes each part against its contract and QC checks the seams. Cost
+     * multiplies only on the worker stage; the budget freeze stays the seatbelt; the Furnace
+     * pass still ends the build like every other.
+     */
+    const afRaw = (assignments && assignments.af && assignments.af.on && Array.isArray(assignments.af.rows))
+      ? sanitizeAfRows(assignments.af.rows) : [];
+    const afSpec = afRaw.length ? classifyAfRows(afRaw) : null;
+    let afRan = false;
+
+    // A routed model can be the image engine, which no text pipeline can call; mirror runMove's
+    // honest fallback to design code with placeholder art.
+    const pickTextModel = (move, assign) => {
+      let d = routeMove({ title: move.title, description: move.why, files: move.files }, assign);
+      if (d.isImage || d.model === "dominion-forge") {
+        d = { ...d, taskClass: "design_code", model: (assign && assign.design_code) || resolved.design_code || planModel };
+      }
+      return d;
+    };
+
+    // One relay stage whose model calls run concurrently and whose writes land sequentially.
+    // grantOf decides what the cookie rule allows each result to touch.
+    const runAfStage = async ({ stageMoves, assign, allowEmpty }) => {
+      const settled = await Promise.all(stageMoves.map(async (move) => {
+        const decision = pickTextModel(move, assign);
+        ideJobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
+          why: move.why, taskClass: decision.taskClass, model: decision.model, routeWhy: decision.why });
+        try {
+          const manifest = await engine.readManifest(workspace.root, move.files || []);
+          const res = await chat({ model: decision.model, messages: buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal: prompt }) });
+          return { move, res };
+        } catch (e) {
+          return { move, res: { ok: false, error: String((e && e.message) || e), costUsd: 0 } };
+        }
+      }));
+      const failures = [];
+      for (const s of settled) {
+        spend(s.res.costUsd);
+        if (s.res.costUsd) { await meterTurn(T, s.res.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: s.res.costUsd, move: s.move.id }); }
+        if (ac.signal.aborted) return { sealed: true, failures };
+        if (!s.res.ok) {
+          ideJobs.emit(job.id, { type: "move", id: s.move.id, title: s.move.title, state: "failed", message: s.res.error || "The model call failed." });
+          failures.push(s.move);
+          continue;
+        }
+        const parsed = parseFileBlocks(s.res.content);
+        const own = ownershipFilter(parsed.files, s.move.files || []);
+        for (const d of own.dropped) {
+          ideJobs.emit(job.id, { type: "move", id: s.move.id, title: s.move.title, state: "warned",
+            message: d.path + ": outside this part's ownership, refused (the cookie rule)" });
+        }
+        if (!own.kept.length) {
+          if (allowEmpty) { ideJobs.emit(job.id, { type: "move", id: s.move.id, title: s.move.title, state: "done", files: 0 }); continue; }
+          ideJobs.emit(job.id, { type: "move", id: s.move.id, title: s.move.title, state: "failed", message: "It returned no files inside its own part." });
+          failures.push(s.move);
+          continue;
+        }
+        const carve = carveOutReport(own.kept);
+        if (carve) {
+          ideJobs.emit(job.id, { type: "move", id: s.move.id, title: s.move.title, state: "blocked", message: carve.message });
+          ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) });
+          return { sealed: true, failures };
+        }
+        await engine.writeFiles(job, workspace, own.kept);
+        ideJobs.emit(job.id, { type: "move", id: s.move.id, title: s.move.title, state: "done", files: own.kept.length });
+      }
+      return { sealed: false, failures };
+    };
+
+    const runAfCrew = async () => {   // true = pipeline complete; false = the job was finished here
+      const maxParts = afSpec.workers.reduce((s, w) => s + (w.n || 1), 0);
+      const divModel = afSpec.divider.model || planModel;
+      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140),
+        moves: [{ id: "af-divide", title: afSpec.divider.task, files: [], why: "" }], af: true });
+
+      // 1. The divider writes the contracts; the referee gives it one chance to fix an overlap.
+      ideJobs.emit(job.id, { type: "move", id: "af-divide", title: afSpec.divider.task, state: "running", model: divModel });
+      const divMessages = dividerMessages({ goal: prompt, maxParts, register: reg, persona });
+      let divided = await chat({ model: divModel, messages: divMessages });
+      spend(divided.costUsd);
+      if (divided.costUsd) { await meterTurn(T, divided.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: divided.costUsd, move: "af-divide" }); }
+      if (!divided.ok) { ideJobs.finish(job.id, { type: "error", message: divided.error || "The divider could not be reached." }); return false; }
+      let plan = parseDividerPlan(divided.content, maxParts);
+      let dj = plan.ok ? verifyDisjoint(plan.parts) : { ok: false, overlaps: [] };
+      if (plan.ok && !dj.ok) {
+        const named = dj.overlaps.map((o) => o.file + " (parts " + o.a + " and " + o.b + ")").join(", ");
+        ideJobs.emit(job.id, { type: "run", command: "af referee", ok: false, output: "Overlap refused: " + named });
+        const redo = await chat({ model: divModel, messages: [
+          ...divMessages,
+          { role: "assistant", content: divided.content },
+          { role: "user", content: "REFUSED: these files are claimed by more than one part: " + named
+            + ". No two parts may ever share a file. Reissue the FULL plan in the same format with disjoint FILES lists." },
+        ] });
+        spend(redo.costUsd);
+        if (redo.costUsd) { await meterTurn(T, redo.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: redo.costUsd, move: "af-divide" }); }
+        if (redo.ok) { plan = parseDividerPlan(redo.content, maxParts); dj = plan.ok ? verifyDisjoint(plan.parts) : { ok: false, overlaps: [] }; }
+      }
+      if (!plan.ok || !dj.ok) { ideJobs.finish(job.id, { type: "error", message: phrase("af_refused", reg) }); return false; }
+      const parts = plan.parts;
+      ideJobs.emit(job.id, { type: "move", id: "af-divide", title: afSpec.divider.task, state: "done", files: 0 });
+
+      // The Blueprint gets the full relay, and the referee's grant is on the record.
+      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140),
+        moves: afPlanMoves({ dividerTask: afSpec.divider.task, parts,
+          reviewerTask: afSpec.reviewer ? afSpec.reviewer.task : "", qcTask: afSpec.qc ? afSpec.qc.task : "" }), af: true });
+      ideJobs.emit(job.id, { type: "run", command: "af referee", ok: true,
+        output: parts.map((p, i) => "Part " + (i + 1) + " owns: " + p.files.join(", ")).join("\n") });
+
+      // 2. The whole worker batch is estimated BEFORE any worker starts; the freeze is the seatbelt.
+      const workerAssign = afAssignFor(afSpec.workers[0].model || "") || resolved;
+      const wmRec = modelById(afSpec.workers[0].model || resolved.build_code) || {};
+      const est = estimateMove({ manifestBytes: 8000, inCost: wmRec.inCost || 0, outCost: wmRec.outCost || 0 });
+      const b = budgetCheck({ spentUsd: budget.spentUsd, capUsd: budget.capUsd, nextEstUsd: est.usd * parts.length });
+      if (b.stop) {
+        const answer = await ask("budget", phrase("budget_question", reg, money(budget.capUsd), money(budget.spentUsd)),
+          [phrase("budget_keep", reg), phrase("budget_stop", reg)]);
+        if (answer === null) return false;
+        if (!ANSWER.keepGoing.test(answer)) { ideJobs.finish(job.id, { type: "stopped", message: phrase("budget_stopped", reg) }); return false; }
+        budget.capUsd += Math.max(capOriginal, 0.5);
+      }
+
+      // 3. One restore point for the batch, then the workers.
+      const snap = await engine.snapshot(job, workspace);
+      if (!snap.ok) { ideJobs.finish(job.id, { type: "error", message: "No restore point could be made, so nothing was written. " + (snap.error || "") }); return false; }
+      const workerStage = await runAfStage({
+        stageMoves: parts.map((p, i) => afWorkerMove(p, i + 1)), assign: workerAssign, allowEmpty: false });
+      if (workerStage.sealed) return false;
+
+      // A failed part is a fork in the road, exactly like the standard path: the user picks, and
+      // free text is guidance. The sequential retry runs through runMove (its own snapshot and
+      // verify are safe one at a time).
+      for (const failed of workerStage.failures) {
+        const answer = await ask("move-" + failed.id, phrase("move_failed_question", reg, failed.title),
+          [phrase("move_retry", reg), phrase("move_skip", reg), phrase("move_stop", reg)]);
+        if (answer === null) return false;
+        if (ANSWER.skip.test(answer)) continue;
+        if (ANSWER.stop.test(answer)) { ideJobs.finish(job.id, { type: "stopped", message: phrase("move_stopped", reg) }); return false; }
+        const guided = !ANSWER.retry.test(answer)
+          ? { ...failed, why: failed.why + " The user says: " + answer.slice(0, 500) } : failed;
+        const r2 = await engine.runMove(job, { move: guided, workspace, assignments: workerAssign, goal: prompt });
+        spend(r2 && r2.costUsd);
+        if (r2 && r2.blocked) { ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) }); return false; }
+        // A part that fails twice stays failed on the record; the reviewer and the Furnace name it.
+      }
+
+      // 4. One check over the whole batch; its output feeds the reviewer.
+      const v = await engine.verify(job, workspace);
+      const checkOutput = v && v.ran && !v.ok ? String(v.output || "") : "";
+
+      // 5. The reviewer fixes each part against its contract (a clean part returns no files).
+      if (afSpec.reviewer) {
+        const revStage = await runAfStage({
+          stageMoves: parts.map((p, i) => afReviewMove(p, i + 1, { reviewerTask: afSpec.reviewer.task, checkOutput })),
+          assign: afAssignFor(afSpec.reviewer.model || "") || resolved, allowEmpty: true });
+        if (revStage.sealed) return false;
+      }
+
+      // 6. QC looks at the whole and fixes the seams; then the final check tells the truth.
+      if (afSpec.qc) {
+        const qcStage = await runAfStage({
+          stageMoves: [afQcMove(parts, afSpec.qc.task)],
+          assign: afAssignFor(afSpec.qc.model || "") || resolved, allowEmpty: true });
+        if (qcStage.sealed) return false;
+      }
+      await engine.verify(job, workspace);
+      return true;
+    };
+
+    if (afSpec && !afSpec.error && !small.small) {
+      if (!(await runAfCrew())) return;
+      afRan = true;
+    } else if (afSpec && afSpec.error) {
+      ideJobs.emit(job.id, { type: "run", command: "af referee", ok: false,
+        output: afSpec.error + "; the standard crew builds this one." });
+    } else if (afSpec && small.small) {
+      ideJobs.emit(job.id, { type: "run", command: "af", ok: true, output: phrase("af_small", reg) });
+    }
+
+    if (!afRan) {
+    if (small.small) {
+      moves = [{ id: "m1", title: prompt.slice(0, 140), why: small.why, files: [], verify: "" }];
+      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, single: true });
+    } else {
+      const planned = await chat({ model: planModel, messages: [
+        { role: "system", content: PLANNER_SYSTEM + "\n\n" + plannerVoice(reg) + "\n" + persona },
+        { role: "user", content: "PROJECT: " + (workspace.name || workspace.root) + "\n\nBUILD THIS:\n" + prompt },
+      ] });
+      spend(planned.costUsd);
+      await meterTurn(T, planned.costUsd, prompt, "");
+      if (planned.costUsd) ideJobs.emit(job.id, { type: "cost", usd: planned.costUsd, move: "plan" });
+      if (!planned.ok) {
+        return ideJobs.finish(job.id, { type: "error", message: planned.error || "The planner could not be reached." });
+      }
+      const parsed = parseBlueprint(planned.content);
+      if (!parsed.ok) return ideJobs.finish(job.id, { type: "error", message: parsed.error });
+      moves = parsed.moves;
+      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves });
+    }
+    }   // end of the standard-crew path; the AF relay above already planned and built its own way
+
+    const queue = afRan ? [] : moves.slice(0, MAX_MOVES);
     for (let i = 0; i < queue.length; i++) {
       let move = queue[i];
       if (ac.signal.aborted) return;

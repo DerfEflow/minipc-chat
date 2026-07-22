@@ -142,6 +142,21 @@
     browse_empty: ["Nothing inside this folder yet. You can still build here.", "Empty directory.", "Empty directory (nothing inside; you can still build here)."],
     browse_loading: ["Looking...", "Listing...", "Listing (looking inside)..."],
 
+    // ---- AF: the agentic workflow window (Fred's design 2026-07-22; vibe + engineer only) -----
+    af_btn: ["AF", "AF", "AF"],
+    af_title: ["Your agent crew", "Agentic workflow", "Agentic workflow (your agent crew)"],
+    af_hint: [
+      "A crew of AIs splits the work and builds the parts at the same time. Each row is one job in the relay.",
+      "Partition pipeline: divider writes contracts, workers build disjoint parts in parallel, reviewer fixes, QC verifies. One model per row.",
+      "A partition pipeline (a relay of AI agents): one divides the work into parts with contracts, several build the parts at the same time, one reviews and fixes, one does the final check. One model per row.",
+    ],
+    af_col_task: ["What to do", "Task", "Task (what to do)"],
+    af_col_model: ["Which AI", "Model", "Model (which AI)"],
+    af_col_n: ["How many", "Number", "Number (how many agents)"],
+    af_add: ["Add a row", "Add row", "Add row"],
+    af_on: ["Use this crew for builds", "Enable agentic workflow", "Enable (use this crew for builds)"],
+    af_reset: ["Back to the standard crew", "Reset to template", "Reset to the default template"],
+
     // ---- tools choice (assignment board is opt-in) --------------------------------------------
     tools_label: ["Which tools should Dominion use?", "Model assignments", "Model assignments (which AI does which work)"],
     tools_default: ["Use all the default tools (recommended)", "Defaults (recommended)", "Defaults (recommended; Dominion's standard picks)"],

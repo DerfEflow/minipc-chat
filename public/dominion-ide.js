@@ -108,6 +108,9 @@
     back.addEventListener("click", closePanel);
     close.addEventListener("click", closePanel);
 
+    const afBtn = document.querySelector("#st-af");
+    if (afBtn) { afBtn.title = L("af_title"); afBtn.addEventListener("click", openAFPanel); }
+
     renderBoard();
     renderStarter();
     wireStarter();
@@ -120,6 +123,223 @@
       for (const sel of document.querySelectorAll("#ide-cards select")) sel.disabled = !!state.allInOne;
       saveAssignments();
     });
+  }
+
+  /* ---------- AF: Agentic Workflow Window (Phase 3+) -----------------------------------
+   * A crew pipeline: rows of Task / Model / Number. One model per row, divider writes contracts,
+   * workers build in parallel, reviewer fixes, QC verifies.
+   */
+  const AF_DEFAULT = [
+    { task: "Divide the work and write the contracts", model: "", n: 1 },
+    { task: "Build the parts, one agent per part", model: "", n: 5 },
+    { task: "Review and fix each finished part", model: "", n: 1 },
+    { task: "Final quality check of the whole", model: "", n: 1 },
+  ];
+
+  function buildAFPanel() {
+    if ($("#af-panel")) return;
+    const panel = document.createElement("div");
+    panel.className = "af-panel";
+    panel.id = "af-panel";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", L("af_title"));
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "af-backdrop";
+    backdrop.addEventListener("click", closeAFPanel);
+
+    const card = document.createElement("div");
+    card.className = "af-card";
+
+    const head = document.createElement("div");
+    head.className = "af-head";
+    head.innerHTML = '<h3 data-lex="af_title"></h3>'
+      + '<button type="button" class="af-close" aria-label="Close" title="Close">'
+        + '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>'
+      + '</button>';
+    head.querySelector(".af-close").addEventListener("click", closeAFPanel);
+
+    const hint = document.createElement("p");
+    hint.className = "af-hint";
+    hint.setAttribute("data-lex", "af_hint");
+
+    const grid = document.createElement("div");
+    grid.className = "af-grid";
+    grid.id = "af-grid";
+
+    const colTask = document.createElement("div");
+    colTask.className = "af-col-header";
+    colTask.setAttribute("data-lex", "af_col_task");
+
+    const colModel = document.createElement("div");
+    colModel.className = "af-col-header";
+    colModel.setAttribute("data-lex", "af_col_model");
+
+    const colN = document.createElement("div");
+    colN.className = "af-col-header";
+    colN.setAttribute("data-lex", "af_col_n");
+
+    const colAct = document.createElement("div");
+    colAct.className = "af-col-header af-col-actions-header";
+
+    grid.append(colTask, colModel, colN, colAct);
+
+    const footer = document.createElement("div");
+    footer.className = "af-footer";
+
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.className = "af-add-row";
+    addBtn.setAttribute("data-lex", "af_add");
+    addBtn.addEventListener("click", () => addAFRow());
+
+    const toggleRow = document.createElement("div");
+    toggleRow.className = "af-toggle-row";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.id = "af-on";
+    checkbox.addEventListener("change", (e) => {
+      if (!state.assignments.af) state.assignments.af = { on: false, rows: [] };
+      state.assignments.af.on = e.target.checked;
+      saveAssignments();
+    });
+
+    const label = document.createElement("label");
+    label.htmlFor = "af-on";
+    label.setAttribute("data-lex", "af_on");
+
+    toggleRow.append(checkbox, label);
+
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.setAttribute("data-lex", "af_reset");
+    resetBtn.addEventListener("click", resetAFToDefault);
+
+    footer.append(addBtn, toggleRow, resetBtn);
+
+    card.append(head, hint, grid, footer);
+    panel.append(backdrop, card);
+    const root = $("#ide-root");
+    if (root) root.append(panel);
+
+    paintLexicon();
+    renderAFRows();
+  }
+
+  function openAFPanel() {
+    buildAFPanel();
+    const panel = $("#af-panel");
+    if (panel) {
+      panel.classList.add("af-open");
+      const checkbox = $("#af-on");
+      if (checkbox && state.assignments.af) {
+        checkbox.checked = state.assignments.af.on;
+      }
+    }
+  }
+
+  function closeAFPanel() {
+    const panel = $("#af-panel");
+    if (panel) panel.classList.remove("af-open");
+  }
+
+  function renderAFRows() {
+    const grid = $("#af-grid");
+    if (!grid) return;
+    const rows = grid.querySelectorAll(".af-row");
+    rows.forEach((r) => r.remove());
+
+    if (!state.assignments.af) {
+      state.assignments.af = { on: false, rows: AF_DEFAULT.map((r) => ({ ...r })) };
+    }
+    const af = state.assignments.af;
+    for (let i = 0; i < af.rows.length; i++) {
+      const row = af.rows[i];
+      const rowEl = document.createElement("div");
+      rowEl.className = "af-row";
+
+      const taskInput = document.createElement("input");
+      taskInput.type = "text";
+      taskInput.className = "af-task-input";
+      taskInput.value = row.task || "";
+      taskInput.addEventListener("change", () => {
+        if (!state.assignments.af) state.assignments.af = { on: false, rows: [] };
+        if (!state.assignments.af.rows[i]) state.assignments.af.rows[i] = { task: "", model: "", n: 1 };
+        state.assignments.af.rows[i].task = taskInput.value;
+        saveAssignments();
+      });
+
+      const modelSelect = document.createElement("select");
+      modelSelect.className = "af-model-select";
+      fillModelOptions(modelSelect, row.model || "", false);
+      modelSelect.addEventListener("change", () => {
+        if (!state.assignments.af) state.assignments.af = { on: false, rows: [] };
+        if (!state.assignments.af.rows[i]) state.assignments.af.rows[i] = { task: "", model: "", n: 1 };
+        state.assignments.af.rows[i].model = modelSelect.value;
+        saveAssignments();
+      });
+
+      const nInput = document.createElement("input");
+      nInput.type = "number";
+      nInput.className = "af-n-input";
+      nInput.min = "1";
+      nInput.max = "25";
+      nInput.value = row.n || 1;
+      nInput.addEventListener("change", () => {
+        if (!state.assignments.af) state.assignments.af = { on: false, rows: [] };
+        if (!state.assignments.af.rows[i]) state.assignments.af.rows[i] = { task: "", model: "", n: 1 };
+        const v = parseInt(nInput.value, 10);
+        state.assignments.af.rows[i].n = isNaN(v) ? 1 : Math.max(1, Math.min(25, v));
+        nInput.value = state.assignments.af.rows[i].n;
+        saveAssignments();
+      });
+
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "af-remove-row";
+      removeBtn.title = "Remove row";
+      removeBtn.setAttribute("aria-label", "Remove row");
+      removeBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+      removeBtn.addEventListener("click", () => removeAFRow(i));
+
+      rowEl.append(taskInput, modelSelect, nInput, removeBtn);
+      const grid = $("#af-grid");
+      if (grid) grid.append(rowEl);
+    }
+    updateAFButtonState();
+  }
+
+  function addAFRow() {
+    if (!state.assignments.af) state.assignments.af = { on: false, rows: [] };
+    if (state.assignments.af.rows.length >= 8) return;
+    state.assignments.af.rows.push({ task: "", model: "", n: 1 });
+    renderAFRows();
+    updateAFButtonState();
+    saveAssignments();
+  }
+
+  function updateAFButtonState() {
+    const addBtn = document.querySelector(".af-add-row");
+    if (addBtn && state.assignments.af) {
+      addBtn.disabled = state.assignments.af.rows.length >= 8;
+    }
+  }
+
+  function removeAFRow(idx) {
+    if (!state.assignments.af) return;
+    state.assignments.af.rows.splice(idx, 1);
+    renderAFRows();
+    updateAFButtonState();
+    saveAssignments();
+  }
+
+  function resetAFToDefault() {
+    state.assignments.af = { on: false, rows: AF_DEFAULT.map((r) => ({ ...r })) };
+    renderAFRows();
+    const checkbox = $("#af-on");
+    if (checkbox) checkbox.checked = false;
+    saveAssignments();
   }
 
   /* ---------- Assignment Board (Phase 3) ------------------------------------------------
@@ -409,7 +629,10 @@
         '<summary data-lex="drawer_models"></summary>' +
         '<div class="st-tools" id="st-tools">' +
           '<span class="st-tools-label" data-lex="tools_label"></span>' +
-          '<div class="st-model-line" id="st-model-line" hidden></div>' +
+          '<div class="st-model-line-row">' +
+            '<div class="st-model-line" id="st-model-line" hidden></div>' +
+            '<button type="button" id="st-af" data-lex="af_btn" hidden></button>' +
+          '</div>' +
           '<div class="st-tools-btns">' +
             '<button type="button" id="st-tools-default" data-lex="tools_default"></button>' +
             '<button type="button" id="st-tools-custom" data-lex="tools_customize"></button>' +
@@ -742,6 +965,7 @@
   function paintTools() {
     const board = $("#ide-board");
     const btnDef = $("#st-tools-default"), btnCus = $("#st-tools-custom");
+    const afBtn = $("#st-af");
     if (!btnDef) return;
     if (board) {
       board.hidden = state.mode === "beginner" ? true
@@ -750,6 +974,9 @@
     }
     btnDef.classList.toggle("on", toolsChoice !== "custom");
     btnCus.classList.toggle("on", toolsChoice === "custom");
+    if (afBtn) {
+      afBtn.hidden = state.mode === "beginner";
+    }
   }
 
   function wireTools() {
@@ -1642,11 +1869,19 @@
     loadAllowed().then(() => refreshJobs());
   }
 
-  // Escape closes the works. Registered WITHOUT capture so the dial and askText (both capture:true)
-  // keep their precedence; mutual exclusion means only one reveal is ever open anyway, and the
-  // state.open check makes this a no-op otherwise.
+  // Escape closes the works or the AF panel. Registered WITHOUT capture so the dial and askText
+  // (both capture:true) keep their precedence; mutual exclusion means only one reveal is ever open.
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && state.open) { e.preventDefault(); closePanel(); }
+    if (e.key === "Escape") {
+      const afPanel = $("#af-panel");
+      if (afPanel && afPanel.classList.contains("af-open")) {
+        e.preventDefault();
+        closeAFPanel();
+      } else if (state.open) {
+        e.preventDefault();
+        closePanel();
+      }
+    }
   });
 
   // Clear draft when build completes successfully.

@@ -53,6 +53,17 @@ const D = {
     technical: "No hands node connected. Start the node on the target machine and rerun.",
     hybrid: "No hands node (the small Dominion helper program on your computer) is connected. Start it on the machine holding this project, then rerun.",
   },
+  // AF pipeline (Fred's design 2026-07-22): the referee speaks, honestly, in register.
+  af_refused: {
+    plain: "The work could not be split into parts that never share a file, even after a second try. The build stopped before anything was written.",
+    technical: "Divider failed to produce a disjoint partition after one retry. Build refused before any writes.",
+    hybrid: "The divider (the planning agent) could not produce disjoint parts (no two sharing a file) after one retry. Build refused before any writing.",
+  },
+  af_small: {
+    plain: "This is a small job, so one builder handles it and the crew stays home.",
+    technical: "Small ask; AF pipeline skipped.",
+    hybrid: "Small ask; the AF crew (the agent pipeline) is skipped for one-step jobs.",
+  },
   auto_home_fail: {
     plain: "I could not make a home for your app on the computer. Make sure the Dominion helper is running there, then try again.",
     technical: "Auto-workspace creation failed on the node.",

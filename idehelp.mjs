@@ -51,6 +51,12 @@ export const CRUCIBLE_GUIDE = [
   "  or Stop, and free-text advice steers the retry.",
   "- When a build finishes, the user is invited to put it online (deploy); the guided version",
   "  of that step is coming and the card says so honestly.",
+  "- The AF button (vibe coders and engineers only, near the model line) opens the Agentic",
+  "  workflow window: a crew of AI agents composed as rows of Task, Model and Number. The",
+  "  default relay: one divides the work and writes contracts, several build the parts at the",
+  "  same time, one reviews and fixes, one does the final check. The cookie rule is enforced",
+  "  in code: no two agents ever own the same file, and a referee refuses overlaps before",
+  "  any work starts. Cost multiplies only on the worker row; the budget stop still applies.",
   "- The ? button in the header replays the guided tour. The flame card with a timer means",
   "  work is in flight.",
 ].join("\n");
@@ -71,5 +77,5 @@ export const GUIDE_MUST_MENTION = [
   "App Builder", "compass", "divider", "Beginner", "Vibe", "engineer", "drawers", "Howdy",
   "conversation", "app.dominion.tools", "folder", "Browse", "snapshot", "intake", "build it",
   "mockup", "Blueprint", "Workshop", "preview", "Show-the-code", "Build log", "notification",
-  "Budget", "put it online", "tour", "flame",
+  "Budget", "put it online", "tour", "flame", "AF", "cookie rule", "referee",
 ];
