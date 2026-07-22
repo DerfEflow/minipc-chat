@@ -454,7 +454,7 @@ function describeExportResult(r) {
   // the download link is the backup. When the save didn't happen, say so plainly rather than
   // implying a location that isn't there.
   const at = r.savedTo
-    ? ` SAVED ON YOUR MACHINE AT: ${r.savedTo}${r.savedSynced ? " (in Google Drive, so it syncs to your other devices)" : ""}.`
+    ? ` SAVED AT: ${r.savedTo}${r.savedOn ? ` on ${r.savedOn}` : ""}${r.savedSynced ? " (in Google Drive, so it syncs to your other devices)" : ""}.`
     : (r.saveNote ? ` NOTE: it is not on your machine (${r.saveNote}); use the download link.` : "");
   return `Exported "${(r.gate && r.gate.checks && r.gate.checks.title) || "artifact"}" as ${r.format} (${r.bytes} bytes).${at}${dl} Source versions preserved.${warns}${forge}`;
 }

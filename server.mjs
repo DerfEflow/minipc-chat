@@ -3145,7 +3145,14 @@ const EXPORT_SAFETY_LAX = String(cfgGet("EXPORT_SAFETY", "lax")).toLowerCase() !
  */
 function docVaultTarget(T) {
   const override = String(cfgGet("DOC_VAULT_DIR", "")).trim();
-  if (override) return { dir: override.replace(/[\\/]+$/, "") };
+  if (override) {
+    // DOC_VAULT_NODE is REQUIRED whenever the pinned path is on a drive more than one machine has.
+    // C:\ is the obvious case: without a node the dispatch would fall back to pick() and drop
+    // documents on whichever machine answered last, which is the same coin flip that started all
+    // of this. An explicit node makes the destination one place, permanently.
+    const node = String(cfgGet("DOC_VAULT_NODE", "")).trim();
+    return { dir: override.replace(/[\\/]+$/, ""), node, pinned: true };
+  }
   let info = {};
   try { info = (typeof handsHub.nodeInfo === "function" ? handsHub.nodeInfo() : {}) || {}; } catch { info = {}; }
   // Scope follows the guest wall: the owner's machines, or a guest's own node, never across.
@@ -3178,9 +3185,12 @@ async function saveExportToMachine(r, T, hands) {
     let bytes;
     try { bytes = readFileSync(r.path); } catch (e) { return { ok: false, reason: "could not read the export: " + (e && e.message) }; }
     const dest = target.dir + "\\" + (r.fileName || basename(r.path));
-    // The drive letter in `dest` selects the machine on its own (see pathNode) — no node named here.
-    const w = await dispatch("fs_write", { path: dest, content: bytes.toString("base64"), base64: true }, { timeoutMs: 45000 });
-    if (w && w.ok) return { ok: true, path: dest, synced: !!target.synced };
+    // An unambiguous drive letter routes itself (see pathNode); a pinned destination names its
+    // machine explicitly, which is the only way a C:\ path can mean one computer and not two.
+    const opts = { timeoutMs: 45000 };
+    if (target.node) opts.preferred = target.node;
+    const w = await dispatch("fs_write", { path: dest, content: bytes.toString("base64"), base64: true }, opts);
+    if (w && w.ok) return { ok: true, path: dest, node: (w && w.node) || target.node || "", synced: !!target.synced };
     return { ok: false, reason: (w && (w.error || w.reason)) || "the machine refused the write" };
   } catch (e) { return { ok: false, reason: String(e && e.message || e) }; }
 }
@@ -3203,7 +3213,7 @@ async function exportGated(id, format, { destination = "", overrideSensitive = f
   if (r.path) { r.fileName = basename(r.path); r.downloadUrl = "/exports/" + encodeURIComponent(r.fileName); }
   // ...and put a copy on a real disk. Additive: the server copy and the link above survive either way.
   const saved = await saveExportToMachine(r, tenant, hands);
-  if (saved.ok) { r.savedTo = saved.path; r.savedSynced = saved.synced; console.log(`[dominion-ai] export saved to machine: ${saved.path}`); }
+  if (saved.ok) { r.savedTo = saved.path; r.savedSynced = saved.synced; r.savedOn = saved.node || ""; console.log(`[dominion-ai] export saved to machine: ${saved.path}${saved.node ? " on " + saved.node : ""}`); }
   else if (saved.reason) r.saveNote = saved.reason;
   return { ...r, gate: { checks: gate.checks, warnings: gate.warnings } };
 }
@@ -5102,7 +5112,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify({
         as: asGuest ? "guest" : "owner",
-        ok: !!(out && out.savedTo), savedTo: (out && out.savedTo) || null, synced: !!(out && out.savedSynced),
+        ok: !!(out && out.savedTo), savedTo: (out && out.savedTo) || null, savedOn: (out && out.savedOn) || null, synced: !!(out && out.savedSynced),
         saveNote: (out && out.saveNote) || null, serverPath: (out && out.path) || null,
         bytes: (out && out.bytes) || 0, downloadUrl: (out && out.downloadUrl) || null, error: err, ms: Date.now() - t0,
       }));
