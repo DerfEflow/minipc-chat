@@ -769,16 +769,22 @@
    */
   function wireBrowse(status) {
     const tree = $("#st-tree");
-    const browse = async (path) => {
+    // Which machine this walk is on. Sent with every request so the tree cannot hop computers
+    // mid-walk, which is what made the drive list change between taps when both nodes were up.
+    let onMachine = "";
+    const browse = async (path, machine) => {
       tree.hidden = false;
       tree.textContent = L("browse_loading");
+      if (machine !== undefined) onMachine = machine || "";
       let j = null, err = null;
       try {
         const r = await fetch("/ide/browse", { method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ path: path || "" }) });
+          body: JSON.stringify({ path: path || "", node: onMachine }) });
         j = await r.json();
       } catch (e) { err = e; }
       if (!j || j.error) { tree.textContent = j && j.error ? j.error : friendlyError(err); return; }
+      if (j.node) onMachine = j.node;
+      if (!path) onMachine = "";                 // back at the drive list: no machine chosen yet
       renderTree(j.path || "", j.dirs || []);
     };
     const renderTree = (path, dirs) => {
@@ -787,7 +793,8 @@
       bar.className = "tr-bar";
       const where = document.createElement("span");
       where.className = "tr-where";
-      where.textContent = path || "…";
+      // Always say which computer you are looking at. Not knowing was the whole bug.
+      where.textContent = (path || "…") + (onMachine ? "  ·  " + onMachine : "");
       bar.append(where);
       if (path) {
         const up = document.createElement("button");
@@ -795,9 +802,9 @@
         // Parent of "F:\Projects" is "F:\"; parent of a drive root is the drive list.
         up.addEventListener("click", () => {
           const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
-          if (parts.length <= 1) { browse(""); return; }
+          if (parts.length <= 1) { browse("", ""); return; }   // back to the drive list, machine cleared
           const parent = parts.slice(0, -1).join("\\");
-          browse(parts.length === 2 ? parts[0] + "\\" : parent);
+          browse(parts.length === 2 ? parts[0] + "\\" : parent, onMachine);
         });
         const use = document.createElement("button");
         use.type = "button"; use.className = "tr-use"; use.textContent = L("browse_here");
@@ -820,7 +827,15 @@
         const b = document.createElement("button");
         b.type = "button"; b.className = "tr-dir";
         b.textContent = d.name;
-        b.addEventListener("click", () => browse(d.path));
+        // At the drive list each entry names its machine, because C:\ appears once per computer
+        // and picking the wrong one used to be invisible until the build ran somewhere unexpected.
+        if (!path && d.machine) {
+          const tag = document.createElement("small");
+          tag.className = "tr-machine";
+          tag.textContent = d.machine;
+          b.append(tag);
+        }
+        b.addEventListener("click", () => browse(d.path, d.machine));
         tree.append(b);
       }
     };

@@ -221,6 +221,29 @@
   }
   const folderReady = () => !!(folderHandle && folderPerm === "granted");
 
+  /*
+   * Re-arm the linked folder while a click is still "warm".
+   *
+   * THE BUG THIS FIXES (Fred, 2026-07-22: forged images, went to the folder, found nothing).
+   * Chrome does not persist directory permission across a browser restart: the handle survives in
+   * IndexedDB but queryPermission drops to "prompt". The forge path guarded its write with
+   * `if (autoSave && folderReady())` and then reported "Vision sealed to local vault" either way,
+   * so a lapsed permission meant the file went to IndexedDB, never to disk, and NOTHING said so.
+   *
+   * requestPermission needs transient user activation, which is long gone by the time an image
+   * finishes generating. So it is asked HERE, on the click that starts the forge, while the
+   * activation is still live. Returns true when the folder is usable afterwards.
+   */
+  async function armFolder() {
+    if (!folderHandle || !autoSave) return folderReady();
+    if (folderPerm === "granted") return true;
+    try {
+      folderPerm = await askPerm(folderHandle);
+      renderFolderBar();
+    } catch { /* denied or unavailable: the caller reports it honestly below */ }
+    return folderReady();
+  }
+
   // Write one vault record into the linked folder. Returns true when the file landed.
   async function writeToFolder(rec) {
     if (!folderReady()) return false;
@@ -302,7 +325,13 @@
     if (folderPerm !== "granted") {
       bar.dataset.state = "needs-permission";
       nameEl.textContent = String(folderHandle.name || "FOLDER").toUpperCase();
-      setStatus("This browser needs one click to restore access to that folder after a restart.");
+      // Say how many are stranded. "Needs one click" is easy to ignore; "6 images are not on your
+      // disk" is not, and that gap is exactly what went unnoticed before.
+      let waiting = 0;
+      try { waiting = (await vaultAll()).filter((r) => !r.savedAt).length; } catch {}
+      setStatus(waiting
+        ? `${waiting} image${waiting === 1 ? " is" : "s are"} in the vault but NOT in your folder. This browser drops folder permission when it restarts: one click restores it, then SAVE ALL writes them out.`
+        : "This browser needs one click to restore access to that folder after a restart.");
       mkBtn("RECONNECT", () => reconnectFolder(), "active");
       mkBtn("UNLINK", () => unlinkFolder());
       return;
@@ -743,6 +772,9 @@
     btn.disabled = true;
     btn.classList.add("igniting");
     btn.setAttribute("aria-busy", "true");
+    // Ask for folder permission NOW, on the warm click, not after the image lands (see armFolder).
+    const wantFolder = !!(autoSave && folderHandle);
+    const folderArmed = await armFolder();
     stripBusy("FORGE CHAMBER ACTIVE", "Charging creative lattice…");
     startProgress();
     try {
@@ -751,12 +783,20 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ prompt, quality: state.quality, aspect: state.aspect, n: 1, refs: state.refs.map((x) => x.dataUrl) }),
       });
+      let wrote = 0, made = 0;
       for (const img of r.images || []) {
         const rec = await vaultSave(img.b64, { prompt, quality: r.quality, aspect: r.aspect, source: "sync" });
-        if (autoSave && folderReady()) await writeToFolder(rec);
+        made++;
+        if (folderArmed && folderReady() && (await writeToFolder(rec))) wrote++;
       }
       stopProgress();
-      stripDone("Vision sealed to local vault · " + (r.usage && r.usage.outputTokens ? r.usage.outputTokens.toLocaleString() + " tokens · " : "") + fmtUsd(r.costUsd || 0));
+      // Never claim more than happened. "Sealed to the vault" used to print even when the folder
+      // write was skipped, which is how an image could look saved and be nowhere on disk.
+      const where = wrote ? ` · written to ${folderHandle.name}`
+        : (wantFolder ? " · NOT written to your folder yet (tap RECONNECT below)" : "");
+      stripDone("Vision sealed to local vault" + where + " · " + (r.usage && r.usage.outputTokens ? r.usage.outputTokens.toLocaleString() + " tokens · " : "") + fmtUsd(r.costUsd || 0));
+      if (wantFolder && !wrote) showFault(`The image is safe in the on-device vault, but it was NOT written to ${folderHandle.name}. Your browser drops folder permission when it restarts. Tap RECONNECT in the vault bar, then SAVE ALL to catch up.`);
+      renderFolderBar();
       state.refs = [];
       renderRefs();
       renderGallery();
@@ -829,7 +869,10 @@
   async function collectBatch(id, btn) {
     btn.disabled = true;
     btn.textContent = "COLLECTING…";
-    let offset = 0, saved = 0;
+    let offset = 0, saved = 0, wrote = 0;
+    // COLLECT is the warm click for a batch, same reasoning as the forge button (see armFolder).
+    const wantFolder = !!(autoSave && folderHandle);
+    const folderArmed = await armFolder();
     stripBusy("FOUNDRY DELIVERY", "Collecting forged visions…");
     startProgress();
     try {
@@ -838,7 +881,7 @@
         if (r.status !== "completed") { stopProgress(); showFault("Batch is " + (JOB_LABELS[r.status] || r.status).toLowerCase() + "."); break; }
         for (const img of r.images || []) {
           const rec = await vaultSave(img.b64, { prompt: img.prompt, quality: img.quality, aspect: img.aspect, source: "batch" });
-          if (autoSave && folderReady()) await writeToFolder(rec);
+          if (folderArmed && folderReady() && (await writeToFolder(rec))) wrote++;
           saved++;
         }
         $("#generation-status").textContent = `Collecting forged visions… ${saved}/${r.total}`;
@@ -847,7 +890,11 @@
         if (r.done || !(r.images || []).length) {
           stopProgress();
           const settle = r.refundedCredits ? ` · ${r.refundedCredits} credit${r.refundedCredits === 1 ? "" : "s"} returned` : r.extraCredits ? ` · ${r.extraCredits} extra credit${r.extraCredits === 1 ? "" : "s"} for overage` : "";
-          stripDone(`${saved} vision${saved === 1 ? "" : "s"} sealed to the vault` + (r.failed ? ` · ${r.failed} failed` : "") + (r.costUsd != null ? ` · ${fmtUsd(r.costUsd)} actual` : "") + settle);
+          const where = wrote ? ` · ${wrote} written to ${folderHandle.name}`
+            : (wantFolder ? " · NOT written to your folder yet (tap RECONNECT below)" : "");
+          stripDone(`${saved} vision${saved === 1 ? "" : "s"} sealed to the vault` + where + (r.failed ? ` · ${r.failed} failed` : "") + (r.costUsd != null ? ` · ${fmtUsd(r.costUsd)} actual` : "") + settle);
+          if (wantFolder && saved && !wrote) showFault(`${saved} image${saved === 1 ? " is" : "s are"} safe in the on-device vault, but none reached ${folderHandle.name}. Your browser drops folder permission when it restarts. Tap RECONNECT in the vault bar, then SAVE ALL.`);
+          renderFolderBar();
           dismissed.add(id);
           saveDismissed();
           break;

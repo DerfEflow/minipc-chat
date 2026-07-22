@@ -1329,16 +1329,35 @@ async function handleIde(req, res, u) {
    * because the folder lives on the BUILD machine (the hands node), not inside the phone's
    * browser sandbox. So the node lists its own drives and folders and the phone taps through
    * them. No path = the drive list; carve-outs are refused by the node itself.
+   *
+   * BUG FIXED 2026-07-22 (Fred: "the folder picker for the IDE was buggy"). With two machines
+   * connected, the drive list came from whichever node had most recently sent a heartbeat, so the
+   * drives CHANGED between taps: sometimes C:/E: (mini-PC), sometimes C:/F:/G:/Z: (laptop), with
+   * nothing on screen saying which machine you were looking at. Now the root listing is built from
+   * every connected machine at once, each drive labelled with its machine, and `node` travels with
+   * every subsequent request so a walk that starts on the laptop stays on the laptop. That last
+   * part matters for C:\, which exists on both and which a path alone can never disambiguate.
    */
   if (req.method === "POST" && path === "/ide/browse") {
     const blocked = ideFeature.wall(T);
     if (blocked) return send(blocked);
+    const want = String(body.path || "");
+    const pinned = String(body.node || "");
     try {
-      const r = await ideHandsFor(T)("fs_browse", { path: String(body.path || "") });
+      // Root listing for the owner: enumerate ALL his machines from the profiles they reported,
+      // with no dispatch at all. One machine or a guest falls through to the node's own listing.
+      if (!want && T.isOwner) {
+        const all = ownerDriveList();
+        if (all.machines.length > 1) return send({ status: 200, body: { ok: true, path: "", dirs: all.dirs, machines: all.machines } });
+      }
+      const r = await ideHandsFor(T)("fs_browse", { path: want }, pinned ? { preferred: pinned } : {});
       if (!r || r.ok === false) {
         return send({ status: 200, body: { error: (r && r.error) || "The computer that runs builds is not reachable right now." } });
       }
-      return send({ status: 200, body: { ok: true, path: r.path || "", dirs: Array.isArray(r.dirs) ? r.dirs.slice(0, 500) : [] } });
+      // Echo the machine back so the picker can keep the walk on one computer and label it.
+      const on = pinned || (typeof handsHub.nodeForPath === "function" ? handsHub.nodeForPath(want) : "") || "";
+      const dirs = (Array.isArray(r.dirs) ? r.dirs.slice(0, 500) : []).map((d) => ({ ...d, machine: on || d.machine || "" }));
+      return send({ status: 200, body: { ok: true, path: r.path || "", dirs, node: on } });
     } catch {
       return send({ status: 200, body: { error: "The computer that runs builds is not reachable right now." } });
     }
@@ -1557,10 +1576,33 @@ function groundPreviewHtml(html) {
 // Which machine answers for this tenant: the owner's connected node, or a guest's own uid-bound
 // node. Never both. Shared by the build runner and the folder-picker endpoint so they can never
 // disagree about whose computer is being touched.
+/*
+ * Every drive on every machine Fred owns, each labelled with the machine it belongs to.
+ *
+ * This is the IDE folder picker's root listing. It used to come from ONE node chosen by whichever
+ * had heartbeat last, so the drive list changed between taps and never said which computer it was
+ * showing. Built from the profiles the machines report, so it needs no dispatch and cannot show a
+ * drive that is not really there. Shared with /hands/selftest-environment so the exact list the
+ * picker will render can be checked without a browser.
+ */
+function ownerDriveList() {
+  let info = {};
+  try { info = (typeof handsHub.nodeInfo === "function" ? handsHub.nodeInfo() : {}) || {}; } catch { info = {}; }
+  const machines = Object.keys(info).filter((n) => !n.startsWith("user:"));
+  const dirs = [];
+  for (const m of machines) for (const r of (info[m].roots || [])) {
+    const p = String(r).trim();
+    if (p) dirs.push({ name: p, path: p, machine: m });
+  }
+  return { dirs, machines };
+}
+
+// opts is forwarded so a caller can pin the machine (opts.preferred). The folder picker needs that:
+// C:\ exists on both of Fred's machines, so a path alone cannot say which one he is looking at.
 function ideHandsFor(T) {
   return T.isOwner
-    ? (tool, args) => CTX.hands.dispatch(tool, args)
-    : (tool, args) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000 });
+    ? (tool, args, opts = {}) => CTX.hands.dispatch(tool, args, opts)
+    : (tool, args, opts = {}) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000, ...opts });
 }
 
 // One model call with the build pipeline's cost arithmetic: prefer what the provider actually
@@ -5030,8 +5072,10 @@ const server = http.createServer(async (req, res) => {
       if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }
       const owner = machinesBlock({ isOwner: true, uid: "" });
       const guest = machinesBlock({ isOwner: false, uid: "nobody" });
+      // The IDE folder picker's root listing, from the same function the picker calls.
+      const picker = ownerDriveList();
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ owner, guest, ownerChars: owner.length, guestChars: guest.length }));
+      return res.end(JSON.stringify({ owner, guest, ownerChars: owner.length, guestChars: guest.length, picker }));
     }
     if (path === "/hands/selftest-ollama" && req.method === "GET") {
       if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }

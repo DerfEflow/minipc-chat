@@ -616,6 +616,11 @@ body.ide-open #ide-root { transform: none; }
 .st-tree .tr-dir::before { content: "\25B8  "; color: var(--copper-hot, #d4823c); }
 .st-tree .tr-dir:hover { border-color: var(--glass-line, rgba(150,200,230,.2)); background: rgba(14,33,54,.6); }
 .st-tree .tr-empty { padding: 10px; font-size: 12.5px; color: var(--muted, #8ba0ae); }
+/* Which computer a drive belongs to. Only drawn at the root listing, where the same letter can
+   appear once per machine and picking blind used to send a build to the wrong box. */
+.st-tree .tr-machine { margin-left: 8px; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--copper-hot, #d4823c); border: 1px solid rgba(185, 107, 50, .35); border-radius: 2px;
+  padding: 1px 5px; vertical-align: middle; }
 
 /* ---------- tools choice ------------------------------------------------------------------
  * The Assignment Board is expert furniture: hidden until Customize. The recommended answer is
