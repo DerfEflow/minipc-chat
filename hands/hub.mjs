@@ -76,7 +76,26 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     if (prev) { try { prev.res.end(); } catch {} clearInterval(prev.beat); }
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
     res.write("event: hb\ndata: {}\n\n");
-    const entry = { res, connectedAt: Date.now(), lastSeen: Date.now(), jobsSent: 0, jobsDone: 0 };
+    // The node's self-description (drives, platform, elevation) rides the connect URL as base64url
+    // JSON. It is what the system prompt renders so models know which machine holds which drive —
+    // see the ENVIRONMENT block in server.mjs. Untrusted input, so it is parsed defensively and
+    // clamped; a malformed blob costs the node its profile, never the connection.
+    let info = null;
+    try {
+      const raw = u.searchParams.get("info");
+      if (raw) {
+        const o = JSON.parse(Buffer.from(String(raw), "base64url").toString("utf8"));
+        if (o && typeof o === "object") info = {
+          host: String(o.host || "").slice(0, 64),
+          platform: String(o.platform || "").slice(0, 16),
+          roots: Array.isArray(o.roots) ? o.roots.slice(0, 32).map((s) => String(s).slice(0, 260)) : [],
+          elevated: o.elevated === true,
+          desktop: o.desktop === true,
+          maxAccess: o.maxAccess === true,
+        };
+      }
+    } catch { info = null; }
+    const entry = { res, info, connectedAt: Date.now(), lastSeen: Date.now(), jobsSent: 0, jobsDone: 0 };
     entry.beat = setInterval(() => { try { res.write("event: hb\ndata: {}\n\n"); } catch {} }, heartbeatMs);
     nodes.set(name, entry);
     log(`hands: node "${name}" connected`);
@@ -219,21 +238,49 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     if (!enabled) return disabled(res);
     if (!authed(req)) return deny(res);
     return json(res, 200, {
-      nodes: [...nodes.entries()].map(([name, n]) => ({ name, connectedAt: n.connectedAt, lastSeen: n.lastSeen, jobsSent: n.jobsSent, jobsDone: n.jobsDone })),
+      nodes: [...nodes.entries()].map(([name, n]) => ({ name, connectedAt: n.connectedAt, lastSeen: n.lastSeen, jobsSent: n.jobsSent, jobsDone: n.jobsDone, info: n.info || null })),
       pendingJobs: jobs.size,
     });
   }
 
-  // Pick a connected node to act on: an explicit preference wins; otherwise prefer an always-on
-  // mini-PC name, else the first connected node, else null (no machine available).
+  // Pick a connected node to act on. An explicit preference wins when it is connected. Otherwise
+  // return the node whose stream last did something (heartbeat, job result, or chunk) — this is
+  // the "currently active" machine when the owner has more than one hands node live. The old bias
+  // toward a "mini-pc" name meant every chat routed to the mini-PC whenever it was up, so a
+  // co-registered laptop was never reachable through the chat path — that hardcode is gone.
   function pick(preferred) {
     const p = String(preferred || "").toLowerCase();
     if (p && nodes.has(p)) return p;
-    for (const n of ["mini-pc", "minipc", "mini_pc"]) if (nodes.has(n)) return n;
-    const first = nodes.keys().next();
-    return first.done ? null : first.value;
+    let best = null, bestSeen = -1;
+    for (const [name, n] of nodes) {
+      const seen = n.lastSeen || 0;
+      if (seen > bestSeen) { best = name; bestSeen = seen; }
+    }
+    return best;
   }
   const nodeNames = () => [...nodes.keys()];
+  // name -> self-description, for the ENVIRONMENT block in the system prompt and for path-based
+  // routing (which machine actually holds F:\ ?). Only nodes that reported a profile appear.
+  const nodeInfo = () => {
+    const out = {};
+    for (const [name, n] of nodes) if (n.info) out[name] = n.info;
+    return out;
+  };
+  // Which connected node owns this absolute path? Returns "" when no node claims it, or when more
+  // than one does (C:\ exists on both machines, so it can never pin a target on its own).
+  function nodeForPath(p) {
+    const t = String(p || "").trim().toLowerCase();
+    if (!t) return "";
+    const hits = [];
+    for (const [name, n] of nodes) {
+      const roots = (n.info && Array.isArray(n.info.roots)) ? n.info.roots : [];
+      for (const r of roots) {
+        const root = String(r || "").trim().toLowerCase();
+        if (root && t.startsWith(root.length > 3 ? root : root.slice(0, 3))) { hits.push(name); break; }
+      }
+    }
+    return hits.length === 1 ? hits[0] : "";
+  }
   const stats = () => ({ enabled, nodes: nodes.size, pendingJobs: jobs.size });
-  return { enabled, handleStream, handleResult, handleChunk, handleRun, handleNodes, dispatch, dispatchStream, cancelJob, cancelAll, pick, nodeNames, stats };
+  return { enabled, handleStream, handleResult, handleChunk, handleRun, handleNodes, dispatch, dispatchStream, cancelJob, cancelAll, pick, nodeNames, nodeInfo, nodeForPath, stats };
 }

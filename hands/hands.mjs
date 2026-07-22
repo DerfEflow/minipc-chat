@@ -622,12 +622,52 @@ async function handleEvent(ev, data) {
   await postResult(job.id, result);
 }
 
+/*
+ * SELF-DESCRIPTION — what this machine actually is, sent to the hub on every connect.
+ *
+ * Why this exists: the server used to TELL every model "you run on Fred's mini-PC", a sentence
+ * hardcoded in the system prompt back when there was one node. Once a second node (the laptop)
+ * joined, that sentence was a lie, and no model could be expected to reach a laptop drive it had
+ * been told did not exist. The map now comes FROM the machine instead of from a constant, so it
+ * cannot drift again: add a drive, restart the node, and the prompt tells the truth on the next turn.
+ */
+// Administrator/root? Best effort, computed ONCE at startup so no turn pays for it. On Windows the
+// classic probe is `net session`, which exits 0 only when elevated. A failure to detect reports
+// false, which is the safe direction: the model then does not promise admin work it cannot do.
+let ELEVATED = false;
+function detectElevation() {
+  return new Promise((res) => {
+    if (!IS_WIN) return res(typeof process.getuid === "function" && process.getuid() === 0);
+    try {
+      const p = spawn("net", ["session"], { windowsHide: true, stdio: "ignore" });
+      const t = setTimeout(() => { try { p.kill(); } catch {} res(false); }, 4000);
+      p.on("close", (code) => { clearTimeout(t); res(code === 0); });
+      p.on("error", () => { clearTimeout(t); res(false); });
+    } catch { res(false); }
+  });
+}
+// The compact node profile the hub stores and the prompt renders. ROOTS is read live (set_roots can
+// change it at runtime), so a reconnect always re-reports the current reach.
+function selfDescription() {
+  return {
+    host: hostname() || "",
+    platform: process.platform,
+    roots: ROOTS.slice(0, 32),
+    elevated: ELEVATED,
+    desktop: DESKTOP_ON,
+    maxAccess: MAX_ACCESS,
+  };
+}
+
 async function connectOnce() {
   const ac = new AbortController();
   let lastBeat = Date.now();
   const lapse = setInterval(() => { if (Date.now() - lastBeat > HEARTBEAT_LAPSE_MS) { log("heartbeat lapsed — recycling the stream"); ac.abort(); } }, 5000);
   try {
-    const r = await fetch(HANDS_URL + "/hands/stream?node=" + encodeURIComponent(NODE_NAME), {
+    // The profile rides the connect URL as one base64url JSON blob: a single param keeps the query
+    // readable and survives drive letters, backslashes and spaces without per-field escaping games.
+    const info = Buffer.from(JSON.stringify(selfDescription()), "utf8").toString("base64url");
+    const r = await fetch(HANDS_URL + "/hands/stream?node=" + encodeURIComponent(NODE_NAME) + "&info=" + info, {
       headers: authHeaders({ accept: "text/event-stream" }),
       signal: ac.signal,
     });
@@ -660,7 +700,8 @@ async function main() {
     process.exit(1);
   }
   if (!ROOTS.length) log("NOTE: no HANDS_ROOTS and HANDS_MAX_ACCESS unset — fs tools will refuse until roots are configured deliberately.");
-  log(`starting  ·  access=${MAX_ACCESS ? "MAX (all drives minus carve-outs)" : "scoped"}  ·  roots=${ROOTS.join(", ") || "(none)"}  ·  self-protected dirs=${SELF_PROTECT.length}  ·  platform=${process.platform}`);
+  ELEVATED = await detectElevation();   // once, before the first connect, so the profile is complete
+  log(`starting  ·  access=${MAX_ACCESS ? "MAX (all drives minus carve-outs)" : "scoped"}  ·  roots=${ROOTS.join(", ") || "(none)"}  ·  elevated=${ELEVATED}  ·  self-protected dirs=${SELF_PROTECT.length}  ·  platform=${process.platform}`);
   for (;;) {
     try { await connectOnce(); }
     catch (e) { log(`disconnected: ${e && e.message}`); }

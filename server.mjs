@@ -911,11 +911,41 @@ const handsHub = createHandsHub({
 // the node itself enforces the carve-outs (D:/backups/customer-DBs). Multi-tenant later scopes this
 // to each user's own node; for now the owner's tools reach whichever node is connected.
 const HANDS_DEFAULT_NODE = cfgGet("HANDS_DEFAULT_NODE", "");
+// dispatch accepts an optional per-call `preferred` (opts.preferred) so a chat turn can pin the
+// hands work to a specific machine when the user's own words name one ("on my laptop", etc.).
+// When nothing is preferred, or the preferred name isn't connected, pick() falls back to the
+// freshest connected node — no more silent mini-PC bias.
+/*
+ * A path IS an address. F:\ exists only on the laptop and E:\ only on the mini-PC, so a drive
+ * letter in a tool's arguments identifies the machine without the user having to name it. This is
+ * the routing half of the environment fix: before it, a request that didn't literally contain the
+ * word "laptop" went to whichever node had most recently sent a heartbeat, i.e. a coin flip between
+ * Fred's two machines, which is why file work "didn't connect" at random.
+ *
+ * Returns "" when nothing in the args names a drive, when the drive lives on several machines
+ * (C:\ is on both), or when different args point at different machines. Pinning nothing is correct
+ * there: an honest tool error the model can read beats a confident dispatch to the wrong computer.
+ */
+function pathNode(args) {
+  try {
+    if (typeof handsHub.nodeForPath !== "function") return "";
+    // JSON escapes backslashes, so "F:\Claude" appears as F:\\Claude — one separator still matches.
+    const found = String(JSON.stringify(args || {})).match(/[a-zA-Z]:[\\/]/g) || [];
+    const nodes = new Set();
+    for (const hit of found) {
+      const n = handsHub.nodeForPath(hit.slice(0, 2) + "\\");
+      if (n) nodes.add(n);
+    }
+    return nodes.size === 1 ? [...nodes][0] : "";
+  } catch { return ""; }
+}
+
 CTX.hands = {
-  target: () => handsHub.pick(HANDS_DEFAULT_NODE),
+  target: (preferred) => handsHub.pick(preferred || HANDS_DEFAULT_NODE),
   dispatch: (tool, args, opts = {}) => {
-    const n = handsHub.pick(HANDS_DEFAULT_NODE);
-    return n ? handsHub.dispatch(n, tool, args || {}, { timeoutMs: 60000, ...opts })
+    const { preferred, ...rest } = opts || {};
+    const n = handsHub.pick(preferred || pathNode(args) || HANDS_DEFAULT_NODE);
+    return n ? handsHub.dispatch(n, tool, args || {}, { timeoutMs: 60000, ...rest })
              : Promise.resolve({ ok: false, offline: true, error: "No machine is connected. Start your Dominion hands node on the computer you want to reach." });
   },
 };
@@ -2233,14 +2263,54 @@ const reviewEngine = createReviewEngine({
 // C4: the formatting tools run on the LIGHT model through this hook (fast + cheap by design).
 CTX.lightChat = (messages, o = {}) => ollamaChat(LIGHT_MODEL, messages, { noTools: true, ...o });
 
-function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true } = {}) {
+/*
+ * ENVIRONMENT — the true machine map, generated from what the nodes report about THEMSELVES.
+ *
+ * This replaced a hardcoded sentence asserting the app ran on one specific machine, written when
+ * there was exactly one node and never revised when the laptop joined. The result was models that
+ * denied Fred's own F:\ drive existed, because as far as their briefing went, it didn't. A
+ * generated block cannot rot: whatever a machine reports on connect is what the model is told.
+ *
+ * Scope follows the wall: the owner sees his machines, a guest sees only their own node, and
+ * neither is told the other exists.
+ */
+function machinesBlock(T) {
+  let info = {};
+  try { info = (typeof handsHub.nodeInfo === "function" ? handsHub.nodeInfo() : {}) || {}; } catch { info = {}; }
+  const mine = Object.keys(info).filter((n) => (T && T.isOwner) ? !n.startsWith("user:") : n === `user:${T && T.uid}`);
+  const head = "\n\nENVIRONMENT (read from the machines themselves, live this turn):\n" +
+    "You run in the cloud. You have NO filesystem of your own beyond your private sandbox — every real file lives on a machine you reach through a connected node. ";
+  if (!mine.length) {
+    return head + "RIGHT NOW NO MACHINE IS CONNECTED, so file and command tools will fail until one reconnects. Say that plainly instead of guessing at paths.";
+  }
+  const lines = mine.map((n) => {
+    const i = info[n] || {};
+    const drives = (i.roots || []).join(", ") || "(no drives configured)";
+    const who = i.elevated ? "administrator rights" : "standard user rights";
+    return `- "${n}"${i.host ? ` (${i.host})` : ""}, ${i.platform || "unknown"}, ${who}: ${drives}`;
+  });
+  // The disambiguation rule is the whole point: a drive letter unique to one machine IS the address.
+  const letters = {};
+  for (const n of mine) for (const r of (info[n].roots || [])) {
+    const L = String(r).trim().slice(0, 2).toUpperCase();
+    if (/^[A-Z]:$/.test(L)) (letters[L] = letters[L] || []).push(n);
+  }
+  const unique = Object.entries(letters).filter(([, ns]) => ns.length === 1).map(([L, ns]) => `${L}\\ = ${ns[0]}`);
+  const shared = Object.entries(letters).filter(([, ns]) => ns.length > 1).map(([L]) => `${L}\\`);
+  return head + "The machines connected right now:\n" + lines.join("\n") +
+    (unique.length ? `\nA drive letter that exists on only one machine IS the address of that machine: ${unique.join(", ")}. Paths on those drives route themselves; you do not need to ask which machine.` : "") +
+    (shared.length ? ` ${shared.join(" and ")} exists on more than one machine, so when a request touches it, say which machine you mean or ask.` : "") +
+    "\nD:\\ is the backup SSD and is permanently walled off on every machine; never plan work that touches it. Never claim a path does not exist because it is not on the machine you happen to be thinking of — check the map above first. When you finish a tool action, name the machine you acted on.";
+}
+
+function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true, machines = "" } = {}) {
   // Tool-less turns (as_fred voice work, chat-bench models) get a LEAN prompt: identity, house
   // style, Wolfe Logic, mode, persona. The tool doctrine below is dead weight when no tool schemas
   // ride the call (Fred's token rule, 2026-07-18: the Substack writer must not pay for machinery
   // it cannot use), and it muddies pure voice work besides.
   let s = withTools ? [
     "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is " + new Date().toISOString().slice(0, 10) + ".",
-    "You run on his always-on mini-PC and you have real tools (hands). Use them when they help —",
+    "You have real tools (hands) that reach his actual machines — the ENVIRONMENT block below says which. Use them when they help —",
     "don't just describe what could be done; do it. Prefer reading current state (e.g. deck_list_projects,",
     "forge_read) before acting so you work from facts, not guesses.",
     "Keep replies concise and direct. Don't fabricate file contents, project ids, or results — read them.",
@@ -2250,6 +2320,9 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
     "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is " + new Date().toISOString().slice(0, 10) + ".",
     "Keep replies concise, direct, and honest. Never fabricate facts, quotes, sources, or events.",
   ].join(" ");
+  // The machine map rides every TOOL turn (a tool-less turn has nothing to route, so it stays lean).
+  // Built by the caller, which knows the tenant — see machinesBlock().
+  if (withTools && machines) s += machines;
   // THIS APP'S OWN FEATURES (Fred, 2026-07-19). Every model should be able to answer "what can this
   // do, how do I use it, where is it" and, when a request matches a dedicated feature, point at the
   // control instead of improvising. The index is deliberately small so it can ride every turn; the
@@ -3906,10 +3979,26 @@ async function handleChat(req, res) {
   // MUST sit after forgeExtra is resolved above: reading it earlier is a temporal dead zone and
   // throws on every single turn. That shipped on 2026-07-19 and is why this line is down here now.
   opts.role = T.role; opts.forgeExtra = forgeExtra;
+  // Per-turn machine hint: if the owner's message names one of the currently connected nodes
+  // (case-insensitive, whole word), pin this turn's tool work to that node. Fixes the case where
+  // both a "laptop" and a "mini-pc" node are registered and the chat could otherwise only ever
+  // reach whichever pick() happens to return. Guests reach their own node either way — this only
+  // rewrites the owner's dispatch path.
+  let preferredNode = "";
   if (reqCtx.hands === (T.ctxBase || CTX).hands && reqCtx.hands) {
+    try {
+      const registered = handsHub.nodeNames().filter((n) => !n.startsWith("user:"));
+      const lower = String(lastUserText || "").toLowerCase();
+      for (const name of registered) {
+        if (new RegExp("\\b" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b").test(lower)) { preferredNode = name; break; }
+      }
+    } catch {}
     const base = reqCtx.hands;
-    reqCtx.hands = { ...base, dispatch: (tool, args, opts = {}) => base.dispatch(tool, args, { ...opts, signal: ac.signal }) };
+    reqCtx.hands = { ...base, dispatch: (tool, args, opts = {}) => base.dispatch(tool, args, { ...opts, preferred: opts.preferred || preferredNode, signal: ac.signal }) };
   }
+  // Announce which machine the turn will act on (transparency; the "route" event already carries
+  // model/mode). An empty string means fallback pick — no explicit hint from the user this turn.
+  try { sse({ type: "machine", target: preferredNode || (typeof handsHub.pick === "function" ? handsHub.pick(HANDS_DEFAULT_NODE) : "") || "none" }); } catch {}
   // Context builder (Phase 2, full): system -> learned rules -> memory + artifacts + past chats -> turns.
   working("reading context");   // retrieval (embed call + vec cache) can be slow on a cold box
   // Degrade, don't die: this runs BEFORE the try below, and with disconnect decoupled from abort
@@ -3917,7 +4006,7 @@ async function handleChat(req, res) {
   let ctxInfo;
   try { ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model }, T); }
   catch { ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" }; }
-  const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier, { withTools: attachTools }) }];
+  const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier, { withTools: attachTools, machines: attachTools ? machinesBlock(T) : "" }) }];
   // Off-but-available connectors, by NAME only (Fred, 2026-07-19). Without this, a disabled
   // connector is indistinguishable from a missing capability: the model has no schema for it, so
   // it answers "I can't do that" and the user believes the app cannot, rather than that a switch
