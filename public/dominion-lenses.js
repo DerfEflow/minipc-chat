@@ -308,7 +308,11 @@
       backdrop.remove();
     });
     backdrop.append(modal);
-    document.body.append(backdrop);
+    // Mounted INSIDE #ide-root, the same lesson the tour veil taught: the panel is a fixed
+    // z-index:70 stacking context, so a body-level backdrop paints over the whole panel and
+    // its own z-index games mean nothing to the elements underneath. In-context, backdrop
+    // (345) sits above the tour layers (330-340) and leaves the rest of the app alone.
+    (document.getElementById("ide-root") || document.body).append(backdrop);
   }
 
   // The Stop control exists exactly while there is something to stop.

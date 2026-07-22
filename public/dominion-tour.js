@@ -284,6 +284,11 @@
   document.addEventListener("dominion-crucible-open", () => {
     mountRecall();
     if (seen()) return;
+    // The tenant layer's tutorial sheet sits at a stratospheric z-index over EVERYTHING,
+    // including this tour. Two onboardings stacked means the user can see ours and only touch
+    // theirs (found the hard way: an invisible-to-tests overlay eating real taps). If their
+    // dialog is up, stand down; the next open offers the tour again.
+    if (document.querySelector(".dt-overlay:not([hidden])")) return;
     // Auto-show is for beginners (mode ruling): engineers skipped school on purpose, and vibe
     // coders get it too since the surface is new to everyone. The ? recalls it for all modes.
     const root = document.getElementById("ide-root");
