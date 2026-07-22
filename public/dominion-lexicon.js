@@ -105,8 +105,6 @@
     publish_later: ["Later", "Dismiss", "Dismiss (maybe later)"],
 
     // ---- iteration 2.3: the beginner's front door (Fred's beginner roleplay, 2026-07-22) ----
-    continue_btn: ["Continue", "Continue", "Continue"],
-    auto_home_working: ["Making a home for your app...", "Creating workspace...", "Creating a workspace (a home folder for your app)..."],
     st_name_ph: ["What should we call this app? (you can skip this)", "Name (optional)", "Name (optional; used for the workspace label)"],
     folder_saved: ["Saved. Your app will live there.", "Workspace registered.", "Workspace registered (your app will live there)."],
     pick_folder_first: ["Pick a folder first, or tap Browse my computer.", "Select a workspace first.", "Select a workspace (a project folder) first."],
@@ -185,7 +183,7 @@
     ],
     tour_s3_t: ["Say what you want", "The brief", "The brief (say what you want)"],
     tour_s3_b: [
-      "Type what you want to make in your own words, then tap Continue. Dominion will ask you a few easy questions, one at a time, and show you its plan before anything starts.",
+      "Just talk to it. Type what you are dreaming of making, in your own words, right here in the conversation. Dominion will ask you a few easy questions, one at a time, and show you its plan before anything starts.",
       "Describe the target. An intake pass interviews you, then presents the agreed scope for approval before any spend.",
       "Describe the app in your own words. An intake pass (a short interview) follows, and the agreed scope is shown for approval before any spend.",
     ],
@@ -202,8 +200,8 @@
       "Starts the job (the running build). It keeps going even if you close the app, and a notification calls you back for questions. Deploy (putting it online) is offered when it finishes.",
     ],
     tour_go_folder: ["First: pick or add your folder here", "Step 1: select a workspace", "Step 1: select a workspace (pick or add your folder)"],
-    tour_go_prompt: ["Now describe what you want built", "Step 2: write the brief", "Step 2: write the brief (describe what you want)"],
-    tour_go_start: ["Ready. Tap here to start", "Step 3: run the build", "Step 3: run the build (tap to start)"],
+    tour_go_prompt: ["Tell Dominion what you want to build, right here", "Step 2: write the brief", "Step 2: write the brief (describe what you want)"],
+    tour_go_start: ["When the plan looks right, just say: build it", "Step 3: run the build", "Step 3: run the build (tap to start)"],
     tour_done_t: ["That's the whole loop", "Tour complete", "Tour complete (that's the whole loop)"],
     tour_done_b: [
       "You now know everything you need. Tap the compass question mark any time to see this again.",

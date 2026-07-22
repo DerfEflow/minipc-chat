@@ -483,47 +483,6 @@ body.ide-open #ide-root { transform: none; }
   padding-right: 36px;
 }
 .ide-start textarea { width: 100%; resize: vertical; min-height: 66px; line-height: 1.55; }
-.st-prompt-wrap {
-  position: relative;
-  display: grid;
-  min-width: 0;
-}
-#ide-root[data-mode="beginner"] .st-prompt-wrap textarea {
-  /* The button sits bottom:9 and stands 40 tall, so its top edge lands 49px up. The text band has
-     to clear that whole extent or a full box would tuck its last line under the button. Padding is
-     outside a textarea's scroll region, so this band stays text-free however much they type.
-     Beginner-scoped because only beginners have the button; other modes keep the full box. */
-  padding-bottom: 52px;
-}
-.st-continue {
-  position: absolute;
-  bottom: 9px;
-  right: 9px;
-  min-width: 40px;
-  min-height: 40px;
-  flex: 0 0 auto;
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-  padding: 8px 13px;
-  border-radius: 3px;
-  color: #eafff0;
-  border: 1px solid rgba(157, 255, 146, .5);
-  background: linear-gradient(145deg, rgba(38, 118, 44, .85), rgba(3, 30, 16, .95));
-  box-shadow: 0 0 16px rgba(100, 255, 90, .18), inset 0 1px 0 rgba(226, 255, 221, .25);
-  transition: border-color .16s ease, color .16s ease, box-shadow .16s ease, transform .12s ease;
-}
-.st-continue:hover {
-  border-color: rgba(118, 255, 104, .6);
-  box-shadow: 0 0 22px rgba(100, 255, 90, .28), inset 0 1px 0 rgba(226, 255, 221, .25);
-}
-.st-continue:active {
-  transform: translateY(1px);
-}
-.st-continue:disabled {
-  opacity: .5;
-  cursor: default;
-}
 .ide-start textarea::placeholder, .ide-start input::placeholder { color: #667784; }
 .ide-start .st-new { display: grid; gap: 8px; grid-template-columns: 2fr 1fr auto; }
 .ide-start button {
@@ -672,7 +631,7 @@ body.ide-open #ide-root { transform: none; }
 
 /* ---------- the intake conversation -------------------------------------------------------
  * A small chat that earns its keep before money moves. Minimized, it folds to just its head. */
-.st-chat { display: grid; gap: 8px; min-width: 0; padding: 10px; border-radius: 4px;
+.st-chat { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; padding: 10px; border-radius: 4px;
   border: 1px solid rgba(185, 107, 50, .35);
   background: radial-gradient(80% 60% at 50% 0%, rgba(185,107,50,.10), transparent 70%),
     linear-gradient(180deg, rgba(8,20,34,.92), rgba(2,7,14,.96));
@@ -682,7 +641,7 @@ body.ide-open #ide-root { transform: none; }
 .st-chat-head button { font: inherit; font-size: 11.5px; cursor: pointer; padding: 5px 10px; border-radius: 3px;
   color: var(--muted, #8ba0ae); border: 1px solid var(--glass-line, rgba(150,200,230,.16)); background: transparent; }
 .st-chat.min .st-chat-log, .st-chat.min .st-chat-row, .st-chat.min .st-chat-actions, .st-chat.min .st-link { display: none; }
-.st-chat-log { display: grid; gap: 8px; max-height: 40vh; overflow-y: auto; overflow-x: clip; min-width: 0; }
+.st-chat-log { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; max-height: 40vh; overflow-y: auto; overflow-x: clip; min-width: 0; }
 .st-chat-log .cb { padding: 9px 12px; border-radius: 4px; font-size: 13.5px; line-height: 1.6;
   max-width: 92%; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .st-chat-log .cb-user { justify-self: end; color: var(--ink, #e8f6ff);
@@ -695,7 +654,7 @@ body.ide-open #ide-root { transform: none; }
   box-shadow: inset 0 1px 0 rgba(255,193,138,.2); }
 .st-chat-log .cb-vision h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: .12em;
   text-transform: uppercase; color: var(--copper-hot, #d4823c); }
-.st-chat-row { display: flex; gap: 8px; min-width: 0; }
+.st-chat-row { display: flex; gap: 8px; min-width: 0; flex-wrap: wrap; }
 .st-chat-row textarea { flex: 1 1 auto; min-width: 0; resize: none; }
 .st-chat-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .st-link { font: inherit; font-size: 11.5px; cursor: pointer; border: 0; background: transparent;
@@ -791,9 +750,6 @@ body.ide-open #ide-root { transform: none; }
 #ide-root[data-mode="beginner"] #st-chat-actions,
 #ide-root[data-mode="beginner"] #st-chat-skip { display: none; }
 #ide-root[data-mode="beginner"] #st-go { display: none; }
-/* The Continue button is the beginner's start control; other modes keep the Run button alone,
-   so nobody ever faces two buttons that do the same thing. */
-#ide-root:not([data-mode="beginner"]) .st-continue { display: none; }
 #ide-root[data-mode="vibe"] .st-tools-label { display: none; }
 #ide-root[data-mode="vibe"] #st-model-line { display: block; }
 .st-model-line { font-size: 12.5px; line-height: 1.6; color: var(--ink-soft, #d9c9b8); min-width: 0;
@@ -840,8 +796,34 @@ body.ide-open #ide-root { transform: none; }
 #ide-root[data-mode="engineer"] .st-drawer[open] > summary::before { transform: rotate(90deg); }
 #ide-root[data-mode="engineer"] .st-drawer > :not(summary) { margin: 0 12px 12px; }
 /* Which drawers exist per mode. */
-#ide-root[data-mode="beginner"] #dr-models, #ide-root[data-mode="beginner"] #dr-session { display: none; }
+#ide-root[data-mode="beginner"] #dr-brief,
+#ide-root[data-mode="beginner"] #dr-models,
+#ide-root[data-mode="beginner"] #dr-session { display: none; }
 #ide-root[data-mode="vibe"] #dr-session { display: none; }
+
+/* ---------- beginner mode: chat is the main surface ----------------------------------------- */
+#ide-root[data-mode="beginner"] #st-chat {
+  min-height: 58vh;
+  display: flex;
+  flex-direction: column;
+}
+#ide-root[data-mode="beginner"] #st-chat .st-chat-log {
+  flex: 1 1 auto;
+  max-height: none;
+}
+#ide-root[data-mode="beginner"] #st-chat .cb {
+  font-size: 15px;
+}
+
+/* ---------- vibe mode: chat first, options below -------------------------------------------- */
+#ide-root[data-mode="vibe"] .ide-start {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 11px;
+}
+#ide-root[data-mode="vibe"] #st-chat {
+  order: -1;
+}
 
 /* The drawer wrapper is a grid, and a grid's lone auto column happily sizes to a select's
    longest option (the workspace path measured 464px on a 412 phone). Same clamp discipline as

@@ -1200,6 +1200,13 @@ async function handleIde(req, res, u) {
   if (req.method === "GET" && path === "/ide/jobs") return send(ideFeature.listJobs(T));
   if (req.method === "GET" && path === "/ide/workspaces") return send(ideFeature.listWorkspaces(T));
   if (req.method === "GET" && path === "/ide/push/key") return send(ideFeature.pushKey(T));
+  if (req.method === "GET" && path === "/ide/node") {
+    const blocked = ideFeature.wall(T);
+    if (blocked) return send(blocked);
+    let probe = null;
+    try { probe = await ideHandsFor(T)("node_info", {}); } catch { probe = null; }
+    return send({ status: 200, body: { online: !!(probe && probe.ok) } });
+  }
 
   const body = (await readJsonBody(req)) || {};
   if (req.method === "POST" && path === "/ide/prefs") return send(ideFeature.setPrefs(T, body));

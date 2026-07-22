@@ -403,26 +403,7 @@
       '</details>' +
       '<details class="st-drawer" id="dr-brief" open>' +
         '<summary data-lex="drawer_brief"></summary>' +
-        '<div class="st-prompt-wrap" id="st-prompt-wrap">' +
-          '<textarea id="st-prompt" rows="3"></textarea>' +
-          '<button type="button" id="st-continue" class="st-continue" data-lex="continue_btn"></button>' +
-        '</div>' +
-        '<div class="st-chat" id="st-chat" hidden>' +
-          '<div class="st-chat-head">' +
-            '<span data-lex="intake_title"></span>' +
-            '<button type="button" id="st-chat-min" data-lex="intake_min"></button>' +
-          '</div>' +
-          '<div class="st-chat-log" id="st-chat-log" aria-live="polite"></div>' +
-          '<div class="st-chat-row" id="st-chat-row" hidden>' +
-            '<textarea id="st-chat-in" rows="1"></textarea>' +
-            '<button type="button" id="st-chat-send" data-lex="intake_send"></button>' +
-          '</div>' +
-          '<div class="st-chat-actions" id="st-chat-actions" hidden>' +
-            '<button type="button" id="st-chat-build" class="st-primary" data-lex="intake_build"></button>' +
-            '<button type="button" id="st-chat-more" data-lex="intake_more"></button>' +
-          '</div>' +
-          '<button type="button" id="st-chat-skip" class="st-link" data-lex="intake_skip"></button>' +
-        '</div>' +
+        '<textarea id="st-prompt" rows="3"></textarea>' +
       '</details>' +
       '<details class="st-drawer" id="dr-models" open>' +
         '<summary data-lex="drawer_models"></summary>' +
@@ -445,6 +426,22 @@
           '</select>' +
         '</div>' +
       '</details>' +
+      '<div class="st-chat" id="st-chat">' +
+        '<div class="st-chat-head">' +
+          '<span data-lex="intake_title"></span>' +
+          '<button type="button" id="st-chat-min" data-lex="intake_min"></button>' +
+        '</div>' +
+        '<div class="st-chat-log" id="st-chat-log" aria-live="polite"></div>' +
+        '<div class="st-chat-row" id="st-chat-row">' +
+          '<textarea id="st-chat-in" rows="1"></textarea>' +
+          '<button type="button" id="st-chat-send" data-lex="intake_send"></button>' +
+        '</div>' +
+        '<div class="st-chat-actions" id="st-chat-actions" hidden>' +
+          '<button type="button" id="st-chat-build" class="st-primary" data-lex="intake_build"></button>' +
+          '<button type="button" id="st-chat-more" data-lex="intake_more"></button>' +
+        '</div>' +
+        '<button type="button" id="st-chat-skip" class="st-link" data-lex="intake_skip"></button>' +
+      '</div>' +
       '<div class="st-row">' +
         '<button type="button" id="st-go" class="st-primary" data-lex="start_go"></button>' +
         '<span class="st-status" id="st-status" role="status"></span>' +
@@ -463,7 +460,9 @@
     const name = $("#st-new-name");
     if (name) name.placeholder = L("st_name_ph");
     const chatIn = $("#st-chat-in");
-    if (chatIn) chatIn.placeholder = L("intake_ph");
+    if (chatIn) {
+      chatIn.placeholder = intake.messages.length === 0 ? L("dream_ph") : L("intake_ph");
+    }
     const goBtn = $("#st-go");
     if (goBtn) goBtn.textContent = state.mode === "beginner" ? L("start_talk") : L("start_go");
     const lang = $("#st-lang");
@@ -870,10 +869,6 @@
     if (intake.busy) return;
     intake.busy = true;
     window.ideFlame.show();
-    const chat = $("#st-chat");
-    const chatRow = $("#st-chat-row");
-    const chatLog = $("#st-chat-log");
-    const isFirstMessage = chat.hidden;   // still hidden = no AI reply has revealed it yet
     const thinking = chatBubble("ai", L("intake_thinking"));
     thinking.classList.add("cb-thinking");
     let j = null;
@@ -899,12 +894,6 @@
       + (j.mockups || []).map((m) => "MOCKUP: " + m + "\n").join("")
       + (j.vision ? "VISION READY\n" + j.vision : "") });
     saveDraft();
-    if (isFirstMessage) {
-      chat.hidden = false;
-      chat.classList.remove("min");
-      chatRow.hidden = false;
-      chatBubble("user", intake.messages[0].content);
-    }
     if (j.reply) chatBubble("ai", j.reply);
     for (const m of (j.mockups || [])) renderMockup(m);
     if (j.vision) {
@@ -999,32 +988,87 @@
     log.scrollTop = log.scrollHeight;
   }
 
-  function beginIntake(status) {
-    let workspaceId = $("#st-ws").value;
-    const prompt = $("#st-prompt").value.trim();
-    if (!prompt) { status("Say what you want built.", true); return; }
-    if (!workspaceId && state.mode === "beginner") {
-      window.ideFlame.show(L("auto_home_working"));
+  let nodePollingInterval = 0;
+
+  function startIntakeWithDream(dream, status) {
+    // For beginner and vibe: auto-create workspace in background and start interview immediately.
+    // For engineer: require workspace to be selected first.
+    const workspaceId = $("#st-ws").value;
+    if (!workspaceId && (state.mode === "engineer")) {
+      status(L("pick_folder_first"), true);
+      return;
+    }
+    if (!workspaceId && (state.mode === "beginner" || state.mode === "vibe")) {
+      // Auto-create the workspace SILENTLY in the background: the interview neither waits for it
+      // nor mentions it, and the flame stays owned by the interview turn (a hide here would kill
+      // the working indicator mid-thought).
       fetch("/ide/workspace/auto", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ hint: prompt }) })
+        body: JSON.stringify({ hint: dream }) })
         .then(r => r.json())
         .then(j => {
-          window.ideFlame.hide();
-          if (j.error) { status(j.error, true); return; }
           if (j.ok && j.workspace) {
             state.workspaces.push(j.workspace);
             state.workspaceId = j.workspace.id;
-            workspaceId = j.workspace.id;
             renderStarter();
-            continueIntakeWithPrompt(prompt, status);
+          } else if (j.offline) {
+            // The build computer is not connected: the folksy install explanation, then watch.
+            chatBubble("ai", L("node_offline_explain"));
+            chatBubble("ai", L("node_watching"));
+            startNodePolling(dream, status);
+          } else if (j.error) {
+            status(j.error, true);
           }
         })
-        .catch(e => { window.ideFlame.hide(); status(friendlyError(e), true); });
+        .catch(() => {
+          chatBubble("ai", L("node_offline_explain"));
+          chatBubble("ai", L("node_watching"));
+          startNodePolling(dream, status);
+        });
+      // Start interview immediately regardless of workspace result.
+      continueIntakeWithPrompt(dream, status);
       return;
     }
-    if (!workspaceId) { status(L("pick_folder_first"), true); return; }
     status("");
-    continueIntakeWithPrompt(prompt, status);
+    continueIntakeWithPrompt(dream, status);
+  }
+
+  function startNodePolling(dream, status) {
+    if (nodePollingInterval) clearInterval(nodePollingInterval);
+    // Every 20 seconds, for as long as the panel stays open: a person setting up their computer
+    // for the first time needs many minutes, and the promise was "let me know when it is set up",
+    // never "hurry". closePanel and the build start both clear this.
+    nodePollingInterval = setInterval(async () => {
+      try {
+        const r = await fetch("/ide/node", { headers: { accept: "application/json" } });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (j.online) {
+          clearInterval(nodePollingInterval);
+          nodePollingInterval = 0;
+          // Node is now online: celebrate and retry workspace auto-creation.
+          chatBubble("ai", L("node_connected_celebrate"));
+          fetch("/ide/workspace/auto", { method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ hint: dream }) })
+            .then(r => r.json())
+            .then(j => {
+              if (j.ok && j.workspace) {
+                state.workspaces.push(j.workspace);
+                state.workspaceId = j.workspace.id;
+                renderStarter();
+              }
+            })
+            .catch(() => {});
+        }
+      } catch {}
+    }, 20000);
+  }
+
+  // The brief-box entry (#st-go, vibe and engineer) funnels into the same start path as the chat,
+  // so the workspace rules cannot drift between the two doors.
+  function beginIntake(status) {
+    const prompt = $("#st-prompt").value.trim();
+    if (!prompt) { status("Say what you want built.", true); return; }
+    startIntakeWithDream(prompt, status);
   }
 
   function continueIntakeWithPrompt(prompt, status) {
@@ -1033,9 +1077,14 @@
     }
     intake.messages = [{ role: "user", content: prompt }];
     intake.vision = null;
+    // Draw the brief as the user's first turn exactly once, here in the shared start path, so both
+    // entry paths (chat send and the start button) show it and neither shows it twice. The howdy
+    // above it stays; the log is never wiped, because the chat is the conversation now.
+    chatBubble("user", prompt);
     $("#st-chat-actions").hidden = true;
-    $("#st-chat-log").textContent = "";
     $("#st-go").disabled = true;
+    // The interview is running now, so the chat input asks for an answer instead of a dream.
+    paintLexicon();
     status("");
     saveDraft();
     intakeTurn(status);
@@ -1049,6 +1098,17 @@
       const text = input.value.trim();
       if (!text || intake.busy) return;
       input.value = "";
+      // When chat entry is the dream/brief (intake.messages.length === 0):
+      if (intake.messages.length === 0) {
+        // The typed text IS the brief. Mirror it into the drawer so drafts and the same-prompt
+        // guard can see it, then start the interview; the user bubble and the placeholder swap
+        // are handled once, by the shared start path.
+        $("#st-prompt").value = text;
+        saveDraft();
+        startIntakeWithDream(text, status);
+        return;
+      }
+      // During the interview, continue the conversation:
       if (state.mode === "beginner" && intake.vision && affirmative.test(text)) {
         const goal = intake.messages[0] ? intake.messages[0].content : $("#st-prompt").value.trim();
         const full = goal + "\n\nAGREED VISION (approved by the user; build exactly this):\n" + intake.vision;
@@ -1068,7 +1128,6 @@
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
     });
-    $("#st-continue").addEventListener("click", () => beginIntake(status));
     $("#st-chat-min").addEventListener("click", () => {
       const chat = $("#st-chat");
       chat.classList.toggle("min");
@@ -1108,6 +1167,8 @@
   async function startBuild(prompt, status) {
     const workspaceId = $("#st-ws").value;
     if (!workspaceId) { status("Pick or add a folder first.", true); return; }
+    if (nodePollingInterval) clearInterval(nodePollingInterval);
+    nodePollingInterval = 0;
     window.ideFlame.show();
     const go = $("#st-go");
     go.disabled = true;
@@ -1396,6 +1457,7 @@
     }
     // Restore draft if it exists.
     const draft = loadDraft();
+    let hasConversation = false;
     if (draft && draft.prompt) {
       // A prompt on its own restores the box and nothing else: no chat, no answer row, because no
       // conversation happened yet. A draft that carries messages IS a conversation, so its chat and
@@ -1404,6 +1466,7 @@
       if (draft.messages && draft.messages.length > 0) {
         intake.messages = draft.messages;
         intake.vision = draft.vision || null;
+        hasConversation = true;
         const log = $("#st-chat-log");
         if (log) {
           log.textContent = "";
@@ -1417,14 +1480,17 @@
             }
           }
         }
-        const chat = $("#st-chat");
-        if (chat) {
-          chat.hidden = false;
-          const chatRow = $("#st-chat-row");
-          if (chatRow) chatRow.hidden = false;
-        }
         const status = $("#st-status");
         if (status) status.textContent = L("draft_restored");
+        // A restored conversation is a running interview, so the chat input asks for an answer.
+        paintLexicon();
+      }
+    }
+    // Opening beat: if chat log is empty (no draft with messages), show the howdy bubble.
+    if (!hasConversation) {
+      const log = $("#st-chat-log");
+      if (log && log.textContent.trim() === "") {
+        chatBubble("ai", L("howdy"));
       }
     }
     // Paint from whatever is true right now. The panel is built lazily, so anything reconciled
@@ -1444,6 +1510,8 @@
   function closePanel() {
     if (!state.open) return;
     state.open = false;
+    if (nodePollingInterval) clearInterval(nodePollingInterval);
+    nodePollingInterval = 0;
     document.body.classList.remove("ide-open");
     // Keep the transform context alive until the travel finishes, then drop it so position:fixed
     // resolves normally again for the shell's own descendants.
