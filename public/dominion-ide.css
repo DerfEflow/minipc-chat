@@ -483,6 +483,47 @@ body.ide-open #ide-root { transform: none; }
   padding-right: 36px;
 }
 .ide-start textarea { width: 100%; resize: vertical; min-height: 66px; line-height: 1.55; }
+.st-prompt-wrap {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+#ide-root[data-mode="beginner"] .st-prompt-wrap textarea {
+  /* The button sits bottom:9 and stands 40 tall, so its top edge lands 49px up. The text band has
+     to clear that whole extent or a full box would tuck its last line under the button. Padding is
+     outside a textarea's scroll region, so this band stays text-free however much they type.
+     Beginner-scoped because only beginners have the button; other modes keep the full box. */
+  padding-bottom: 52px;
+}
+.st-continue {
+  position: absolute;
+  bottom: 9px;
+  right: 9px;
+  min-width: 40px;
+  min-height: 40px;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  padding: 8px 13px;
+  border-radius: 3px;
+  color: #eafff0;
+  border: 1px solid rgba(157, 255, 146, .5);
+  background: linear-gradient(145deg, rgba(38, 118, 44, .85), rgba(3, 30, 16, .95));
+  box-shadow: 0 0 16px rgba(100, 255, 90, .18), inset 0 1px 0 rgba(226, 255, 221, .25);
+  transition: border-color .16s ease, color .16s ease, box-shadow .16s ease, transform .12s ease;
+}
+.st-continue:hover {
+  border-color: rgba(118, 255, 104, .6);
+  box-shadow: 0 0 22px rgba(100, 255, 90, .28), inset 0 1px 0 rgba(226, 255, 221, .25);
+}
+.st-continue:active {
+  transform: translateY(1px);
+}
+.st-continue:disabled {
+  opacity: .5;
+  cursor: default;
+}
 .ide-start textarea::placeholder, .ide-start input::placeholder { color: #667784; }
 .ide-start .st-new { display: grid; gap: 8px; grid-template-columns: 2fr 1fr auto; }
 .ide-start button {
@@ -746,8 +787,13 @@ body.ide-open #ide-root { transform: none; }
 #ide-root[data-mode="vibe"] .st-lang { display: none; }
 #ide-root[data-mode="beginner"] .st-tools { display: none; }
 #ide-root[data-mode="beginner"] .ide-probe { display: none; }
+#ide-root[data-mode="beginner"] #dr-folder { display: none; }
 #ide-root[data-mode="beginner"] #st-chat-actions,
 #ide-root[data-mode="beginner"] #st-chat-skip { display: none; }
+#ide-root[data-mode="beginner"] #st-go { display: none; }
+/* The Continue button is the beginner's start control; other modes keep the Run button alone,
+   so nobody ever faces two buttons that do the same thing. */
+#ide-root:not([data-mode="beginner"]) .st-continue { display: none; }
 #ide-root[data-mode="vibe"] .st-tools-label { display: none; }
 #ide-root[data-mode="vibe"] #st-model-line { display: block; }
 .st-model-line { font-size: 12.5px; line-height: 1.6; color: var(--ink-soft, #d9c9b8); min-width: 0;

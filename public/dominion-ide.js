@@ -393,7 +393,7 @@
         '</div>' +
         '<div class="st-new" id="st-new" hidden>' +
           '<input id="st-new-path" type="text" autocomplete="off" spellcheck="false" />' +
-          '<input id="st-new-name" type="text" autocomplete="off" placeholder="Name (optional)" />' +
+          '<input id="st-new-name" type="text" autocomplete="off" />' +
           '<div class="st-new-btns">' +
             '<button type="button" id="st-browse" data-lex="browse_btn"></button>' +
             '<button type="button" id="st-new-go" data-lex="use_folder"></button>' +
@@ -403,23 +403,26 @@
       '</details>' +
       '<details class="st-drawer" id="dr-brief" open>' +
         '<summary data-lex="drawer_brief"></summary>' +
-        '<textarea id="st-prompt" rows="3"></textarea>' +
-      '<div class="st-chat" id="st-chat" hidden>' +
-        '<div class="st-chat-head">' +
-          '<span data-lex="intake_title"></span>' +
-          '<button type="button" id="st-chat-min" data-lex="intake_min"></button>' +
+        '<div class="st-prompt-wrap" id="st-prompt-wrap">' +
+          '<textarea id="st-prompt" rows="3"></textarea>' +
+          '<button type="button" id="st-continue" class="st-continue" data-lex="continue_btn"></button>' +
         '</div>' +
-        '<div class="st-chat-log" id="st-chat-log" aria-live="polite"></div>' +
-        '<div class="st-chat-row" id="st-chat-row">' +
-          '<textarea id="st-chat-in" rows="1"></textarea>' +
-          '<button type="button" id="st-chat-send" data-lex="intake_send"></button>' +
+        '<div class="st-chat" id="st-chat" hidden>' +
+          '<div class="st-chat-head">' +
+            '<span data-lex="intake_title"></span>' +
+            '<button type="button" id="st-chat-min" data-lex="intake_min"></button>' +
+          '</div>' +
+          '<div class="st-chat-log" id="st-chat-log" aria-live="polite"></div>' +
+          '<div class="st-chat-row" id="st-chat-row" hidden>' +
+            '<textarea id="st-chat-in" rows="1"></textarea>' +
+            '<button type="button" id="st-chat-send" data-lex="intake_send"></button>' +
+          '</div>' +
+          '<div class="st-chat-actions" id="st-chat-actions" hidden>' +
+            '<button type="button" id="st-chat-build" class="st-primary" data-lex="intake_build"></button>' +
+            '<button type="button" id="st-chat-more" data-lex="intake_more"></button>' +
+          '</div>' +
+          '<button type="button" id="st-chat-skip" class="st-link" data-lex="intake_skip"></button>' +
         '</div>' +
-        '<div class="st-chat-actions" id="st-chat-actions" hidden>' +
-          '<button type="button" id="st-chat-build" class="st-primary" data-lex="intake_build"></button>' +
-          '<button type="button" id="st-chat-more" data-lex="intake_more"></button>' +
-        '</div>' +
-        '<button type="button" id="st-chat-skip" class="st-link" data-lex="intake_skip"></button>' +
-      '</div>' +
       '</details>' +
       '<details class="st-drawer" id="dr-models" open>' +
         '<summary data-lex="drawer_models"></summary>' +
@@ -457,6 +460,8 @@
     if (prompt) prompt.placeholder = L("start_prompt_ph");
     const path = $("#st-new-path");
     if (path) path.placeholder = L("folder_ph");
+    const name = $("#st-new-name");
+    if (name) name.placeholder = L("st_name_ph");
     const chatIn = $("#st-chat-in");
     if (chatIn) chatIn.placeholder = L("intake_ph");
     const goBtn = $("#st-go");
@@ -499,48 +504,39 @@
 
   function wireStarter() {
     const status = (msg, bad) => { const el = $("#st-status"); if (el) { el.textContent = msg || ""; el.classList.toggle("bad", !!bad); } };
-
     $("#st-add").addEventListener("click", () => { const n = $("#st-new"); n.hidden = !n.hidden; if (!n.hidden) $("#st-new-path").focus(); });
-
     $("#st-lang").addEventListener("change", async () => {
       const reg = $("#st-lang").value;
       if (window.DominionLexicon) window.DominionLexicon.set(reg);
       paintLexicon();
-      // The server phrases its own sentences (questions, endings), so it needs the choice too.
-      try {
-        await fetch("/ide/prefs", { method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ engaged: state.engaged, language: reg }) });
-      } catch {}
+      try { await fetch("/ide/prefs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engaged: state.engaged, language: reg }) }); } catch {}
     });
-
     $("#st-new-go").addEventListener("click", async () => {
       // The server strips wrapping quotes too, but doing it here keeps the visible field honest.
+      // Smart quotes included: phones curl pasted quotes automatically.
       const root = $("#st-new-path").value.trim().replace(/^["'“”]+|["'“”]+$/g, "").trim();
       const name = $("#st-new-name").value.trim();
-      if (!root) { status("Type the folder path first.", true); return; }
+      if (!root) { status(L("type_path_first"), true); return; }
       try {
-        const r = await fetch("/ide/workspace", { method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name, root }) });
+        const r = await fetch("/ide/workspace", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, root }) });
         const j = await r.json();
         if (!r.ok || j.error) { status(j.error || "That folder could not be added.", true); return; }
         state.workspaces.push(j.workspace);
         state.workspaceId = j.workspace.id;
         renderStarter();
         $("#st-new").hidden = true;
-        $("#st-new-path").value = ""; $("#st-new-name").value = "";
-        status("Folder added.");
+        $("#st-new-path").value = "";
+        $("#st-new-name").value = "";
+        status(L("folder_saved"));
         document.dispatchEvent(new CustomEvent("dominion-ide-workspace"));
       } catch { status("The server could not be reached.", true); }
     });
-
     wireBrowse(status);
     wireTools();
     wireIntake(status);
-
     for (const b of document.querySelectorAll("#st-mode-switch button")) {
       b.addEventListener("click", () => applyMode(b.dataset.mode));
     }
-
     $("#st-go").addEventListener("click", () => beginIntake(status));
   }
 
@@ -874,6 +870,10 @@
     if (intake.busy) return;
     intake.busy = true;
     window.ideFlame.show();
+    const chat = $("#st-chat");
+    const chatRow = $("#st-chat-row");
+    const chatLog = $("#st-chat-log");
+    const isFirstMessage = chat.hidden;   // still hidden = no AI reply has revealed it yet
     const thinking = chatBubble("ai", L("intake_thinking"));
     thinking.classList.add("cb-thinking");
     let j = null;
@@ -899,14 +899,18 @@
       + (j.mockups || []).map((m) => "MOCKUP: " + m + "\n").join("")
       + (j.vision ? "VISION READY\n" + j.vision : "") });
     saveDraft();
+    if (isFirstMessage) {
+      chat.hidden = false;
+      chat.classList.remove("min");
+      chatRow.hidden = false;
+      chatBubble("user", intake.messages[0].content);
+    }
     if (j.reply) chatBubble("ai", j.reply);
     for (const m of (j.mockups || [])) renderMockup(m);
     if (j.vision) {
       intake.vision = j.vision;
       visionCard(j.vision);
       saveDraft();
-      // Honesty before the button: what this vision actually involves, and the price band.
-      // Beginners hear these facts later, at the deploy talk, in gentler words.
       if (j.involves && state.mode !== "beginner") renderInvolves(j.involves);
       $("#st-chat-actions").hidden = false;
       document.dispatchEvent(new CustomEvent("dominion-ide-vision"));
@@ -996,25 +1000,43 @@
   }
 
   function beginIntake(status) {
-    const workspaceId = $("#st-ws").value;
+    let workspaceId = $("#st-ws").value;
     const prompt = $("#st-prompt").value.trim();
-    if (!workspaceId) { status("Pick or add a folder first.", true); return; }
     if (!prompt) { status("Say what you want built.", true); return; }
+    if (!workspaceId && state.mode === "beginner") {
+      window.ideFlame.show(L("auto_home_working"));
+      fetch("/ide/workspace/auto", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ hint: prompt }) })
+        .then(r => r.json())
+        .then(j => {
+          window.ideFlame.hide();
+          if (j.error) { status(j.error, true); return; }
+          if (j.ok && j.workspace) {
+            state.workspaces.push(j.workspace);
+            state.workspaceId = j.workspace.id;
+            workspaceId = j.workspace.id;
+            renderStarter();
+            continueIntakeWithPrompt(prompt, status);
+          }
+        })
+        .catch(e => { window.ideFlame.hide(); status(friendlyError(e), true); });
+      return;
+    }
+    if (!workspaceId) { status(L("pick_folder_first"), true); return; }
     status("");
+    continueIntakeWithPrompt(prompt, status);
+  }
+
+  function continueIntakeWithPrompt(prompt, status) {
     if (intake.messages.length > 0 && intake.messages[0].content === prompt) {
-      const chat = $("#st-chat");
-      chat.hidden = false;
       return;
     }
     intake.messages = [{ role: "user", content: prompt }];
     intake.vision = null;
     $("#st-chat-actions").hidden = true;
     $("#st-chat-log").textContent = "";
-    const chat = $("#st-chat");
-    chat.hidden = false;
-    chat.classList.remove("min");
     $("#st-go").disabled = true;
-    chatBubble("user", prompt);
+    status("");
     saveDraft();
     intakeTurn(status);
   }
@@ -1046,6 +1068,7 @@
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
     });
+    $("#st-continue").addEventListener("click", () => beginIntake(status));
     $("#st-chat-min").addEventListener("click", () => {
       const chat = $("#st-chat");
       chat.classList.toggle("min");
@@ -1373,27 +1396,36 @@
     }
     // Restore draft if it exists.
     const draft = loadDraft();
-    if (draft && draft.prompt && draft.messages && draft.messages.length > 0) {
+    if (draft && draft.prompt) {
+      // A prompt on its own restores the box and nothing else: no chat, no answer row, because no
+      // conversation happened yet. A draft that carries messages IS a conversation, so its chat and
+      // its answer row both come back.
       $("#st-prompt").value = draft.prompt;
-      intake.messages = draft.messages;
-      intake.vision = draft.vision || null;
-      const log = $("#st-chat-log");
-      if (log) {
-        log.textContent = "";
-        for (const msg of draft.messages) {
-          if (msg.role === "user") {
-            chatBubble("user", msg.content);
-          } else if (msg.role === "assistant") {
-            const before = msg.content.split("VISION READY\n");
-            if (before[0]) chatBubble("ai", before[0].replace(/MOCKUP: .+\n/g, ""));
-            if (before[1] && intake.vision) visionCard(intake.vision);
+      if (draft.messages && draft.messages.length > 0) {
+        intake.messages = draft.messages;
+        intake.vision = draft.vision || null;
+        const log = $("#st-chat-log");
+        if (log) {
+          log.textContent = "";
+          for (const msg of draft.messages) {
+            if (msg.role === "user") {
+              chatBubble("user", msg.content);
+            } else if (msg.role === "assistant") {
+              const before = msg.content.split("VISION READY\n");
+              if (before[0]) chatBubble("ai", before[0].replace(/MOCKUP: .+\n/g, ""));
+              if (before[1] && intake.vision) visionCard(intake.vision);
+            }
           }
         }
+        const chat = $("#st-chat");
+        if (chat) {
+          chat.hidden = false;
+          const chatRow = $("#st-chat-row");
+          if (chatRow) chatRow.hidden = false;
+        }
+        const status = $("#st-status");
+        if (status) status.textContent = L("draft_restored");
       }
-      const chat = $("#st-chat");
-      if (chat) chat.hidden = false;
-      const status = $("#st-status");
-      if (status) status.textContent = L("draft_restored");
     }
     // Paint from whatever is true right now. The panel is built lazily, so anything reconciled
     // while it did not exist (a question that arrived while the works were closed) has to be

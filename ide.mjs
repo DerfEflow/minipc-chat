@@ -29,6 +29,40 @@ export const MAX_NAME = 80;
 export const MAX_ROOT = 400;
 
 /*
+ * Convert a free-text app description into a clean folder-safe workspace name.
+ * Strips everything except letters, digits and spaces, Title Cases the words, collapses whitespace,
+ * takes at most 40 characters ending on a word boundary, and falls back to "My First App" when
+ * nothing survives. No date or random calls.
+ */
+export function autoWorkspaceName(hint) {
+  // Strip everything except letters, digits, and spaces
+  let cleaned = String(hint || "").replace(/[^a-zA-Z0-9\s]/g, "").trim();
+
+  // Collapse whitespace
+  cleaned = cleaned.replace(/\s+/g, " ");
+
+  // Title case the words
+  let titled = cleaned
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
+
+  // Take at most 40 characters ending on a word boundary
+  if (titled.length > 40) {
+    titled = titled.slice(0, 40);
+    // Find the last space to end on a word boundary
+    const lastSpace = titled.lastIndexOf(" ");
+    if (lastSpace > 0) {
+      titled = titled.slice(0, lastSpace);
+    }
+  }
+
+  // Fall back to "My First App" when nothing survives
+  return titled || "My First App";
+}
+
+/*
  * Parse an IDE_MODE value into a gate.
  *   "owner" (default): Fred only
  *   "all" | "1":      every signed-in user (anon is never allowed)
@@ -328,6 +362,16 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       const blocked = wall(T); if (blocked) return blocked;
       const r = storeFor(T).remove(body && body.id);
       if (r.error) return { status: 404, code: r.code, body: r };
+      return ok(r);
+    },
+
+    autoWorkspace(T, { root, name } = {}) {
+      const blocked = wall(T); if (blocked) return blocked;
+      const r = storeFor(T).create({
+        name: name, root: root,
+      });
+      if (r.error) return { status: 400, code: r.code, body: r };
+      log("[ide] workspace auto-created " + r.workspace.id + " for " + (T.uid || "owner"));
       return ok(r);
     },
 

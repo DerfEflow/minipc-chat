@@ -141,12 +141,14 @@
     const mode = root ? root.dataset.mode : "beginner";
 
     const baseSteps = [
-      { target: "#st-ws-row", t: "tour_s2_t", b: "tour_s2_b" },
       { target: "#st-prompt", t: "tour_s3_t", b: "tour_s3_b" },
-      { target: "#st-go", t: "tour_s5_t", b: "tour_s5_b" },
+      // Beginners never touch #st-go: their Continue button inside the brief starts the flow,
+      // so the last step points there. Every other mode keeps the primary Run button.
+      { target: mode === "beginner" ? "#st-continue" : "#st-go", t: "tour_s5_t", b: "tour_s5_b" },
     ];
 
     if (mode === "vibe") {
+      baseSteps.unshift({ target: "#st-ws-row", t: "tour_s2_t", b: "tour_s2_b" });
       baseSteps.splice(2, 0, { target: "#st-tools", t: "tour_s4_t", b: "tour_s4_b" });
     }
 
@@ -208,11 +210,17 @@
    */
   function beginGuide() {
     stepIndex = -1;
-    const stages = [
-      { target: "#st-ws-row", text: "tour_go_folder", done: () => { const s = $("#st-ws"); return !!(s && s.value); } },
-      { target: "#st-prompt", text: "tour_go_prompt", done: () => { const p = $("#st-prompt"); return !!(p && p.value.trim()); } },
-      { target: "#st-go", text: "tour_go_start", done: () => false },   // advanced by the build-started event
-    ];
+    const root = document.getElementById("ide-root");
+    const mode = root ? root.dataset.mode : "beginner";
+    const stages = [];
+
+    if (mode === "vibe") {
+      stages.push({ target: "#st-ws-row", text: "tour_go_folder", done: () => { const s = $("#st-ws"); return !!(s && s.value); } });
+    }
+    stages.push({ target: "#st-prompt", text: "tour_go_prompt", done: () => { const p = $("#st-prompt"); return !!(p && p.value.trim()); } });
+    // Beginners tap Continue inside the brief; every other mode taps the primary Run button.
+    stages.push({ target: mode === "beginner" ? "#st-continue" : "#st-go", text: "tour_go_start", done: () => false });   // advanced by the build-started event
+
     let g = 0;
     while (g < stages.length - 1 && stages[g].done()) g++;
     const point = () => {

@@ -53,6 +53,11 @@ const D = {
     technical: "No hands node connected. Start the node on the target machine and rerun.",
     hybrid: "No hands node (the small Dominion helper program on your computer) is connected. Start it on the machine holding this project, then rerun.",
   },
+  auto_home_fail: {
+    plain: "I could not make a home for your app on the computer. Make sure the Dominion helper is running there, then try again.",
+    technical: "Auto-workspace creation failed on the node.",
+    hybrid: "Could not create the workspace (the app's home folder) on the build machine. Check the node and retry.",
+  },
   build_done: {
     plain: "Build complete.",
     technical: "Build complete.",

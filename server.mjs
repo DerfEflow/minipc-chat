@@ -61,7 +61,7 @@ import { createBilling, creditsForUsd } from "./billing.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore } from "./forge.mjs";
-import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT } from "./ide.mjs";
+import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs } from "./idejobs.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES } from "./ideengine.mjs";
 import { routeMove, resolveAssignments } from "./iderouter.mjs";
@@ -1205,6 +1205,79 @@ async function handleIde(req, res, u) {
   if (req.method === "POST" && path === "/ide/prefs") return send(ideFeature.setPrefs(T, body));
   if (req.method === "POST" && path === "/ide/route/preview") return send(ideFeature.previewRoute(T, body));
   if (req.method === "POST" && path === "/ide/workspace") return send(ideFeature.createWorkspace(T, body));
+  if (req.method === "POST" && path === "/ide/workspace/auto") {
+    const blocked = ideFeature.wall(T);
+    if (blocked) return send(blocked);
+    const hint = String(body.hint || "");
+    const handsFor = ideHandsFor(T);
+    try {
+      const reg = normalizeRegister((ideFeature.state(T).body.prefs || {}).language);
+      // Probe that the build machine is reachable. An unreachable node THROWS from the
+      // dispatcher, so the probe must be caught here or a beginner sees a raw exception
+      // string. The offline flag is the client's cue to explain the helper install.
+      let probe = null;
+      try { probe = await handsFor("node_info", {}); } catch { probe = null; }
+      if (!probe || probe.ok === false) {
+        return send({ status: 200, body: { error: phrase("no_node", reg), offline: true } });
+      }
+
+      // Get the home directory from the build machine
+      let home = "";
+      try {
+        const homeResult = await handsFor("shell_run", { command: "$env:USERPROFILE", timeoutMs: 5000 });
+        if (homeResult && homeResult.ok && homeResult.stdout) {
+          home = String(homeResult.stdout).trim();
+        }
+      } catch {}
+
+      // Fallback: get first drive via fs_browse. The node returns drives as {name, path} rows.
+      if (!home) {
+        try {
+          const drives = await handsFor("fs_browse", { path: "" });
+          if (drives && drives.ok && Array.isArray(drives.dirs) && drives.dirs.length > 0) {
+            const first = drives.dirs[0];
+            const drivePath = String((first && (first.path || first.name)) || "").trim();
+            if (drivePath) {
+              const sep = drivePath.endsWith("\\") ? "" : "\\";
+              home = drivePath + sep + "Users\\Public";
+            }
+          }
+        } catch {}
+      }
+
+      // If still no home, give up gracefully
+      if (!home) {
+        return send({ status: 200, body: { error: phrase("auto_home_fail", reg) } });
+      }
+
+      // Compose the workspace root
+      const cleanName = autoWorkspaceName(hint);
+      const root = home + "\\Dominion Apps\\" + cleanName;
+
+      // Check if a workspace with this root already exists (case-insensitive)
+      const store = ideStoreFor(T);
+      const existing = store.list().find(w => w.root.toLowerCase() === root.toLowerCase());
+      if (existing) {
+        // Reuse the existing workspace
+        return send({ status: 200, body: { ok: true, workspace: existing } });
+      }
+
+      // Create the directory
+      try {
+        await handsFor("shell_run", {
+          command: `New-Item -ItemType Directory -Force -Path '${root.replace(/'/g, "''")}'`,
+          timeoutMs: 10000
+        });
+      } catch {
+        return send({ status: 200, body: { error: phrase("auto_home_fail", reg) } });
+      }
+
+      // Create the workspace through the feature
+      return send(ideFeature.autoWorkspace(T, { root, name: cleanName }));
+    } catch (e) {
+      return send({ status: 200, body: { error: String((e && e.message) || e).slice(0, 300) } });
+    }
+  }
   if (req.method === "POST" && path === "/ide/workspace/update") return send(ideFeature.updateWorkspace(T, body));
   if (req.method === "POST" && path === "/ide/workspace/delete") return send(ideFeature.removeWorkspace(T, body));
   if (req.method === "POST" && path === "/ide/job/stop") return send(ideFeature.stopJob(T, body));

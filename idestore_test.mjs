@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createIdeGate, createIdeStore, createIdeFeature, MAX_WORKSPACES } from "./ide.mjs";
+import { createIdeGate, createIdeStore, createIdeFeature, MAX_WORKSPACES, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs } from "./idejobs.mjs";
 import { isProtectedPath } from "./tools.mjs";
 
@@ -102,6 +102,28 @@ await t("prefs persist across a reopen, and a corrupt state file is quarantined 
   assert.deepEqual(s2.list(), []);
   assert.ok(existsSync(s1.file + ".bad"), "the corrupt bytes are kept for inspection, never destroyed");
   assert.match(readFileSync(s1.file + ".bad", "utf8"), /not json/);
+});
+
+/* ---- autoWorkspaceName ----------------------------------------------------------------- */
+await t("autoWorkspaceName converts a normal sentence into Title Case with no punctuation", () => {
+  const result = autoWorkspaceName("a page where my grandkids check off chores!!");
+  assert.match(result, /^[A-Z]/);
+  assert.ok(!result.match(/[!?.,;:]/), "should have no punctuation");
+  assert.ok(result.split(" ").every(w => /^[A-Z]/.test(w)), "all words should be Title Cased");
+});
+
+await t("autoWorkspaceName clips a 200-character ramble to 40 chars or less ending on a word boundary", () => {
+  const ramble = "a " + "very ".repeat(50) + "long text";
+  const result = autoWorkspaceName(ramble);
+  assert.ok(result.length <= 40, `result "${result}" should be 40 chars or less, got ${result.length}`);
+  assert.ok(!result.endsWith(" "), "should not end with a space");
+  assert.ok(result.indexOf(" ") > 0, "should have at least one space (word boundary)");
+});
+
+await t("autoWorkspaceName falls back to 'My First App' for emoji-only input", () => {
+  assert.equal(autoWorkspaceName("😀😀😀"), "My First App");
+  assert.equal(autoWorkspaceName(""), "My First App");
+  assert.equal(autoWorkspaceName("   "), "My First App");
 });
 
 /* ---- the HTTP gate stack ---------------------------------------------------------------- */

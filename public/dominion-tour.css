@@ -74,11 +74,11 @@
   content: "";
   position: absolute;
   left: var(--ax, 24px);
-  top: -7px;
-  width: 14px;
-  height: 14px;
+  top: -9px;
+  width: 18px;
+  height: 18px;
   background: inherit;
-  border: inherit;
+  border: 2px solid rgba(212, 130, 60, 1);
   border-right: none;
   border-bottom: none;
   transform: translateX(-50%) rotate(45deg);
@@ -86,7 +86,7 @@
 
 #ide-root .ide-tour-pop.above::before {
   top: auto;
-  bottom: -7px;
+  bottom: -9px;
   transform: translateX(-50%) rotate(225deg);
 }
 
@@ -159,9 +159,10 @@
 }
 
 #ide-root .tour-hi {
-  outline: 1px solid rgba(118, 255, 104, 0.55);
+  outline: 2px solid rgba(212, 130, 60, 1);
   outline-offset: 3px;
   border-radius: 3px;
+  box-shadow: 0 0 0 4px rgba(212, 130, 60, 0.25), 0 0 24px rgba(212, 130, 60, 0.45);
 }
 
 #ide-root .tour-lift {

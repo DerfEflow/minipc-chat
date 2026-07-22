@@ -26,8 +26,8 @@
     ],
     start_go: ["Start the build", "Run build", "Run build (start it)"],
     add_folder: ["Add a folder", "Add workspace", "Add workspace (a project folder)"],
-    use_folder: ["Use this folder", "Register workspace", "Register (use this folder)"],
-    folder_ph: ["Full folder path, for example C:\\Projects\\my-app", "Workspace root path", "Workspace root (the project folder's full path)"],
+    use_folder: ["Save this folder", "Register workspace", "Register (save this folder)"],
+    folder_ph: ["The folder's address, for example C:\\Apps\\MyApp", "Workspace root path", "Workspace root (the folder's full address)"],
     no_folder_yet: ["No folder yet. Add one.", "No workspace registered.", "No workspace (project folder) yet. Add one."],
     lang_label: ["How should Dominion talk to you?", "Terminology register", "Terminology register (how Dominion talks to you)"],
     lang_plain: ["Plain English", "Plain English", "Plain English"],
@@ -104,10 +104,43 @@
     publish_show: ["Show me what that involves", "Details", "Details (what deploying involves)"],
     publish_later: ["Later", "Dismiss", "Dismiss (maybe later)"],
 
+    // ---- iteration 2.3: the beginner's front door (Fred's beginner roleplay, 2026-07-22) ----
+    continue_btn: ["Continue", "Continue", "Continue"],
+    auto_home_working: ["Making a home for your app...", "Creating workspace...", "Creating a workspace (a home folder for your app)..."],
+    st_name_ph: ["What should we call this app? (you can skip this)", "Name (optional)", "Name (optional; used for the workspace label)"],
+    folder_saved: ["Saved. Your app will live there.", "Workspace registered.", "Workspace registered (your app will live there)."],
+    pick_folder_first: ["Pick a folder first, or tap Browse my computer.", "Select a workspace first.", "Select a workspace (a project folder) first."],
+    type_path_first: ["Tap Browse my computer, or paste the folder's address here first.", "Enter the workspace root path first.", "Enter the workspace root (the folder's full address) first."],
+
+    // ---- the conversation surface (Fred's ruling 2026-07-22: the conversation IS the surface).
+    // The beginner journey opens with canned beats in the owner's voice: zero model spend until
+    // the user actually answers. Order per register: [plain, technical, hybrid]. ----------------
+    howdy: [
+      "Howdy! What can I help you build?",
+      "Ready. Describe the build.",
+      "Ready when you are. Tell me what you want built and I will scope it with you.",
+    ],
+    dream_ph: ["Tell me what you're dreaming up...", "Describe the target...", "Describe what you want built..."],
+    node_offline_explain: [
+      "One thing before we start. I need somewhere to keep your app while we work on it, and this app uses YOUR computer for that. If you are reading this on your phone, go turn your computer on, open a web browser there, and type in app.dominion.tools. Install this same app on the computer. Once that is done, the two of them talk to each other, and you can build from anywhere, even right here on your phone. Let me know when it is set up. And if you get stuck, just ask me for help.",
+      "No build node connected. Install the app from app.dominion.tools on the machine that should host the workspace; the node pairs automatically and this session detects it.",
+      "No build machine is connected yet. Your apps are stored on your own computer (the build node). On that computer, open app.dominion.tools in a browser and install this app; it pairs automatically and I will pick this up the moment it connects.",
+    ],
+    node_watching: [
+      "I'll keep an eye out for your computer. Take your time.",
+      "Polling for node...",
+      "Watching for the node (your computer) to connect...",
+    ],
+    node_connected_celebrate: [
+      "OK, I see you got my buddy all set up on the computer. And while you were doing that, we already had a conversation, and we have decided we like you. Now, where were we...",
+      "Build node connected. Resuming.",
+      "Build node connected (your computer and this app are talking now). Picking up right where we left off.",
+    ],
+
     // ---- the folder picker --------------------------------------------------------------------
     browse_btn: ["Browse my computer", "Browse", "Browse (pick from your computer's folders)"],
-    browse_up: ["Back up one level", "Up", "Up (back one level)"],
-    browse_here: ["Build in this folder", "Select this folder", "Select (build in this folder)"],
+    browse_up: ["Go back", "Up", "Up (go back one folder)"],
+    browse_here: ["Put my app here", "Select this folder", "Select (put the app here)"],
     browse_empty: ["Nothing inside this folder yet. You can still build here.", "Empty directory.", "Empty directory (nothing inside; you can still build here)."],
     browse_loading: ["Looking...", "Listing...", "Listing (looking inside)..."],
 
@@ -152,7 +185,7 @@
     ],
     tour_s3_t: ["Say what you want", "The brief", "The brief (say what you want)"],
     tour_s3_b: [
-      "Describe the app in your own words. Dominion will then ask you a few questions, one at a time, and show you exactly what it plans to build before it starts. Nothing is spent until you approve.",
+      "Type what you want to make in your own words, then tap Continue. Dominion will ask you a few easy questions, one at a time, and show you its plan before anything starts.",
       "Describe the target. An intake pass interviews you, then presents the agreed scope for approval before any spend.",
       "Describe the app in your own words. An intake pass (a short interview) follows, and the agreed scope is shown for approval before any spend.",
     ],
@@ -254,7 +287,7 @@
       "Build started. Job persists server-side; notifications on input requests.",
       "Build started; the job (running build) persists even if you leave, and I'll call you if I need you.",
     ],
-    start_talk: ["Talk it through with Dominion", "Begin intake", "Begin intake (talk it through)"],
+    start_talk: ["Continue", "Begin intake", "Begin intake (continue)"],
     draft_restored: [
       "Picked up right where you left off.",
       "Draft restored.",
