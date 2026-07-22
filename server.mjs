@@ -2279,7 +2279,7 @@ function machinesBlock(T) {
   try { info = (typeof handsHub.nodeInfo === "function" ? handsHub.nodeInfo() : {}) || {}; } catch { info = {}; }
   const mine = Object.keys(info).filter((n) => (T && T.isOwner) ? !n.startsWith("user:") : n === `user:${T && T.uid}`);
   const head = "\n\nENVIRONMENT (read from the machines themselves, live this turn):\n" +
-    "You run in the cloud. You have NO filesystem of your own beyond your private sandbox — every real file lives on a machine you reach through a connected node. ";
+    "You run in the cloud. You have NO filesystem of your own beyond your private sandbox: every real file lives on a machine you reach through a connected node. ";
   if (!mine.length) {
     return head + "RIGHT NOW NO MACHINE IS CONNECTED, so file and command tools will fail until one reconnects. Say that plainly instead of guessing at paths.";
   }
@@ -2300,7 +2300,7 @@ function machinesBlock(T) {
   return head + "The machines connected right now:\n" + lines.join("\n") +
     (unique.length ? `\nA drive letter that exists on only one machine IS the address of that machine: ${unique.join(", ")}. Paths on those drives route themselves; you do not need to ask which machine.` : "") +
     (shared.length ? ` ${shared.join(" and ")} exists on more than one machine, so when a request touches it, say which machine you mean or ask.` : "") +
-    "\nD:\\ is the backup SSD and is permanently walled off on every machine; never plan work that touches it. Never claim a path does not exist because it is not on the machine you happen to be thinking of — check the map above first. When you finish a tool action, name the machine you acted on.";
+    "\nD:\\ is the backup SSD and is permanently walled off on every machine; never plan work that touches it. Never claim a path does not exist because it is not on the machine you happen to be thinking of; check the map above first. When you finish a tool action, name the machine you acted on.";
 }
 
 function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true, machines = "" } = {}) {
@@ -2310,7 +2310,7 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
   // it cannot use), and it muddies pure voice work besides.
   let s = withTools ? [
     "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is " + new Date().toISOString().slice(0, 10) + ".",
-    "You have real tools (hands) that reach his actual machines — the ENVIRONMENT block below says which. Use them when they help —",
+    "You have real tools (hands) that reach his actual machines; the ENVIRONMENT block below says which. Use them when they help,",
     "don't just describe what could be done; do it. Prefer reading current state (e.g. deck_list_projects,",
     "forge_read) before acting so you work from facts, not guesses.",
     "Keep replies concise and direct. Don't fabricate file contents, project ids, or results — read them.",
