@@ -258,3 +258,38 @@ Fixes shipped (cache v89-furnace, commits 2dd9282 + caa3696 + d34b376):
 Verified in dev browser at 412: width clean, drafts round-trip, compact picker + lock, no
 stale publish, per-mode tour with veil, log panel rows, flame API. Motion feel and the full
 beginner mockup round remain Fred's phone items. Suite 48/50 (two known pre-existing).
+
+## Overnight run 2026-07-22 (three waves, all crew-built: Haiku writers, Opus reviewers, Fable engine work + final pass)
+
+Shipped v93-conversation-surface (commits f873f54 + 5c5f790, live, byte-verified):
+- Iteration 2.3 beginner door: POST /ide/workspace/auto (home = $env:USERPROFILE, "Dominion
+  Apps\<Title Cased Name>", reuse on collision, register-dictionary failures, offline flag),
+  autoWorkspaceName pure + tested, chat revealed on first AI reply, plain-English relabels.
+- Iteration 3, the conversation IS the surface: chat always visible, canned Howdy in register,
+  dream typed in the chat; beginner sees NO drawers (chat fills, 58vh); vibe chat above the
+  full drawer set; engineer drawers first, chat under; /ide/intake works with no workspace so
+  the interview runs before a computer is connected; GET /ide/node; offline install script
+  (canned, app.dominion.tools), 20s poll for as long as the panel is open, celebration line,
+  never re-asks the dream; workspace auto-creates silently for beginner+vibe; Continue button
+  retired everywhere; tour points beginners at the conversation.
+
+Shipped v94-af-window (commit 0879359, live):
+- AF window (vibe+engineer): rows Task/Model/Number, plus sign, default template (divide w/
+  contracts, 5 workers, reviewer, QC), persists at assignments.af per workspace.
+- ideaf.mjs (classification, divider format, parser with path guards, referee reporting every
+  colliding pair, afAssignFor) + ideafrun.mjs (relay plan moves, write-time cookie rule).
+- Engine relay in runIdeBuild: parallel worker MODEL CALLS, sequential writes (one snapshot,
+  staged verifies), referee refuses overlaps with one redo then finishes honest (af_refused),
+  reviewer per part vs contract, QC on the seams, budget freeze before the batch, failed parts
+  fork to the user, Furnace still ends every AF build. Small asks skip the crew (af_small).
+- Crew defects caught this run: divider CONTRACT lines overwrote instead of accumulating
+  (Fable), triple-claim overlap missed the (2,3) pair (Opus), AF card grid mis-tracked (Opus),
+  1s/60-poll node watch instead of 20s/unbounded (Fable), engineer pointed at Continue (Fable).
+
+Ledger adds:
+- L-13: post-build arc beats (asks if happy, conversational deploy explainer) still live in the
+  publish modal, never in the chat; Fred's arc wants them conversational after the build too.
+- L-14: AF pipeline has no live end-to-end run yet (unit + round-trip proven; first real AF
+  build should be watched).
+- Fred phone pass pending on ALL of tonight: beginner Howdy flow, vibe/engineer layouts, AF
+  window, at 412/320.
