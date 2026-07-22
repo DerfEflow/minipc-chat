@@ -952,6 +952,18 @@ function processEvent(st, ev) {
     note.textContent = (ev.kind === "nudge" ? "🔥 " : "⚠ ") + (ev.text || "");
     inner.insertBefore(note, tools);
     scroll();
+  } else if (ev.type === "disarmed") {
+    /*
+     * The turn asked for machine work while something had already removed the tools. This exists
+     * because "As Fred" mode sat in the dropdown for weeks, silently stripping tools from every
+     * turn on every device, and the app never once said so. A setting that takes away the app's
+     * hands has to admit it at the exact moment you reach for them.
+     */
+    const note = document.createElement("div");
+    note.className = "ctx wildfire-note wildfire-blocked";
+    note.textContent = "⚠ " + (ev.text || "");
+    inner.insertBefore(note, tools);
+    scroll();
   } else if (ev.type === "tools_capped") {
     // The 128-tool ceiling silently shed connector tools for months. Never again silently.
     // The headline stays in plain sight; the raw tool identifiers fold behind a tap so a list

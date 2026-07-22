@@ -4018,6 +4018,29 @@ async function handleChat(req, res) {
   if (cloudModel && !isToolCapable(cloudModel)) { attachTools = false; }
 
   /*
+   * THE SILENT-DISARM GUARD (2026-07-22).
+   *
+   * Fred spent six sessions convinced his machines were unreachable. They were not. His Operating
+   * mode dropdown was left on "As Fred", which is deliberately tool-less (his own instruction: the
+   * voice model must not get tools), and that setting is remembered in localStorage forever. So
+   * EVERY turn arrived with tools already stripped, on every device, and nothing anywhere said so.
+   * The models, given no tools, correctly reported that they could not reach anything, and that
+   * read exactly like broken wiring.
+   *
+   * Any state that silently removes the app's hands has to announce itself the moment the user asks
+   * for hands. Same doctrine as the Wildfire notices: loud beats silent, always.
+   */
+  if (!attachTools && MACHINE_INTENT_RE.test(lastUserText)) {
+    const why = mode === "as_fred"
+      ? 'the Operating mode is set to "As Fred", which runs without tools on purpose so the voice stays pure. Switch Operating mode to Auto (or anything except As Fred) and ask again.'
+      : (cloudModel && !isToolCapable(cloudModel))
+        ? `the selected model (${modelById(cloudModel)?.name || cloudModel}) cannot use tools at all. Pick a model with the TOOLS badge.`
+        : "this turn was routed without tools.";
+    sse({ type: "disarmed", mode, model: cloudModel || "", text: `Heads up: that asks for real work on a machine, but ${why}` });
+    console.log(`[dominion-ai] silent-disarm guard fired: mode=${mode} model=${cloudModel || "(local)"} — machine intent with tools off`);
+  }
+
+  /*
    * WILDFIRE (Fred, 2026-07-19) — the owner's broad-authority arming switch.
    *
    * Deliberately SEPARATE from Forge Mode. Forge Mode stays exactly as it was, for everyone, on
