@@ -4905,6 +4905,34 @@ const server = http.createServer(async (req, res) => {
      * path through the SAME ollamaChat()/embedText() the app uses, without faking owner auth under CF
      * Access enforce. Also a standing probe that Qwen is reachable from the cloud.
      */
+    /*
+     * Route self-test: prove a path reaches the machine that actually owns it.
+     *
+     * This exists because the failure it guards is invisible from outside. Dispatch used to fall
+     * back to the freshest-heartbeat node, so a request for F:\ landed on the mini-PC about half
+     * the time and came back "outside allowed roots" — indistinguishable from a real permission
+     * problem. This calls the SAME wrapper the tool layer calls (CTX.hands.dispatch, with no
+     * preferred node), so a green result means the auto-routing is genuinely working, not that a
+     * test happened to name the right machine.
+     */
+    if (path === "/hands/selftest-route" && req.method === "GET") {
+      if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }
+      const probe = String(u.searchParams.get("path") || "");
+      if (!probe) { res.writeHead(400, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "path required" })); }
+      const t0 = Date.now();
+      const expected = (typeof handsHub.nodeForPath === "function" ? handsHub.nodeForPath(probe) : "") || "";
+      let ran = null, ok = false, error = null;
+      try {
+        // node_info names the machine that executed it — the only answer that cannot be faked by
+        // the caller, since it comes back from the node itself.
+        const r = await CTX.hands.dispatch("node_info", { path: probe }, { timeoutMs: 25000 });
+        ok = !!(r && r.ok);
+        ran = (r && r.result && (r.result.node || r.result.name)) || (r && r.node) || null;
+        if (!ok) error = (r && (r.error || r.reason)) || "dispatch failed";
+      } catch (e) { error = String(e && e.message || e); }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({ probe, expectedNode: expected, ranOn: ran, ok, match: !!ran && !!expected && ran === expected, error, ms: Date.now() - t0 }));
+    }
     if (path === "/hands/selftest-ollama" && req.method === "GET") {
       if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }
       const t0 = Date.now();
