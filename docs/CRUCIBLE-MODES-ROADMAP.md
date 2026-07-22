@@ -146,3 +146,38 @@ The Crucible's differentiator is therefore:
    journal remain the spine; no move is fire-and-forget.
 4. TEACHING COMMUNICATION: every stage explains what just happened and what happens next, at
    the mode's register and level; the app should leave the user more capable than it found them.
+
+## AF: the Agentic Workflow window (Fred's design 2026-07-22, APPROVED to build after the v89 phone pass)
+
+An AF button beside the model line (vibe) and in the Assignments drawer (engineer), never for
+beginners. Opens a glass panel of rows, plus sign beneath to add more, three headed columns:
+Task (free text, no dropdown) / Model / Number. Default template prefills Fred's pipeline:
+
+| Task | Model | Number |
+| --- | --- | --- |
+| Divide the work and write the contracts | A | 1 |
+| Build the parts, one agent per part | B | 5 |
+| Review and fix each finished part | C | 1 |
+| Final quality check of the whole | A | 1 |
+
+LAWS (Fred's rulings, non-negotiable):
+1. The cookie rule: no two agents ever touch the same chunk. The divider grants each worker
+   EXCLUSIVE ownership of named files, and the orchestrator verifies disjointness in CODE and
+   refuses overlaps before any worker starts. The guardrail is a referee, never a promise.
+2. One model per line item in the task list: cohesion of voice within each piece.
+3. The divider writes CONTRACTS (each part's promises to the others), so workers build to
+   contract and the unify/QC stages verify seams instead of rebuilding them. Quality holds
+   while speed multiplies.
+4. Scale = whatever the user pays for (1 to 25+ workers); cost multiplies only on worker rows;
+   the budget freeze remains the seatbelt. Honest wall-clock: divide + slowest part + unify +
+   review (3-4x on five workers, never 5x).
+5. Task wording is classified by the existing router (divide/split -> divider, review/fix ->
+   reviewer, check/QC -> qc, else worker). Rows persist per workspace (assignments.af).
+6. Blueprint shows the relay honestly: who owned what, what the referee refused, what the
+   reviewer fixed. The Furnace pass still ends every AF build.
+Racing variant (N agents attempt the same step, judge picks the winner) is a later addition on
+the same panel, distinguished by wording; v1 is the partition pipeline above.
+
+Proven in anger before it was a feature: iteration 2.1 itself was built exactly this way
+(Fable divided into 5 disjoint-file chunks with specs, 5 Haiku wrote in parallel, Opus 4.8
+reviewed each, Fable did final QC). The defects each layer caught are logged in the build pack.
