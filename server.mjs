@@ -4933,6 +4933,21 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify({ probe, expectedNode: expected, ranOn: ran, ok, match: !!ran && !!expected && ran === expected, error, ms: Date.now() - t0 }));
     }
+    /*
+     * Show the ENVIRONMENT text the models are actually receiving this turn.
+     *
+     * The bug this closes out was invisible precisely because nobody could see the briefing: the
+     * prompt claimed one machine, the hardware had two, and the only symptom was a model insisting
+     * a real drive did not exist. Being able to read the block back, on demand, is what turns that
+     * from a mystery into a one-line check. Bearer-gated like the other self-tests.
+     */
+    if (path === "/hands/selftest-environment" && req.method === "GET") {
+      if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }
+      const owner = machinesBlock({ isOwner: true, uid: "" });
+      const guest = machinesBlock({ isOwner: false, uid: "nobody" });
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({ owner, guest, ownerChars: owner.length, guestChars: guest.length }));
+    }
     if (path === "/hands/selftest-ollama" && req.method === "GET") {
       if (!bearerOk(req)) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: "unauthorized" })); }
       const t0 = Date.now();
