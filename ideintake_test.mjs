@@ -80,12 +80,12 @@ await t("a third MOCKUP line is ignored (two per reply, per the protocol)", () =
   assert.ok(p.reply.includes("MOCKUP: three"), "the overflow stays visible rather than vanishing");
 });
 
-await t("mode reaches the system prompt: beginner gets mentor + aesthetics, engineer gets the cold executor", () => {
+await t("mode reaches the system prompt: beginner gets mentor + aesthetics, engineer gets staff precision", () => {
   const b = intakeSystem("plain", "beginner");
   assert.ok(/mentor/i.test(b));
   assert.ok(/MOCKUP:/.test(b), "beginner interviewer knows the mockup protocol");
   const e = intakeSystem("technical", "engineer");
-  assert.ok(/cold/i.test(e));
+  assert.ok(/staff software engineer/i.test(e));
   assert.ok(!/MOCKUP:/.test(e), "engineers do not get picture books");
   const v = intakeSystem("hybrid", "vibe");
   assert.ok(/collaborator/i.test(v));

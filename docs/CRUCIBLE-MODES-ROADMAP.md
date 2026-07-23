@@ -12,8 +12,8 @@ bottom, then build. Companion docs: IDE-MODE-ROADMAP.md (iteration 1 SOW), IDE-M
 - Blueprint vs Workshop has no obvious purpose when the only visible difference is that one
   reveals code and the other does not.
 - There is no way to guide aesthetics, and beginners care about aesthetics more than function.
-- The AI needs a different job per audience: mentor and encourager for some, workhorse for
-  others, and a cold robot with massive compute and no personality for the rest.
+- The AI needs a different job per audience: mentor and encourager, adaptive designer-developer,
+  or calm staff engineer.
 - The value of the design is the intuitive layout and the way it simplifies each step.
 
 ## The core idea
@@ -26,10 +26,10 @@ can still override it in settings.
 
 | | Beginner | Vibe Coder | Software Engineer |
 | --- | --- | --- | --- |
-| Layout | Chat window + folder picker. Almost nothing else visible. | Feature-rich but intentional; the essentials plus honest cost and complexity. | Everything available, but in CLOSED drawers named by function, ordered by dependency. |
+| Layout | Chat is the product. Almost nothing else is visible. | Chat plus a composable Studio Drawer. The user chooses which real shared tools surround the conversation. | Everything available, grouped by function and ordered by dependency. |
 | Language default | plain | hybrid | technical |
 | Model handling | Invisible. Curated defaults, never mentioned. | One sentence: which brain is doing the work and what it costs, with a change link. | Full Assignment Board in its own drawer. |
-| The AI is | A mentor and encourager. Celebrates progress, explains by result, never by mechanism. | A sharp collaborator. Intuits the nuance in the vision, is upfront about cost, connectors, databases, servers, domains. | A cold executor. Terse, precise, zero cheerleading, maximum information density. |
+| The AI is | A warm mentor. Proactive, encouraging, lightly funny, and always below an 8th-grade reading level. | A kind, current designer-developer. Matches the user's technical depth and explains fully when asked. | A calm staff engineer. Concise, technical, non-patronizing, and measured by commands, diffs, tests, risk, and results. |
 | Build view | Live preview of the app they can tap through and test. Code hidden (toggle exists). | Live preview first, code toggle one tap away. | Code and design preview side by side, chat docked at the bottom. Code reveal automatic. |
 | After the build | Windows close, chat becomes prominent, walks them to putting it online. | Same closing flow plus the deploy cost/complexity talk. | A completion summary; the engineer knows what to do next. |
 
@@ -74,6 +74,12 @@ plus plain flags for each piece of real-world complexity the vision implies: nee
 needs user accounts, needs a paid hosting home, needs a domain name, talks to an outside
 service. No surprises mid-build. Beginners get the same facts later, at the deploy talk, in
 gentler words. Engineers get the numbers inline and nothing else.
+
+The Vibe workspace is composable rather than a simplified copy of Engineer. Chat and live build
+state always remain. A right-side drawer on desktop and bottom sheet on mobile controls the real
+shared surfaces: project folder, living brief, AI crew, cost, preview, tests/output, files/diffs,
+and history. Presets are Minimal, Design Studio, Full Stack, and Ship It; individual switches make
+the selection Custom. Toggling a module never creates a second stateful copy.
 
 ## The live preview tunnel (the hard engineering)
 

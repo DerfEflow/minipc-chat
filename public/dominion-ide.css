@@ -962,3 +962,254 @@ body.ide-open #ide-root { transform: none; }
 }
 
 #ide-root[data-mode="beginner"] #st-af { display: none; }
+
+/* ==========================================================================================
+   COHERENT WORKSPACE: one journey, three control contracts
+   ========================================================================================== */
+
+/* The journey is state, not decoration: JS advances this single strip as intake, build,
+   verification, and completion events occur. */
+.st-journey {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 240px);
+  align-items: center;
+  gap: 22px;
+  padding: 14px 16px 14px 18px;
+  border-left: 2px solid var(--copper-hot, #d4823c);
+  background: linear-gradient(90deg, rgba(185, 107, 50, .1), rgba(10, 25, 41, .22) 58%, transparent);
+}
+.st-journey-copy { display: grid; gap: 3px; min-width: 0; }
+.st-journey-kicker, .st-studio-kicker {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--copper-hot, #d4823c);
+}
+.st-journey-copy strong { font-size: 15px; color: var(--ink, #e8f6ff); }
+.st-journey-copy > span:last-child { font-size: 12px; line-height: 1.45; color: var(--muted, #8ba0ae); }
+.st-journey-track {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+  align-items: center;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.st-journey-track li { position: relative; height: 14px; display: grid; align-items: center; }
+.st-journey-track li::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  right: -3px;
+  height: 2px;
+  background: rgba(150, 200, 230, .14);
+}
+.st-journey-track li:first-child::before { left: 50%; }
+.st-journey-track li:last-child::before { right: 50%; }
+.st-journey-track li span {
+  position: relative;
+  z-index: 1;
+  width: 8px;
+  height: 8px;
+  justify-self: center;
+  border-radius: 50%;
+  background: #07111d;
+  border: 1px solid rgba(150, 200, 230, .36);
+}
+.st-journey-track li.done::before { background: rgba(118, 255, 104, .36); }
+.st-journey-track li.done span { border-color: rgba(118, 255, 104, .58); background: rgba(118, 255, 104, .5); }
+.st-journey-track li.on span {
+  width: 11px;
+  height: 11px;
+  border-color: var(--energy-hot, #9dff92);
+  background: var(--energy, #76ff68);
+  box-shadow: 0 0 12px rgba(118, 255, 104, .72);
+}
+
+/* Vibe is an adaptive studio. Chat and current state are fixed; the rest is composed here. */
+.st-vibe-toolbar {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 0 2px;
+}
+#ide-root[data-mode="vibe"] .st-vibe-toolbar { display: flex; }
+.st-vibe-toolbar > div { display: grid; gap: 2px; }
+.st-vibe-toolbar strong { font-size: 12.5px; color: var(--ink, #e8f6ff); }
+.st-vibe-toolbar span { font-size: 11px; color: var(--muted, #8ba0ae); }
+.st-vibe-toolbar button, .st-studio-presets button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .2));
+  color: var(--ink-soft, #d9c9b8);
+  background: linear-gradient(180deg, rgba(14, 33, 54, .88), rgba(4, 11, 20, .94));
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .1);
+}
+.st-vibe-toolbar button {
+  flex: 0 0 auto;
+  padding: 9px 13px;
+  border-radius: 999px;
+  font-size: 11.5px;
+}
+.st-vibe-toolbar button:hover, .st-studio-presets button:hover,
+.st-studio-presets button.on {
+  color: var(--ink, #e8f6ff);
+  border-color: rgba(118, 255, 104, .42);
+  box-shadow: inset 0 0 14px rgba(118, 255, 104, .09);
+}
+
+.st-studio-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 360;
+}
+.st-studio-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  border: 0;
+  background: rgba(0, 4, 9, .68);
+  backdrop-filter: blur(5px);
+}
+.st-studio-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(430px, 92vw);
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  gap: 0;
+  overflow: hidden;
+  border-left: 1px solid rgba(185, 107, 50, .4);
+  background:
+    radial-gradient(90% 60% at 100% 0%, rgba(118, 255, 104, .07), transparent 65%),
+    linear-gradient(180deg, rgba(10, 26, 43, .99), rgba(2, 8, 15, .995));
+  box-shadow: -24px 0 70px rgba(0, 0, 0, .62), inset 1px 0 rgba(225, 247, 255, .06);
+  animation: studio-in .22s ease-out both;
+}
+@keyframes studio-in { from { transform: translateX(28px); opacity: .55; } }
+.st-studio-panel > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 22px 22px 16px;
+  border-bottom: 1px solid rgba(150, 200, 230, .12);
+}
+.st-studio-panel h3 { margin: 5px 0 0; font-size: 19px; color: var(--ink, #e8f6ff); }
+.st-studio-close {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .2));
+  background: rgba(3, 10, 18, .8);
+  color: var(--ink-soft, #d9c9b8);
+  font: 24px/1 system-ui;
+  cursor: pointer;
+}
+.st-studio-intro {
+  margin: 0;
+  padding: 14px 22px 4px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--muted, #8ba0ae);
+}
+.st-studio-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 13px 22px 16px;
+}
+.st-studio-presets button { padding: 7px 10px; border-radius: 999px; font-size: 11px; }
+.st-studio-modules {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 14px 18px;
+}
+.st-studio-module {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 13px 9px;
+  border-top: 1px solid rgba(150, 200, 230, .1);
+  cursor: pointer;
+}
+.st-studio-module input { margin-top: 3px; accent-color: var(--energy, #76ff68); }
+.st-studio-module > span { display: grid; gap: 3px; }
+.st-studio-module strong { font-size: 13px; font-weight: 600; color: var(--ink, #e8f6ff); }
+.st-studio-module small { font-size: 11.5px; line-height: 1.45; color: var(--muted, #8ba0ae); }
+.st-studio-panel > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 22px;
+  border-top: 1px solid rgba(150, 200, 230, .14);
+  background: rgba(1, 6, 12, .62);
+}
+.st-studio-panel > footer span { font-size: 11px; color: var(--muted, #8ba0ae); }
+.st-studio-panel > footer button { padding: 9px 20px; }
+
+/* The Vibe drawer controls the real shared surfaces. It never creates a second copy of state. */
+#ide-root[data-mode="vibe"]:not([data-studio-modules~="workspace"]) #dr-folder,
+#ide-root[data-mode="vibe"]:not([data-studio-modules~="brief"]) #dr-brief,
+#ide-root[data-mode="vibe"]:not([data-studio-modules~="crew"]) #dr-models,
+#ide-root[data-mode="vibe"]:not([data-studio-modules~="cost"]) #cru-meter,
+#ide-root[data-mode="vibe"]:not([data-studio-modules~="history"]) .cru-log-btn,
+#ide-root[data-mode="vibe"]:not([data-studio-modules~="preview"]) .w-preview,
+#ide-root[data-mode="vibe"]:not([data-studio-modules~="checks"]) .w-checks,
+#ide-root[data-mode="vibe"]:not([data-studio-modules~="code"]) .w-files,
+#ide-root[data-mode="vibe"]:not([data-studio-modules~="code"]) .w-changes,
+#ide-root[data-mode="vibe"]:not([data-studio-modules~="code"]) .w-code-toggle {
+  display: none !important;
+}
+#ide-root[data-mode="vibe"][data-studio-modules~="code"] .w-code-toggle { display: none; }
+
+/* A build has one launch moment. Once it starts, intake and duplicate launch CTAs retire; the
+   durable build surface becomes the primary action area. */
+#ide-root[data-phase="build"] #st-go,
+#ide-root[data-phase="verify"] #st-go,
+#ide-root[data-phase="ship"] #st-go,
+#ide-root[data-phase="build"] #st-chat-actions,
+#ide-root[data-phase="verify"] #st-chat-actions,
+#ide-root[data-phase="ship"] #st-chat-actions,
+#ide-root[data-phase="build"] #st-chat-skip,
+#ide-root[data-phase="verify"] #st-chat-skip,
+#ide-root[data-phase="ship"] #st-chat-skip,
+#ide-root[data-phase="build"] #st-chat-row,
+#ide-root[data-phase="verify"] #st-chat-row,
+#ide-root[data-phase="ship"] #st-chat-row {
+  display: none !important;
+}
+
+/* Make the Vibe reading order intentional: identity, journey, studio controls, conversation,
+   then only the modules that person selected. */
+#ide-root[data-mode="vibe"] #st-chat { order: 3; }
+#ide-root[data-mode="vibe"] .st-head-row { order: 0; }
+#ide-root[data-mode="vibe"] .st-journey { order: 1; }
+#ide-root[data-mode="vibe"] .st-vibe-toolbar { order: 2; }
+#ide-root[data-mode="vibe"] .st-drawer { order: 4; }
+#ide-root[data-mode="vibe"] .ide-start > .st-row { order: 5; }
+
+@media (max-width: 620px) {
+  .st-journey { grid-template-columns: minmax(0, 1fr); gap: 11px; }
+  .st-journey-track { max-width: 240px; }
+  .st-vibe-toolbar { align-items: flex-end; }
+  .st-vibe-toolbar button { padding: 8px 11px; }
+  .st-studio-panel {
+    top: auto;
+    left: 0;
+    width: 100%;
+    height: min(78vh, 700px);
+    border-left: 0;
+    border-top: 1px solid rgba(185, 107, 50, .45);
+    border-radius: 18px 18px 0 0;
+    animation-name: studio-up;
+  }
+  @keyframes studio-up { from { transform: translateY(26px); opacity: .55; } }
+}
