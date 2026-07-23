@@ -106,31 +106,53 @@ export function parseBlueprint(text) {
  * ------------------------------------------------------------------------------------------- */
 export function parseFileBlocks(text) {
   const out = [], needs = [], issues = [];
-  const re = /```(?:path=|file=)?\s*([^\n`]+?)\s*\n([\s\S]*?)```/g;
-  let m;
-  while ((m = re.exec(String(text || "")))) {
-    const rawPath = String(m[1] || "").trim().replace(/^["']|["']$/g, "");
-    const body = m[2];
-    if (/^NEED:/i.test(rawPath)) { needs.push(rawPath.replace(/^NEED:\s*/i, "")); continue; }
-    if (!rawPath) continue;
-    /*
-     * A language fence must never become a file. The old check was a whitelist of eight language
-     * names, so a model that wrote a ```python or ```html explanation block got a file literally
-     * named "python" written into the project. Reverse the logic: something is a PATH when it
-     * looks like one (a dot or a slash, or one of the well-known extensionless files); a single
-     * bare word is a language tag and is skipped.
-     */
-    const looksLikePath = /[.\/]/.test(rawPath) || /^(dockerfile|makefile|license|procfile|gemfile|rakefile|readme)$/i.test(rawPath);
-    if (!looksLikePath) continue;
-    // Traversal and absolute paths are refused rather than normalized: a build that silently
-    // rewrites where it is writing is worse than one that stops and says so.
-    if (rawPath.includes("..")) { issues.push({ path: rawPath, reason: "path tries to climb out of the workspace" }); continue; }
-    if (/^[a-zA-Z]:[\\/]/.test(rawPath) || rawPath.startsWith("/") || rawPath.startsWith("\\")) {
-      issues.push({ path: rawPath, reason: "path is absolute; moves write inside the workspace only" });
+  /*
+   * A line walker with fence-DEPTH tracking (Kimi #5, verified). The old regex ended a file at the
+   * first ``` anywhere, so a generated README or doc containing its own fenced code example was
+   * truncated at that inner fence. Column zero alone cannot fix it: a README's own closing fence
+   * is at column zero too. So instead: an INFO fence (```path or ```lang, anything after the
+   * backticks) opens a level, a BARE ``` closes the innermost. A file block is level 1; an inner
+   * ```bash example opens level 2 and its bare fence returns to level 1; the file's own bare fence
+   * then closes level 1. The file's whole body, inner fences and all, is preserved.
+   */
+  const lines = String(text || "").split(/\r?\n/);
+  let path = null, body = null, depth = 0;
+  const fence = (l) => { const m = l.match(/^```(.*)$/); return m ? m[1].trim() : null; };
+  const commit = (rawPath, content) => {
+    const stripped = rawPath.replace(/^(path=|file=)/i, "").trim().replace(/^["']|["']$/g, "");
+    if (/^NEED:/i.test(stripped)) { needs.push(stripped.replace(/^NEED:\s*/i, "")); return; }
+    const clean = stripped;
+    if (!clean) return;
+    // A language tag (a bare word, no dot or slash) is never a file; the well-known extensionless
+    // names are the exception.
+    const looksLikePath = /[.\/]/.test(clean) || /^(dockerfile|makefile|license|procfile|gemfile|rakefile|readme)$/i.test(clean);
+    if (!looksLikePath) return;
+    if (clean.includes("..")) { issues.push({ path: clean, reason: "path tries to climb out of the workspace" }); return; }
+    if (/^[a-zA-Z]:[\\/]/.test(clean) || clean.startsWith("/") || clean.startsWith("\\")) {
+      issues.push({ path: clean, reason: "path is absolute; moves write inside the workspace only" });
+      return;
+    }
+    out.push({ path: clean.replace(/\\/g, "/"), content: content.join("\n") });
+  };
+  for (const line of lines) {
+    const info = fence(line);
+    if (path === null) {
+      // Outside any file: only an INFO fence that looks like a path opens a file block.
+      if (info) {
+        const stripped = info.replace(/^(path=|file=)/i, "").trim().replace(/^["']|["']$/g, "");
+        const looksLikePath = /^NEED:/i.test(stripped) || /[.\/]/.test(stripped) || /^(dockerfile|makefile|license|procfile|gemfile|rakefile|readme)$/i.test(stripped);
+        if (looksLikePath) { path = info; body = []; depth = 1; }
+      }
       continue;
     }
-    out.push({ path: rawPath.replace(/\\/g, "/"), content: body.replace(/\n$/, "") });
+    // Inside a file block.
+    if (info === "") { depth--; if (depth === 0) { commit(path, body); path = null; body = null; continue; } body.push(line); continue; }
+    if (info !== null) { depth++; body.push(line); continue; }
+    body.push(line);
   }
+  // An unterminated final block is still committed with what it had (a truncated stream should
+  // save partial work rather than drop the whole file).
+  if (path !== null) commit(path, body);
   return { files: out, needs, issues };
 }
 
@@ -412,7 +434,7 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
 
       const manifest = await readManifest(workspace.root, move.files || []);
       const messages = buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal });
-      const res = await chat({ model: decision.model, messages });
+      let res = await chat({ model: decision.model, messages });
       costUsd += Number(res && res.costUsd) || 0;
       if (!res || !res.ok) {
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
@@ -420,13 +442,31 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         return { ok: false, costUsd };
       }
 
-      const parsed = parseFileBlocks(res.content);
+      let parsed = parseFileBlocks(res.content);
+      // One corrective reprompt before surfacing a zero-file failure (Kimi #8): models disobey the
+      // file-block format, and a beginner cannot tell "the model was sloppy" from "the product is
+      // broken". Show it its own output and ask again, ONCE. A second empty answer is a real
+      // failure and surfaces with a next action below.
+      if (!parsed.files.length && !parsed.needs.length) {
+        jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
+          message: "The response was not in the file format; asking once more." });
+        const retry = await chat({ model: decision.model, messages: [
+          ...messages,
+          { role: "assistant", content: String(res.content || "").slice(0, 4000) },
+          { role: "user", content: "That reply contained no file blocks, so nothing could be written. Respond ONLY with fenced file blocks, each opening ```<path> on its own line and closing ``` at the start of a line. No prose outside the blocks." },
+        ] });
+        costUsd += Number(retry && retry.costUsd) || 0;
+        if (retry && retry.ok) { const rp = parseFileBlocks(retry.content); if (rp.files.length) { res = retry; parsed = rp; } }
+      }
       for (const bad of parsed.issues) jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "warned", message: bad.path + ": " + bad.reason });
       if (!parsed.files.length) {
+        // A surfaced error carries a NEXT ACTION, never just a verdict (Kimi: flawless fails with
+        // instructions). nextAction rides the event so the surface can offer the button.
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
           message: parsed.needs.length
-            ? "It needs a file that was not in this move's list: " + parsed.needs.join(", ")
-            : "It returned no files to write." });
+            ? "It needs a file that was not in this move's list: " + parsed.needs.join(", ") + ". Try again, or simplify this step."
+            : "The model did not return any files to write, even after a retry. Try again, or simplify the ask.",
+          nextAction: parsed.needs.length ? "retry" : "retry_or_simplify" });
         return { ok: false, costUsd };
       }
 

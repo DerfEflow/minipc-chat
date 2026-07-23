@@ -66,6 +66,25 @@ await t("a plain language fence is not mistaken for a file", () => {
   assert.equal(out.files.length, 0);
 });
 
+await t("a generated file containing an inner code fence is NOT truncated (Kimi #5)", () => {
+  // README.md holds a fenced example; the inner fence must not close the file early.
+  const readme = "# My App\n\nRun it:\n\n```bash\nnpm start\n```\n\nThat is all.";
+  const out = parseFileBlocks("```path=README.md\n" + readme + "\n```");
+  assert.equal(out.files.length, 1, "one file, not split at the inner fence");
+  assert.equal(out.files[0].path, "README.md");
+  assert.match(out.files[0].content, /npm start/, "the inner example survived");
+  assert.match(out.files[0].content, /That is all\./, "the tail after the inner fence survived");
+});
+
+await t("two real files still parse when the first contains a nested fence", () => {
+  const src = "```path=docs/guide.md\nExample:\n```js\nconst x = 1;\n```\ndone\n```\n" +
+    "```path=src/app.js\nexport const app = 1;\n```";
+  const out = parseFileBlocks(src);
+  assert.equal(out.files.length, 2);
+  assert.equal(out.files[1].path, "src/app.js");
+  assert.match(out.files[0].content, /const x = 1/);
+});
+
 await t("a move can say it needs a file it was not given", () => {
   const out = parseFileBlocks("```path=NEED: src/config.ts\n\n```");
   assert.deepEqual(out.needs, ["src/config.ts"]);

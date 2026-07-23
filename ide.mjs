@@ -12,7 +12,7 @@
  * to guests. Fred's ruling 2026-07-19: guests stay dark until Phase 8 (hardening), so the default
  * is owner-only.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { routeMove, CLASS_INFO, TASK_CLASSES, DEFAULT_ASSIGNMENTS, IMAGE_ENGINE, PRESETS } from "./iderouter.mjs";
@@ -131,7 +131,13 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
       return blank();
     }
   }
-  function write(s) { writeFileSync(file, JSON.stringify(s, null, 2), "utf8"); return s; }
+  // tmp + rename: a crash mid-write tears the TEMP file, never the registry. To the user a torn
+  // registry read as "my projects disappeared" (Kimi #6, verified non-atomic).
+  function write(s) {
+    writeFileSync(file + ".tmp", JSON.stringify(s, null, 2), "utf8");
+    renameSync(file + ".tmp", file);
+    return s;
+  }
 
   /*
    * Validate a workspace root. Refuses rather than repairs, and says which rule it broke.

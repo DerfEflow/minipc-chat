@@ -12,8 +12,9 @@ import assert from "node:assert/strict";
 import {
   classifyMove, classifyMoveSmart, resolveAssignments, routeMove,
   TASK_CLASSES, DEFAULT_ASSIGNMENTS, IMAGE_ENGINE, CLASSIFIER_THRESHOLD, CLASS_INFO,
-  PRESETS, presetById,
+  PRESETS, presetById, referencedModelIds, assertRouterModelsExist,
 } from "./iderouter.mjs";
+import { modelById } from "./models.catalog.mjs";
 
 let passed = 0, failed = 0;
 function t(name, fn) {
@@ -171,6 +172,17 @@ await t("junk input is classified rather than crashing", () => {
     const r = classifyMove(m || undefined);
     assert.ok(TASK_CLASSES.includes(r.taskClass));
   }
+});
+
+await t("every model id the router pins exists in the live catalog (Kimi #7)", () => {
+  // This is the mechanical backstop: a provider rename that drops a pinned id fails HERE, in the
+  // suite, instead of in front of a user at route-resolution time.
+  assertRouterModelsExist((id) => !!modelById(id));
+  for (const id of referencedModelIds()) assert.ok(modelById(id), "catalog is missing " + id);
+});
+
+await t("assertRouterModelsExist throws, naming the offender, when a pin is missing", () => {
+  assert.throws(() => assertRouterModelsExist((id) => id !== "moonshotai/kimi-k3"), /kimi-k3/);
 });
 
 console.log("\n" + passed + " passed, " + failed + " failed");

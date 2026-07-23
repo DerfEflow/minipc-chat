@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { REGISTERS, phrase, plannerVoice, ANSWER, DICT_KEYS, normalizeRegister } from "./idelang.mjs";
-import { createRunAndSee, runPlanFor, visionMessages, PREVIEW_PORT } from "./idesee.mjs";
+import { createRunAndSee, runPlanFor, visionMessages, PREVIEW_PORT, PREVIEW_PORT_BASE, previewPortFor } from "./idesee.mjs";
 
 let passed = 0, failed = 0;
 function t(name, fn) {
@@ -52,6 +52,13 @@ await t("the planner voice differs by register", () => {
   assert.match(plannerVoice("plain"), /plain English/i);
   assert.match(plannerVoice("technical"), /engineer/i);
   assert.match(plannerVoice("hybrid"), /gloss/i);
+});
+
+await t("per-build preview ports are stable per job and spread across the range (Kimi #3)", () => {
+  const a = previewPortFor("job-aaaaaaaa"), b = previewPortFor("job-bbbbbbbb");
+  assert.equal(previewPortFor("job-aaaaaaaa"), a, "same job, same port");
+  assert.notEqual(a, b, "different jobs get different ports");
+  assert.ok(a >= PREVIEW_PORT_BASE && a < PREVIEW_PORT_BASE + 180, "within the reserved range");
 });
 
 /* ---- run detection ----------------------------------------------------------------------- */

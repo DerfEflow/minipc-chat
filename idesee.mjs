@@ -19,18 +19,35 @@
  * caller's emit surface. Testable with fakes, no server required.
  */
 
-export const PREVIEW_PORT = 37311;
+export const PREVIEW_PORT_BASE = 37311;
+export const PREVIEW_PORT = PREVIEW_PORT_BASE;   // legacy export; per-build ports come from previewPortFor
+
+// Two builds on one machine used to collide on a single constant port, and a leaked old server
+// could answer the next build's liveness check so the vision model judged the WRONG project
+// (Kimi #3). Every build now gets its own port from its job id, and the static server answers a
+// canary path with a per-build token that waitUp verifies: liveness plus identity, not liveness
+// alone.
+export function previewPortFor(jobId) {
+  let h = 0;
+  for (const c of String(jobId || "")) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return PREVIEW_PORT_BASE + (h % 180);
+}
 
 // A static file server in one line of node, launched DETACHED on the user's machine. Written as
 // an -e one-liner so it needs nothing installed beyond node itself, which the hands node proves.
+// argv: [1]=root [2]=canary token [3]=port. Path check requires the resolved path to BE the root
+// or live under root+sep: a sibling folder sharing the prefix (C:\proj vs C:\proj-evil) no
+// longer passes (Kimi #1, verified traversal).
 const STATIC_SERVER_JS = [
-  "const h=require('http'),f=require('fs'),p=require('path'),r=process.argv[1];",
-  "h.createServer((q,s)=>{let u=decodeURIComponent((q.url||'/').split('?')[0]);if(u.endsWith('/'))u+='index.html';",
-  "const fp=p.join(r,u);if(!fp.startsWith(r))return s.writeHead(403).end();",
+  "const h=require('http'),f=require('fs'),p=require('path'),r=process.argv[1],t=process.argv[2],o=+process.argv[3];",
+  "h.createServer((q,s)=>{let u=decodeURIComponent((q.url||'/').split('?')[0]);",
+  "if(u==='/__dominion_canary')return s.end(t);",
+  "if(u.endsWith('/'))u+='index.html';",
+  "const fp=p.join(r,u);if(fp!==r&&!fp.startsWith(r+p.sep))return s.writeHead(403).end();",
   "f.readFile(fp,(e,b)=>{if(e){s.writeHead(404);return s.end('not found')}",
   "const x={'.html':'text/html','.css':'text/css','.js':'text/javascript','.mjs':'text/javascript','.png':'image/png','.jpg':'image/jpeg','.svg':'image/svg+xml','.json':'application/json'};",
   "s.writeHead(200,{'content-type':x[p.extname(fp)]||'application/octet-stream'});s.end(b)})",
-  "}).listen(" + PREVIEW_PORT + ",'127.0.0.1')",
+  "}).listen(o,'127.0.0.1')",
 ].join("");
 
 /*
@@ -95,11 +112,12 @@ export function createRunAndSee({ hands, chat, jobs, log = () => {} } = {}) {
    * arguments and the server never started. The elements carry their own double quotes now
    * (the one-liner contains no double quotes by construction; the assert keeps it that way).
    */
-  async function launch(job, root, plan) {
+  async function launch(job, root, plan, { port, token } = {}) {
     if (STATIC_SERVER_JS.includes('"')) return { ok: false, error: "static server script must stay double-quote-free" };
+    const p = port || PREVIEW_PORT_BASE, tok = String(token || "canary");
     const ps = plan.mode === "static"
-      ? "$p = Start-Process node -ArgumentList @('-e', '\"" + STATIC_SERVER_JS.replace(/'/g, "''") + "\"', '\"" + root.replace(/'/g, "''") + "\"') -WindowStyle Hidden -PassThru; $p.Id"
-      : "$env:PORT='" + PREVIEW_PORT + "'; $p = Start-Process cmd -ArgumentList @('/c', 'cd /d \"" + root + "\" && " + plan.command + "') -WindowStyle Hidden -PassThru; $p.Id";
+      ? "$p = Start-Process node -ArgumentList @('-e', '\"" + STATIC_SERVER_JS.replace(/'/g, "''") + "\"', '\"" + root.replace(/'/g, "''") + "\"', '" + tok + "', '" + p + "') -WindowStyle Hidden -PassThru; $p.Id"
+      : "$env:PORT='" + p + "'; $p = Start-Process cmd -ArgumentList @('/c', 'cd /d \"" + root + "\" && " + plan.command + "') -WindowStyle Hidden -PassThru; $p.Id";
     const r = await hands("shell_run", { command: ps, timeoutMs: 30000 });
     const pid = parseInt(String((r && (r.stdout || r.output)) || "").trim().split(/\s+/).pop(), 10);
     if (!pid || Number.isNaN(pid)) return { ok: false, error: "the preview process did not report a pid" };
@@ -116,22 +134,27 @@ export function createRunAndSee({ hands, chat, jobs, log = () => {} } = {}) {
 
   // The preview server was launched detached a moment ago; navigating before it listens parks
   // Chrome on a dead page and the later screenshot times out (seen live twice). Poll until the
-  // port answers, briefly, before pointing the browser at it.
-  async function waitUp() {
-    for (let i = 0; i < 10; i++) {
-      const r = await hands("shell_run", {
-        command: "node -e \"require('http').get('http://127.0.0.1:" + PREVIEW_PORT + "/',r=>{process.exit(0)}).on('error',()=>process.exit(1))\"",
-        timeoutMs: 8000 });
+  // port answers, before pointing the browser at it. ~35s of patience: a cold Next.js or Vite
+  // dev server routinely needs more than the old 7 seconds (Kimi #6). Static mode also verifies
+  // the CANARY TOKEN, so a leaked older server can never impersonate this build's preview.
+  async function waitUp({ port, token, mode } = {}) {
+    const p = port || PREVIEW_PORT_BASE;
+    const probe = mode === "static" && token
+      ? "require('http').get('http://127.0.0.1:" + p + "/__dominion_canary',r=>{let b='';r.on('data',d=>b+=d);r.on('end',()=>process.exit(b==='" + token + "'?0:1))}).on('error',()=>process.exit(1))"
+      : "require('http').get('http://127.0.0.1:" + p + "/',r=>{process.exit(0)}).on('error',()=>process.exit(1))";
+    for (let i = 0; i < 30; i++) {
+      const r = await hands("shell_run", { command: "node -e \"" + probe + "\"", timeoutMs: 8000 });
       if (((r && (r.code ?? r.exitCode)) || 0) === 0) return true;
-      await new Promise((res) => setTimeout(res, 700));
+      await new Promise((res) => setTimeout(res, 1000));
     }
     return false;
   }
 
-  async function screenshot(job, label) {
-    const open = await hands("browser_control", { op: "navigate", url: "http://127.0.0.1:" + PREVIEW_PORT + "/" });
+  async function screenshot(job, label, port) {
+    const url = "http://127.0.0.1:" + (port || PREVIEW_PORT_BASE) + "/";
+    const open = await hands("browser_control", { op: "navigate", url });
     if (!open || open.ok === false) {
-      const first = await hands("browser_control", { op: "open", url: "http://127.0.0.1:" + PREVIEW_PORT + "/" });
+      const first = await hands("browser_control", { op: "open", url });
       if (!first || first.ok === false) return { ok: false, refused: true, error: (first && first.error) || (open && open.error) || "browser refused" };
     }
     await new Promise((r) => setTimeout(r, 1800));   // let the page settle before judging it
@@ -164,13 +187,15 @@ export function createRunAndSee({ hands, chat, jobs, log = () => {} } = {}) {
     const dep = await ensureDeps(job, root, pkg);
     if (!dep.ok) { emitRun(job, { skipped: true, message: "Dependencies did not install, so it was not run. The output is above." }); return { skipped: "deps_failed" }; }
 
-    const started = await launch(job, root, plan);
+    const port = previewPortFor(job.id);
+    const token = "dw" + String(job.id || "").replace(/[^a-z0-9]/gi, "").slice(-12);
+    const started = await launch(job, root, plan, { port, token });
     if (!started.ok) { emitRun(job, { skipped: true, message: "It could not be started: " + started.error + "." }); return { skipped: "launch_failed" }; }
-    const up = await waitUp();
+    const up = await waitUp({ port, token, mode: plan.mode });
     if (!up) { await stopPreview(started.pid); emitRun(job, { skipped: true, message: "The preview never answered on its port, so the look was not checked." }); return { skipped: "server_never_up" }; }
 
     try {
-      const before = await screenshot(job, "before");
+      const before = await screenshot(job, "before", port);
       if (before.refused) { emitRun(job, { skipped: true, message: "This machine's browser is not available to Dominion, so the look was not checked." }); return { skipped: "browser_refused" }; }
       if (!before.ok) { emitRun(job, { skipped: true, message: "The page could not be photographed: " + before.error + "." }); return { skipped: "shot_failed" }; }
 
@@ -190,7 +215,7 @@ export function createRunAndSee({ hands, chat, jobs, log = () => {} } = {}) {
       if (typeof applyFixes === "function") {
         const fixed = await applyFixes(verdict);
         fixCost = (fixed && fixed.costUsd) || 0;
-        const after = await screenshot(job, "after");
+        const after = await screenshot(job, "after", port);
         if (after.ok) emitRun(job, { command: "look (after)", ok: true, output: "Second look taken after the improvements: " + after.path });
       }
       return { improved: true, critique: verdict, costUsd: (judged.costUsd || 0) + fixCost };

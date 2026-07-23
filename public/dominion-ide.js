@@ -1511,7 +1511,18 @@
   let draftSaveTimer = 0;
   function wireIntake(status) {
     const input = $("#st-chat-in");
-    const affirmative = /^(build|build\s+it|build\s+it\s+now|start|go\s+ahead|do\s+it|yes|let\s+go|lets\s+go)$/i;
+    // Readiness detection was exact-match, so "ok go ahead" or "yes, build it!" fell through and
+    // the user sat talking to a wall (Kimi #9: the emotional climax of the beginner flow). Now it
+    // matches the intent ANYWHERE in a short reply: a clear go-word, tolerant of leading "ok/yes",
+    // trailing punctuation, and "build it/this/that". Long replies are treated as more brief, not
+    // as consent, so a sentence that merely contains "go" does not trip a build.
+    const affirmative = (t) => {
+      const s = String(t || "").trim().toLowerCase().replace(/[!.]+$/, "");
+      if (s.split(/\s+/).length > 6) return false;
+      return /\b(build|ship|make|launch)\s+(it|this|that|now)?\b/.test(s)
+        || /^(ok(ay)?\s+|sure\s+|yes\s+|yep\s+|yeah\s+)?(go|go\s+ahead|do\s+it|let'?s\s+go|send\s+it|proceed|begin|start)\b/.test(s)
+        || /^(build|ship|go|proceed|begin|yes|yep|yeah)$/.test(s);
+    };
     const send = () => {
       const text = input.value.trim();
       if (!text || intake.busy) return;
@@ -1527,7 +1538,7 @@
         return;
       }
       // During the interview, continue the conversation:
-      if (state.mode === "beginner" && intake.vision && affirmative.test(text)) {
+      if (state.mode === "beginner" && intake.vision && affirmative(text)) {
         const goal = intake.messages[0] ? intake.messages[0].content : $("#st-prompt").value.trim();
         const full = goal + "\n\nAGREED VISION (approved by the user; build exactly this):\n" + intake.vision;
         intake.messages.push({ role: "user", content: text });

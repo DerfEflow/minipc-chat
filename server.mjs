@@ -66,7 +66,7 @@ import { createIdeJobs } from "./idejobs.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, parseFileBlocks, carveOutReport, buildMoveMessages } from "./ideengine.mjs";
 import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor } from "./ideaf.mjs";
 import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } from "./ideafrun.mjs";
-import { routeMove, resolveAssignments } from "./iderouter.mjs";
+import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
 import { intakeMessages, parseIntake } from "./ideintake.mjs";
@@ -1053,6 +1053,11 @@ const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
 // surface. "owner" (default) = Fred only; "all"/"1" = every signed-in user; "off"/"0" = nobody.
 // Fred's ruling 2026-07-19: guests stay dark until Phase 8 (hardening), so the default is "owner".
 const ideGate = createIdeGate(cfgGet("IDE_MODE", IDE_MODE_DEFAULT));
+// Boot assertion (Kimi #7): the router's pinned model ids must exist in the catalog. A rename
+// upstream would otherwise fail route resolution in front of a user. Warn loudly rather than
+// crash the whole app: the Crucible is one feature, and a bad pin should not take chat down.
+try { assertRouterModelsExist((id) => !!modelById(id)); }
+catch (e) { console.error("[dominion-ai] WARNING: " + e.message); }
 const ideAllowed = (T) => ideGate.allowed(T);
 // Workspace/prefs store per ACCOUNT: the owner keeps the global data dir (his path stays
 // byte-for-byte what it was), everyone else gets their own tenant directory, the same isolation

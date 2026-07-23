@@ -77,6 +77,27 @@ export const PRESETS = [
 
 export const presetById = (id) => PRESETS.find((p) => p.id === String(id || "")) || null;
 
+/*
+ * Every model id the router hard-codes (defaults + presets), so a boot assertion can prove each
+ * one still exists in the catalog. Providers rename models; a pinned id that silently vanishes
+ * fails route resolution in front of a user (Kimi #7). IMAGE_ENGINE is the internal Forge
+ * sentinel, not a catalog id, so it is excluded. "" means "use the caller's main model" and is
+ * likewise not a catalog id.
+ */
+export function referencedModelIds() {
+  const ids = new Set();
+  const add = (v) => { if (v && v !== IMAGE_ENGINE) ids.add(v); };
+  for (const v of Object.values(DEFAULT_ASSIGNMENTS)) add(v);
+  for (const p of PRESETS) for (const v of Object.values(p.assignments || {})) add(v);
+  return [...ids];
+}
+// Assert against a catalog membership predicate. Throws with the offenders named. Called at boot.
+export function assertRouterModelsExist(existsInCatalog) {
+  const missing = referencedModelIds().filter((id) => !existsInCatalog(id));
+  if (missing.length) throw new Error("iderouter references model ids absent from the catalog: " + missing.join(", "));
+  return true;
+}
+
 // Confidence bands, same shape as server.mjs routeDecision.
 export const CONF_STRONG = 0.9, CONF_OK = 0.7, CONF_WEAK = 0.5;
 export const CLASSIFIER_THRESHOLD = 0.7;   // below this, ask the cheap classifier

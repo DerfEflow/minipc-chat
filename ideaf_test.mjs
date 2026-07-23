@@ -185,6 +185,24 @@ CONTRACT: Consumes /data and renders a list.`;
   assert.equal(result.parts[1].title, "Frontend");
 });
 
+await t("parseDividerPlan tolerates markdown emphasis and any casing (Kimi #4)", () => {
+  // The shapes real models actually emit: bold, headings, lowercase, colon variants.
+  const text = "## **Part 1:** Backend\n" +
+    "**Files:** src/api.mjs\n" +
+    "*Contract:* Provides /data.\n" +
+    "part 2 - Frontend\n" +
+    "FILES : public/app.js\n" +
+    "contract: Renders it.";
+  const result = parseDividerPlan(text, 5);
+  assert.ok(result.ok, "a stylistic flourish must not yield zero parts");
+  assert.equal(result.parts.length, 2);
+  assert.equal(result.parts[0].title, "Backend");
+  assert.ok(result.parts[0].files.includes("src/api.mjs"));
+  assert.ok(result.parts[0].contract.includes("/data"));
+  assert.equal(result.parts[1].title, "Frontend");
+  assert.ok(result.parts[1].files.includes("public/app.js"));
+});
+
 await t("parseDividerPlan normalizes backslashes to forward slashes", () => {
   const text = `PART 1: Code
 FILES: src\\api.mjs, src\\db.sql

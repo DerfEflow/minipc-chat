@@ -155,20 +155,26 @@ export function dividerMessages({ goal = "", maxParts = 5, register = "plain", p
  */
 export function parseDividerPlan(text, maxParts = 5) {
   const raw = String(text == null ? "" : text).trim();
-  const lines = raw.split(/\r?\n/);
+  // Models write "Part 1", "**PART 1:**", "## PART 1 -", "Files:", bolded and cased every way.
+  // Strip leading markdown (#, *, -, >, whitespace) and trailing emphasis per line, and match the
+  // keywords case-insensitively, so a stylistic flourish never yields zero parts and a dead build
+  // (Kimi #4, verified strict-parser). The intake parser was already case-insensitive; this
+  // brings the divider in line.
+  const clean = (line) => String(line).replace(/^[\s>#*_-]+/, "").replace(/\*+\s*$/, "").trimEnd();
+  const lines = raw.split(/\r?\n/).map(clean);
   const parts = [];
   let currentPart = null;
   let currentContract = "";
 
   for (const line of lines) {
-    const partMatch = line.match(/^PART\s+(\d+):\s*(.+)$/);
+    const partMatch = line.match(/^\**\s*PART\s+(\d+)\s*:?\**\s*(.*)$/i);
     if (partMatch) {
       if (currentPart) {
         currentPart.contract = currentContract.trim();
         parts.push(currentPart);
       }
       currentPart = {
-        title: partMatch[2].trim(),
+        title: (partMatch[2] || "").replace(/^[\s:-]+/, "").replace(/\*+\s*$/, "").trim() || ("Part " + partMatch[1]),
         files: [],
         contract: "",
       };
@@ -178,7 +184,7 @@ export function parseDividerPlan(text, maxParts = 5) {
 
     if (!currentPart) continue;
 
-    const filesMatch = line.match(/^FILES:\s*(.*)$/);
+    const filesMatch = line.match(/^\**\s*FILES\s*:\**\s*(.*)$/i);
     if (filesMatch) {
       const fileStr = filesMatch[1].trim();
       if (fileStr) {
@@ -191,7 +197,7 @@ export function parseDividerPlan(text, maxParts = 5) {
       continue;
     }
 
-    const contractMatch = line.match(/^CONTRACT:\s*(.*)$/);
+    const contractMatch = line.match(/^\**\s*CONTRACT\s*:\**\s*(.*)$/i);
     if (contractMatch) {
       // A part may state several promises across several CONTRACT lines; they accumulate.
       // Overwriting here silently discarded every promise except the last one.
@@ -202,7 +208,7 @@ export function parseDividerPlan(text, maxParts = 5) {
     }
 
     if (currentPart && line.trim()) {
-      if (!currentContract && !line.match(/^(PART|FILES|CONTRACT)/i)) {
+      if (!currentContract && !line.match(/^\**\s*(PART|FILES|CONTRACT)/i)) {
         continue;
       }
       if (currentContract) {
