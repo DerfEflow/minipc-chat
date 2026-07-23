@@ -78,6 +78,7 @@ import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
 import { createChatJobs, coalesceEvents } from "./chatjobs.mjs";
+import { createLongRun } from "./longrun.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -176,6 +177,11 @@ const chatsync = createChatSync({ dir: cfgGet("CHATSYNC_DIR", dataPath("chatsync
 // Durable chat jobs (chatjobs.mjs): every /chat run persists to SQLite so long runs survive client
 // disconnects of any length AND server restarts/redeploys. The factory sweeps orphans at boot.
 const jobStore = createChatJobs({ dir: cfgGet("CHATJOBS_DIR", dataPath("chatjobs")) });
+
+// Long-run harness (longrun.mjs, SOW rev B): job-level orchestration for 36-hour work. The
+// LEDGER is the job's memory; chatjobs above stays the turn-level transport durability. Owner's
+// jobs live here; each guest gets their own store via the tenant resolver.
+const longrun = createLongRun({ dir: cfgGet("LONGRUN_DIR", dataPath("jobs")) });
 const CHATJOBS_TAIL = Number(cfgGet("CHATJOBS_TAIL", "4096")) || 4096;             // RAM tail cap per job
 const CHATJOBS_FLUSH_MS = Number(cfgGet("CHATJOBS_FLUSH_MS", "2000")) || 2000;     // token-batch window
 const CHATJOBS_MAX_RUNNING = Number(cfgGet("CHATJOBS_MAX_RUNNING", "6")) || 6;     // per-user in-flight cap
@@ -1033,9 +1039,9 @@ const MULTI_TENANT = String(cfgGet("MULTI_TENANT", "0")) === "1";
 const OWNER_EMAIL = cfgGet("OWNER_EMAIL", "fredwolfe@gmail.com");
 const usersStore = createUsersStore({ dir: dataPath("tenants"), ownerEmail: OWNER_EMAIL });
 const tenants = createTenantResolver({ baseDir: DATA_DIR, embed: embedText,
-  globals: { memory, chatlog, chatsync, artifacts, flywheel, sandboxDir: CTX.sandboxDir, ctx: CTX, persona }, users: usersStore });
+  globals: { memory, chatlog, chatsync, artifacts, flywheel, longrun, sandboxDir: CTX.sandboxDir, ctx: CTX, persona }, users: usersStore });
 const OWNER_T = { role: "owner", isOwner: true, uid: "owner", email: OWNER_EMAIL, status: "active",
-  memory, chatlog, chatsync, artifacts, flywheel, sandboxDir: CTX.sandboxDir, persona, ctxBase: CTX };
+  memory, chatlog, chatsync, artifacts, flywheel, longrun, sandboxDir: CTX.sandboxDir, persona, ctxBase: CTX };
 const resolveTenant = (req) => MULTI_TENANT ? tenants.resolve(req) : OWNER_T;
 // ---- Dominion Works (IDE mode). SOW: docs/IDE-MODE-ROADMAP.md, build pack: docs/IDE-MODE-BUILD.md.
 // Ships dark behind IDE_MODE so every phase can land in prod without exposing an unfinished build
@@ -5041,6 +5047,42 @@ const server = http.createServer(async (req, res) => {
           console.log(`[dominion-ai] chat sync (${T.isOwner ? "owner" : T.email || T.uid}): +${result.accepted.length} accepted, ${result.rejected.length} refused, ${truncated} truncated`);
         }
         return json(200, { ...changes, accepted: result.accepted, rejected: result.rejected });
+      }
+      return json(405, { error: "method not allowed" });
+    }
+
+    // Long-run harness jobs (SOW rev B item 1's owner-visible progress log + item 7's seam).
+    // Identity required; invite/credits are NOT (reading your own ledger and pausing your own
+    // job is not billable work). Job CREATION with real model spend arrives with the item 5
+    // billing wiring; until then jobs are created by server-side callers.
+    if (path === "/jobs") {
+      const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+      const T = resolveTenant(req);
+      if (T.role === "anon") return json(401, { error: "Sign in to see your jobs.", code: "no_identity" });
+      if (T.status === "paused" || T.status === "locked") return json(403, { error: "Account " + T.status + ".", code: "account_" + T.status });
+      const store = T.longrun;
+      if (!store) return json(503, { error: "Long-run jobs are not available for this account." });
+      if (req.method === "GET") {
+        const id = u.searchParams.get("id");
+        if (!id) return json(200, { jobs: store.listJobs().map((m) => ({ id: m.id, mission: m.mission, state: m.state, reason: m.reason, createdAt: m.createdAt, updatedAt: m.updatedAt })) });
+        const p = store.progress(id);
+        if (!p) return json(404, { error: "no such job" });
+        return json(200, { meta: p.meta, done: p.done.size, remaining: p.remaining.length, ledgerTail: p.entries.slice(-50) });
+      }
+      if (req.method === "POST") {
+        const raw = await readRawBody(req, 1024 * 1024);
+        if (raw === null) return json(413, { error: "request too large" });
+        let body; try { body = JSON.parse(raw.toString("utf8") || "{}"); } catch { return json(400, { error: "bad json" }); }
+        const op = String(body.op || "");
+        if (op === "pause") {
+          const m = store.pauseJob(String(body.id || ""), "paused by " + (T.isOwner ? "owner" : "user"));
+          return m ? json(200, { meta: m }) : json(404, { error: "no such job" });
+        }
+        if (op === "resume") {
+          const m = store.resumeJob(String(body.id || ""));
+          return m ? json(200, { meta: m }) : json(404, { error: "no such job" });
+        }
+        return json(400, { error: "op must be pause or resume" });
       }
       return json(405, { error: "method not allowed" });
     }

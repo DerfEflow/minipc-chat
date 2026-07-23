@@ -14,6 +14,7 @@ import { createArtifactStore } from "./artifacts.mjs";
 import { createChatLog } from "./chatlog.mjs";
 import { createChatSync } from "./chatsync.mjs";
 import { createFlywheel } from "./flywheel.mjs";
+import { createLongRun } from "./longrun.mjs";
 import { join } from "node:path";
 
 // Tools a non-owner may call. Everything here is safe: web, their own artifacts/memory/sandbox,
@@ -67,8 +68,12 @@ export function createTenantStores({ baseDir, uid, embed }) {
   const chatsync = createChatSync({ dir: join(root, "chatsync") });
   const artifacts = createArtifactStore({ dir: join(root, "artifacts") });
   const flywheel = createFlywheel({ dir: join(root, "flywheel") });
+  // Long-run jobs (the 36-hour harness): per-uid dir, so one user's job ledger is reachable
+  // only through their own resolved bundle. The chatsync lesson made this a law: a store added
+  // here must ALSO ride the resolver's owner branch below, or guests get 503s.
+  const longrun = createLongRun({ dir: join(root, "jobs") });
   const sandboxDir = join(root, "sandbox");
-  return { root, memory, chatlog, chatsync, artifacts, flywheel, sandboxDir };
+  return { root, memory, chatlog, chatsync, artifacts, flywheel, longrun, sandboxDir };
 }
 
 // A resolver caches per-user store bundles and returns a tenant view for a request.
@@ -84,8 +89,8 @@ export function createTenantResolver({ baseDir, embed, globals, users }) {
     const id = users.identify(req);
     if (id.role === "owner") {
       return { ...id, memory: globals.memory, chatlog: globals.chatlog, chatsync: globals.chatsync,
-        artifacts: globals.artifacts, flywheel: globals.flywheel, sandboxDir: globals.sandboxDir,
-        persona: globals.persona, ctxBase: globals.ctx };
+        artifacts: globals.artifacts, flywheel: globals.flywheel, longrun: globals.longrun,
+        sandboxDir: globals.sandboxDir, persona: globals.persona, ctxBase: globals.ctx };
     }
     const s = id.role === "anon" ? null : storesFor(id);
     // Non-owner ctx: their stores + their sandbox + the SHARED persona (read-only) + owner secrets
@@ -96,7 +101,7 @@ export function createTenantResolver({ baseDir, embed, globals, users }) {
       // Export through the CALLER's own artifact store so non-owners never touch the owner's artifacts.
       exportGated: (id, fmt, o) => globals.ctx.exportGated(id, fmt, o, s.artifacts) } : null;
     return s ? { ...id, memory: s.memory, chatlog: s.chatlog, chatsync: s.chatsync, artifacts: s.artifacts,
-      flywheel: s.flywheel, sandboxDir: s.sandboxDir, persona: globals.persona, ctxBase } : { ...id, ctxBase: null };
+      flywheel: s.flywheel, longrun: s.longrun, sandboxDir: s.sandboxDir, persona: globals.persona, ctxBase } : { ...id, ctxBase: null };
   }
   return { resolve, storesFor, cache };
 }
