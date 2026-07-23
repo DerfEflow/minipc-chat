@@ -85,7 +85,7 @@ async function agent(ctx, action, extra = {}, signal = null) {
 }
 
 // ---- the bridge read API (read-only files on Fred's machine) ----
-async function forgeRead(ctx, op, path = "", query = "", signal = null) {
+async function forgeRead(ctx, op, path = "", query = "", signal = null, opts = {}) {
   if (!ctx.syncKey) return "Not configured: no SYNC_SECRET on the server.";
   const r = await request("POST", ctx.baseUrl + "/api/bridge/read", { "x-sync-key": ctx.syncKey }, { op, path, query }, signal);
   if (r.aborted) return ABORTED;
@@ -100,7 +100,7 @@ async function forgeRead(ctx, op, path = "", query = "", signal = null) {
     if (c.aborted) return ABORTED;
     const cur = (parse(c.text) || {}).read;
     if (!cur) continue;
-    if (cur.status === "done") return (cur.content || "(empty)").slice(0, 8000);
+    if (cur.status === "done") return windowText(String(cur.content || ""), opts.offset, opts.limit);
     if (cur.status === "error") return "Bridge couldn't read that: " + cur.error;
   }
   return "The bridge didn't answer in time — the machine may be busy.";
@@ -204,11 +204,40 @@ async function handsDesktop(ctx, args) {
   return r.detail || "Done.";
 }
 
-async function handsRead(ctx, op, path, query) {
-  if (op === "list") return fmtHands(await ctx.hands.dispatch("fs_list", { path }), (r) => (r.entries || []).map((e) => `${e.type === "dir" ? "[dir] " : "      "}${e.name}${e.size != null ? "  (" + e.size + " b)" : ""}`).join("\n") || "(empty)");
-  if (op === "tree") return fmtHands(await ctx.hands.dispatch("fs_tree", { path, depth: 3 }), (r) => (r.tree || []).join("\n") || "(empty)");
+// Honest paging for file reads. A silent slice is the tool lying to the model: the text just ends
+// and the model wastes turns narrating "I was cut off". Every window states exactly what it shows
+// and how to get the rest; a file that fits comes back bare, so small reads look like they always did.
+const READ_LIMIT_DEFAULT = 16000, READ_LIMIT_MAX = 48000;
+function windowText(text, offsetArg, limitArg) {
+  const total = text.length;
+  const offset = Math.max(0, Math.floor(Number(offsetArg) || 0));
+  const limit = Math.min(Math.max(Math.floor(Number(limitArg) || READ_LIMIT_DEFAULT), 1000), READ_LIMIT_MAX);
+  if (total === 0) return "(empty)";
+  if (offset >= total) return `(nothing at offset ${offset}: the file is ${total} characters long; it ends before that point)`;
+  const end = Math.min(offset + limit, total);
+  const chunk = text.slice(offset, end);
+  if (offset === 0 && end === total) return chunk;
+  const head = `[showing characters ${offset} to ${end} of ${total}]`;
+  const tail = end < total
+    ? `[file continues: ${total - end} characters remain. Call forge_read again with the same path and offset:${end} to keep reading.]`
+    : `[end of file]`;
+  return `${head}\n${chunk}\n${tail}`;
+}
+async function handsRead(ctx, op, path, query, opts = {}) {
+  if (op === "list") return fmtHands(await ctx.hands.dispatch("fs_list", { path }), (r) => {
+    const entries = r.entries || [];
+    const body = entries.map((e) => `${e.type === "dir" ? "[dir] " : "      "}${e.name}${e.size != null ? "  (" + e.size + " b)" : ""}`).join("\n") || "(empty)";
+    return entries.length >= 500 ? body + "\n[listing capped at 500 entries; this folder may hold more. List a subfolder to narrow down.]" : body;
+  });
+  if (op === "tree") {
+    const depth = Math.min(Math.max(Math.floor(Number(opts.depth) || 3), 1), 6);
+    return fmtHands(await ctx.hands.dispatch("fs_tree", { path, depth }), (r) => {
+      const body = (r.tree || []).join("\n") || "(empty)";
+      return r.truncated ? body + `\n[tree truncated at ${(r.tree || []).length} lines (depth ${depth}). Run tree on a subfolder, or use op:list to walk one level at a time.]` : body;
+    });
+  }
   if (op === "grep") return "To search on the machine, use forge_run with a search command for that OS (PowerShell Select-String on Windows, grep/rg on Linux), or use forge_read op:list/tree/read to browse.";
-  return fmtHands(await ctx.hands.dispatch("fs_read", { path }), (r) => String(r.text ?? "(empty)").slice(0, 8000));
+  return fmtHands(await ctx.hands.dispatch("fs_read", { path }), (r) => windowText(String(r.text ?? ""), opts.offset, opts.limit));
 }
 
 // ---- sandbox (jailed to ctx.sandboxDir, server-side) ----
@@ -295,7 +324,7 @@ export const TOOLS = [
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_add_next_step", description: "Add an actionable next-step to a project.", parameters: { type: "object", properties: { project_id: { type: "string" }, text: { type: "string" } }, required: ["project_id", "text"] } } } },
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_set_next_proof", description: "Set a project's Next Proof — the single riskiest thing it must prove next.", parameters: { type: "object", properties: { project_id: { type: "string" }, proof: { type: "string" } }, required: ["project_id", "proof"] } } } },
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_create_project", description: "Create a new Command Deck project. discipline: Apps|Writing|Business|Product Development|Saints Dominion. status: Idea|Building|Live|Paused|Done.", parameters: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, discipline: { type: "string" }, status: { type: "string" }, priority: { type: "string" } }, required: ["name"] } } } },
-  { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "forge_read", description: "Read files on the connected machine (READ-ONLY). op: 'read' a file, 'list' a folder, 'tree' a folder tree, 'grep' (search hint). Reaches the machine through its Dominion hands node; the node enforces allowed folders + carve-outs.", parameters: { type: "object", properties: { op: { type: "string", enum: ["read", "list", "tree", "grep"] }, path: { type: "string" }, query: { type: "string" } }, required: ["op"] } } } },
+  { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "forge_read", description: "Read files on the connected machine (READ-ONLY). op: 'read' a file, 'list' a folder, 'tree' a folder tree, 'grep' (search hint). Large files return in pages: each page says exactly which characters it shows and the offset to pass for the next page, so ANY size file can be read fully by calling again with offset. Reaches the machine through its Dominion hands node; the node enforces allowed folders + carve-outs.", parameters: { type: "object", properties: { op: { type: "string", enum: ["read", "list", "tree", "grep"] }, path: { type: "string" }, query: { type: "string" }, offset: { type: "integer", description: "op:read only. Character position to start from; use the offset the previous page told you. Default 0." }, limit: { type: "integer", description: "op:read only. Max characters per page, 1000 to 48000. Default 16000." }, depth: { type: "integer", description: "op:tree only. Folder depth 1 to 6. Default 3." } }, required: ["op"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_write", description: "Write (create or overwrite) a file on the connected machine, in a folder the machine allows. Reaches it through the Dominion hands node (carve-outs + allowed-folders enforced). Use for real file changes as you build.", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path on that machine." }, content: { type: "string" } }, required: ["path", "content"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_run", description: "Run a shell command on the connected machine and return its output (PowerShell on Windows, sh on Linux). Reaches it through the Dominion hands node; the node enforces carve-outs and refuses destructive commands against protected dirs. Use to build, test, and inspect as you work.", parameters: { type: "object", properties: { command: { type: "string" }, timeoutMs: { type: "number", description: "Optional, default 60000, max 600000." } }, required: ["command"] } } } },
   { category: "code", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "forge_rollback", description: "Undo a change you made on the machine. Call with no id to LIST recent snapshots (every forge_write and forge_run takes one automatically), then call again with an id to restore it. File overwrites restore exactly; files you created are deleted; a shell command that touched a git repo returns the exact git commands to revert it. Use this the moment you realize a change was wrong, instead of asking Fred to fix it.", parameters: { type: "object", properties: { id: { type: "string", description: "Snapshot id from the list. Omit to list." }, limit: { type: "number", description: "How many recent snapshots to list, default 15." } } } } } },
@@ -569,8 +598,8 @@ export async function runTool(name, args, ctx, signal = null) {
       case "browser_control": return await handsBrowser(ctx, args);
       case "desktop_control": return await handsDesktop(ctx, args);
       case "forge_read":
-        if (ctx.hands) return await handsRead(ctx, args.op, args.path || "", args.query || "");
-        return await forgeRead(ctx, args.op, args.path || "", args.query || "", signal);
+        if (ctx.hands) return await handsRead(ctx, args.op, args.path || "", args.query || "", { offset: args.offset, limit: args.limit, depth: args.depth });
+        return await forgeRead(ctx, args.op, args.path || "", args.query || "", signal, { offset: args.offset, limit: args.limit });
       case "forge_write": {
         if (!ctx.hands) return "Writing to a machine needs a connected Dominion hands node. Start it on the computer you want to reach.";
         return fmtHands(await ctx.hands.dispatch("fs_write", { path: args.path, content: args.content ?? "" }), (r) => `Wrote ${r.bytes} bytes to ${r.path} on ${r.node || "the machine"}.${r.snapshot ? ` Snapshot ${r.snapshot} taken first, so forge_rollback can undo this.` : ""}`);
