@@ -1169,7 +1169,7 @@ async function meterTurn(T, costUsd, promptText, answer) {
       const m = billing.chargeTurn(T.email, costUsd || 0);
       if (m.low) billing.autoRecharge(T.email).catch(() => {});   // fire-and-forget; locks on repeated failure
     } else if (T.role === "sponsored") {
-      users.addSponsoredSpend(T.email, costUsd || 0);              // pauses the account at the cap
+      usersStore.addSponsoredSpend(T.email, costUsd || 0);              // pauses the account at the cap
     }
     if (T.consented) trainingSinkRecord({ ts: new Date().toISOString(), uid: T.uid, role: T.role, prompt: String(promptText || "").slice(0, 4000), answer: String(answer || "").slice(0, 8000) });
   } catch {}
@@ -2716,7 +2716,7 @@ function meterOcr(T, costUsd) {
       const m = billing.chargeTurn(T.email, costUsd || 0);
       if (m.low) billing.autoRecharge(T.email).catch(() => {});
     } else if (T.role === "sponsored") {
-      users.addSponsoredSpend(T.email, costUsd || 0);
+      usersStore.addSponsoredSpend(T.email, costUsd || 0);
     }
   } catch {}
 }
@@ -2738,7 +2738,7 @@ const imagesFeature = createImagesFeature({
     if (!MULTI_TENANT || !T || T.isOwner || !(credits > 0)) return;
     try {
       if (T.role === "credit") billing.adminAdjust(T.email, Math.trunc(credits), reason || "batch settle refund");
-      else if (T.role === "sponsored") users.addSponsoredSpend(T.email, -(credits / 100));
+      else if (T.role === "sponsored") usersStore.addSponsoredSpend(T.email, -(credits / 100));
     } catch {}
   },
   canChat: (email) => billing.canChat(email),
