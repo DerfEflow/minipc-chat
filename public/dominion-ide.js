@@ -214,6 +214,24 @@
 
     grid.append(colTask, colModel, colN, colAct);
 
+    // ---- Full Custom: divide the goal into SECTIONS, then own every one (Phase 2, Fred's spec).
+    // A "Plan the sections" button asks the divider for the parts, then each part becomes a row
+    // the user configures: any model, any agent count, with a live time/token estimate and a red
+    // warning when a pick is inadequate (never a block). Vibe + engineer only; beginners never
+    // see the AF window at all.
+    const custom = document.createElement("div");
+    custom.className = "af-custom";
+    custom.id = "af-custom";
+    custom.innerHTML =
+      '<div class="af-custom-head">' +
+        '<span data-lex="af_custom_title"></span>' +
+        '<button type="button" id="af-divide" class="af-divide-btn" data-lex="af_divide"></button>' +
+      '</div>' +
+      '<p class="af-custom-hint" data-lex="af_custom_hint"></p>' +
+      '<div id="af-sections" class="af-sections"></div>' +
+      '<div id="af-plan-total" class="af-plan-total" hidden></div>';
+    custom.querySelector("#af-divide").addEventListener("click", planSections);
+
     const footer = document.createElement("div");
     footer.className = "af-footer";
 
@@ -248,7 +266,7 @@
 
     footer.append(addBtn, toggleRow, resetBtn);
 
-    card.append(head, hint, grid, footer);
+    card.append(head, hint, grid, footer, custom);
     panel.append(backdrop, card);
     const root = $("#ide-root");
     if (root) root.append(panel);
@@ -338,6 +356,125 @@
       if (grid) grid.append(rowEl);
     }
     updateAFButtonState();
+  }
+
+  /*
+   * Full Custom (Phase 2). Ask the divider to propose the sections for the current brief, then
+   * render one configurable row per section. Reuses the same brief the build will use (the drawer
+   * prompt or the interview's first message), so what you plan is what you build.
+   */
+  let afPlan = null;   // { parts: [...], picks: [{model, agents}] }
+
+  async function planSections() {
+    const goal = (intake.messages[0] && intake.messages[0].content) || ($("#st-prompt") && $("#st-prompt").value.trim()) || "";
+    const btn = $("#af-divide"), box = $("#af-sections");
+    if (!goal) { if (box) box.innerHTML = '<p class="af-section-empty">' + L("af_need_brief") + "</p>"; return; }
+    if (btn) { btn.disabled = true; btn.textContent = L("af_dividing"); }
+    try {
+      const r = await fetch("/ide/divide", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: goal, mode: state.mode, register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }) });
+      const j = await r.json();
+      if (!r.ok || !j.ok) {
+        if (box) box.innerHTML = '<p class="af-section-empty">' + (j.error || j.reason || L("af_divide_failed")) + "</p>";
+        return;
+      }
+      afPlan = { parts: j.parts, picks: j.parts.map(() => ({ model: "", agents: 1 })) };
+      if (!j.disjoint && box) { /* the referee will still enforce at build; just note it */ }
+      renderSections();
+    } catch (e) {
+      if (box) box.innerHTML = '<p class="af-section-empty">' + L("af_divide_failed") + "</p>";
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = L("af_divide"); }
+    }
+  }
+
+  function renderSections() {
+    const box = $("#af-sections");
+    if (!box || !afPlan) return;
+    box.innerHTML = "";
+    afPlan.parts.forEach((part, i) => {
+      const row = document.createElement("div");
+      row.className = "af-section";
+      const title = document.createElement("div");
+      title.className = "af-section-title";
+      title.textContent = (i + 1) + ". " + (part.title || "Section " + (i + 1));
+      const files = document.createElement("div");
+      files.className = "af-section-files";
+      files.textContent = (part.files || []).join(", ");
+
+      const controls = document.createElement("div");
+      controls.className = "af-section-controls";
+      const sel = document.createElement("select");
+      sel.className = "af-model-select";
+      fillModelOptions(sel, afPlan.picks[i].model || "", false);
+      sel.addEventListener("change", () => { afPlan.picks[i].model = sel.value; refreshEstimates(); persistPicks(); });
+
+      const stepper = document.createElement("div");
+      stepper.className = "af-agents";
+      const minus = document.createElement("button"); minus.type = "button"; minus.textContent = "-";
+      const count = document.createElement("span"); count.className = "af-agent-count"; count.textContent = afPlan.picks[i].agents;
+      const plus = document.createElement("button"); plus.type = "button"; plus.textContent = "+";
+      const clampAgents = (d) => { afPlan.picks[i].agents = Math.max(1, Math.min(8, afPlan.picks[i].agents + d)); count.textContent = afPlan.picks[i].agents; refreshEstimates(); persistPicks(); };
+      minus.addEventListener("click", () => clampAgents(-1));
+      plus.addEventListener("click", () => clampAgents(1));
+      const agentsLabel = document.createElement("span"); agentsLabel.className = "af-agents-label"; agentsLabel.setAttribute("data-lex", "af_agents");
+      stepper.append(minus, count, plus, agentsLabel);
+
+      controls.append(sel, stepper);
+
+      const est = document.createElement("div");
+      est.className = "af-section-est";
+      est.id = "af-est-" + i;
+      est.textContent = L("af_est_pending");
+
+      const warn = document.createElement("div");
+      warn.className = "af-section-warn";
+      warn.id = "af-warn-" + i;
+      warn.hidden = true;
+
+      row.append(title, files, controls, est, warn);
+      box.append(row);
+    });
+    paintLexicon();
+    refreshEstimates();
+  }
+
+  let estimateTimer = 0;
+  function refreshEstimates() {
+    clearTimeout(estimateTimer);
+    estimateTimer = setTimeout(async () => {
+      if (!afPlan) return;
+      try {
+        const r = await fetch("/ide/estimate", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ parts: afPlan.parts, picks: afPlan.picks }) });
+        const j = await r.json();
+        if (!r.ok) return;
+        (j.per || []).forEach((e, i) => {
+          const est = $("#af-est-" + i), warn = $("#af-warn-" + i);
+          if (est) {
+            const mins = e.seconds >= 90 ? Math.round(e.seconds / 60) + " min" : e.seconds + "s";
+            const basis = e.basis === "prior" ? " " + L("af_est_prior") : "";
+            est.textContent = "~" + mins + " · ~" + Math.round(e.tokens / 1000) + "k tokens · ~$" + e.usd.toFixed(2) + basis;
+          }
+          if (warn) {
+            if (e.warning) { warn.hidden = false; warn.textContent = e.warning.text; warn.className = "af-section-warn af-warn-" + e.warning.level; }
+            else warn.hidden = true;
+          }
+        });
+        const total = $("#af-plan-total");
+        if (total && j.plan) {
+          total.hidden = false;
+          const tmin = j.plan.seconds >= 90 ? Math.round(j.plan.seconds / 60) + " min" : j.plan.seconds + "s";
+          total.textContent = L("af_plan_total") + " ~" + tmin + " · ~" + Math.round(j.plan.tokens / 1000) + "k tokens · ~$" + j.plan.usd.toFixed(2);
+        }
+      } catch {}
+    }, 260);
+  }
+
+  function persistPicks() {
+    if (!state.assignments.af) state.assignments.af = { on: false, rows: [] };
+    state.assignments.af.partAssignments = afPlan ? afPlan.picks.map((p) => ({ model: p.model, agents: p.agents })) : [];
+    saveAssignments();
   }
 
   function addAFRow() {

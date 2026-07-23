@@ -206,6 +206,20 @@
     af_add: ["Add a row", "Add row", "Add row"],
     af_on: ["Use this crew for builds", "Enable agentic workflow", "Enable (use this crew for builds)"],
     af_reset: ["Back to the standard crew", "Reset to template", "Reset to the default template"],
+    af_custom_title: ["Build it your way", "Full custom sections", "Full custom (own every section)"],
+    af_custom_hint: [
+      "Let the planner split your idea into sections, then pick any AI and how many helpers for each. The time and cost update as you choose. Anything is allowed; a red note warns you when a pick is a stretch, but it is yours to try.",
+      "Divide the build into sections and assign a model and agent count to each. Estimates recompute live; inadequate picks are flagged red but never blocked.",
+      "Divide the build into sections, then assign a model and agent count (helpers) to each. Estimates update live; a red note flags a stretch pick without blocking it.",
+    ],
+    af_divide: ["Plan the sections", "Divide the build", "Divide into sections"],
+    af_dividing: ["Planning...", "Dividing...", "Dividing..."],
+    af_divide_failed: ["Could not plan the sections. Try again.", "Divide failed. Retry.", "Divide failed; try again."],
+    af_need_brief: ["Say what you want built first, up in the conversation.", "Enter a brief first.", "Enter a brief first (say what to build)."],
+    af_agents: ["helpers", "agents", "agents (helpers)"],
+    af_est_pending: ["Pick an AI to see time and cost", "Select a model for estimates", "Pick a model to estimate time and cost"],
+    af_est_prior: ["(rough guess)", "(prior estimate)", "(rough prior, not yet measured)"],
+    af_plan_total: ["Whole build:", "Total:", "Whole build (total):"],
 
     // ---- tools choice (assignment board is opt-in) --------------------------------------------
     tools_label: ["Which tools should Dominion use?", "Model assignments", "Model assignments (which AI does which work)"],

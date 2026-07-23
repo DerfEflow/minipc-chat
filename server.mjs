@@ -64,7 +64,9 @@ import { createForgeStore } from "./forge.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs } from "./idejobs.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, parseFileBlocks, carveOutReport, buildMoveMessages } from "./ideengine.mjs";
-import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor } from "./ideaf.mjs";
+import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor, adequacyWarning, chunksForPart } from "./ideaf.mjs";
+import { isRepoCmd, startBranchPlan, salvageCommitPlan, githubPushPlan, buildBranch } from "./idegit.mjs";
+import { createTelemetry, estimatePartTokens } from "./idetelemetry.mjs";
 import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } from "./ideafrun.mjs";
 import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
@@ -184,6 +186,10 @@ const jobStore = createChatJobs({ dir: cfgGet("CHATJOBS_DIR", dataPath("chatjobs
 // LEDGER is the job's memory; chatjobs above stays the turn-level transport durability. Owner's
 // jobs live here; each guest gets their own store via the tenant resolver.
 const longrun = createLongRun({ dir: cfgGet("LONGRUN_DIR", dataPath("jobs")) });
+// Build telemetry (Phase 2): real per-model throughput, so the AF window's time/token estimates
+// come from measured data (Fred's telemetry-first ruling), not a guessed table. One shared store;
+// estimates are per-model so cross-user data only sharpens the same numbers.
+const buildTelemetry = createTelemetry({ dir: dataPath("telemetry") });
 // Restart honesty: a job whose meta says "running" was being driven by a process that no longer
 // exists. Seal it paused (the ledger kept every finished unit); resume costs one segment at most.
 try { const sealed = sealInterrupted(longrun); if (sealed) console.log(`[dominion-ai] long-run: sealed ${sealed} interrupted job(s) after restart`); } catch {}
@@ -1259,6 +1265,24 @@ async function handleIde(req, res, u) {
   const body = (await readJsonBody(req)) || {};
   if (req.method === "POST" && path === "/ide/prefs") return send(ideFeature.setPrefs(T, body));
   if (req.method === "POST" && path === "/ide/route/preview") return send(ideFeature.previewRoute(T, body));
+  // AF Full Custom (Phase 2): a divide-only PREVIEW so the window can show the proposed parts and
+  // let the user assign a model + agent count to each BEFORE any build spends money. One divider
+  // call, gated like a build (identity + credits), estimate rides on each part.
+  if (req.method === "POST" && path === "/ide/divide") return handleIdeDivide(req, res, T, body);
+  // The live estimate the counters read as the user tinkers: for one part on one model at N
+  // agents, or a whole plan. Pure math over the telemetry store; no model call, so it is free.
+  if (req.method === "POST" && path === "/ide/estimate") {
+    const parts = Array.isArray(body.parts) ? body.parts : [];
+    const picks = Array.isArray(body.picks) ? body.picks : [];
+    const per = parts.map((p, i) => {
+      const rec = modelById((picks[i] && picks[i].model) || "") || null;
+      const est = buildTelemetry.estimatePart(p, rec, (picks[i] && picks[i].agents) || 1);
+      const warn = adequacyWarning({ rec, role: "worker", partTokens: estimatePartTokens(p), agents: (picks[i] && picks[i].agents) || 1 });
+      return { ...est, warning: warn };
+    });
+    const roll = buildTelemetry.estimatePlan(parts, (p, i) => ({ rec: modelById((picks[i] && picks[i].model) || "") || null, agents: (picks[i] && picks[i].agents) || 1 }));
+    return send({ status: 200, body: { per, plan: roll } });
+  }
   if (req.method === "POST" && path === "/ide/workspace") return send(ideFeature.createWorkspace(T, body));
   if (req.method === "POST" && path === "/ide/workspace/auto") {
     const blocked = ideFeature.wall(T);
@@ -1624,7 +1648,9 @@ function ideHandsFor(T) {
 // One model call with the build pipeline's cost arithmetic: prefer what the provider actually
 // charged, else derive from catalog prices (the OCR path's rule).
 async function ideChatOnce(model, messages, { signal } = {}) {
+  const startedAt = Date.now();
   const r = await cloudChatStream(model, messages, { signal });
+  const ms = Date.now() - startedAt;
   let costUsd = 0;
   const rec = modelById(model);
   if (r && r.usage) {
@@ -1635,7 +1661,8 @@ async function ideChatOnce(model, messages, { signal } = {}) {
       costUsd = ((inTok * (rec.inCost || 0)) + (outTok * (rec.outCost || 0))) / 1e6;
     }
   }
-  return { ok: !!(r && r.ok), content: (r && r.content) || "", error: (r && r.error) || "", costUsd: +costUsd.toFixed(6) };
+  // usage + ms + model ride along so the build telemetry can record real throughput (Phase 2).
+  return { ok: !!(r && r.ok), content: (r && r.content) || "", error: (r && r.error) || "", costUsd: +costUsd.toFixed(6), usage: (r && r.usage) || null, ms, model };
 }
 
 /*
@@ -1759,6 +1786,36 @@ function longJobTool(T, args = {}) {
   return jobs.map((m) => "- " + m.id + " [" + m.state + "] " + m.mission.slice(0, 80) + (m.reason ? " (" + m.reason.slice(0, 100) + ")" : "")).join("\n");
 }
 
+/*
+ * AF Full Custom divide-preview (Phase 2). Runs ONLY the divider on the goal and returns the
+ * proposed parts, each with an estimated token size, so the window can render one configurable
+ * row per part. No workspace and no build: this is the "plan the parts" step before the user
+ * assigns models. Gated exactly like a build turn (identity + credits), because it spends one
+ * model call. The parts are echoed back verbatim; the build re-divides but matches by index, and
+ * the client also sends these parts so a stable plan is preserved.
+ */
+async function handleIdeDivide(req, res, T, body) {
+  const json = (code, o) => sjson(res, code, o);
+  if (!ideGate.allowed(T)) return json(403, { error: "Not available for this account." });
+  if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) return json(402, { error: "Building needs credits. Add credits in Setup first.", code: "needs_credits" });
+  const prompt = String(body.prompt || "").trim();
+  if (!prompt) return json(400, { error: "Say what you want built first." });
+  const reg = normalizeRegister(body.register);
+  const persona = personaVoice(normalizeCrucibleMode(body.mode));
+  const maxParts = Math.max(2, Math.min(Number(body.maxParts) || 5, 8));
+  const divModel = String(body.model || "").trim() && modelById(body.model) ? body.model : defaultModelFor(!!T.isOwner);
+  try {
+    const divided = await ideChatOnce(divModel, dividerMessages({ goal: prompt, maxParts, register: reg, persona }), {});
+    if (divided.costUsd) { try { await meterTurn(T, divided.costUsd, prompt, ""); } catch {} }
+    if (!divided.ok) return json(502, { error: divided.error || "The divider could not be reached." });
+    const plan = parseDividerPlan(divided.content, maxParts);
+    if (!plan.ok) return json(200, { ok: false, reason: plan.error || "no parts", raw: String(divided.content || "").slice(0, 2000) });
+    const dj = verifyDisjoint(plan.parts);
+    const parts = plan.parts.map((p) => ({ ...p, tokens: estimatePartTokens(p) }));
+    return json(200, { ok: true, parts, disjoint: dj.ok, overlaps: dj.overlaps || [], costUsd: divided.costUsd || 0 });
+  } catch (e) { return json(502, { error: String((e && e.message) || e) }); }
+}
+
 async function runIdeBuild(job, { T, workspace, prompt, assignments, register, mode }) {
   const reg = normalizeRegister(register);
   const persona = personaVoice(normalizeCrucibleMode(mode));
@@ -1782,6 +1839,36 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
   const budget = { spentUsd: 0, capUsd: Number(workspace && workspace.budget && workspace.budget.capUsd) || 0 };
   const spend = (usd) => { budget.spentUsd += Number(usd) || 0; };
 
+  /*
+   * Phase 2 (Fred's ruling): every build runs on its OWN branch build/<jobid>, so real work is
+   * never mixed into main and a failed build leaves the branch behind as salvage. Non-git
+   * workspaces get a timestamped sibling snapshot from the engine as before; git ones get a
+   * branch. onGitBranch stays null when the workspace is not a repo (no init without consent,
+   * which the client passes as assignments.gitInit).
+   */
+  let onGitBranch = null;
+  async function cutBuildBranch() {
+    try {
+      const root = workspace.root;
+      const rp = await handsFor("shell_run", { command: isRepoCmd(root), timeoutMs: 20000 });
+      const isRepo = /true/i.test(String((rp && (rp.stdout || rp.output)) || ""));
+      const doInit = !isRepo && !!(assignments && assignments.gitInit);
+      const plan = startBranchPlan({ root, jobId: job.id, isRepo, doInit });
+      if (!plan.branch) return;   // not a repo and init not chosen: engine's copy-snapshot covers it
+      for (const c of plan.cmds) await handsFor("shell_run", { command: c, timeoutMs: 60000 });
+      onGitBranch = plan.branch;
+      ideJobs.emit(job.id, { type: "run", command: "git", ok: true, output: "Working on branch " + plan.branch + " (your main stays untouched)." });
+    } catch (e) { ideJobs.emit(job.id, { type: "run", command: "git", ok: false, output: "Could not cut a build branch; using file snapshots instead." }); }
+  }
+  async function salvage(outcome, note) {
+    if (!onGitBranch) return;
+    try {
+      const plan = salvageCommitPlan({ root: workspace.root, jobId: job.id, outcome, note });
+      for (const c of plan.cmds) await handsFor("shell_run", { command: c, timeoutMs: 60000 });
+      ideJobs.emit(job.id, { type: "run", command: "git", ok: true, output: "Saved the work so far on " + plan.branch + ". Nothing was lost." });
+    } catch {}
+  }
+
   try {
     // A machine has to be reachable before anything is planned, so nobody pays for a blueprint
     // that could never have been executed.
@@ -1790,6 +1877,7 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
       return ideJobs.finish(job.id, { type: "error", code: "no_node",
         message: phrase("no_node", reg) });
     }
+    await cutBuildBranch();
 
     const resolved = resolveAssignments(assignments, { allInOne: (assignments && assignments.allInOne) || "", fallback: defaultModelFor(!!T.isOwner) });
     const planModel = resolved.build_code || defaultModelFor(!!T.isOwner);
@@ -1851,7 +1939,9 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
     // grantOf decides what the cookie rule allows each result to touch.
     const runAfStage = async ({ stageMoves, assign, allowEmpty }) => {
       const settled = await Promise.all(stageMoves.map(async (move) => {
-        const decision = pickTextModel(move, assign);
+        // Full Custom: a move may carry its OWN assignment (per-part model the user picked); it
+        // wins over the stage default. This is how "any model on any section" reaches the engine.
+        const decision = pickTextModel(move, move.assign || assign);
         ideJobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
           why: move.why, taskClass: decision.taskClass, model: decision.model, routeWhy: decision.why });
         try {
@@ -1866,6 +1956,15 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
       for (const s of settled) {
         spend(s.res.costUsd);
         if (s.res.costUsd) { await meterTurn(T, s.res.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: s.res.costUsd, move: s.move.id }); }
+        // Feed the estimate engine real numbers (Phase 2): tokens out and wall-time per model, so
+        // future estimates for THIS model are measured, not the cold prior. Skipped when the
+        // provider reported no usable timing.
+        try {
+          const outTok = (s.res.usage && (s.res.usage.completion_tokens ?? s.res.usage.output_tokens)) || 0;
+          const ms = Number(s.res.ms) || 0;
+          const model = (s.move.assign && s.move.assign.allInOne) || s.res.model;
+          if (outTok > 0 && ms > 0 && model) buildTelemetry.record({ model, outTokens: outTok, ms, costUsd: s.res.costUsd || 0 });
+        } catch {}
         if (ac.signal.aborted) return { sealed: true, failures };
         if (!s.res.ok) {
           ideJobs.emit(job.id, { type: "move", id: s.move.id, title: s.move.title, state: "failed", message: s.res.error || "The model call failed." });
@@ -1951,9 +2050,19 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
       // 3. One restore point for the batch, then the workers.
       const snap = await engine.snapshot(job, workspace);
       if (!snap.ok) { ideJobs.finish(job.id, { type: "error", message: "No restore point could be made, so nothing was written. " + (snap.error || "") }); return false; }
-      const workerStage = await runAfStage({
-        stageMoves: parts.map((p, i) => afWorkerMove(p, i + 1)), assign: workerAssign, allowEmpty: false });
-      if (workerStage.sealed) return false;
+      // Full Custom: per-part model assignments the user configured, matched to parts by index.
+      // A part with no configured model falls back to the single worker model, so the plain AF
+      // flow is unchanged. Each worker move carries its own assign; the estimate/warning were
+      // already shown client-side, so here we simply honor the choice (Fred: it is theirs).
+      const partAssigns = (assignments && assignments.af && Array.isArray(assignments.af.partAssignments)) ? assignments.af.partAssignments : [];
+      const workerMoves = parts.map((p, i) => {
+        const mv = afWorkerMove(p, i + 1);
+        const pick = partAssigns[i] && partAssigns[i].model;
+        if (pick) { mv.assign = afAssignFor(pick); mv.pickedModel = pick; }
+        return mv;
+      });
+      const workerStage = await runAfStage({ stageMoves: workerMoves, assign: workerAssign, allowEmpty: false });
+      if (workerStage.sealed) { await salvage("interrupted", "workers"); return false; }
 
       // A failed part is a fork in the road, exactly like the standard path: the user picks, and
       // free text is guidance. The sequential retry runs through runMove (its own snapshot and
@@ -1981,7 +2090,7 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
         const revStage = await runAfStage({
           stageMoves: parts.map((p, i) => afReviewMove(p, i + 1, { reviewerTask: afSpec.reviewer.task, checkOutput })),
           assign: afAssignFor(afSpec.reviewer.model || "") || resolved, allowEmpty: true });
-        if (revStage.sealed) return false;
+        if (revStage.sealed) { await salvage("interrupted", "reviewer"); return false; }
       }
 
       // 6. QC looks at the whole and fixes the seams; then the final check tells the truth.
@@ -1989,7 +2098,7 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
         const qcStage = await runAfStage({
           stageMoves: [afQcMove(parts, afSpec.qc.task)],
           assign: afAssignFor(afSpec.qc.model || "") || resolved, allowEmpty: true });
-        if (qcStage.sealed) return false;
+        if (qcStage.sealed) { await salvage("interrupted", "qc"); return false; }
       }
       await engine.verify(job, workspace);
       return true;
