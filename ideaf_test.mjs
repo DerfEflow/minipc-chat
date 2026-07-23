@@ -18,7 +18,7 @@ import {
   dividerMessages,
   parseDividerPlan,
   verifyDisjoint,
-  afAssignFor,
+  afAssignFor, orchestratorEligible, adequacyWarning, chunksForPart, customDividerNote,
 } from "./ideaf.mjs";
 
 let passed = 0, failed = 0;
@@ -343,6 +343,46 @@ await t("afAssignFor returns assignments object with modelId for all classes", (
   assert.equal(assign.mechanical, "gpt-4");
   assert.equal(assign.review, "gpt-4");
   assert.equal(assign.allInOne, "gpt-4");
+});
+
+/* ---- AF Full Custom rules (Phase 2) ------------------------------------------------------ */
+await t("orchestrator floor: a real model qualifies, a tiny one does not", () => {
+  assert.equal(orchestratorEligible({ paramsB: 400, ctx: 200000, outCost: 15 }), true);
+  assert.equal(orchestratorEligible({ paramsB: 3, ctx: 8000, outCost: 0.1 }), false, "tiny local model cannot lead");
+  assert.equal(orchestratorEligible({ paramsB: 4, ctx: 130000, outCost: 0.3 }), true, "small params but big context clears");
+  assert.equal(orchestratorEligible(null), false);
+});
+
+await t("adequacy never blocks but warns RED when a part overflows the context", () => {
+  const small = { id: "x/small", name: "Small", ctx: 8000, outCost: 1 };
+  const w = adequacyWarning({ rec: small, role: "worker", partTokens: 6000, agents: 1 });
+  assert.equal(w.level, "red");
+  assert.match(w.text, /truncated|holds only/i);
+  assert.match(w.text, /yours to try/i, "the warning invites experimentation, never forbids");
+  const big = { id: "x/big", name: "Big", ctx: 1000000, outCost: 15 };
+  assert.equal(adequacyWarning({ rec: big, role: "worker", partTokens: 6000 }), null, "roomy model, no warning");
+});
+
+await t("adequacy flags a too-small orchestrator specifically", () => {
+  const tiny = { id: "x/tiny", name: "Tiny", ctx: 8000, paramsB: 3, outCost: 0.1 };
+  const w = adequacyWarning({ rec: tiny, role: "orchestrator", partTokens: 100 });
+  assert.equal(w.level, "red");
+  assert.match(w.text, /divide a build/i);
+});
+
+await t("chunksForPart respects both agent count and context ceiling", () => {
+  const big = { ctx: 1000000 };
+  assert.equal(chunksForPart({ rec: big, partTokens: 2000, agents: 3 }), 3, "agents drive when context is roomy");
+  const small = { ctx: 8000 };
+  assert.ok(chunksForPart({ rec: small, partTokens: 40000, agents: 1 }) > 1, "context forces more chunks");
+});
+
+await t("customDividerNote names each part's model and context, or is empty", () => {
+  assert.equal(customDividerNote([]), "");
+  const note = customDividerNote([{ title: "Backend", model: "x/big", modelName: "Big", ctx: 200000, agents: 2 }]);
+  assert.match(note, /Backend/);
+  assert.match(note, /Big/);
+  assert.match(note, /200,000/);
 });
 
 console.log("\nideaf: " + passed + " passed, " + failed + " failed");

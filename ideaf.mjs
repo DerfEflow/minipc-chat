@@ -285,6 +285,78 @@ export function verifyDisjoint(parts) {
   return { ok: overlaps.length === 0, overlaps };
 }
 
+/* ============================================================================================
+ * AF Full Custom (Phase 2, Fred's spec): the user owns every section. Any model on any part,
+ * any agent count, with a RED warning but no block, except the orchestrator which is floored
+ * above the tiny tier. These are the pure rules the AF window and the engine both read.
+ * ============================================================================================ */
+
+// The orchestrator/divider must actually be able to reason about splitting a build. The floor is
+// deliberately low (Fred: "only limit the orchestrator, and even then only the tiny ones"): a
+// model qualifies unless it is a tiny/local class. We read the catalog record's own signals.
+export function orchestratorEligible(rec) {
+  if (!rec) return false;
+  const params = Number(rec.paramsB) || 0;
+  const ctx = Number(rec.ctx) || 0;
+  const outCost = typeof rec.outCost === "number" ? rec.outCost : 1;
+  // Tiny tells: very small params, tiny context, or a near-free price with no reasoning. Any ONE
+  // of real size, real context, or a real price clears the floor.
+  const tiny = (params && params < 8) && ctx <= 16000 && outCost < 0.5;
+  return !tiny;
+}
+
+/*
+ * Adequacy warning for a model picked for a part. Never blocks (Fred: "let them do it, it is
+ * theirs to experiment with"); returns a RED warning naming the exact expected failure, or null.
+ * The part's estimated tokens must fit the model's context with room for the prompt.
+ */
+export function adequacyWarning({ rec, role, partTokens = 0, agents = 1 } = {}) {
+  if (!rec) return { level: "red", text: "This model is not in the catalog; the build cannot use it." };
+  const ctx = Number(rec.ctx) || 0;
+  // The part's own output plus the context pack (manifest, contracts) it is fed. Rough 2.2x.
+  const needed = Math.ceil(partTokens * 2.2);
+  if (ctx && needed > ctx) {
+    return { level: "red", text: "This part needs about " + needed.toLocaleString() + " tokens of context but " +
+      (rec.name || rec.id) + " holds only " + ctx.toLocaleString() + ". Expect truncated files and broken output. It is yours to try." };
+  }
+  if (role === "orchestrator" && !orchestratorEligible(rec)) {
+    return { level: "red", text: (rec.name || rec.id) + " is too small to divide a build reliably; the split may be nonsense. Pick a larger model to lead." };
+  }
+  if (ctx && needed > ctx * 0.75) {
+    return { level: "amber", text: "This part will nearly fill " + (rec.name || rec.id) + "'s context; quality may drop near the limit." };
+  }
+  if (Number(agents) > 1 && (Array.isArray(rec.tools) ? false : rec.tools === false)) {
+    return { level: "amber", text: "Multiple agents coordinate best on a tool-capable model." };
+  }
+  return null;
+}
+
+/*
+ * How many chunks a part should be cut into so no single agent's share exceeds its model's
+ * context (Fred: "the orchestrator chunks that section in relationship to the context window of
+ * that model"). Returns at least the agent count, more if the context demands it. The referee's
+ * cookie rule still holds: chunks never share files.
+ */
+export function chunksForPart({ rec, partTokens = 0, agents = 1 } = {}) {
+  const ctx = (rec && Number(rec.ctx)) || 128000;
+  const perChunkCeiling = Math.max(1000, Math.floor(ctx / 2.2));   // usable output room per call
+  const byContext = Math.max(1, Math.ceil(partTokens / perChunkCeiling));
+  return Math.max(Math.max(1, Math.trunc(Number(agents) || 1)), byContext);
+}
+
+/*
+ * The divider prompt, Full Custom variant: it is told each part's assigned model and context
+ * size so it splits within those windows. Layers onto dividerMessages' rules.
+ */
+export function customDividerNote(assignments) {
+  if (!assignments || !assignments.length) return "";
+  const lines = assignments.map((a) =>
+    "- Part \"" + a.title + "\": model " + (a.modelName || a.model) + " (context ~" + (a.ctx || "?").toLocaleString() +
+    " tokens), " + (a.agents || 1) + " agent(s). Keep each file this part owns small enough that its content plus its " +
+    "contracts fit that context; if a part is too big for its model, split it into more files with narrower contracts.");
+  return ["", "ASSIGNED MODELS (chunk each part to fit its model's context):", ...lines].join("\n");
+}
+
 /*
  * Return a resolved assignments object forcing one model for all text classes when modelId
  * is not empty. When modelId is "", return null (caller falls back to the standard board).
