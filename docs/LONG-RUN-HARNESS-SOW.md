@@ -1,7 +1,8 @@
-# Long-Run Harness SOW (draft for Fred's review)
+# Long-Run Harness SOW
 
-Status: DRAFT rev A, 2026-07-22. Nothing here is built. Numbering locks when Fred approves.
-Companion change already shipped: forge_read honest paging (the floor this stands on).
+Status: rev B, LOCKED 2026-07-22 (Fred answered Q1-Q4; decisions recorded at the bottom).
+Nothing is built yet. Companion change already shipped: forge_read honest paging (the floor
+this stands on).
 
 ## Mission
 
@@ -46,7 +47,7 @@ hours.
 Deterministic checks between steps:
 - Fingerprint repetition: same tool + same args + same result N times in a row = loop. Halt the
   segment, report which step wedged.
-- Stall clock: no new ledger line in X minutes (default 15, configurable per job) = stalled.
+- Stall clock: no new ledger line in 20 minutes (Fred's number, configurable per job) = stalled.
 - Same-error repetition: two failures of the same subgoal = stop and classify (Fred's own
   two-strike rule, enforced in code).
 The kept-promise guard proved this pattern at turn level; this is the same idea at job level.
@@ -94,12 +95,19 @@ resuming takes.
 - L-8 vision judge continuous run: separate ledger item, unchanged.
 - Multi-machine segment scheduling (all segments run through the job's chosen hands node).
 
-## Open questions for Fred
+## Decisions (locked 2026-07-22, Fred's answers to rev A's questions)
 
-- Q1. Stall clock default: 15 minutes feel right, or longer for heavy local-model jobs?
-- Q2. Budget tranche default: dollar figure per tranche for guest jobs vs owner jobs?
-- Q3. Cheap-judge default model: qwen3-vl is already the OCR workhorse; reuse it here?
-- Q4. Where does this land first: Crucible builds only, or any long chat task too?
+- D1. Stall clock default: **20 minutes** (Fred's call), configurable per job.
+- D2. Budget tranches: guest default **$1 per tranche, hard ceiling $2**; a guest can
+  preapprove up to 10 tranches at job submit. Owner default $5 per tranche, preapproval
+  unlimited. The tranche is a fuse, never a job cap: cheap models burning $1 slowly is the
+  system working, and a paused job resumes with one approval. Amounts are Claude's suggestion
+  inside Fred's "never exceed ~$2 for guests" rule; changing them later is a one-line edit.
+- D3. Cheap-judge model: **qwen3-vl** (already the OCR workhorse; same wallet, known pricing).
+  Stays off by default, per-job flag.
+- D4. Scope: **Crucible builds AND long chat tasks.** A plain chat ask ("review this whole
+  app") can be promoted to a job and gets the same ledger, watchdog, validators, and fuses.
+  The chat is the surface either way, per the v93 ruling.
 
 ## Acceptance (ship line)
 
