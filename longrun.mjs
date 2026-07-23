@@ -161,6 +161,13 @@ export function createLongRun({ dir, now = Date.now }) {
 
     while (true) {
       const p = progress(id);
+      // Cooperative pause (item 7 wiring): /jobs pause flips the meta; the driver honors it at
+      // the next unit boundary instead of finishing the job and overwriting the state. The
+      // in-flight unit completes (bounded step law), so pausing never tears a unit.
+      if (p.meta.state === "paused") {
+        emit("paused", { why: "request" });
+        return { state: "paused", reason: p.meta.reason || "paused by request" };
+      }
       if (!p.remaining.length) {
         setState(id, "done");
         emit("done", { units: p.done.size });

@@ -79,7 +79,8 @@ import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
 import { createChatJobs, coalesceEvents } from "./chatjobs.mjs";
 import { createLongRun } from "./longrun.mjs";
-import { createJobBudget, canApprove, tranchePolicy } from "./longrunbilling.mjs";
+import { createJobBudget, canApprove, tranchePolicy, makeRunDeps } from "./longrunbilling.mjs";
+import { makeCallUnit, sealInterrupted } from "./longrunglue.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -183,6 +184,9 @@ const jobStore = createChatJobs({ dir: cfgGet("CHATJOBS_DIR", dataPath("chatjobs
 // LEDGER is the job's memory; chatjobs above stays the turn-level transport durability. Owner's
 // jobs live here; each guest gets their own store via the tenant resolver.
 const longrun = createLongRun({ dir: cfgGet("LONGRUN_DIR", dataPath("jobs")) });
+// Restart honesty: a job whose meta says "running" was being driven by a process that no longer
+// exists. Seal it paused (the ledger kept every finished unit); resume costs one segment at most.
+try { const sealed = sealInterrupted(longrun); if (sealed) console.log(`[dominion-ai] long-run: sealed ${sealed} interrupted job(s) after restart`); } catch {}
 const CHATJOBS_TAIL = Number(cfgGet("CHATJOBS_TAIL", "4096")) || 4096;             // RAM tail cap per job
 const CHATJOBS_FLUSH_MS = Number(cfgGet("CHATJOBS_FLUSH_MS", "2000")) || 2000;     // token-batch window
 const CHATJOBS_MAX_RUNNING = Number(cfgGet("CHATJOBS_MAX_RUNNING", "6")) || 6;     // per-user in-flight cap
@@ -1627,6 +1631,127 @@ async function ideChatOnce(model, messages, { signal } = {}) {
     }
   }
   return { ok: !!(r && r.ok), content: (r && r.content) || "", error: (r && r.error) || "", costUsd: +costUsd.toFixed(6) };
+}
+
+/*
+ * Long-run runner registry (glue phase). One driver per job per process: the spine is not
+ * parallel-safe within a job (sequential ledger appends are the law), so a second start of the
+ * same job is answered "already running" instead of racing. The runner captures ONLY the four
+ * tenant fields the money path needs: a live request object must never outlive its request.
+ */
+const LONGRUN_ACTIVE = new Map();   // absolute job dir -> AbortController
+
+async function longrunNotify(T, jobId, type, detail) {
+  if (!IDE_VAPID_PUBLIC || !IDE_VAPID_PRIVATE) return;
+  let subs = [];
+  try { subs = ideStoreFor(T).push.list(); } catch { return; }
+  if (!subs.length) return;
+  const urgency = type === "done" ? "normal" : "high";
+  try {
+    const r = await sendWakeups({ subs, publicKey: IDE_VAPID_PUBLIC, privateKey: IDE_VAPID_PRIVATE, subject: IDE_VAPID_SUBJECT, urgency, ttl: urgency === "high" ? 900 : 3600, log: (m) => console.log(m) });
+    if (r.gone && r.gone.length) { try { ideStoreFor(T).push.prune(r.gone); } catch {} }
+    if (r.sent) console.log(`[dominion-ai] long-run push: job ${jobId} ${type} to ${r.sent} device(s)`);
+  } catch {}
+}
+
+function startLongRun(T, store, id) {
+  const key = join(store.dir, id);
+  if (LONGRUN_ACTIVE.has(key)) return { already: true };
+  const m = store.readMeta(id);
+  if (!m) return { error: "no such job" };
+  if (m.state !== "ready") return { error: "job is " + m.state + " (" + (m.reason || "no reason recorded") + ")" + (m.state === "paused" ? "; resume it first" : "") };
+  // Jobs created before the glue phase (or seeded server-side) may carry no model. Answer
+  // honestly instead of throwing: the state flip already happened, only the driver declines.
+  if (!m.model || !modelById(m.model)) return { error: "this job has no runnable model on its meta; recreate it with a catalog model" };
+  const RT = { isOwner: !!T.isOwner, role: T.role, email: T.email, uid: T.uid };
+  const deps = makeRunDeps({ store, jobId: id, T: RT, billing, users: usersStore });
+  const ac = new AbortController();
+  const callUnit = makeCallUnit({ chatOnce: ideChatOnce, model: m.model, meter: deps.meter, register: m.register || "plain", signal: ac.signal });
+  const eventsPath = join(store.dir, id, "events.jsonl");
+  const onEvent = (type, detail) => {
+    appendFile(eventsPath, JSON.stringify({ at: Date.now(), type, ...detail }) + "\n").catch(() => {});
+    if (type === "paused" || type === "halted" || type === "done") longrunNotify(RT, id, type, detail);
+  };
+  LONGRUN_ACTIVE.set(key, ac);
+  store.runJob(id, { callUnit, budget: deps.budget, onEvent })
+    .catch((e) => { try { store.pauseJob(id, "the runner crashed: " + String((e && e.message) || e).slice(0, 300)); } catch {} })
+    .finally(() => LONGRUN_ACTIVE.delete(key));
+  return { started: true };
+}
+
+/*
+ * Shared job creation (endpoint op create AND the long_job chat tool call this, so the money
+ * gates can never drift between the two doors). Returns { status, body } in endpoint shape.
+ */
+function longrunCreateFor(T, store, body) {
+  if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) {
+    return { status: 402, body: { error: "Long-run jobs need credits. Add credits in Setup first.", code: "needs_credits" } };
+  }
+  const mission = String(body.mission || "").trim().slice(0, 2000);
+  const plan = (Array.isArray(body.plan) ? body.plan : []).slice(0, 500)
+    .map((u) => { const title = String((u && u.title) || (typeof u === "string" ? u : "")).trim().slice(0, 300); if (!title) return null; const unit = { title }; if (u && u.detail) unit.detail = String(u.detail).slice(0, 4000); return unit; })
+    .filter(Boolean);
+  if (!mission) return { status: 400, body: { error: "a job needs a mission line" } };
+  if (!plan.length) return { status: 400, body: { error: "a job needs a plan: an array of units, each with a title" } };
+  const model = String(body.model || "").trim();
+  if (!modelById(model)) return { status: 400, body: { error: "pick a cloud model from the catalog for long-run work (local models cannot drive a job yet)", code: "bad_model" } };
+  const role = T.isOwner ? "owner" : T.role;
+  const tranches = Math.max(1, Math.trunc(Number(body.tranches) || 1));
+  const usdEach = tranchePolicy(role, body.trancheUsd);
+  const gate = canApprove({ T, billing, usd: tranches * usdEach });
+  if (!gate.ok) return { status: 402, body: { error: gate.error, code: gate.code || "approve_refused" } };
+  let job;
+  try {
+    job = store.createJob({ mission, model, plan, stallMinutes: body.stallMinutes,
+      meta: { register: normalizeRegister(body.register), createdBy: T.isOwner ? "owner" : (T.email || T.uid) } });
+  } catch (e) { return { status: 400, body: { error: String((e && e.message) || e) } }; }
+  const b = createJobBudget({ jobDir: join(store.dir, job.id), role, trancheUsd: body.trancheUsd });
+  const ap = b.approve(tranches, T.isOwner ? "owner" : T.email || T.uid);
+  const r = body.start === false ? null : startLongRun(T, store, job.id);
+  return { status: 200, body: { meta: store.readMeta(job.id), budget: b.state(),
+    approved: ap.ok ? ap.approvedTranches : 0, started: !!(r && r.started) } };
+}
+
+// The chat door (SOW item 7, D4: a plain chat ask can be promoted to a job). Returns prose in
+// plain register; the model relays it in the user's own register.
+function longJobTool(T, args = {}) {
+  const store = T.longrun;
+  if (!store) return "Long-run jobs are not available for this account.";
+  const action = String(args.action || "status");
+  if (action === "create") {
+    const r = longrunCreateFor(T, store, args);
+    if (r.status !== 200) return "Couldn't start the job: " + (r.body.error || "refused");
+    const m = r.body.meta, b = r.body.budget;
+    return "Long job started.\n- id: " + m.id + "\n- mission: " + m.mission + "\n- units planned: " + m.plan.length +
+      "\n- model: " + m.model + "\n- budget approved: $" + b.approvedUsd.toFixed(2) +
+      " (when a tranche runs dry the job pauses and asks; it is never killed)" +
+      "\n- It runs on the server even if the app closes; a notification calls the user back when it finishes, pauses, or fails. Ask for status any time.";
+  }
+  const id = String(args.id || "");
+  if (action === "pause") {
+    const m = store.pauseJob(id, "paused from the chat");
+    return m ? "Paused. The unit in flight finishes first (a pause never tears work); everything done so far is safe in the ledger." : "No job with that id.";
+  }
+  if (action === "resume") {
+    const m = store.resumeJob(id);
+    if (!m) return "No job with that id.";
+    const r = m.state === "ready" ? startLongRun(T, store, id) : null;
+    return r && r.started ? "Resumed and running again from the ledger; nothing was lost."
+      : "Resumed" + (r && r.error ? ", but the driver could not start: " + r.error : m.state === "done" ? "; that job is already done." : ".");
+  }
+  // status (default): one job when id given, else the recent list.
+  if (id) {
+    const p = store.progress(id);
+    if (!p) return "No job with that id.";
+    let bud = null;
+    try { bud = createJobBudget({ jobDir: join(store.dir, id), role: T.isOwner ? "owner" : T.role }).state(); } catch {}
+    return "Job " + id + ": " + p.meta.state + (p.meta.reason ? " (" + p.meta.reason + ")" : "") +
+      "\n- mission: " + p.meta.mission + "\n- done " + p.done.size + " of " + (p.meta.plan || []).length + " units" +
+      (bud ? "\n- budget: $" + bud.spentUsd.toFixed(2) + " spent of $" + bud.approvedUsd.toFixed(2) + " approved" : "");
+  }
+  const jobs = store.listJobs().slice(0, 8);
+  if (!jobs.length) return "No long-run jobs yet. Create one with action \"create\": a mission line, a plan of units, a catalog model.";
+  return jobs.map((m) => "- " + m.id + " [" + m.state + "] " + m.mission.slice(0, 80) + (m.reason ? " (" + m.reason.slice(0, 100) + ")" : "")).join("\n");
 }
 
 async function runIdeBuild(job, { T, workspace, prompt, assignments, register, mode }) {
@@ -4119,6 +4244,9 @@ async function handleChat(req, res) {
   // `tenant` rides the tool ctx so tools that reach a machine (document auto-save) can scope to the
   // right node without re-resolving identity, and so a guest can never land a file on Fred's disk.
   const reqCtx = { ...(T.ctxBase || CTX), chatId, mode, model, tenant: T };
+  // Long-run jobs from the chat (item 7): both doors share longrunCreateFor, so the money
+  // gates are identical whether the user talks or the client POSTs.
+  reqCtx.longJob = (args) => longJobTool(T, args);
   // Per-user Forge: a non-owner who has ENABLED their own Forge node AND engaged Forge Mode this turn
   // (flame/furnace) may reach THEIR OWN machine. Route forge_* to their node only ("user:<uid>"), and
   // add the Forge tools to their wall for this turn. Carve-outs still hold node-side + hub-side.
@@ -5085,7 +5213,26 @@ const server = http.createServer(async (req, res) => {
         }
         if (op === "resume") {
           const m = store.resumeJob(String(body.id || ""));
-          return m ? json(200, { meta: m }) : json(404, { error: "no such job" });
+          if (!m) return json(404, { error: "no such job" });
+          // A resumed job restarts its driver immediately (glue phase): resume means GO, not
+          // "flip a flag and hope". Already-running and done jobs answer honestly.
+          const r = m.state === "ready" ? startLongRun(T, store, m.id) : null;
+          return json(200, { meta: store.readMeta(m.id), started: !!(r && r.started), note: r && (r.error || (r.already ? "already running" : "")) || "" });
+        }
+        // Glue phase: create a job over the wire. Billable work, so the /chat wall applies
+        // (pay-before-access for credit users); the initial tranche approval is gated the same
+        // as op approve-tranche, and D2 clamps the guest preapproval at submit.
+        if (op === "create") {
+          const r = longrunCreateFor(T, store, body);
+          return json(r.status, r.body);
+        }
+        if (op === "start") {
+          const id = String(body.id || "");
+          if (!store.readMeta(id)) return json(404, { error: "no such job" });
+          const r = startLongRun(T, store, id);
+          return r.started ? json(200, { started: true, meta: store.readMeta(id) })
+            : r.already ? json(200, { started: false, note: "already running", meta: store.readMeta(id) })
+            : json(409, { error: r.error });
         }
         // Item 5 (D2): approve one or more tranches on your own job. The tranche size is
         // role-clamped (guest $1 default / $2 ceiling, owner $5 default / free choice); credit
@@ -5103,7 +5250,7 @@ const server = http.createServer(async (req, res) => {
           if (r.error) return json(400, { error: r.error });
           return json(200, { approved: r.approvedTranches, approvedUsd: r.approvedUsd, budget: b.state() });
         }
-        return json(400, { error: "op must be pause, resume, or approve-tranche" });
+        return json(400, { error: "op must be create, start, pause, resume, or approve-tranche" });
       }
       return json(405, { error: "method not allowed" });
     }

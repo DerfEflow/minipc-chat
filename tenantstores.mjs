@@ -15,6 +15,7 @@ import { createChatLog } from "./chatlog.mjs";
 import { createChatSync } from "./chatsync.mjs";
 import { createFlywheel } from "./flywheel.mjs";
 import { createLongRun } from "./longrun.mjs";
+import { sealInterrupted } from "./longrunglue.mjs";
 import { join } from "node:path";
 
 // Tools a non-owner may call. Everything here is safe: web, their own artifacts/memory/sandbox,
@@ -27,6 +28,9 @@ export const SAFE_TOOLS = new Set([
   "create_docx", "create_pdf", "create_spreadsheet", "search_artifacts", "compare_artifacts",
   "remember", "recall_memory", "update_memory", "save_lesson", "request_review",
   "search_chats", "retrieve_context_pack",
+  // Long-run jobs (SOW item 7, D4): guests may promote a chat ask to a job. The money gates
+  // live server-side (pay-before-access + D2 tranches), so listing the tool is safe.
+  "long_job",
   // Every user, paying or not, gets to ask this app how it works and where its controls are.
   "app_help",
   // NOTE: search_persona is DELIBERATELY absent. Non-owners never read the corpus CONTENTS. They get
@@ -72,6 +76,9 @@ export function createTenantStores({ baseDir, uid, embed }) {
   // only through their own resolved bundle. The chatsync lesson made this a law: a store added
   // here must ALSO ride the resolver's owner branch below, or guests get 503s.
   const longrun = createLongRun({ dir: join(root, "jobs") });
+  // Bundles are built lazily on first touch, so this runs once per user per process: any job
+  // left "running" by a dead process seals paused before anyone reads a lying state.
+  try { sealInterrupted(longrun); } catch {}
   const sandboxDir = join(root, "sandbox");
   return { root, memory, chatlog, chatsync, artifacts, flywheel, longrun, sandboxDir };
 }

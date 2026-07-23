@@ -91,6 +91,35 @@ await t("owner approves a tranche over the wire; the detail view carries the bud
   assert(d.body.budget && d.body.budget.remainingUsd === 5 && d.body.budget.spentUsd === 0, "detail budget wrong: " + JSON.stringify(d.body.budget));
 });
 
+await t("create over the wire (keyless rig): job starts, fails honestly, pauses, spends nothing", async () => {
+  const c = await req("POST", "/jobs", { email: OWNER, body: { op: "create", mission: "prove the wire",
+    plan: [{ title: "one unit" }], model: "openai/gpt-5.6-luna", tranches: 1 } });
+  assert(c.status === 200, "create failed: " + JSON.stringify(c.body));
+  assert(c.body.started === true, "runner did not start: " + JSON.stringify(c.body));
+  assert(c.body.budget.approvedUsd === 5, "owner tranche must be $5");
+  const id = c.body.meta.id;
+  // The rig has no provider keys, so the unit fails fast twice and the job pauses honestly.
+  let d = null;
+  for (let i = 0; i < 50; i++) {
+    d = await req("GET", "/jobs?id=" + id, { email: OWNER });
+    if (d.body.meta && d.body.meta.state === "paused") break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert(d.body.meta.state === "paused", "expected paused, got " + JSON.stringify(d.body.meta));
+  assert(/key configured/i.test(d.body.meta.reason), "reason must name the missing key: " + d.body.meta.reason);
+  assert(d.body.done === 0 && d.body.budget.spentUsd === 0, "a keyless failure must spend nothing");
+});
+
+await t("create refuses a model the catalog does not know", async () => {
+  const r = await req("POST", "/jobs", { email: OWNER, body: { op: "create", mission: "m", plan: [{ title: "u" }], model: "made/up-model" } });
+  assert(r.status === 400 && r.body.code === "bad_model", JSON.stringify(r.body));
+});
+
+await t("guest creation without credits is refused with the pay-before-access wall", async () => {
+  const r = await req("POST", "/jobs", { email: GUEST, body: { op: "create", mission: "m", plan: [{ title: "u" }], model: "openai/gpt-5.6-luna" } });
+  assert(r.status === 402 && r.body.code === "needs_credits", "expected the credits wall, got " + r.status + " " + JSON.stringify(r.body));
+});
+
 await t("guest gets their OWN empty store, never a 503 (both resolver branches wired)", async () => {
   const r = await req("GET", "/jobs", { email: GUEST });
   assert(r.status === 200, "expected 200, got " + r.status + " " + JSON.stringify(r.body));

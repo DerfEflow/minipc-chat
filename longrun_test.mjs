@@ -203,6 +203,22 @@ await t("pause and resume are honest state transitions", async () => {
   assert.equal(lr.readMeta(j.id).state, "ready");
 });
 
+await t("an external pause lands at the next unit boundary; the in-flight unit still counts", async () => {
+  const lr = createLongRun({ dir: join(WORK, "extpause") });
+  const j = lr.createJob({ mission: "pause me", plan: [{ title: "u0" }, { title: "u1" }, { title: "u2" }] });
+  let calls = 0;
+  const call = async () => {
+    calls++;
+    if (calls === 1) lr.pauseJob(j.id, "user tapped pause");   // arrives WHILE unit 0 runs
+    return { text: "a perfectly ordinary healthy result with plenty of distinct words in it here" };
+  };
+  const r = await lr.runJob(j.id, { callUnit: call });
+  assert.equal(r.state, "paused");
+  assert.match(r.reason, /tapped pause/);
+  assert.equal(calls, 1, "only the in-flight unit ran");
+  assert.equal(lr.progress(j.id).done.size, 1, "the in-flight unit was kept, not torn");
+});
+
 rmSync(WORK, { recursive: true, force: true });
 console.log(`\nlongrun: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

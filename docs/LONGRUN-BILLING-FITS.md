@@ -88,5 +88,35 @@ with every dollar traceable in the existing billing ledger.
 - B-1 OPEN (accepted risk): mid-tranche zero-balance overshoot bounded by tranche size (W3).
 - B-2 OPEN (accepted): min-1-credit rounding per unit; batch-settle exact refunds are a later
   nicety if Fred wants them.
-- B-3 OPEN: job creation endpoint + real callUnit glue are the NEXT phase per Fred's sequence;
-  this build must leave makeRunDeps ready for it.
+- B-3 CLOSED 07-23: glue phase built (below).
+
+## Addendum: the glue phase (same day, Fred's option 2)
+
+Scope shipped: longrunglue.mjs (unitMessages fresh-context packs, makeCallUnit with the
+meter-at-result law, sealInterrupted boot sweep), the runner registry + startLongRun in
+server.mjs, /jobs ops create/start (+ resume now restarts the driver), cooperative pause at
+the unit boundary in the spine, the long_job chat tool (both doors share longrunCreateFor so
+the money gates cannot drift), SAFE_TOOLS entry, the feature-map entry for app_help, and push
+wakeups on paused/halted/done.
+
+Wargamed moves:
+- W6 double-run: one driver per job per process (LONGRUN_ACTIVE map keyed by job dir); a second
+  start answers "already running". The spine's sequential-append law stays unbroken.
+- W7 spend without metering: impossible by construction: the ONLY callUnit the server ever
+  builds wires deps.meter inside makeCallUnit; errored calls that reported cost still meter.
+- W8 restart honesty: boot sweep seals "running" corpses to paused with the true reason, global
+  store at boot, tenant stores at first touch; proven by a genuinely stranded runJob in test.
+- W9 pause tearing a unit: pause lands at the next unit boundary; the in-flight unit completes
+  and counts (bounded-step law). Proven in longrun_test.
+- W10 chat-door drift: the tool and the endpoint call the same longrunCreateFor; there is no
+  second copy of the gates to rot.
+
+Found in passing, fixed ahead of this work (commit b0e8adf): sponsored spend NEVER drew Fred's
+monthly cap in live prod: meterTurn, meterOcr, and the image creditBack all called an
+undeclared `users`, and the ReferenceError died in silent catches. All three now call
+usersStore. Lesson for the FITS system: a silent catch around money is a bug amplifier; the
+catch must at least count.
+
+Remaining rite (unchanged): a deliberately sabotaged 3-hour job, then one real overnight job,
+watched. The short live probe (a two-unit real job on a cheap model, owner account) ships with
+this phase to prove the glue against a real provider.

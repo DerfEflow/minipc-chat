@@ -171,6 +171,21 @@ export const FEATURES = [
       "Credits and payment live here, as do connectors such as GitHub, Supabase, Stripe, Railway and Zapier.",
     ],
   },
+  {
+    id: "long-jobs",
+    brief: "hours-long background jobs",
+    aliases: ["job", "jobs", "long job", "long-run", "long run", "overnight", "background task", "36 hours", "keep working", "big task"],
+    name: "Long-run jobs",
+    where: "in the conversation itself: ask for the big thing and the assistant offers to run it as a job (no button yet)",
+    what: "Work too big for one reply runs on the server for hours, in small verified units, with a budget fuse: spending pauses at each approved tranche and never runs away. It keeps going with the app closed and survives restarts; every finished unit is saved.",
+    how: [
+      "Ask for the big thing (review this whole app, write ten chapters). The assistant proposes a mission, a plan of units, a model, and the budget, then starts it after you agree.",
+      "A tranche is a spending fuse: $1 each for guests (at most $2 per tranche, 10 approvals ahead), $5 for the owner. When one runs dry the job PAUSES and asks; approving the next tranche resumes it. It is never killed for money.",
+      "Ask for status any time in chat; pause or resume the same way. A notification calls you back when it finishes, pauses, or fails.",
+      "If the server restarts mid-run, the job seals paused with the truth; resuming loses at most the one unit that was in flight.",
+    ],
+    notes: "Paying users' unit costs come from their credits like any turn; sponsored users draw the monthly cap. The assistant states the budget before creating a job.",
+  },
 ];
 
 /** The compact index that rides every turn. Name plus location only: enough to point correctly,
