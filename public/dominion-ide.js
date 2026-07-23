@@ -22,9 +22,37 @@
   // fewer at the door.
   const MODE_REG = { beginner: "plain", vibe: "hybrid", engineer: "technical" };
   const MODES = ["beginner", "vibe", "engineer"];
+  const JOURNEY_PHASES = ["idea", "clarify", "ready", "build", "verify", "ship"];
+  const JOURNEY_COPY = {
+    idea: ["journey_idea_title", "journey_idea_note"],
+    clarify: ["journey_clarify_title", "journey_clarify_note"],
+    ready: ["journey_ready_title", "journey_ready_note"],
+    build: ["journey_build_title", "journey_build_note"],
+    verify: ["journey_verify_title", "journey_verify_note"],
+    ship: ["journey_ship_title", "journey_ship_note"],
+  };
+  const STUDIO_KEY = "dominion.crucible.studio.v1";
+  const STUDIO_MODULES = [
+    { id: "workspace", title: "studio_workspace_title", note: "studio_workspace_note" },
+    { id: "brief", title: "studio_brief_title", note: "studio_brief_note" },
+    { id: "crew", title: "studio_crew_title", note: "studio_crew_note" },
+    { id: "cost", title: "studio_cost_title", note: "studio_cost_note" },
+    { id: "preview", title: "studio_preview_title", note: "studio_preview_note" },
+    { id: "checks", title: "studio_checks_title", note: "studio_checks_note" },
+    { id: "code", title: "studio_code_title", note: "studio_code_note" },
+    { id: "history", title: "studio_history_title", note: "studio_history_note" },
+  ];
+  const STUDIO_PRESETS = {
+    minimal: ["brief", "cost"],
+    design: ["brief", "crew", "cost", "preview", "checks"],
+    fullstack: STUDIO_MODULES.map((m) => m.id),
+    ship: ["cost", "preview", "checks", "history"],
+  };
 
   const state = {
     mode: "",             // "" = never chosen on this device or account: show the picker once
+    phase: "idea",        // explicit journey state; never inferred from which DOM node is visible
+    studio: { preset: "design", modules: new Set(STUDIO_PRESETS.design) },
     allowed: false, engaged: false, open: false,
     routing: null,        // class labels/blurbs/defaults, from the server
     catalog: [],          // the model list, from the SAME /api/models the chat picker uses
@@ -114,6 +142,8 @@
     renderBoard();
     renderStarter();
     wireStarter();
+    wireStudio();
+    paintJourney();
     wireProbe();
     const all = $("#ide-allinone");
     if (all) all.addEventListener("change", () => {
@@ -605,6 +635,20 @@
           '<button type="button" data-mode="engineer" data-lex="mode_name_engineer"></button>' +
         '</div>' +
       '</div>' +
+      '<div class="st-journey" id="st-journey" aria-live="polite">' +
+        '<div class="st-journey-copy">' +
+          '<span class="st-journey-kicker" data-lex="journey_kicker"></span>' +
+          '<strong id="st-journey-title"></strong>' +
+          '<span id="st-journey-note"></span>' +
+        '</div>' +
+        '<ol class="st-journey-track" aria-label="Build journey">' +
+          JOURNEY_PHASES.map((phase) => '<li data-phase="' + phase + '"><span></span></li>').join("") +
+        '</ol>' +
+      '</div>' +
+      '<div class="st-vibe-toolbar">' +
+        '<div><strong data-lex="studio_toolbar_title"></strong><span id="st-studio-summary"></span></div>' +
+        '<button type="button" id="st-studio-open" aria-haspopup="dialog" data-lex="studio_open"></button>' +
+      '</div>' +
       '<details class="st-drawer" id="dr-folder" open>' +
         '<summary data-lex="drawer_folder"></summary>' +
         '<div class="st-row" id="st-ws-row">' +
@@ -668,8 +712,165 @@
       '<div class="st-row">' +
         '<button type="button" id="st-go" class="st-primary" data-lex="start_go"></button>' +
         '<span class="st-status" id="st-status" role="status"></span>' +
+      '</div>' +
+      '<div class="st-studio-shell" id="st-studio-shell" hidden>' +
+        '<button type="button" class="st-studio-backdrop" id="st-studio-backdrop" aria-label="Close workspace customization"></button>' +
+        '<section class="st-studio-panel" role="dialog" aria-modal="true" aria-labelledby="st-studio-title">' +
+          '<header>' +
+            '<div><span class="st-studio-kicker" data-lex="studio_kicker"></span><h3 id="st-studio-title" data-lex="studio_title"></h3></div>' +
+            '<button type="button" class="st-studio-close" id="st-studio-close" aria-label="Close">×</button>' +
+          '</header>' +
+          '<p class="st-studio-intro" data-lex="studio_intro"></p>' +
+          '<div class="st-studio-presets" id="st-studio-presets" aria-label="Workspace presets"></div>' +
+          '<div class="st-studio-modules" id="st-studio-modules"></div>' +
+          '<footer><span data-lex="studio_immediate"></span><button type="button" class="st-primary" id="st-studio-done" data-lex="studio_done"></button></footer>' +
+        '</section>' +
       '</div>';
     return el;
+  }
+
+  function readStudio() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(STUDIO_KEY) || "null");
+      const valid = new Set(STUDIO_MODULES.map((m) => m.id));
+      const modules = Array.isArray(raw && raw.modules) ? raw.modules.filter((id) => valid.has(id)) : null;
+      if (modules) {
+        state.studio = {
+          preset: typeof raw.preset === "string" ? raw.preset : "custom",
+          modules: new Set(modules),
+        };
+      }
+    } catch {}
+  }
+
+  function saveStudio() {
+    try {
+      localStorage.setItem(STUDIO_KEY, JSON.stringify({
+        preset: state.studio.preset,
+        modules: [...state.studio.modules],
+      }));
+    } catch {}
+  }
+
+  function studioPresetFor(modules) {
+    const chosen = [...modules].sort().join(",");
+    for (const [name, ids] of Object.entries(STUDIO_PRESETS)) {
+      if ([...ids].sort().join(",") === chosen) return name;
+    }
+    return "custom";
+  }
+
+  function paintJourney() {
+    const root = $("#ide-root");
+    if (root) root.dataset.phase = state.phase;
+    const copy = JOURNEY_COPY[state.phase] || JOURNEY_COPY.idea;
+    const title = $("#st-journey-title"), note = $("#st-journey-note");
+    if (title) title.textContent = L(copy[0]);
+    if (note) note.textContent = L(copy[1]);
+    const activeIndex = JOURNEY_PHASES.indexOf(state.phase);
+    for (const [index, step] of [...document.querySelectorAll("#st-journey-track li")].entries()) {
+      step.classList.toggle("on", index === activeIndex);
+      step.classList.toggle("done", index < activeIndex);
+      step.setAttribute("aria-label", L(JOURNEY_COPY[step.dataset.phase][0]));
+      step.setAttribute("aria-current", index === activeIndex ? "step" : "false");
+    }
+  }
+
+  function setJourneyPhase(phase) {
+    if (!JOURNEY_PHASES.includes(phase) || state.phase === phase) return;
+    state.phase = phase;
+    paintJourney();
+    try {
+      document.dispatchEvent(new CustomEvent("dominion-journey-changed", { detail: { phase } }));
+    } catch {}
+  }
+
+  function paintStudio() {
+    const root = $("#ide-root");
+    if (!root) return;
+    const modules = [...state.studio.modules];
+    root.dataset.studioModules = modules.join(" ");
+    const preset = studioPresetFor(state.studio.modules);
+    state.studio.preset = preset;
+    const summary = $("#st-studio-summary");
+    if (summary) {
+      const names = { minimal: "studio_preset_minimal", design: "studio_preset_design", fullstack: "studio_preset_fullstack", ship: "studio_preset_ship", custom: "studio_preset_custom" };
+      summary.textContent = L(names[preset] || names.custom) + " · " + modules.length + " " + L("studio_tools_count");
+    }
+    for (const b of document.querySelectorAll("#st-studio-presets button")) {
+      const on = b.dataset.preset === preset;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    for (const input of document.querySelectorAll("#st-studio-modules input")) {
+      input.checked = state.studio.modules.has(input.value);
+    }
+    try { document.dispatchEvent(new CustomEvent("dominion-studio-changed", { detail: { modules } })); } catch {}
+  }
+
+  function closeStudio() {
+    const shell = $("#st-studio-shell");
+    if (!shell || shell.hidden) return;
+    shell.hidden = true;
+    document.body.classList.remove("studio-open");
+    $("#st-studio-open") && $("#st-studio-open").focus();
+  }
+
+  function openStudio() {
+    if (state.mode !== "vibe") return;
+    const shell = $("#st-studio-shell");
+    if (!shell) return;
+    shell.hidden = false;
+    document.body.classList.add("studio-open");
+    const first = shell.querySelector("button, input");
+    if (first) first.focus();
+  }
+
+  function wireStudio() {
+    readStudio();
+    const presets = $("#st-studio-presets");
+    const presetNames = { minimal: "studio_preset_minimal", design: "studio_preset_design", fullstack: "studio_preset_fullstack", ship: "studio_preset_ship" };
+    for (const [id, modules] of Object.entries(STUDIO_PRESETS)) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.dataset.preset = id;
+      b.dataset.lex = presetNames[id];
+      b.textContent = L(presetNames[id]);
+      b.addEventListener("click", () => {
+        state.studio = { preset: id, modules: new Set(modules) };
+        saveStudio();
+        paintStudio();
+      });
+      presets.append(b);
+    }
+    const list = $("#st-studio-modules");
+    for (const module of STUDIO_MODULES) {
+      const label = document.createElement("label");
+      label.className = "st-studio-module";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = module.id;
+      const copy = document.createElement("span");
+      copy.innerHTML = "<strong></strong><small></small>";
+      copy.querySelector("strong").dataset.lex = module.title;
+      copy.querySelector("small").dataset.lex = module.note;
+      copy.querySelector("strong").textContent = L(module.title);
+      copy.querySelector("small").textContent = L(module.note);
+      input.addEventListener("change", () => {
+        if (input.checked) state.studio.modules.add(module.id);
+        else state.studio.modules.delete(module.id);
+        state.studio.preset = studioPresetFor(state.studio.modules);
+        saveStudio();
+        paintStudio();
+      });
+      label.append(input, copy);
+      list.append(label);
+    }
+    $("#st-studio-open").addEventListener("click", openStudio);
+    $("#st-studio-close").addEventListener("click", closeStudio);
+    $("#st-studio-backdrop").addEventListener("click", closeStudio);
+    $("#st-studio-done").addEventListener("click", closeStudio);
+    paintStudio();
   }
 
   // Pour the chosen register into every tagged element. One function, called on mount and on
@@ -870,9 +1071,12 @@
     // Register follows the mode (ruling 4a); the lang select stays as the engineer's override.
     if (window.DominionLexicon) window.DominionLexicon.set(MODE_REG[m]);
     paintLexicon();
+    paintJourney();
     paintModeSwitch();
     paintTools();
     paintModelLine();
+    paintStudio();
+    if (m !== "vibe") closeStudio();
     if (save) {
       fetch("/ide/prefs", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ engaged: state.engaged, mode: m, language: MODE_REG[m] }) }).catch(() => {});
@@ -900,57 +1104,18 @@
           '<span class="mc-t" data-lex="mode_' + m + '_t"></span>' +
           '<span class="mc-b" data-lex="mode_' + m + '_b"></span>' +
         '</button>').join("") +
-      '<div class="st-modes-lock">' +
-        '<label><input type="checkbox" id="st-mode-lock"> <span data-lex="mode_dontshow"></span></label>' +
-      '</div>' +
       '<p class="st-modes-note" data-lex="mode_note"></p>';
     stage.prepend(el);
     stage.classList.add("picking");
     paintLexicon();
     for (const card of el.querySelectorAll(".st-mode-card")) {
       card.addEventListener("click", () => {
-        const locked = $("#st-mode-lock").checked;
-        if (locked) {
-          try { localStorage.setItem("dominion.crucible.mode.locked.v1", "1"); } catch {}
-        }
         stage.classList.remove("picking");
         applyMode(card.dataset.mode);
         maybeShowIntro();
         document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
       });
     }
-  }
-
-  // Show mode picker in compact form (current mode highlighted, one row).
-  function showModePickerCompact() {
-    const stage = $("#ide-stage");
-    if (!stage || $("#st-modes")) return;
-    const el = document.createElement("section");
-    el.className = "st-modes st-modes-compact";
-    el.id = "st-modes";
-    el.innerHTML =
-      MODES.map((m) =>
-        '<button type="button" class="st-mode-card' + (m === state.mode ? ' on' : '') + '" data-mode="' + m + '">' +
-          '<span class="mc-t" data-lex="mode_' + m + '_t"></span>' +
-        '</button>').join("") +
-      '<label class="st-modes-lock"><input type="checkbox" id="st-mode-lock"> <span data-lex="mode_dontshow"></span></label>';
-    stage.prepend(el);
-    paintLexicon();
-    for (const card of el.querySelectorAll(".st-mode-card")) {
-      card.addEventListener("click", () => {
-        applyMode(card.dataset.mode);
-        // applyMode drops the picker, so re-mount the compact row so it stays usable, now with
-        // the freshly chosen mode marked.
-        showModePickerCompact();
-      });
-    }
-    // Ticking the box IS the dismissal: the row leaves immediately and stays gone (the mode
-    // switch in the starter head remains the stable way to change modes; ruling 1a).
-    el.querySelector("#st-mode-lock").addEventListener("change", (e) => {
-      if (!e.target.checked) return;
-      try { localStorage.setItem("dominion.crucible.mode.locked.v1", "1"); } catch {}
-      el.remove();
-    });
   }
 
   // The vibe coder sees one honest sentence instead of a board: who does the work, at what rate.
@@ -1141,6 +1306,7 @@
     if (j.vision) {
       intake.vision = j.vision;
       visionCard(j.vision);
+      setJourneyPhase("ready");
       saveDraft();
       if (j.involves && state.mode !== "beginner") renderInvolves(j.involves);
       $("#st-chat-actions").hidden = false;
@@ -1319,6 +1485,7 @@
     }
     intake.messages = [{ role: "user", content: prompt }];
     intake.vision = null;
+    setJourneyPhase("clarify");
     // Draw the brief as the user's first turn exactly once, here in the shared start path, so both
     // entry paths (chat send and the start button) show it and neither shows it twice. The howdy
     // above it stays; the log is never wiped, because the chat is the conversation now.
@@ -1424,6 +1591,7 @@
       const j = await r.json();
       if (!r.ok || j.error) { status(j.error || "The build could not start.", true); go.disabled = false; window.ideFlame.hide(); return; }
       status("");
+      setJourneyPhase("build");
       const chat = $("#st-chat");
       if (chat && !chat.hidden) chatBubble("ai", L("chat_build_started"));
       go.disabled = false;
@@ -1511,6 +1679,8 @@
     } catch { return; }
     paintRail();
     renderAsk();
+    const live = state.jobs.find((j) => !j.done);
+    if (live && state.phase !== "verify") setJourneyPhase("build");
   }
 
   // A frozen build asking for a human. Answering is one tap, and the card says plainly that
@@ -1686,13 +1856,8 @@
     // (this device or the account), it re-skins silently; without one, the three cards come
     // first and the intro + tour wait for the answer.
     const chosen = state.mode || readMode();
-    const locked = (() => { try { return localStorage.getItem("dominion.crucible.mode.locked.v1") === "1"; } catch { return false; } })();
-    if (chosen && locked) {
+    if (chosen) {
       applyMode(chosen, { save: false });
-      maybeShowIntro();
-    } else if (chosen) {
-      applyMode(chosen, { save: false });
-      showModePickerCompact();
       maybeShowIntro();
     } else {
       showModePicker();
@@ -1726,6 +1891,7 @@
         if (status) status.textContent = L("draft_restored");
         // A restored conversation is a running interview, so the chat input asks for an answer.
         paintLexicon();
+        setJourneyPhase(intake.vision ? "ready" : "clarify");
       }
     }
     // Opening beat: if chat log is empty (no draft with messages), show the howdy bubble.
@@ -1751,6 +1917,7 @@
 
   function closePanel() {
     if (!state.open) return;
+    closeStudio();
     state.open = false;
     if (nodePollingInterval) clearInterval(nodePollingInterval);
     nodePollingInterval = 0;
@@ -1888,8 +2055,12 @@
   // (both capture:true) keep their precedence; mutual exclusion means only one reveal is ever open.
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      const studio = $("#st-studio-shell");
       const afPanel = $("#af-panel");
-      if (afPanel && afPanel.classList.contains("af-open")) {
+      if (studio && !studio.hidden) {
+        e.preventDefault();
+        closeStudio();
+      } else if (afPanel && afPanel.classList.contains("af-open")) {
         e.preventDefault();
         closeAFPanel();
       } else if (state.open) {
@@ -1899,8 +2070,16 @@
     }
   });
 
-  // Clear draft when build completes successfully.
-  document.addEventListener("dominion-build-done", () => clearDraft());
+  // The engine and its lenses advance the same explicit journey; completion is not inferred from
+  // a success-colored card or a hidden button.
+  document.addEventListener("dominion-build-verifying", () => setJourneyPhase("verify"));
+  document.addEventListener("dominion-build-done", () => {
+    setJourneyPhase("ship");
+    clearDraft();
+  });
+  document.addEventListener("dominion-build-ended", () => {
+    setJourneyPhase(intake.vision ? "ready" : (intake.messages.length ? "clarify" : "idea"));
+  });
 
   // The reattach triad. A build that ran while the app was closed reappears on the next of these.
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshJobs(); });
@@ -1931,6 +2110,8 @@
   window.ideModeSetEngaged = (on) => setEngaged(!!on, { reveal: false, push: true });
   window.ideRefreshJobs = refreshJobs;
   window.ideEnsurePush = ensurePush;
+  window.dominionStudioHas = (module) => state.mode !== "vibe" || state.studio.modules.has(module);
+  window.dominionJourneyPhase = () => state.phase;
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();

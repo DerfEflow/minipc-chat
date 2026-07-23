@@ -169,7 +169,7 @@ tunnel), 4a (mode sets register silently). Commits 975caad, 174550f, e8f0510, 9d
 v88-live-preview.
 
 **Three modes.** idemodes.mjs: normalizeMode fails safe to beginner; MODE_DEFAULTS carry register/
-tour/board/code-lens; personaVoice (mentor / sharp collaborator / cold executor) reaches the
+tour/board/code-lens; personaVoice (mentor / adaptive designer-developer / calm staff engineer) reaches the
 intake interviewer AND the planner; aestheticsVoice teaches the beginner interviewer the MOCKUP
 protocol; visionExtras flags database/accounts/payments/messaging/external deterministically and
 prices a cost BAND from move count and model rates. prefs.mode stores "" as never-chosen so the

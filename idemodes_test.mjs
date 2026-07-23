@@ -2,7 +2,7 @@
  * Three-modes core self-test. Run with: node idemodes_test.mjs
  * Proves:
  *   1. mode normalization fails SAFE to beginner (the mode that excludes nobody)
- *   2. each persona matches Fred's ruling: mentor / sharp collaborator / cold executor
+ *   2. each persona matches the product contract: mentor / adaptive collaborator / staff engineer
  *   3. the aesthetics stage exists ONLY for beginners, with the MOCKUP protocol
  *   4. visionExtras flags real-world commitments deterministically and prices a BAND
  *   5. costBand speaks honest words under a cent
@@ -33,13 +33,16 @@ await t("mode defaults carry the register and layout decisions", () => {
   assert.equal(MODES.length, 3);
 });
 
-await t("personas match the ruling: mentor, collaborator, cold executor", () => {
+await t("personas match the product contract: mentor, collaborator, staff engineer", () => {
   assert.ok(/mentor/i.test(personaVoice("beginner")), "beginner gets the mentor");
   assert.ok(/RESULT/.test(personaVoice("beginner")), "beginner hears results, never mechanisms");
   assert.ok(/collaborator/i.test(personaVoice("vibe")), "vibe gets the collaborator");
   assert.ok(/upfront about cost/i.test(personaVoice("vibe")), "vibe hears cost early");
-  assert.ok(/cold/i.test(personaVoice("engineer")), "engineer gets the cold executor");
-  assert.ok(/zero\s*cheerleading/i.test(personaVoice("engineer")));
+  assert.ok(/staff software engineer/i.test(personaVoice("engineer")), "engineer gets a staff-engineer voice");
+  assert.ok(/measurable results/i.test(personaVoice("engineer")));
+  assert.ok(/never patronize/i.test(personaVoice("engineer")));
+  assert.ok(/current product designer/i.test(personaVoice("vibe")), "vibe gets a current designer-developer");
+  assert.ok(/technical details fully/i.test(personaVoice("vibe")), "vibe adapts its technical depth");
 });
 
 await t("beginner persona has the sharpened rules: 8th grade, proactive, next-step, motivation, ambitious", () => {
@@ -51,6 +54,7 @@ await t("beginner persona has the sharpened rules: 8th grade, proactive, next-st
   assert.ok(/ambitious/i.test(b), "beginner must acknowledge ambitious apps");
   assert.ok(/complicated/i.test(b), "beginner must explain why it is complicated");
   assert.ok(/smaller first version|smaller.*grow/i.test(b), "beginner must offer smaller first version");
+  assert.ok(/gentle humor/i.test(b), "beginner may use light, kind humor");
 });
 
 await t("aesthetics stage is beginner-only and teaches the MOCKUP protocol", () => {

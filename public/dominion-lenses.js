@@ -36,6 +36,8 @@
     previewOn: false,       // the live try-it frame is open
     doneWitnessedLive: new Set(), // job ids we saw complete live on this page lifetime
     logOpen: false,         // past-builds log panel visible
+    verifyAnnounced: "",    // job whose first recorded check advanced the shared journey
+    endedAnnounced: "",     // failed/stopped job whose retryable ending was announced
   };
 
   // The Crucible's working mode drives how much machinery each lens shows.
@@ -172,6 +174,8 @@
     state.openMoves = new Set();
     state.showFullPlan = false;
     state.previewOn = false;
+    state.verifyAnnounced = "";
+    state.endedAnnounced = "";
     state.doneWitnessedLive.clear();
     render();
 
@@ -249,6 +253,10 @@
     const d = digest(state.events);
     paintCost(d);
     paintStop(d);
+    if (state.jobId && d.runs.length && !d.outcome && state.verifyAnnounced !== state.jobId) {
+      state.verifyAnnounced = state.jobId;
+      try { document.dispatchEvent(new CustomEvent("dominion-build-verifying", { detail: { jobId: state.jobId } })); } catch {}
+    }
 
     if (!state.jobId) { body.replaceChildren(emptyState()); paintLog(); return; }
     body.replaceChildren(state.lens === "blueprint" ? blueprint(d) : workshop(d));
@@ -258,6 +266,15 @@
     if (d.outcome === "done" && state.doneWitnessedLive.has(state.jobId) && state.doneAnnounced !== state.jobId) {
       state.doneAnnounced = state.jobId;
       try { document.dispatchEvent(new CustomEvent("dominion-build-done", { detail: { jobId: state.jobId } })); } catch {}
+    }
+    if ((d.outcome === "error" || d.outcome === "stopped")
+      && state.doneWitnessedLive.has(state.jobId) && state.endedAnnounced !== state.jobId) {
+      state.endedAnnounced = state.jobId;
+      try {
+        document.dispatchEvent(new CustomEvent("dominion-build-ended", {
+          detail: { jobId: state.jobId, outcome: d.outcome },
+        }));
+      } catch {}
     }
     maybeOfferPublish(d);
     paintLog();
@@ -579,7 +596,8 @@
     wrap.dataset.mode = modeOf();
 
     const mode = modeOf();
-    const codeVisible = mode === "engineer" || state.codeOpen;
+    const studioCode = mode === "vibe" && window.dominionStudioHas && window.dominionStudioHas("code");
+    const codeVisible = mode === "engineer" || studioCode || state.codeOpen;
     const files = [...d.files.values()];
 
     /*
@@ -590,7 +608,7 @@
     wrap.append(previewSection(d));
 
     // The console: exactly what ran and what it said. Proof belongs to everyone.
-    const runBox = section(L("checks"));
+    const runBox = section(L("checks"), "checks");
     if (!d.runs.length) runBox.append(note("Nothing has been run yet."));
     else for (const r of d.runs) runBox.append(runView(r));
     wrap.append(runBox);
@@ -606,14 +624,14 @@
     }
 
     // Files, as a tree of what this build actually touched.
-    const filesBox = section(L("files_touched"));
+    const filesBox = section(L("files_touched"), "files");
     if (!files.length) filesBox.append(note("Nothing written yet."));
     else filesBox.append(tree(files));
     wrap.append(filesBox);
 
     // Diffs, when the engine has produced them.
     const withDiff = files.filter((f) => f.diff);
-    const diffBox = section(L("changes"));
+    const diffBox = section(L("changes"), "changes");
     if (!withDiff.length) diffBox.append(note("No diffs recorded for this build."));
     else for (const f of withDiff) diffBox.append(diffView(f));
     wrap.append(diffBox);
@@ -689,9 +707,9 @@
     return box;
   }
 
-  function section(title) {
+  function section(title, module) {
     const s = document.createElement("div");
-    s.className = "w-section";
+    s.className = "w-section" + (module ? " w-" + module : "");
     const h = document.createElement("h4");
     h.textContent = title;
     s.append(h);
@@ -798,6 +816,7 @@
     if (lbl) lbl.textContent = L("cost_label");
     render();
   });
+  document.addEventListener("dominion-studio-changed", () => render());
 
   window.dominionLenses = { mount, sync, follow, setLens, digest, get state() { return state; } };
 })();
