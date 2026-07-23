@@ -65,11 +65,53 @@
 /* ---------- the handle -------------------------------------------------------------------- */
 #compass {
   --cx-progress: 0;
+  position: relative;                 /* the navigation fan anchors to the handle */
   display: inline-flex; align-items: center; gap: 3px;
   height: 44px;
   touch-action: none;                 /* the drag is ours; the page must not scroll under it */
   user-select: none; -webkit-user-select: none;
 }
+
+/* The navigation fan (Fred, phone pass 07-23): press the handle, get every surface as a big
+ * labelled button. Old-world plate over the bar, copper line, glass glow: house aesthetic. */
+#cx-fan {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(185, 107, 50, .5);
+  background: linear-gradient(180deg, rgba(16, 34, 54, .97), rgba(6, 14, 26, .98));
+  box-shadow: 0 14px 38px rgba(0, 0, 0, .6), inset 0 1px 0 rgba(255, 193, 138, .18);
+  z-index: 200;                        /* above the bar; the panels' stacking contexts sit apart */
+  animation: cx-fan-in .18s ease;
+}
+@keyframes cx-fan-in { from { opacity: 0; transform: translateX(-50%) translateY(6px); } }
+#cx-fan button {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  min-width: 64px;
+  min-height: 56px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  cursor: pointer;
+  color: var(--ink, #e8f6ff);
+  border: 1px solid rgba(150, 200, 230, .16);
+  border-radius: 6px;
+  background: rgba(3, 10, 18, .6);
+}
+#cx-fan button:hover, #cx-fan button:focus-visible {
+  border-color: rgba(118, 255, 104, .45);
+  box-shadow: inset 0 0 14px rgba(118, 255, 104, .08);
+}
+#cx-fan svg { width: 20px; height: 20px; fill: none; stroke: var(--copper-hot, #d4823c); stroke-width: 1.8; }
+@media (prefers-reduced-motion: reduce) { #cx-fan { animation: none; } }
 #compass .cx-core { display: grid; justify-items: center; gap: 2px; }
 
 /* At rest: a dim copper pinpoint sitting in space that was empty anyway. Nothing pulses, nothing

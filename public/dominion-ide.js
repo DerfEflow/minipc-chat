@@ -696,7 +696,10 @@
       '<div class="st-chat" id="st-chat">' +
         '<div class="st-chat-head">' +
           '<span data-lex="intake_title"></span>' +
-          '<button type="button" id="st-chat-min" data-lex="intake_min"></button>' +
+          '<span class="st-chat-head-btns">' +
+            '<button type="button" id="st-fresh" data-lex="fresh_start"></button>' +
+            '<button type="button" id="st-chat-min" data-lex="intake_min"></button>' +
+          '</span>' +
         '</div>' +
         '<div class="st-chat-log" id="st-chat-log" aria-live="polite"></div>' +
         '<div class="st-chat-row" id="st-chat-row">' +
@@ -1543,6 +1546,7 @@
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
     });
+    $("#st-fresh").addEventListener("click", startFresh);
     $("#st-chat-min").addEventListener("click", () => {
       const chat = $("#st-chat");
       chat.classList.toggle("min");
@@ -1848,6 +1852,30 @@
   }
   function clearDraft() {
     try { localStorage.removeItem("dominion.crucible.draft.v1"); } catch {}
+  }
+
+  /*
+   * Start fresh (Fred, phone pass 07-23): a restored dead build left the chat stuck with no
+   * exit. One tap abandons the composing surface: draft gone (one-level backup kept for a fat
+   * finger), interview reset, Howdy again, inputs live. Server-side jobs are untouched: this
+   * clears the desk, it does not reach into the machine room.
+   */
+  function startFresh() {
+    try { const d = localStorage.getItem("dominion.crucible.draft.v1"); if (d) localStorage.setItem("dominion.crucible.draft.bak", d); } catch {}
+    clearDraft();
+    intake.messages = [];
+    intake.vision = null;
+    intake.busy = false;
+    const log = $("#st-chat-log");
+    if (log) log.textContent = "";
+    const prompt = $("#st-prompt"); if (prompt) prompt.value = "";
+    const chatIn = $("#st-chat-in"); if (chatIn) { chatIn.value = ""; chatIn.disabled = false; }
+    const send = $("#st-chat-send"); if (send) send.disabled = false;
+    const go = $("#st-go"); if (go) go.disabled = false;
+    const actions = $("#st-chat-actions"); if (actions) actions.hidden = true;
+    setJourneyPhase("idea");
+    chatBubble("ai", L("howdy"));
+    const status = $("#st-status"); if (status) status.textContent = L("fresh_done");
   }
 
   function openPanel() {

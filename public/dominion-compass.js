@@ -131,8 +131,8 @@
     }
     const dot = el.querySelector(".cx-dot");
     dot.setAttribute("aria-label", here === "main"
-      ? "Move between surfaces. Drag left for the dial, right for the image forge, up for The Crucible."
-      : "Return to the conversation. Drag, or press.");
+      ? "Press for the surface menu. Or drag: left for the dial, right for the image forge, up for The Crucible."
+      : "Press for the surface menu, or drag to return to the conversation.");
   }
 
   /* ---------- drag -------------------------------------------------------------------------
@@ -295,11 +295,11 @@
         }
         endDrag(drag, committed);
       } else if (start && !moved) {
-        // A plain press with no drag: on a panel it goes home, on the main screen it wakes the
-        // arrows so a first-time user can see what the thing does.
-        const here = current();
-        if (here !== "main") { const c = PANELS[here].close(); if (typeof c === "function") c(); setTimeout(paint, 60); }
-        else { el.classList.add("hint"); setTimeout(() => el.classList.remove("hint"), 2200); }
+        // A plain press with no drag opens the navigation fan (Fred, phone pass 07-23: swiping
+        // was unreliable on his phone and the wake-the-arrows hint taught nothing). One tap
+        // shows every surface as a big labelled button; one more tap goes there. Dragging
+        // still works for anyone who likes it.
+        toggleFan(el);
       }
       start = null; decided = null;
     };
@@ -309,17 +309,11 @@
     dot.addEventListener("pointerup", onUp);
     dot.addEventListener("pointercancel", onUp);
     dot.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleFan(el); return; }
       const routes = routesFor(current());
       const map = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
       const dir = map[e.key];
-      if (dir && routes[dir]) {
-        e.preventDefault();
-        const dest = routes[dir];
-        if (dest === "crucible") armCrucible();
-        if (dest === "main") { const c = PANELS[current()].close(); if (typeof c === "function") c(); }
-        else { const o = PANELS[dest].open_(); if (typeof o === "function") o(); }
-        setTimeout(paint, 60);
-      }
+      if (dir && routes[dir]) { e.preventDefault(); goTo(routes[dir]); }
     });
 
     // Arrows are also plain tap targets, for anyone who would rather not drag at all.
@@ -327,12 +321,73 @@
       arm.addEventListener("click", () => {
         const dest = routesFor(current())[arm.dataset.dir];
         if (!dest) return;
-        if (dest === "crucible") armCrucible();
-        if (dest === "main") { const c = PANELS[current()].close(); if (typeof c === "function") c(); }
-        else { const o = PANELS[dest].open_(); if (typeof o === "function") o(); }
-        setTimeout(paint, 60);
+        goTo(dest);
       });
     }
+  }
+
+  /* ---------- the navigation fan -------------------------------------------------------------
+   * The reliable path between surfaces: press the handle, get every destination as a big
+   * labelled button, tap one. Works from ANY surface to ANY surface (the fan closes the panel
+   * you are on, waits out the travel, then opens the next), which the one-way arrows never did.
+   */
+  function goTo(dest) {
+    const here = current();
+    if (dest === here) return;
+    if (dest === "crucible" && !armCrucible()) return;
+    const openDest = () => {
+      if (dest === "main") return;   // closing already took us home
+      const o = PANELS[dest].open_();
+      if (typeof o === "function") o();
+      setTimeout(paint, 60);
+    };
+    if (here !== "main") {
+      const c = PANELS[here].close();
+      if (typeof c === "function") c();
+      // The reveals all transform the same four shell pieces; let the closing travel finish
+      // before the next reveal grabs them, or the two transitions fight over one transform.
+      setTimeout(openDest, reduced() ? 30 : 420);
+    } else {
+      openDest();
+    }
+    setTimeout(paint, 60);
+  }
+
+  function toggleFan(el) {
+    const oldFan = $("#cx-fan");
+    if (oldFan) { oldFan.remove(); return; }
+    const here = current();
+    const fan = document.createElement("div");
+    fan.id = "cx-fan";
+    fan.setAttribute("role", "menu");
+    const items = [];
+    if (here !== "main") items.push({ id: "main", label: "Chat", icon: "M4 5h16v11H8l-4 4z" });
+    for (const [id, p] of Object.entries(PANELS)) {
+      if (id === here) continue;
+      if (id === "crucible" && !crucibleAllowed()) continue;
+      items.push({ id, label: p.label, icon: p.icon });
+    }
+    fan.innerHTML = items.map((it) =>
+      '<button type="button" role="menuitem" data-go="' + it.id + '">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="' + it.icon + '"/></svg>' +
+        '<span>' + it.label + '</span>' +
+      '</button>').join("");
+    fan.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-go]");
+      if (!b) return;
+      fan.remove();
+      goTo(b.dataset.go);
+    });
+    el.append(fan);
+    // Outside tap or Escape closes it; bind on the next tick so the opening tap does not count.
+    setTimeout(() => {
+      const away = (e) => { if (!fan.contains(e.target)) { fan.remove(); cleanup(); } };
+      const key = (e) => { if (e.key === "Escape") { fan.remove(); cleanup(); } };
+      const cleanup = () => { document.removeEventListener("pointerdown", away, true); document.removeEventListener("keydown", key, true); };
+      document.addEventListener("pointerdown", away, true);
+      document.addEventListener("keydown", key, true);
+      new MutationObserver((m, o) => { if (!document.contains(fan)) { cleanup(); o.disconnect(); } }).observe(el, { childList: true });
+    }, 0);
   }
 
   // Build the divider bar and its label once. #ide-root already spends both ::before and ::after

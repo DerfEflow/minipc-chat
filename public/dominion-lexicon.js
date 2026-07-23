@@ -227,6 +227,8 @@
     intake_more: ["Keep talking first", "Refine further", "Refine further (keep talking first)"],
     intake_skip: ["Skip the questions and build now", "Skip intake, build now", "Skip intake (no questions, build now)"],
     intake_min: ["Hide this conversation", "Minimize", "Minimize (hide this conversation)"],
+    fresh_start: ["Start fresh", "Reset build", "Start fresh (clear this build)"],
+    fresh_done: ["Clean slate. What are we building?", "State cleared.", "Cleared (a clean slate). What are we building?"],
     intake_recall: ["Show the conversation", "Restore chat", "Restore chat (show the conversation)"],
 
     // ---- the guided tour ----------------------------------------------------------------------

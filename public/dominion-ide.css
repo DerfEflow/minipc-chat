@@ -645,6 +645,8 @@ body.ide-open #ide-root { transform: none; }
     linear-gradient(180deg, rgba(8,20,34,.92), rgba(2,7,14,.96));
   box-shadow: inset 0 1px 0 rgba(255,193,138,.18), 0 10px 28px rgba(0,0,0,.5); }
 .st-chat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.st-chat-head-btns { display: flex; align-items: center; gap: 6px; }
+#st-fresh { color: var(--copper-hot, #d4823c); border-color: rgba(185, 107, 50, .35); }
 .st-chat-head span { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--copper-hot, #d4823c); }
 .st-chat-head button { font: inherit; font-size: 11.5px; cursor: pointer; padding: 5px 10px; border-radius: 3px;
   color: var(--muted, #8ba0ae); border: 1px solid var(--glass-line, rgba(150,200,230,.16)); background: transparent; }
