@@ -822,6 +822,9 @@
     if (!shell) return;
     shell.hidden = false;
     document.body.classList.add("studio-open");
+    // The drawer always opens at its top (Fred, layout pass 07-23).
+    const mods = shell.querySelector(".st-studio-modules");
+    if (mods) mods.scrollTop = 0;
     const first = shell.querySelector("button, input");
     if (first) first.focus();
   }
@@ -1065,6 +1068,9 @@
     if (root) root.dataset.mode = m;
     const picker = $("#st-modes");
     if (picker) picker.remove();
+    // Switching modes re-lays the page; start it from the top (Fred, layout pass 07-23).
+    const stage = $("#ide-stage");
+    if (stage) stage.scrollTop = 0;
     // Engineers get closed drawers, named by function, in dependency order (the ruling). For
     // everyone else the drawer chrome disappears and the sections read as one open page.
     for (const d of document.querySelectorAll(".st-drawer")) d.open = m !== "engineer";
@@ -1906,6 +1912,10 @@
     // drawn on the way in, or it stays invisible until the next poll.
     renderAsk();
     refreshJobs();
+    // Every entrance starts at the top of the page (Fred, layout pass 07-23): a stage scrolled
+    // from last time would otherwise open mid-content.
+    const stage = $("#ide-stage");
+    if (stage) stage.scrollTop = 0;
     state.open = true;
     document.body.classList.add("ide-anim");
     // Force a style flush between the two classes so the lift transitions instead of jumping.

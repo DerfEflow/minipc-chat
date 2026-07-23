@@ -147,8 +147,11 @@ body.ide-open #ide-root { transform: none; }
   overflow-y: auto;
   overflow-x: clip;
   display: grid;
-  place-items: center;
-  padding: 32px 22px 48px;
+  /* start, not center: centering pushed the TOP of any taller-than-screen section off the
+     viewport, so every page appeared to load halfway down (Fred's phone, layout pass 07-23).
+     Content now always loads with its top at the top; short content simply leaves room below. */
+  place-items: start center;
+  padding: 18px 22px 48px;
 }
 .ide-empty { max-width: 640px; text-align: center; display: grid; gap: 18px; justify-items: center; }
 .ide-empty-core {
@@ -1205,7 +1208,12 @@ body.ide-open #ide-root { transform: none; }
     top: auto;
     left: 0;
     width: 100%;
-    height: min(78vh, 700px);
+    /* Nearly full height: the old 78vh sheet wasted a quarter of the screen above it (Fred,
+       layout pass 07-23). A 36px reveal keeps the sheet feel; dvh tracks the real viewport
+       under mobile browser chrome, with vh as the older-browser fallback. */
+    height: calc(100vh - 36px);
+    height: calc(100dvh - 36px);
+    max-height: 900px;
     border-left: 0;
     border-top: 1px solid rgba(185, 107, 50, .45);
     border-radius: 18px 18px 0 0;

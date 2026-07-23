@@ -66,8 +66,10 @@ export const CRUCIBLE_GUIDE = [
   "  edge: presets (Minimal, Design, Full stack, Ship, or a custom mix) choose which tool",
   "  drawers are visible: Brief, Crew, Cost, Preview, Checks, History. It changes what is",
   "  shown, never what the build does. Close it with the x, the darkened backdrop, or Escape.",
-  "- The ? button in the header replays the guided tour. The flame card with a timer means",
-  "  work is in flight.",
+  "- The ? button in the header replays the guided tour. While the tour is explaining, the",
+  "  screen dims EXCEPT a lit spotlight around the exact control the card's arrow points at,",
+  "  so the thing being described is always visible. Every page and drawer opens scrolled to",
+  "  its top. The flame card with a timer means work is in flight.",
 ].join("\n");
 
 // The instruction that rides with the guide.

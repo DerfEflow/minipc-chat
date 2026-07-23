@@ -23,14 +23,15 @@
   let hi = null;           // the currently highlighted target
   let stepIndex = -1;      // explain-mode position, -1 = not touring
   let guidePoll = 0;       // guide-mode timer
-  let veil = null;         // the full-screen darkening veil
+  let veil = null;         // the full-screen click-catcher (transparent; the spot dims)
+  let spot = null;         // the spotlight hole over the current target, child of the veil
   let currentSteps = [];   // steps array for the current mode
   let repaint = null;      // re-renders the visible card in the active register
 
   function clear() {
     if (pop) { pop.remove(); pop = null; }
     if (hi) { hi.classList.remove("tour-hi", "tour-lift"); hi = null; }
-    if (veil) { veil.remove(); veil = null; }
+    if (veil) { veil.remove(); veil = null; spot = null; }
     clearInterval(guidePoll);
     guidePoll = 0;
     stepIndex = -1;
@@ -70,6 +71,9 @@
     // The arrow slides along the card's edge to keep pointing at the target's center.
     const ax = Math.max(18, Math.min(r.left + r.width / 2 - left, w - 18));
     pop.style.setProperty("--ax", ax + "px");
+
+    // The spotlight hole tracks the same rect the arrow points at.
+    placeSpot(target);
   }
 
   // A target buried in a closed drawer cannot be pointed at: open its ancestors first.
@@ -81,12 +85,24 @@
     }
   }
 
+  // Visible = actually on the page with size. The studio module system can display:none a whole
+  // drawer (v97), and a tour step pointing at a hidden control dims the screen around NOTHING:
+  // the exact black-screen Fred hit. Reveal first (drawers), then believe the rectangle.
+  function visibleTarget(sel) {
+    const t = $(sel);
+    if (!t) return null;
+    reveal(t);
+    const r = t.getBoundingClientRect();
+    return (r.width || r.height) ? t : null;
+  }
+
   function highlight(target) {
+    // tour-lift is retired: a lifted target can never escape an intermediate stacking context,
+    // which is why phones showed pure black. The spot's hole does the revealing now; the
+    // outline stays for the glow inside the hole.
     if (hi) hi.classList.remove("tour-hi", "tour-lift");
     hi = target;
-    if (hi) {
-      hi.classList.add("tour-hi", "tour-lift");
-    }
+    if (hi) hi.classList.add("tour-hi");
   }
 
   // The veil and the card live INSIDE #ide-root on purpose. #ide-root is a fixed, z-index:70,
@@ -100,7 +116,32 @@
     if (veil) veil.remove();
     veil = document.createElement("div");
     veil.className = "ide-tour-veil";
+    // The spot rides inside the veil: one removal cleans up both. Its giant box-shadow does
+    // the dimming; the element itself is the HOLE, so the target underneath stays visible
+    // regardless of any stacking context between it and us.
+    spot = document.createElement("div");
+    spot.className = "ide-tour-spot";
+    veil.append(spot);
     stageRoot().append(veil);
+  }
+
+  // Fit the spotlight hole to the target (a little breathing room so the glow shows). No
+  // target: collapse the hole to a point at screen center, which dims everything evenly.
+  function placeSpot(target) {
+    if (!spot) return;
+    const empty = !target || (() => { const r = target.getBoundingClientRect(); return !r.width && !r.height; })();
+    if (empty) {
+      // No visible target: no dim at all. Blacking the page around nothing is the failure this
+      // rewrite exists to end; the card simply floats over the fully visible page.
+      spot.style.display = "none";
+      return;
+    }
+    spot.style.display = "";
+    const r = target.getBoundingClientRect(), pad = 6;
+    spot.style.left = Math.round(r.left - pad) + "px";
+    spot.style.top = Math.round(r.top - pad) + "px";
+    spot.style.width = Math.round(r.width + pad * 2) + "px";
+    spot.style.height = Math.round(r.height + pad * 2) + "px";
   }
 
   /*
@@ -114,7 +155,7 @@
   function card(target, html, { veil: wantVeil = true } = {}) {
     if (pop) pop.remove();
     if (wantVeil) createVeil();
-    else if (veil) { veil.remove(); veil = null; }
+    else if (veil) { veil.remove(); veil = null; spot = null; }
     pop = document.createElement("div");
     pop.className = "ide-tour-pop" + (wantVeil ? "" : " guide");
     pop.innerHTML =
@@ -158,9 +199,11 @@
     /*
      * Steps already satisfied are dropped BEFORE numbering (Fred's round two: the first card he
      * ever saw said "2/3", because a pre-picked folder skipped step one after the count was
-     * fixed). The chip is the only number anywhere: the titles carry none.
+     * fixed). Hidden targets are dropped the same way: a control the studio modules keep off
+     * the page (the vibe default hides the Workspace drawer; auto-create covers it) must not
+     * be toured. The chip is the only number anywhere: the titles carry none.
      */
-    return baseSteps.filter((s) => !isStepComplete(s));
+    return baseSteps.filter((s) => visibleTarget(s.target) && !isStepComplete(s));
   }
 
   function isStepComplete(step) {
@@ -236,10 +279,10 @@
     }
 
     let g = 0;
-    while (g < stages.length - 1 && stages[g].done()) g++;
+    while (g < stages.length - 1 && (stages[g].done() || !visibleTarget(stages[g].target))) g++;
     const point = () => {
       const st = stages[g];
-      const target = $(st.target);
+      const target = visibleTarget(st.target);
       if (!target) return;
       // veil:false is the whole point of guide mode: the user must reach the app.
       card(target, '<p class="tp-guide">' + L(st.text) + '</p>', { veil: false });
@@ -321,6 +364,12 @@
     const ok = $("#ide-intro-ok");
     if (ok) ok.addEventListener("click", () => setTimeout(start, 250), { once: true });
   });
+
+  // Layout is alive under the card (smooth scrolls, drawers opening, keyboards appearing):
+  // keep the card and the spotlight glued to the target instead of trusting two timed passes.
+  const reglue = () => { if (pop && hi) place(hi); };
+  window.addEventListener("resize", reglue, { passive: true });
+  window.addEventListener("scroll", reglue, { passive: true, capture: true });
 
   // The panel closing takes the tour with it; reopening offers it again only if never finished.
   new MutationObserver(() => {

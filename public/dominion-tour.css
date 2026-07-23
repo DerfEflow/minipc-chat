@@ -9,14 +9,30 @@
  * live in dominion-ide.css by specificity, whatever the load order.
  */
 
+/* The veil is now ONLY a click-catcher: fully transparent. The dimming moved to the spot
+ * below, which has a genuine hole over the target. The old full dim + tour-lift approach went
+ * black over everything on the phone: a lifted target cannot escape an intermediate stacking
+ * context (the v97 grid work added several), so z:335 never actually rose above the veil.
+ * A hole needs no z-index cooperation from anybody (Fred, layout pass 07-23). */
 #ide-root .ide-tour-veil {
   position: fixed;
   inset: 0;
-  background: rgba(2, 6, 12, 0.55);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  background: transparent;
   z-index: 330;
-  pointer-events: auto;   /* the veil absorbs stray taps; only the lifted target and popup stay live */
+  pointer-events: auto;   /* absorbs stray taps; only the popup stays live */
+}
+
+/* The spotlight: sized and placed over the target by place(); everything OUTSIDE it is dimmed
+ * by the giant box-shadow, so the pointed-at control stays fully visible and lit. */
+#ide-root .ide-tour-spot {
+  position: fixed;
+  z-index: 331;
+  pointer-events: none;
+  border-radius: 8px;
+  box-shadow: 0 0 0 200vmax rgba(2, 6, 12, 0.62);
+  outline: 2px solid rgba(212, 130, 60, 0.9);
+  outline-offset: 2px;
+  transition: left 0.25s ease, top 0.25s ease, width 0.25s ease, height 0.25s ease;
 }
 
 /* A flex column: the BODY scrolls inside the clamp, the buttons pin below it, and the X sits
