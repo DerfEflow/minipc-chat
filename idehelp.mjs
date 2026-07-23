@@ -57,6 +57,15 @@ export const CRUCIBLE_GUIDE = [
   "  same time, one reviews and fixes, one does the final check. The cookie rule is enforced",
   "  in code: no two agents ever own the same file, and a referee refuses overlaps before",
   "  any work starts. Cost multiplies only on the worker row; the budget stop still applies.",
+  "- The journey rail at the top of the start panel shows where the user is in six phases:",
+  "  Shape the idea, Make the plan clear, Approve the plan, Build the app, Prove it works, and",
+  "  Use it or share it. The lit step is now; steps behind it are done. It moves by itself as",
+  "  the conversation and build progress; nobody has to click it.",
+  "- The workspace customization button (vibe coders only; labelled Choose my tools, or",
+  "  Configure workspace in the technical register) opens the Vibe Studio drawer from the right",
+  "  edge: presets (Minimal, Design, Full stack, Ship, or a custom mix) choose which tool",
+  "  drawers are visible: Brief, Crew, Cost, Preview, Checks, History. It changes what is",
+  "  shown, never what the build does. Close it with the x, the darkened backdrop, or Escape.",
   "- The ? button in the header replays the guided tour. The flame card with a timer means",
   "  work is in flight.",
 ].join("\n");
@@ -78,4 +87,5 @@ export const GUIDE_MUST_MENTION = [
   "conversation", "app.dominion.tools", "folder", "Browse", "snapshot", "intake", "build it",
   "mockup", "Blueprint", "Workshop", "preview", "Show-the-code", "Build log", "notification",
   "Budget", "put it online", "tour", "flame", "AF", "cookie rule", "referee",
+  "journey", "Studio", "preset",
 ];
