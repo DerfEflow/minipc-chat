@@ -102,6 +102,8 @@ t("sweepOrphans: a fresh store over the same dir turns 'running' rows into orpha
   assert.equal(store2.runningCountFor("a@x.com"), 0, "nothing is 'running' after the sweep");
 });
 
-rmSync(dir, { recursive: true, force: true });
+// Windows: an open sqlite handle can EPERM the cleanup after every assertion passed. Same
+// pattern as longrun_e2e: retry briefly, then let the OS sweep its own temp dir.
+try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* temp dir, OS sweeps it */ }
 console.log(`\nchatjobs_unit_test: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

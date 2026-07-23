@@ -1,8 +1,11 @@
 # Long-Run Harness SOW
 
 Status: rev B, LOCKED 2026-07-22 (Fred answered Q1-Q4; decisions recorded at the bottom).
-Nothing is built yet. Companion change already shipped: forge_read honest paging (the floor
-this stands on).
+Build state (2026-07-23): items 1-3 + resume(6) + prose screens(4) LIVE as the spine
+(longrun.mjs, 785ebc4). Item 5 built this session under full FITS (longrunbilling.mjs +
+/jobs approve-tranche; pack at docs/LONGRUN-BILLING-FITS.md). Companion floor already
+shipped: forge_read honest paging. NEXT per Fred's sequence: real callUnit glue, item 7
+chat surface, job creation endpoint, then the acceptance rite below.
 
 ## Mission
 

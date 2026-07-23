@@ -79,6 +79,7 @@ import { createCloudBackup } from "./cloudbackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
 import { createChatJobs, coalesceEvents } from "./chatjobs.mjs";
 import { createLongRun } from "./longrun.mjs";
+import { createJobBudget, canApprove, tranchePolicy } from "./longrunbilling.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -5052,9 +5053,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Long-run harness jobs (SOW rev B item 1's owner-visible progress log + item 7's seam).
-    // Identity required; invite/credits are NOT (reading your own ledger and pausing your own
-    // job is not billable work). Job CREATION with real model spend arrives with the item 5
-    // billing wiring; until then jobs are created by server-side callers.
+    // Identity required; invite/credits are NOT for reads/pause/resume (your own ledger is not
+    // billable work). approve-tranche IS money (item 5): D2 policy + the zero-balance gate.
+    // Job CREATION arrives with the model-glue phase; until then jobs are created server-side.
     if (path === "/jobs") {
       const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
       const T = resolveTenant(req);
@@ -5067,7 +5068,11 @@ const server = http.createServer(async (req, res) => {
         if (!id) return json(200, { jobs: store.listJobs().map((m) => ({ id: m.id, mission: m.mission, state: m.state, reason: m.reason, createdAt: m.createdAt, updatedAt: m.updatedAt })) });
         const p = store.progress(id);
         if (!p) return json(404, { error: "no such job" });
-        return json(200, { meta: p.meta, done: p.done.size, remaining: p.remaining.length, ledgerTail: p.entries.slice(-50) });
+        // Budget state rides the detail view so a paused-on-fuse job can say exactly what
+        // resuming costs. Role comes from the RESOLVED tenant, never from job meta (W5).
+        let budget = null;
+        try { budget = createJobBudget({ jobDir: join(store.dir, id), role: T.isOwner ? "owner" : T.role }).state(); } catch {}
+        return json(200, { meta: p.meta, done: p.done.size, remaining: p.remaining.length, budget, ledgerTail: p.entries.slice(-50) });
       }
       if (req.method === "POST") {
         const raw = await readRawBody(req, 1024 * 1024);
@@ -5082,7 +5087,23 @@ const server = http.createServer(async (req, res) => {
           const m = store.resumeJob(String(body.id || ""));
           return m ? json(200, { meta: m }) : json(404, { error: "no such job" });
         }
-        return json(400, { error: "op must be pause or resume" });
+        // Item 5 (D2): approve one or more tranches on your own job. The tranche size is
+        // role-clamped (guest $1 default / $2 ceiling, owner $5 default / free choice); credit
+        // users must hold credits covering the new approval (the floor-at-zero leak, W3).
+        if (op === "approve-tranche") {
+          const id = String(body.id || "");
+          if (!store.readMeta(id)) return json(404, { error: "no such job" });
+          const role = T.isOwner ? "owner" : T.role;
+          const n = Math.max(1, Math.trunc(Number(body.tranches) || 1));
+          const usdEach = tranchePolicy(role, body.trancheUsd);
+          const gate = canApprove({ T, billing, usd: n * usdEach });
+          if (!gate.ok) return json(402, { error: gate.error, code: gate.code || "approve_refused" });
+          const b = createJobBudget({ jobDir: join(store.dir, id), role, trancheUsd: body.trancheUsd });
+          const r = b.approve(n, T.isOwner ? "owner" : T.email || T.uid);
+          if (r.error) return json(400, { error: r.error });
+          return json(200, { approved: r.approvedTranches, approvedUsd: r.approvedUsd, budget: b.state() });
+        }
+        return json(400, { error: "op must be pause, resume, or approve-tranche" });
       }
       return json(405, { error: "method not allowed" });
     }

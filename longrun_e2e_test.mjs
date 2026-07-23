@@ -83,6 +83,14 @@ await t("pause and resume round-trip over the wire", async () => {
   assert(r.status === 200 && r.body.meta.state === "ready", "resume failed");
 });
 
+await t("owner approves a tranche over the wire; the detail view carries the budget honestly", async () => {
+  const a = await req("POST", "/jobs", { email: OWNER, body: { op: "approve-tranche", id: seeded.id } });
+  assert(a.status === 200 && a.body.approved === 1, "approve failed: " + JSON.stringify(a.body));
+  assert(a.body.budget.approvedUsd === 5, "owner default tranche must be $5, got " + JSON.stringify(a.body.budget));
+  const d = await req("GET", "/jobs?id=" + seeded.id, { email: OWNER });
+  assert(d.body.budget && d.body.budget.remainingUsd === 5 && d.body.budget.spentUsd === 0, "detail budget wrong: " + JSON.stringify(d.body.budget));
+});
+
 await t("guest gets their OWN empty store, never a 503 (both resolver branches wired)", async () => {
   const r = await req("GET", "/jobs", { email: GUEST });
   assert(r.status === 200, "expected 200, got " + r.status + " " + JSON.stringify(r.body));
