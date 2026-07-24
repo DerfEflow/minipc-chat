@@ -783,13 +783,27 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ prompt, quality: state.quality, aspect: state.aspect, n: 1, refs: state.refs.map((x) => x.dataUrl) }),
       });
-      let wrote = 0, made = 0;
+      let wrote = 0, made = 0, unsaved = 0;
       for (const img of r.images || []) {
-        const rec = await vaultSave(img.b64, { prompt, quality: r.quality, aspect: r.aspect, source: "sync" });
-        made++;
-        if (folderArmed && folderReady() && (await writeToFolder(rec))) wrote++;
+        // The image is already generated and CHARGED server-side, and the server keeps no copy.
+        // So it must never vanish because on-device storage failed (a guest's private-mode or
+        // storage-blocked browser is exactly how "the photo did not appear" happens). If the
+        // vault write throws, keep the image in memory and show it anyway, honestly labelled, so
+        // it can still be opened and saved by hand. A paid-for image is never invisible.
+        try {
+          const rec = await vaultSave(img.b64, { prompt, quality: r.quality, aspect: r.aspect, source: "sync" });
+          made++;
+          if (folderArmed && folderReady() && (await writeToFolder(rec))) wrote++;
+        } catch (saveErr) {
+          unsaved++;
+          state.transient = state.transient || [];
+          state.transient.unshift({ b64: img.b64, prompt, quality: r.quality, aspect: r.aspect, ts: Date.now() });
+        }
       }
       stopProgress();
+      if (unsaved) {
+        showFault("Your image was created, but this browser would not save it to the on-device gallery (often private browsing, or storage is full or blocked). It is shown below so you can long-press or use OPEN to keep it. Try a normal browser window to have it saved automatically.");
+      }
       // Never claim more than happened. "Sealed to the vault" used to print even when the folder
       // write was skipped, which is how an image could look saved and be nowhere on disk.
       const where = wrote ? ` · written to ${folderHandle.name}`
@@ -969,6 +983,27 @@
       for (const j of state.jobs) gallery.append(jobCard(j));
     }
 
+    // Images that were forged this session but could NOT be written to on-device storage show
+    // here from memory, so a paid-for image is never invisible (Fred's brother, 2026-07-23). They
+    // are labelled UNSAVED and use a data URL directly, independent of IndexedDB.
+    if (state.filter !== "favorite" && !q && (state.transient || []).length) {
+      for (const t of state.transient) {
+        const card = document.createElement("article");
+        card.className = "creation-card unsaved-card";
+        card.innerHTML = `
+          <div class="creation-art"><img class="creation-img" alt="${esc(t.prompt.slice(0, 80))}" src="data:image/png;base64,${t.b64}"></div>
+          <div class="card-chrome"><span>UNSAVED · long-press to keep</span></div>
+          <div class="creation-meta"><div><b>${esc(t.prompt.toUpperCase().slice(0, 60) || "FORGED VISION")}</b><small>${esc(cap(t.quality))} · ${esc(cap(t.aspect))} · not on this device</small></div></div>`;
+        const open = document.createElement("button");
+        open.className = "card-action";
+        open.setAttribute("aria-label", "Open image");
+        open.innerHTML = '<svg viewBox="0 0 24 24"><path d="M7 17 17 7M9 7h8v8"/></svg>';
+        open.addEventListener("click", (e) => { e.stopPropagation(); openViewer({ prompt: t.prompt, quality: t.quality, aspect: t.aspect }, "data:image/png;base64," + t.b64); });
+        card.querySelector(".creation-meta").append(open);
+        gallery.append(card);
+      }
+    }
+
     shown.forEach((rec, i) => {
       const url = URL.createObjectURL(rec.blob);
       objectUrls.push(url);
@@ -1001,7 +1036,7 @@
       gallery.append(card);
     });
 
-    if (!shown.length && !state.jobs.length) {
+    if (!shown.length && !state.jobs.length && !(state.transient || []).length) {
       const empty = document.createElement("p");
       empty.className = "gallery-empty";
       empty.textContent = q ? "NOTHING IN THE VAULT MATCHES THAT SEARCH." : "THE VAULT AWAITS ITS FIRST FORGED VISION. EVERYTHING YOU CREATE STAYS ON THIS DEVICE.";
@@ -1072,17 +1107,32 @@
       share.addEventListener("click", () => shareImage(rec));
       actions.append(share);
     }
+    // Browser / device BACK must close THIS viewer, not exit the whole app (Fred's brother,
+    // 2026-07-23: back on the image page poofed everything). We push one history entry when the
+    // viewer opens; BACK pops it and we remove the scrim. A button-close calls history.back() so
+    // the same single path runs and the pushed entry never dangles.
+    let hasHist = false;
+    const removeScrim = () => {
+      if (!scrim.isConnected) return;
+      scrim.remove();
+      window.removeEventListener("popstate", onPop);
+    };
+    const onPop = () => { hasHist = false; removeScrim(); };
+    const dismiss = () => { if (hasHist) { hasHist = false; try { history.back(); return; } catch {} } removeScrim(); };
+
     const del = document.createElement("button");
     del.className = "danger";
     del.textContent = "DELETE";
-    del.addEventListener("click", async () => { await vaultDelete(rec.id); scrim.remove(); renderGallery(); });
+    del.addEventListener("click", async () => { if (rec.id) await vaultDelete(rec.id); dismiss(); renderGallery(); });
     const close = document.createElement("button");
     close.textContent = "CLOSE";
-    close.addEventListener("click", () => scrim.remove());
+    close.addEventListener("click", dismiss);
     actions.append(dl, fav, del, close);
     scrim.append(card);
-    scrim.addEventListener("click", (e) => { if (e.target === scrim) scrim.remove(); });
+    scrim.addEventListener("click", (e) => { if (e.target === scrim) dismiss(); });
     $("#dfi-root").append(scrim);
+    try { history.pushState({ dfiViewer: true }, ""); hasHist = true; } catch { hasHist = false; }
+    window.addEventListener("popstate", onPop);
   }
 
   // ---------- the glass door (park + return) ----------
