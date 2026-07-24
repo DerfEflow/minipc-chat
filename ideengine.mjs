@@ -54,7 +54,7 @@ export const SYSTEM_PREFIX = [
  * patience. Deterministic, because asking a model whether to ask a model is absurd.
  * ------------------------------------------------------------------------------------------- */
 const SMALL_VERBS = /\b(fix|rename|tweak|adjust|change|update|bump|remove|delete|add)\b/i;
-const BIG_SIGNALS = /\b(build|create|scaffold|app|application|system|dashboard|site|website|api|full|entire|whole|from scratch|end[- ]to[- ]end|multi|several|pipeline|integrate|migrate|refactor)\b/i;
+const BIG_SIGNALS = /\b(build|create|scaffold|app|application|system|dashboard|site|website|api|full|entire|whole|from scratch|end[- ]to[- ]end|multi|several|pipeline|integrate|migrate|refactor|page|screen|settings|billing|payment|checkout|auth|authentication|login|signup|sign[- ]up|account|database|schema|onboarding|notifications?)\b/i;
 
 export function isSmallAsk(prompt, { files = [] } = {}) {
   const text = String(prompt || "").trim();

@@ -86,13 +86,14 @@ await t("RESTART: a new spine over the same dir rebuilds finished jobs from thei
   assert.equal(back.events.length, 3);
 });
 
-await t("RESTART: an unfinished job is sealed as INTERRUPTED and says so honestly", () => {
+await t("RESTART: an unfinished OLD job is sealed as INTERRUPTED and says so honestly", () => {
   const dir = freshDir();
-  const first = createIdeJobs({ dir });
+  // The event is stamped far in the past, so the rolling-deploy grace window has long passed.
+  const first = createIdeJobs({ dir, now: () => 1000 });
   const job = first.create({ uid: "u1" });
   first.emit(job.id, { type: "move", id: "m1", state: "running" });   // then the container dies
 
-  const second = createIdeJobs({ dir });
+  const second = createIdeJobs({ dir, now: () => 1000 + 5 * 60000 });   // 5 min later
   const rec = second.loadFromDisk();
   assert.equal(rec.interrupted, 1);
   const back = second.get(job.id);
@@ -106,6 +107,27 @@ await t("RESTART: an unfinished job is sealed as INTERRUPTED and says so honestl
   const third = createIdeJobs({ dir });
   const rec3 = third.loadFromDisk();
   assert.equal(rec3.interrupted, 0, "already-sealed jobs must not be sealed twice");
+});
+
+await t("ROLLING DEPLOY: a job with a RECENT last event is NOT sealed (Kimi #2 phantom kill)", () => {
+  const dir = freshDir();
+  const clock = { t: 1000000 };
+  const first = createIdeJobs({ dir, now: () => clock.t });
+  const job = first.create({ uid: "u1" });
+  first.emit(job.id, { type: "move", id: "m1", state: "running" });   // old container still driving
+
+  // The new container boots moments later (within the grace window).
+  clock.t += 30000;   // 30s
+  const second = createIdeJobs({ dir, now: () => clock.t });
+  const rec = second.loadFromDisk();
+  assert.equal(rec.interrupted, 0, "a live-driven job must not be sealed as a phantom failure");
+  const back = second.get(job.id);
+  assert.equal(back.done, false, "left running, because the outgoing instance may still finish it");
+
+  // Much later, with no further activity, it IS genuinely dead and gets sealed.
+  clock.t += 5 * 60000;
+  const third = createIdeJobs({ dir, now: () => clock.t });
+  assert.equal(third.loadFromDisk().interrupted, 1, "a truly stale job is sealed on a later boot");
 });
 
 await t("attach replays from N and then live-tails, with no gap", async () => {
@@ -193,7 +215,7 @@ await t("stop() seals a running job and is idempotent", () => {
   assert.equal(jobs.stop("ide_nope").ok, false);
 });
 
-await t("gc keeps live jobs and evicts only finished ones, deleting their journals", () => {
+await t("gc keeps live jobs, evicts finished ones, and ARCHIVES their journals (Kimi)", () => {
   const dir = freshDir();
   const jobs = createIdeJobs({ dir, cap: 3 });
   const live = jobs.create({ uid: "u1" });
@@ -201,8 +223,11 @@ await t("gc keeps live jobs and evicts only finished ones, deleting their journa
   for (let i = 0; i < 5; i++) { const j = jobs.create({ uid: "u1" }); jobs.finish(j.id, { type: "done" }); finished.push(j); }
   assert.ok(jobs.size <= 3, "index should be capped, got " + jobs.size);
   assert.ok(jobs.get(live.id), "a LIVE job must never be evicted, however old");
-  const onDisk = readdirSync(join(dir, "jobs")).length;
-  assert.ok(onDisk <= 3, "evicted journals should be removed from disk too, found " + onDisk);
+  const topLevel = readdirSync(join(dir, "jobs")).filter((n) => n.endsWith(".jsonl")).length;
+  assert.ok(topLevel <= 3, "active journals capped at the index size, found " + topLevel);
+  // Evicted journals are archived, not destroyed: the postmortem survives.
+  const archived = existsSync(join(dir, "jobs", "archive")) ? readdirSync(join(dir, "jobs", "archive")).length : 0;
+  assert.ok(archived >= 1, "at least one evicted journal was archived, found " + archived);
 });
 
 for (const d of dirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }

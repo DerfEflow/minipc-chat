@@ -95,6 +95,17 @@ Chat is where plans are born; the Crucible is where they become apps. The bridge
 4.5 Per-build dollar ceiling chosen by the user at start, freezing to need_input when hit
     (the long-run tranche fuse pattern applied to Crucible builds).
 
+## Build status (2026-07-23, full autonomous run)
+
+- Phase 1 SHIPPED (v99-fresh-fan): Start Fresh + compass navigation fan.
+- Phase 3 SHIPPED (v100-hardening): all verified Kimi defects + the sponsored-cap money bug.
+- Phase 2 backend SHIPPED (fdf8d05): idetelemetry + AF Full Custom rules.
+- Phase 2 SHIPPED (v101-af-custom): divide-preview + per-section model/agents + live estimates +
+  warnings + branch salvage + git lane.
+- Phase 2A SHIPPED (v102-plan-pipe): save_plan + Crucible "Start from a plan" drawer.
+- Phase 4 IN PROGRESS: rolling-deploy grace (idejobs), journal archive, intake soft cap, VAPID
+  guest guard, `npm test` gate (run-tests.mjs).
+
 ## Decisions needed (Fred)
 
 - D-1 (2.7): salvage form for non-git workspaces: timestamped sibling folder OK?

@@ -8,6 +8,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node run-tests.mjs"
   }
 }

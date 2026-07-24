@@ -18,7 +18,7 @@
  * Zero dependencies, sync fs, one file per job. Same discipline as artifacts.mjs and forge.mjs.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, appendFileSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, appendFileSync, readFileSync, readdirSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
 // Terminal states. A job whose journal ends without one of these was interrupted by a restart.
@@ -43,6 +43,13 @@ export const EVENT_TYPES = new Set([
 ]);
 
 const isTerminal = (t) => TERMINAL.has(t);
+
+// Rolling-deploy grace (Kimi #2). Railway boots the NEW container while the OLD one is briefly
+// still driving a build; without this, the new container's loadFromDisk would seal that live job
+// as "interrupted" and show a phantom failure on a build that is actually fine. A job whose LAST
+// event is newer than this window is left alone on boot: the outgoing instance is probably still
+// writing to it. Genuinely dead jobs (last event older than the window) are sealed as before.
+const DEPLOY_GRACE_MS = 120000;
 
 export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = () => {}, onEvent = null } = {}) {
   if (!dir) throw new Error("createIdeJobs needs a dir");
@@ -94,6 +101,14 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
         stop: () => {},
       };
       if (!job.done) {
+        // A very recent last event means the OUTGOING container is likely still driving this
+        // build through a rolling deploy; sealing it now would be the phantom failure (Kimi #2).
+        // Leave it as-is; if it is truly dead, the NEXT boot (last event now old) seals it.
+        if (now() - (last.at || 0) < DEPLOY_GRACE_MS) {
+          INDEX.set(id, job);
+          recovered++;
+          continue;
+        }
         // Seal it honestly: nothing is driving this job any more.
         job.interrupted = true;
         job.done = true;
@@ -120,7 +135,13 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
     while (INDEX.size > cap && finished.length) {
       const victim = finished.shift();
       INDEX.delete(victim.id);
-      try { unlinkSync(fileFor(victim.id)); } catch {}
+      // ARCHIVE, do not delete (Kimi): a build journal is the postmortem when something went
+      // wrong. Move it under jobs/archive/ instead of unlinking; the index drops it either way.
+      try {
+        const arch = join(jobsDir, "archive");
+        mkdirSync(arch, { recursive: true });
+        renameSync(fileFor(victim.id), join(arch, victim.id + ".jsonl"));
+      } catch { try { unlinkSync(fileFor(victim.id)); } catch {} }
     }
   }
 

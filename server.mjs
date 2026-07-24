@@ -1083,6 +1083,12 @@ function ideStoreFor(T) {
 const IDE_VAPID_PUBLIC = cfgGet("DOMINION_IDE_VAPID_PUBLIC", "");
 const IDE_VAPID_PRIVATE = cfgGet("DOMINION_IDE_VAPID_PRIVATE", "");
 const IDE_VAPID_SUBJECT = cfgGet("DOMINION_IDE_VAPID_SUBJECT", "mailto:" + OWNER_EMAIL);
+// Before guests (Kimi): the VAPID subject is the abuse contact on file for every user's push
+// traffic. Falling back to the owner's personal email is fine owner-only, but must be set
+// explicitly once the surface opens to guests. Warn loudly rather than leak it silently.
+if (MULTI_TENANT && ideGate && ideGate.everyone && !cfgGet("DOMINION_IDE_VAPID_SUBJECT", "")) {
+  console.error("[dominion-ai] WARNING: IDE is open to guests but DOMINION_IDE_VAPID_SUBJECT is unset; push traffic would list the owner's personal email as the abuse contact. Set it.");
+}
 
 /*
  * The escalation hook. The spine reports every structural event; escalationFor() applies Fred's
