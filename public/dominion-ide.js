@@ -225,12 +225,12 @@
     custom.innerHTML =
       '<div class="af-custom-head">' +
         '<span data-lex="af_custom_title"></span>' +
-        '<button type="button" id="af-divide" class="af-divide-btn" data-lex="af_divide"></button>' +
+        '<button type="button" id="af-divide" class="af-divide-btn" data-lex="af_plan_tasks"></button>' +
       '</div>' +
-      '<p class="af-custom-hint" data-lex="af_custom_hint"></p>' +
+      '<p class="af-custom-hint" data-lex="af_tasks_hint"></p>' +
       '<div id="af-sections" class="af-sections"></div>' +
       '<div id="af-plan-total" class="af-plan-total" hidden></div>';
-    custom.querySelector("#af-divide").addEventListener("click", planSections);
+    custom.querySelector("#af-divide").addEventListener("click", planTasks);
 
     const footer = document.createElement("div");
     footer.className = "af-footer";
@@ -359,94 +359,140 @@
   }
 
   /*
-   * Full Custom (Phase 2). Ask the divider to propose the sections for the current brief, then
-   * render one configurable row per section. Reuses the same brief the build will use (the drawer
-   * prompt or the interview's first message), so what you plan is what you build.
+   * The Task Board (Fred's redesign). "Plan the tasks" asks the orchestrator for a numbered task
+   * roadmap; each task is a row the user owns with a model, an agent count, and an optional group
+   * tag (tasks sharing a tag share a model + agents). Bumping a task above one agent asks the
+   * server whether the task can be split (the reduce check) and shows the honest verdict. Live
+   * estimates ride each task and roll up. The confirmed tasks + groups drive the build.
    */
-  let afPlan = null;   // { parts: [...], picks: [{model, agents}] }
+  let afTasks = null;   // { tasks: [{n,title,files,needs}], picks: [{model, agents, group, reduce}] }
 
-  async function planSections() {
+  async function planTasks() {
     const goal = (intake.messages[0] && intake.messages[0].content) || ($("#st-prompt") && $("#st-prompt").value.trim()) || "";
     const btn = $("#af-divide"), box = $("#af-sections");
     if (!goal) { if (box) box.innerHTML = '<p class="af-section-empty">' + L("af_need_brief") + "</p>"; return; }
-    if (btn) { btn.disabled = true; btn.textContent = L("af_dividing"); }
+    if (btn) { btn.disabled = true; btn.textContent = L("af_planning"); }
     try {
-      const r = await fetch("/ide/divide", { method: "POST", headers: { "content-type": "application/json" },
+      const r = await fetch("/ide/tasks", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ prompt: goal, mode: state.mode, register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }) });
       const j = await r.json();
-      if (!r.ok || !j.ok) {
-        if (box) box.innerHTML = '<p class="af-section-empty">' + (j.error || j.reason || L("af_divide_failed")) + "</p>";
-        return;
-      }
-      afPlan = { parts: j.parts, picks: j.parts.map(() => ({ model: "", agents: 1 })) };
-      if (!j.disjoint && box) { /* the referee will still enforce at build; just note it */ }
-      renderSections();
+      if (!r.ok || !j.ok) { if (box) box.innerHTML = '<p class="af-section-empty">' + (j.error || j.reason || L("af_plan_failed")) + "</p>"; return; }
+      afTasks = { tasks: j.tasks, picks: j.tasks.map(() => ({ model: "", agents: 1, group: "", reduce: null })) };
+      renderTasks();
     } catch (e) {
-      if (box) box.innerHTML = '<p class="af-section-empty">' + L("af_divide_failed") + "</p>";
+      if (box) box.innerHTML = '<p class="af-section-empty">' + L("af_plan_failed") + "</p>";
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = L("af_divide"); }
+      if (btn) { btn.disabled = false; btn.textContent = L("af_plan_tasks"); }
     }
   }
 
-  function renderSections() {
+  // Tasks sharing a non-empty group tag mirror the FIRST such task's model + agents.
+  function syncGroups() {
+    const leader = new Map();
+    afTasks.picks.forEach((p) => { const g = (p.group || "").trim(); if (g && !leader.has(g)) leader.set(g, p); });
+    afTasks.picks.forEach((p) => { const g = (p.group || "").trim(); if (g && leader.get(g) !== p) { p.model = leader.get(g).model; p.agents = leader.get(g).agents; } });
+  }
+
+  function renderTasks() {
     const box = $("#af-sections");
-    if (!box || !afPlan) return;
+    if (!box || !afTasks) return;
     box.innerHTML = "";
-    afPlan.parts.forEach((part, i) => {
+    afTasks.tasks.forEach((task, i) => {
+      const p = afTasks.picks[i];
       const row = document.createElement("div");
-      row.className = "af-section";
+      row.className = "af-section af-task";
       const title = document.createElement("div");
       title.className = "af-section-title";
-      title.textContent = (i + 1) + ". " + (part.title || "Section " + (i + 1));
+      title.textContent = task.n + ". " + task.title;
       const files = document.createElement("div");
       files.className = "af-section-files";
-      files.textContent = (part.files || []).join(", ");
+      files.textContent = (task.files || []).join(", ") + (task.needs && task.needs.length ? "  ·  after " + task.needs.join(", ") : "");
 
       const controls = document.createElement("div");
       controls.className = "af-section-controls";
       const sel = document.createElement("select");
       sel.className = "af-model-select";
-      fillModelOptions(sel, afPlan.picks[i].model || "", false);
-      sel.addEventListener("change", () => { afPlan.picks[i].model = sel.value; refreshEstimates(); persistPicks(); });
+      fillModelOptions(sel, p.model || "", false);
+      sel.addEventListener("change", () => { p.model = sel.value; syncGroups(); renderTasksSoft(); refreshTaskEstimates(); persistTasks(); });
 
       const stepper = document.createElement("div");
       stepper.className = "af-agents";
       const minus = document.createElement("button"); minus.type = "button"; minus.textContent = "-";
-      const count = document.createElement("span"); count.className = "af-agent-count"; count.textContent = afPlan.picks[i].agents;
+      const count = document.createElement("span"); count.className = "af-agent-count"; count.textContent = p.agents;
       const plus = document.createElement("button"); plus.type = "button"; plus.textContent = "+";
-      const clampAgents = (d) => { afPlan.picks[i].agents = Math.max(1, Math.min(8, afPlan.picks[i].agents + d)); count.textContent = afPlan.picks[i].agents; refreshEstimates(); persistPicks(); };
-      minus.addEventListener("click", () => clampAgents(-1));
-      plus.addEventListener("click", () => clampAgents(1));
+      const setAgents = (v) => {
+        p.agents = Math.max(1, Math.min(6, v)); count.textContent = p.agents;
+        if (p.agents > 1) checkReduce(i); else { p.reduce = null; renderTasksSoft(); }
+        syncGroups(); refreshTaskEstimates(); persistTasks();
+      };
+      minus.addEventListener("click", () => setAgents(p.agents - 1));
+      plus.addEventListener("click", () => setAgents(p.agents + 1));
       const agentsLabel = document.createElement("span"); agentsLabel.className = "af-agents-label"; agentsLabel.setAttribute("data-lex", "af_agents");
       stepper.append(minus, count, plus, agentsLabel);
 
-      controls.append(sel, stepper);
+      const group = document.createElement("input");
+      group.type = "text"; group.className = "af-group-input"; group.value = p.group || "";
+      group.setAttribute("data-lex-ph", "af_group_ph");
+      group.placeholder = L("af_group_ph");
+      group.addEventListener("change", () => { p.group = group.value.trim(); syncGroups(); renderTasksSoft(); refreshTaskEstimates(); persistTasks(); });
 
-      const est = document.createElement("div");
-      est.className = "af-section-est";
-      est.id = "af-est-" + i;
-      est.textContent = L("af_est_pending");
+      controls.append(sel, stepper, group);
 
-      const warn = document.createElement("div");
-      warn.className = "af-section-warn";
-      warn.id = "af-warn-" + i;
-      warn.hidden = true;
+      const est = document.createElement("div"); est.className = "af-section-est"; est.id = "af-est-" + i; est.textContent = L("af_est_pending");
+      const warn = document.createElement("div"); warn.className = "af-section-warn"; warn.id = "af-warn-" + i; warn.hidden = true;
+      const red = document.createElement("div"); red.className = "af-reduce"; red.id = "af-reduce-" + i; red.hidden = !p.reduce;
+      if (p.reduce) { red.textContent = p.reduce.note || ""; red.className = "af-reduce af-reduce-" + (p.reduce.mode === "irreducible" ? "irr" : "ok"); }
 
-      row.append(title, files, controls, est, warn);
+      row.append(title, files, controls, est, warn, red);
       box.append(row);
     });
     paintLexicon();
-    refreshEstimates();
+    refreshTaskEstimates();
+  }
+
+  // A light repaint of just the model selects + agent counts + group inputs, without rebuilding
+  // the DOM (so a group-sync does not steal focus mid-edit).
+  function renderTasksSoft() {
+    const box = $("#af-sections");
+    if (!box || !afTasks) return;
+    [...box.querySelectorAll(".af-task")].forEach((row, i) => {
+      const p = afTasks.picks[i]; if (!p) return;
+      const sel = row.querySelector(".af-model-select"); if (sel && sel.value !== (p.model || "")) sel.value = p.model || "";
+      const cnt = row.querySelector(".af-agent-count"); if (cnt) cnt.textContent = p.agents;
+      const red = row.querySelector(".af-reduce");
+      if (red) { if (p.reduce) { red.hidden = false; red.textContent = p.reduce.note || ""; red.className = "af-reduce af-reduce-" + (p.reduce.mode === "irreducible" ? "irr" : "ok"); } else red.hidden = true; }
+    });
+  }
+
+  async function checkReduce(i) {
+    const task = afTasks.tasks[i], p = afTasks.picks[i];
+    p.reduce = { mode: "checking", note: L("af_reduce_checking") };
+    renderTasksSoft();
+    try {
+      const r = await fetch("/ide/reduce", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task, agents: p.agents, model: p.model, mode: state.mode, register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }) });
+      const j = await r.json();
+      if (!r.ok) { p.reduce = null; }
+      else {
+        p.reduce = { mode: j.mode, note: j.note || "" };
+        if (j.mode === "irreducible") { p.agents = 1; }        // forced single agent
+        else if (j.usableAgents && j.usableAgents < p.agents) { p.agents = j.usableAgents; }
+      }
+    } catch { p.reduce = null; }
+    renderTasksSoft();
+    persistTasks();
   }
 
   let estimateTimer = 0;
-  function refreshEstimates() {
+  function refreshTaskEstimates() {
     clearTimeout(estimateTimer);
     estimateTimer = setTimeout(async () => {
-      if (!afPlan) return;
+      if (!afTasks) return;
+      // The estimate endpoint speaks "parts"; a task IS a part for sizing (files + a short label).
+      const parts = afTasks.tasks.map((t) => ({ title: t.title, files: t.files, contract: (t.needs || []).join(",") }));
+      const picks = afTasks.picks.map((p) => ({ model: p.model, agents: p.agents }));
       try {
-        const r = await fetch("/ide/estimate", { method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ parts: afPlan.parts, picks: afPlan.picks }) });
+        const r = await fetch("/ide/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ parts, picks }) });
         const j = await r.json();
         if (!r.ok) return;
         (j.per || []).forEach((e, i) => {
@@ -456,10 +502,7 @@
             const basis = e.basis === "prior" ? " " + L("af_est_prior") : "";
             est.textContent = "~" + mins + " · ~" + Math.round(e.tokens / 1000) + "k tokens · ~$" + e.usd.toFixed(2) + basis;
           }
-          if (warn) {
-            if (e.warning) { warn.hidden = false; warn.textContent = e.warning.text; warn.className = "af-section-warn af-warn-" + e.warning.level; }
-            else warn.hidden = true;
-          }
+          if (warn) { if (e.warning) { warn.hidden = false; warn.textContent = e.warning.text; warn.className = "af-section-warn af-warn-" + e.warning.level; } else warn.hidden = true; }
         });
         const total = $("#af-plan-total");
         if (total && j.plan) {
@@ -468,12 +511,29 @@
           total.textContent = L("af_plan_total") + " ~" + tmin + " · ~" + Math.round(j.plan.tokens / 1000) + "k tokens · ~$" + j.plan.usd.toFixed(2);
         }
       } catch {}
-    }, 260);
+    }, 280);
   }
 
-  function persistPicks() {
+  // The build payload: the confirmed task roadmap + the groups the user formed. taskMode flips the
+  // engine to the task-graph runner. Ungrouped tasks become singleton groups server-side.
+  function persistTasks() {
     if (!state.assignments.af) state.assignments.af = { on: false, rows: [] };
-    state.assignments.af.partAssignments = afPlan ? afPlan.picks.map((p) => ({ model: p.model, agents: p.agents })) : [];
+    if (!afTasks) { delete state.assignments.af.taskMode; delete state.assignments.af.taskPlan; delete state.assignments.af.groups; saveAssignments(); return; }
+    state.assignments.af.taskMode = true;
+    state.assignments.af.taskPlan = afTasks.tasks.map((t) => ({ n: t.n, title: t.title, files: t.files, needs: t.needs }));
+    const groups = [];
+    const byTag = new Map();
+    afTasks.tasks.forEach((t, i) => {
+      const p = afTasks.picks[i];
+      const tag = (p.group || "").trim();
+      if (tag) {
+        if (!byTag.has(tag)) { byTag.set(tag, { id: tag, taskNumbers: [], model: p.model, agents: p.agents }); groups.push(byTag.get(tag)); }
+        byTag.get(tag).taskNumbers.push(t.n);
+      } else {
+        groups.push({ id: "t" + t.n, taskNumbers: [t.n], model: p.model, agents: p.agents });
+      }
+    });
+    state.assignments.af.groups = groups;
     saveAssignments();
   }
 

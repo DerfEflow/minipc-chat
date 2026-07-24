@@ -220,6 +220,16 @@
     af_est_pending: ["Pick an AI to see time and cost", "Select a model for estimates", "Pick a model to estimate time and cost"],
     af_est_prior: ["(rough guess)", "(prior estimate)", "(rough prior, not yet measured)"],
     af_plan_total: ["Whole build:", "Total:", "Whole build (total):"],
+    af_plan_tasks: ["Plan the tasks", "Plan tasks", "Plan the tasks (numbered roadmap)"],
+    af_planning: ["Planning...", "Planning...", "Planning..."],
+    af_plan_failed: ["Could not plan the tasks. Try again.", "Planning failed. Retry.", "Planning failed; try again."],
+    af_tasks_hint: [
+      "Let the orchestrator lay out the build as numbered tasks. Give any task its own AI and helpers; tasks with the same group name share a setup. Put more than one helper on a task and Dominion checks whether it can be split; if it cannot, it says so and keeps it to one.",
+      "The build as a numbered task list. Assign a model and agents per task; shared group names share config. Multi-agent tasks are checked for reducibility.",
+      "The build as a numbered task list (a roadmap). Assign a model and agents (helpers) per task; a shared group name shares the setup. Adding helpers triggers a split check; irreducible tasks stay single.",
+    ],
+    af_group_ph: ["group (optional)", "group", "group tag (optional)"],
+    af_reduce_checking: ["Checking whether this can be split...", "Checking reducibility...", "Checking whether this can be split..."],
 
     // ---- Plan Pipeline (Phase 2A) -------------------------------------------------------------
     plan_drawer: ["Start from a plan", "Start from a plan", "Start from a plan (a roadmap you made)"],

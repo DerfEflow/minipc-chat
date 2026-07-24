@@ -103,8 +103,14 @@ Chat is where plans are born; the Crucible is where they become apps. The bridge
 - Phase 2 SHIPPED (v101-af-custom): divide-preview + per-section model/agents + live estimates +
   warnings + branch salvage + git lane.
 - Phase 2A SHIPPED (v102-plan-pipe): save_plan + Crucible "Start from a plan" drawer.
-- Phase 4 IN PROGRESS: rolling-deploy grace (idejobs), journal archive, intake soft cap, VAPID
-  guest guard, `npm test` gate (run-tests.mjs).
+- Phase 4 SHIPPED (09bff8e): rolling-deploy grace (idejobs), journal archive, intake soft cap,
+  VAPID guest guard, `npm test` gate (run-tests.mjs).
+- TASK-GRAPH REDESIGN SHIPPED (9844869 backend + v103-task-graph UI): Fred's replacement of the
+  file-part AF pipeline with a numbered task roadmap. idetasks.mjs (spine 13/13), runTaskGraph
+  (wave scheduler + recursive per-task division + irreducible verdict), /ide/tasks + /ide/reduce,
+  and the task-board UI (per-task model/agents, group tags, live reduce check + estimates). This
+  is the correct realization of "N agents on task 6": recursion, honest irreducible verdict,
+  cookie rule at every level. Cross-task parallelism runs file-disjoint ready tasks concurrently.
 
 ## Decisions needed (Fred)
 

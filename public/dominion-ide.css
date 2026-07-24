@@ -991,6 +991,12 @@ body.ide-open #ide-root { transform: none; }
 .af-warn-red { color: #ffb4a8; background: rgba(255, 80, 60, .1); border: 1px solid rgba(255, 80, 60, .35); }
 .af-warn-amber { color: #ffd9a0; background: rgba(212, 130, 60, .1); border: 1px solid rgba(212, 130, 60, .3); }
 .af-section-empty { font-size: 12.5px; color: var(--muted, #8ba0ae); padding: 8px 0; }
+/* Task board (Fred's redesign): group tag + reduce verdict */
+.af-group-input { flex: 0 0 92px; min-width: 0; font: inherit; font-size: 12px; padding: 7px 8px; border-radius: 6px;
+  border: 1px solid var(--glass-line, rgba(150,200,230,.2)); background: rgba(3, 10, 18, .6); color: var(--ink, #e8f6ff); }
+.af-reduce { font-size: 11.5px; line-height: 1.45; padding: 6px 9px; border-radius: 6px; }
+.af-reduce-irr { color: #ffd9a0; background: rgba(212, 130, 60, .1); border: 1px solid rgba(212, 130, 60, .3); }
+.af-reduce-ok { color: var(--energy, #76ff68); background: rgba(118, 255, 104, .07); border: 1px solid rgba(118, 255, 104, .25); }
 .af-plan-total { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--glass-line, rgba(150,200,230,.2));
   font-size: 12.5px; font-weight: 600; color: var(--ink, #e8f6ff); font-variant-numeric: tabular-nums; }
 
