@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v107-workshop-alive";
+const CACHE = "dominion-ai-v108-guides";
 const SHELL = [
   "/",
   "/index.html",
@@ -18,7 +18,7 @@ const SHELL = [
   "/dominion-ide.css?v=20",
   "/dominion-ide.js?v=24",
   "/dominion-tour.js?v=6",
-  "/app.js?v=48",
+  "/app.js?v=49",
   "/dominion-ui.css?v=39",
   "/dominion-ui.js?v=39",
   "/dominion-cinematic.js?v=40",
@@ -28,7 +28,7 @@ const SHELL = [
   "/dominion-cinematic-04.css?v=30",
   "/dominion-cinematic-05.css?v=30",
   "/dominion-cinematic-06.css?v=30",
-  "/dominion-rendered-v2.css?v=39",
+  "/dominion-rendered-v2.css?v=40",
   "/dominion-forge.css?v=4",
   "/dominion-forge.js?v=4",
   "/assets/dominion-neural-chassis-desktop-4k-v3.webp",

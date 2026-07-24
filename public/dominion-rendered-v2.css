@@ -288,6 +288,16 @@ body::after { z-index: 2; opacity: .045; }
 .sb-new .glyph { color: #f1fff5; }
 .sb-head .sb-new span { color: #f1fff5; }
 
+/* Guides group in the sidebar: the quick start + full manual, discoverable for anyone new. */
+.sb-guides { display: grid; gap: 6px; padding: 10px 0 4px; border-top: 1px solid rgba(150,200,230,.12); margin-top: 8px; }
+.sb-guides-h { padding: 0 2px; font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: #8ba0ae; }
+.sb-guide { display: inline-flex; align-items: center; gap: 9px; min-height: 40px; padding: 8px 11px; cursor: pointer;
+  border: 1px solid rgba(150, 200, 230, .18); border-radius: 3px; color: var(--ink, #e8f6ff);
+  background: linear-gradient(145deg, rgba(14, 40, 62, .55), rgba(3, 12, 22, .7));
+  font-size: 11.5px; text-align: left; }
+.sb-guide:hover { border-color: rgba(118, 255, 104, .4); color: #f1fff5; box-shadow: inset 0 0 14px rgba(118, 255, 104, .07); }
+.sb-guide-glyph { width: 17px; height: 17px; flex: 0 0 auto; fill: none; stroke: var(--copper-hot, #d4823c); stroke-width: 1.7; }
+
 .rail-cap { padding: 16px 6px 8px; color: #b7d28f; font-size: 9px; letter-spacing: .16em; }
 .sb-search input { height: 43px; border-color: rgba(151, 209, 239, .2); background: rgba(0, 5, 9, .67); box-shadow: inset 0 2px 8px rgba(0,0,0,.62), inset 2px 0 0 rgba(103,188,230,.07); }
 .ci { min-height: 51px; padding: 10px 8px; border-bottom-color: rgba(125, 182, 213, .13); }

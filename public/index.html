@@ -118,6 +118,19 @@
       <input id="chatsearch" type="search" placeholder="Search conversations…" autocomplete="off" />
     </div>
     <div id="chatlist"></div>
+    <!-- Guides: the quick start and the full manual, for anyone new. Open in a new tab where they
+         read as directions and can be downloaded as PDFs. -->
+    <div class="sb-guides">
+      <span class="sb-guides-h">Guides</span>
+      <button id="sb-quickstart" class="sb-guide" type="button" title="A one-page quick start (opens as a PDF you can read or download)">
+        <svg class="sb-guide-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.1 4.9L19 9l-4.9 2.1L12 16l-2.1-4.9L5 9l4.9-1.1L12 3z"/></svg>
+        <span>Quick Start Guide</span>
+      </button>
+      <button id="sb-manual" class="sb-guide" type="button" title="The full user manual (opens as a PDF you can read or download)">
+        <svg class="sb-guide-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5a2 2 0 0 1 2-2h9v18H6a2 2 0 0 1-2-2V5zM15 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3M8 7h4M8 11h4"/></svg>
+        <span>User's Manual</span>
+      </button>
+    </div>
     <!-- Dominion Works toggle. Hidden until GET /account reports ideMode:true, so guests see
          nothing at all until Phase 8 flips the server gate. -->
     <button id="sb-ide" type="button" aria-pressed="false" title="Turn the Dominion Works build surface on or off">
@@ -442,7 +455,7 @@
   <script src="/dominion-tour.js?v=6" defer></script>
   <script src="/dominion-compass.js?v=7" defer></script>
   <script src="/dominion-lenses.js?v=12" defer></script>
-  <script src="/app.js?v=48"></script>
+  <script src="/app.js?v=49"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=4" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>

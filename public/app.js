@@ -1920,6 +1920,12 @@ menuBtn.addEventListener("click", () => (sidebar.classList.contains("open") ? cl
 // itself renders owner vs guest panels by role; the server enforces owner-only endpoints).
 const sbSetup = $("sb-setup");
 if (sbSetup) sbSetup.addEventListener("click", () => { location.href = "/setup"; });
+// Guides open in a new tab: the browser shows the PDF as directions and offers a download.
+const openGuide = (path) => { try { window.open(path, "_blank", "noopener"); } catch { location.href = path; } };
+const sbQuick = $("sb-quickstart");
+if (sbQuick) sbQuick.addEventListener("click", () => openGuide("/guides/Dominion-AI-QuickStart.pdf"));
+const sbManual = $("sb-manual");
+if (sbManual) sbManual.addEventListener("click", () => openGuide("/guides/Dominion-AI-Manual.pdf"));
 // Guests never see the Private/Local lane: the local model is owner-only (the server already
 // refuses it; offering a dead option would just confuse a paying guest). Owner path unchanged.
 fetch("/account").then((r) => r.json()).then((a) => {
