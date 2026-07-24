@@ -504,6 +504,15 @@
               <button type="button" id="dfi-clear" aria-label="Clear prompt"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button>
             </div>
           </div>
+          <!-- The primary action lives DIRECTLY under the input (Fred, 2026-07-23: a non-technical
+               user just wants a picture and should not have to hunt past every option to make one).
+               Everything below this is optional, for those who go looking. -->
+          <button id="forge-button" class="forge-button" type="button">
+            <span class="forge-core" aria-hidden="true"><i></i></span>
+            <span><small>DOMINION IMAGE ENGINE</small><b>IGNITE THE FORGE</b></span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M14 7l5 5-5 5"/></svg>
+          </button>
+          <p class="forge-optional-note">Just want a picture? Type it above and forge. The settings below are optional.</p>
           <div class="reference-well" id="dfi-ref-well" tabindex="0" role="button" aria-label="Add reference images">
             <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 15l3-3 3 3 2-2 3 3M15.5 8.5h.01"/></svg>
             <div><b>ADD REFERENCE PLATES</b><small id="dfi-ref-note">Drop or select up to ${REF_CAP} images · immediate forges only</small></div>
@@ -544,12 +553,6 @@
           <div class="energy-meter"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
           <p>Published OpenAI figures per setting. The final charge follows real usage.</p>
         </section>
-
-        <button id="forge-button" class="forge-button" type="button">
-          <span class="forge-core" aria-hidden="true"><i></i></span>
-          <span><small>DOMINION IMAGE ENGINE</small><b>IGNITE THE FORGE</b></span>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M14 7l5 5-5 5"/></svg>
-        </button>
 
         <section class="foundry-tray" id="dfi-foundry" hidden>
           <header><b>FOUNDRY QUEUE · <span id="dfi-foundry-count">0</span></b><button type="button" id="dfi-foundry-clear" title="Empty the queue">×</button></header>

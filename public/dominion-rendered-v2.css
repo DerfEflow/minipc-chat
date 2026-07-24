@@ -267,12 +267,26 @@ body::after { z-index: 2; opacity: .045; }
     linear-gradient(90deg, rgba(14, 33, 43, .96), rgba(1, 8, 12, .86) 76%, rgba(8, 25, 31, .88));
 }
 
+/* The single most important control in the sidebar: starting fresh. It read as camouflage to a
+   non-technical user who scanned for 30 seconds and could not find it (Fred, 2026-07-23). Now it
+   is the brightest thing here: a near-solid energy-green fill (roughly twice the opacity of the
+   other buttons), near-white text, and a real glow so the eye lands on it first. Glow, not a candy
+   gradient, to stay in the house aesthetic. */
 .sb-new {
-  min-height: 47px;
-  border-color: rgba(111, 255, 133, .38);
-  background: linear-gradient(145deg, rgba(40, 119, 55, .42), rgba(1, 17, 10, .8));
-  box-shadow: 0 12px 24px rgba(0,0,0,.38), inset 0 1px 0 rgba(225,255,231,.14), inset 3px 0 0 rgba(113,255,132,.14);
+  min-height: 50px;
+  border: 1px solid rgba(126, 255, 140, .85);
+  color: #f1fff5;
+  font-weight: 700;
+  background: linear-gradient(145deg, rgba(66, 182, 96, .82), rgba(22, 104, 54, .92));
+  box-shadow:
+    0 0 20px rgba(118, 255, 132, .42),
+    0 12px 24px rgba(0,0,0,.4),
+    inset 0 1px 0 rgba(240,255,244,.32),
+    inset 3px 0 0 rgba(150,255,168,.5);
 }
+.sb-new:hover { border-color: rgba(150,255,168,1); box-shadow: 0 0 26px rgba(118,255,132,.55), 0 12px 24px rgba(0,0,0,.4), inset 0 1px 0 rgba(240,255,244,.4); }
+.sb-new .glyph { color: #f1fff5; }
+.sb-head .sb-new span { color: #f1fff5; }
 
 .rail-cap { padding: 16px 6px 8px; color: #b7d28f; font-size: 9px; letter-spacing: .16em; }
 .sb-search input { height: 43px; border-color: rgba(151, 209, 239, .2); background: rgba(0, 5, 9, .67); box-shadow: inset 0 2px 8px rgba(0,0,0,.62), inset 2px 0 0 rgba(103,188,230,.07); }
