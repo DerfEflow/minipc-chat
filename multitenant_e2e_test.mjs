@@ -144,6 +144,18 @@ await t("admin is owner-only; a non-owner is refused", async () => {
   if (!Array.isArray(ok.body.users) || ok.body.users.length < 3) throw new Error("owner admin list wrong: " + JSON.stringify(ok.body).slice(0, 200));
 });
 
+await t("SECURITY: the /ollama passthrough is OWNER-ONLY (the local model runs on the owner's machine)", async () => {
+  // The bug this guards: any visitor could list and drive the owner's local Ollama for free,
+  // walking around the metered chat path (Fred's brother, 2026-07-23).
+  const guest = await req("GET", "/ollama/api/tags", { email: "newbie@test.com" });
+  if (guest.status !== 403) throw new Error("a non-owner reached the local model passthrough: " + guest.status);
+  const anon = await req("GET", "/ollama/api/tags", {});
+  if (anon.status !== 403) throw new Error("an anonymous caller reached the local model passthrough: " + anon.status);
+  // The owner passes the gate (then fails only at the upstream, which is not running in the rig).
+  const owner = await req("GET", "/ollama/api/tags", { email: OWNER });
+  if (owner.status === 403) throw new Error("the owner was wrongly refused the local model");
+});
+
 await t("Forge setup: token mint + enable are per-caller", async () => {
   const st0 = await req("GET", "/forge/status", { email: "newbie@test.com" });
   if (st0.body.enabled !== false || st0.body.hasToken !== false) throw new Error("fresh forge state wrong");

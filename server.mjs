@@ -5720,6 +5720,14 @@ const server = http.createServer(async (req, res) => {
     if (path === "/ide" || path.startsWith("/ide/")) return handleIde(req, res, u);
 
     if (path === "/ollama" || path.startsWith("/ollama/")) {
+      // OWNER-ONLY (SECURITY, 2026-07-23). This route pipes straight to the owner's local Ollama
+      // on their own hardware. It carried NO identity check, so any visitor could list and drive
+      // the local model on the owner's machine, for free, walking around the metered chat path and
+      // the multi-tenant safety wall. Now it refuses everyone but the owner: a guest's model picker
+      // simply shows no local models, which is correct. Internal calls never use this HTTP route;
+      // they call ollamaChat/ollamaReq against the upstream directly, so nothing internal breaks.
+      const T = resolveTenant(req);
+      if (!T || !T.isOwner) { res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" }); return res.end(JSON.stringify({ error: "The local model runs on the owner's machine and is not available to other accounts." })); }
       const rest = path.slice("/ollama".length) || "/";
       return proxy(req, res, rest + (u.search || ""));
     }
