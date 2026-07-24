@@ -260,7 +260,7 @@
       try { document.dispatchEvent(new CustomEvent("dominion-build-verifying", { detail: { jobId: state.jobId } })); } catch {}
     }
 
-    if (!state.jobId) { body.replaceChildren(emptyState()); paintLog(); return; }
+    if (!state.jobId) { body.replaceChildren(emptyState(state.lens)); paintLog(); return; }
     body.replaceChildren(state.lens === "blueprint" ? blueprint(d) : workshop(d));
     // The completion moment, announced exactly once per job and ONLY when witnessed live: the tour
     // ends on it, and the closing flow (windows fold, the invitation leads) keys off the same fact.
@@ -449,11 +449,16 @@
     }
   }
 
-  function emptyState() {
+  function emptyState(lens) {
     const el = document.createElement("div");
     el.className = "cru-empty";
-    const h = document.createElement("h3"); h.textContent = L("no_builds_title");
-    const pp = document.createElement("p"); pp.textContent = L("no_builds_body");
+    // Each tab explains ITS OWN purpose when there is no build, so switching tabs always shows a
+    // difference (Fred's phone, 2026-07-24: both tabs showed an identical "No builds yet").
+    const key = lens === "workshop" ? ["no_app_title", "no_app_body"]
+              : lens === "blueprint" ? ["no_plan_title", "no_plan_body"]
+              : ["no_builds_title", "no_builds_body"];
+    const h = document.createElement("h3"); h.textContent = L(key[0]);
+    const pp = document.createElement("p"); pp.textContent = L(key[1]);
     el.append(h, pp);
     return el;
   }

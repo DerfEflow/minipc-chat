@@ -134,6 +134,20 @@
       "Builds appear here. Jobs persist server-side across client disconnects; push notifications fire on input requests.",
       "Builds appear here. A job (a running build) persists on the server even if you close the app, and a notification calls you back when it needs an answer.",
     ],
+    // The two tabs explain their OWN purpose even before a build exists, so switching between them
+    // always shows a difference (Fred's phone, 2026-07-24: the tabs looked identical when empty).
+    no_plan_title: ["No plan yet", "No plan yet", "No plan yet"],
+    no_plan_body: [
+      "This is the plan. When you start a build below, its steps appear here one at a time so you can follow along.",
+      "Blueprint: the build's step plan renders here once a build starts.",
+      "Blueprint (the plan): the build's numbered steps appear here once a build starts, one at a time.",
+    ],
+    no_app_title: ["No app yet", "No app yet", "No app yet"],
+    no_app_body: [
+      "This is where your finished app lives. Once you build something, you will try it here, see the checks it passed, and view the code. Start a build below.",
+      "Workshop: the running app, its checks, and its code appear here after a build.",
+      "Workshop (the result): once a build runs, you try the app here, see the checks it passed, and view the code.",
+    ],
 
     // ---- the publish invitation -------------------------------------------------------------
     publish_cta: [
