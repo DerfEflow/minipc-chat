@@ -410,7 +410,7 @@
     $("#size-label").textContent = SIZES[state.aspect];
     const lit = { low: 3, medium: 6, high: 10 }[state.quality] || 6;
     $$("#dfi-root .energy-meter i").forEach((bar, i) => bar.classList.toggle("lit", i < lit));
-    $("b", $("#forge-button")).textContent = state.batch ? "QUEUE IN BATCH FOUNDRY" : "IGNITE THE FORGE";
+    $("b", $("#forge-button")).textContent = state.batch ? "ADD TO THE BATCH" : "IGNITE THE FORGE";
   }
 
   // ---------- fault/status strip ----------
@@ -492,14 +492,14 @@
         <div class="furnace-seam" aria-hidden="true"><i></i><i></i><i></i></div>
         <section class="deck-section directive-section">
           <div class="section-heading">
-            <div><span>01</span><p>CREATIVE DIRECTIVE</p></div>
+            <div><span>01</span><p>WHAT TO MAKE</p></div>
             <div class="section-heading-tools">
               <button type="button" id="dfi-refine" aria-label="Enhance prompt"><svg viewBox="0 0 24 24"><path d="m12 3 1.4 4.2L18 9l-4.6 1.8L12 15l-1.4-4.2L6 9l4.6-1.8L12 3ZM18.5 15l.7 2.1 2.3.9-2.3.9-.7 2.1-.7-2.1-2.3-.9 2.3-.9.7-2.1Z"/></svg><span>Refine</span></button>
               <small id="prompt-count">0 / ${PROMPT_CAP}</small>
             </div>
           </div>
           <div class="prompt-frame">
-            <textarea id="prompt" maxlength="${PROMPT_CAP}" aria-label="Image prompt" placeholder="Describe the vision to forge…"></textarea>
+            <textarea id="prompt" maxlength="${PROMPT_CAP}" aria-label="Image prompt" placeholder="Describe the picture you want…"></textarea>
             <div class="prompt-tools">
               <button type="button" id="dfi-clear" aria-label="Clear prompt"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button>
             </div>
@@ -515,7 +515,7 @@
           <p class="forge-optional-note">Just want a picture? Type it above and forge. The settings below are optional.</p>
           <div class="reference-well" id="dfi-ref-well" tabindex="0" role="button" aria-label="Add reference images">
             <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 15l3-3 3 3 2-2 3 3M15.5 8.5h.01"/></svg>
-            <div><b>ADD REFERENCE PLATES</b><small id="dfi-ref-note">Drop or select up to ${REF_CAP} images · immediate forges only</small></div>
+            <div><b>ADD YOUR OWN IMAGES</b><small id="dfi-ref-note">Optional. Copy the look of pictures you add (up to ${REF_CAP})</small></div>
             <span>+</span>
           </div>
           <div class="reference-tray" id="dfi-ref-tray"></div>
@@ -523,7 +523,7 @@
         </section>
 
         <section class="deck-section">
-          <div class="section-heading"><div><span>02</span><p>RENDER FIDELITY</p></div><small>OUTPUT QUALITY</small></div>
+          <div class="section-heading"><div><span>02</span><p>QUALITY</p></div><small>HOW DETAILED</small></div>
           <div class="segment-grid quality-grid" role="radiogroup" aria-label="Render quality">
             <button type="button" class="segment" data-quality="low" role="radio" aria-checked="false"><span class="quality-rune">I</span><b>LOW</b><small>Rapid concept</small></button>
             <button type="button" class="segment selected" data-quality="medium" role="radio" aria-checked="true"><span class="quality-rune">II</span><b>MEDIUM</b><small>Production</small></button>
@@ -532,7 +532,7 @@
         </section>
 
         <section class="deck-section">
-          <div class="section-heading"><div><span>03</span><p>FRAME GEOMETRY</p></div><small id="size-label">1024 × 1024</small></div>
+          <div class="section-heading"><div><span>03</span><p>SHAPE</p></div><small id="size-label">1024 × 1024</small></div>
           <div class="segment-grid aspect-grid" role="radiogroup" aria-label="Image orientation">
             <button type="button" class="segment selected" data-aspect="square" role="radio" aria-checked="true"><i class="shape square"></i><b>SQUARE</b><small>1:1</small></button>
             <button type="button" class="segment" data-aspect="portrait" role="radio" aria-checked="false"><i class="shape portrait"></i><b>PORTRAIT</b><small>2:3</small></button>
@@ -542,8 +542,8 @@
 
         <section class="batch-module" id="batch-module">
           <div class="batch-icon" aria-hidden="true"><i></i><i></i><i></i></div>
-          <div><span>BATCH FOUNDRY</span><b>50% RATE REDUCTION</b><small>Charged when you seal the batch · overcharges return as credits · completes within 24 hours</small></div>
-          <button id="batch-toggle" class="power-toggle" type="button" role="switch" aria-checked="false" aria-label="Use Batch Foundry"><i></i></button>
+          <div><span>MAKE SEVERAL AT ONCE</span><b>HALF PRICE</b><small>Optional. Queue several pictures and they are made within a day. You pay when you send the batch.</small></div>
+          <button id="batch-toggle" class="power-toggle" type="button" role="switch" aria-checked="false" aria-label="Make several at once for half price"><i></i></button>
         </section>
 
         <section class="telemetry-module" aria-live="polite">
@@ -555,9 +555,9 @@
         </section>
 
         <section class="foundry-tray" id="dfi-foundry" hidden>
-          <header><b>FOUNDRY QUEUE · <span id="dfi-foundry-count">0</span></b><button type="button" id="dfi-foundry-clear" title="Empty the queue">×</button></header>
+          <header><b>YOUR BATCH · <span id="dfi-foundry-count">0</span></b><button type="button" id="dfi-foundry-clear" title="Empty the batch">×</button></header>
           <div id="dfi-foundry-rows"></div>
-          <button type="button" class="foundry-submit" id="dfi-foundry-submit">SEAL THE BATCH · CHARGE NOW AT 50%</button>
+          <button type="button" class="foundry-submit" id="dfi-foundry-submit">SEND THE BATCH · HALF PRICE</button>
         </section>
       </aside>
 
@@ -715,7 +715,7 @@
     const note = $("#dfi-ref-note");
     if (note) note.textContent = state.refs.length
       ? state.refs.length + " of " + REF_CAP + " plates staged · immediate forges only"
-      : "Drop or select up to " + REF_CAP + " images · immediate forges only";
+      : "Optional. Copy the look of pictures you add (up to " + REF_CAP + ")";
   }
 
   function downscale(file, max = 1024) {
@@ -759,9 +759,9 @@
 
   async function onIgnite() {
     const prompt = $("#prompt").value.trim();
-    if (!prompt) return showFault("Describe the vision first.");
+    if (!prompt) return showFault("Describe the picture you want first.");
     if (state.batch) {
-      if (state.refs.length) return showFault("Reference plates ride immediate forges only. Disengage the Batch Foundry or clear the plates.");
+      if (state.refs.length) return showFault("Your own images only work on a single picture made right now. Turn off the batch, or remove your images.");
       const maxItems = CFG.batch.maxItemsOwner || 200;
       if (state.queue.length >= maxItems) return showFault("The foundry queue is full.");
       state.queue.push({ prompt, quality: state.quality, aspect: state.aspect });
@@ -850,7 +850,7 @@
       row.append(rm);
       rows.append(row);
     });
-    $("#dfi-foundry-submit").textContent = `SEAL THE BATCH · ${state.queue.length} VISION${state.queue.length === 1 ? "" : "S"} · ${fmtUsd(est)} CHARGED NOW`;
+    $("#dfi-foundry-submit").textContent = `SEND THE BATCH · ${state.queue.length} PICTURE${state.queue.length === 1 ? "" : "S"} · ${fmtUsd(est)} NOW`;
   }
   async function onFoundrySubmit() {
     if (!state.queue.length) return;
@@ -861,8 +861,8 @@
       state.queue = [];
       saveQueue();
       renderFoundry();
-      stripBusy("BATCH FOUNDRY SEALED", `${r.count} vision${r.count === 1 ? "" : "s"} queued · ${fmtUsd(r.estUsd)} charged · ready within ${CFG.batch.window} (usually sooner)`);
-      stripDone("Overcharges return to your credits at collection.");
+      stripBusy("YOUR BATCH IS SENT", `${r.count} picture${r.count === 1 ? "" : "s"} on the way · ${fmtUsd(r.estUsd)} charged · ready within ${CFG.batch.window} (usually sooner)`);
+      stripDone("If it costs less than estimated, the difference comes back to your credits.");
       refreshJobs();
     } catch (e) {
       showFault(friendly(e));
@@ -1072,8 +1072,8 @@
     card.innerHTML = `
       <img src="${url}" alt="${esc(rec.prompt || "Forged vision")}">
       <div class="dfi-viewer-meta">
-        <p>${esc(rec.prompt || "(no directive saved)")}</p>
-        <small>${esc(cap(rec.quality))} · ${SIZES[rec.aspect] || ""} · ${new Date(rec.ts).toLocaleString()} · ${rec.source === "batch" ? "BATCH FOUNDRY" : "IMMEDIATE FORGE"}</small>
+        <p>${esc(rec.prompt || "(no description saved)")}</p>
+        <small>${esc(cap(rec.quality))} · ${SIZES[rec.aspect] || ""} · ${new Date(rec.ts).toLocaleString()} · ${rec.source === "batch" ? "FROM A BATCH" : "MADE NOW"}</small>
         <div class="dfi-viewer-actions"></div>
       </div>`;
     const actions = card.querySelector(".dfi-viewer-actions");

@@ -70,7 +70,7 @@ t("the controls the map points at exist in the interface", () => {
   for (const [needle, label] of musts) if (!html.includes(needle)) throw new Error("interface is missing " + label + " (" + needle + ")");
   if (!imagesJs.includes('id = "dfi-trigger"')) throw new Error("the image studio trigger is gone");
   if (!imagesJs.includes("IGNITE THE FORGE")) throw new Error("the ignite control the map names is gone");
-  if (!imagesJs.includes("BATCH FOUNDRY")) throw new Error("the batch control the map names is gone");
+  if (!imagesJs.includes("MAKE SEVERAL AT ONCE")) throw new Error("the batch control the map names is gone");
   if (!forgeJs.includes("Seal Setting")) throw new Error("the dial's close control the map names is gone");
   if (!appJs.includes("downloadArtifact")) throw new Error("artifact download is gone but the map promises it");
 });
