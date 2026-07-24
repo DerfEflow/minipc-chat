@@ -24,7 +24,7 @@ import { join } from "node:path";
 export const SAFE_TOOLS = new Set([
   "web_search", "web_read",
   "format_as_markdown", "format_as_json", "format_as_checklist", "format_as_table", "format_as_report", "format_as_scope",
-  "create_artifact", "revise_artifact", "list_artifacts", "read_artifact", "export_artifact",
+  "create_artifact", "revise_artifact", "list_artifacts", "read_artifact", "export_artifact", "save_plan",
   "create_docx", "create_pdf", "create_spreadsheet", "search_artifacts", "compare_artifacts",
   "remember", "recall_memory", "update_memory", "save_lesson", "request_review",
   "search_chats", "retrieve_context_pack",

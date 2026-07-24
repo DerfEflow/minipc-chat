@@ -221,6 +221,20 @@
     af_est_prior: ["(rough guess)", "(prior estimate)", "(rough prior, not yet measured)"],
     af_plan_total: ["Whole build:", "Total:", "Whole build (total):"],
 
+    // ---- Plan Pipeline (Phase 2A) -------------------------------------------------------------
+    plan_drawer: ["Start from a plan", "Start from a plan", "Start from a plan (a roadmap you made)"],
+    plan_from_saved: ["Load a plan you saved from a chat:", "Load a saved plan:", "Load a saved plan (from a chat):"],
+    plan_load: ["Load", "Load", "Load"],
+    plan_none: ["Choose a saved plan...", "Select a plan...", "Choose a saved plan..."],
+    plan_paste_ph: ["...or paste a plan here (a roadmap, phases, task list, or MVP)", "...or paste a plan (roadmap/phases/tasks/MVP)", "...or paste a plan here (roadmap, phases, tasks, MVP)"],
+    plan_name_ph: ["Name this project", "Project name", "Name this project"],
+    plan_start: ["Start this project", "Start project", "Start this project"],
+    plan_pick_first: ["Choose a saved plan first.", "Select a plan first.", "Choose a saved plan first."],
+    plan_loaded: ["Plan loaded. Name it and start, or edit it first.", "Plan loaded.", "Plan loaded (name it and start, or edit first)."],
+    plan_load_failed: ["That plan could not be loaded.", "Load failed.", "That plan could not be loaded."],
+    plan_empty: ["Paste or load a plan first.", "No plan yet.", "Paste or load a plan first."],
+    plan_started: ["Project set up from the plan. Pick a folder, then build.", "Project seeded. Choose a folder and build.", "Project set up from the plan (pick a folder, then build)."],
+
     // ---- tools choice (assignment board is opt-in) --------------------------------------------
     tools_label: ["Which tools should Dominion use?", "Model assignments", "Model assignments (which AI does which work)"],
     tools_default: ["Use all the default tools (recommended)", "Defaults (recommended)", "Defaults (recommended; Dominion's standard picks)"],

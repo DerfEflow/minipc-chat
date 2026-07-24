@@ -956,6 +956,15 @@ body.ide-open #ide-root { transform: none; }
 .af-footer button:last-child:hover { border-color: rgba(118, 255, 104, .4); color: var(--ink, #e8f6ff); }
 .af-footer button:last-child:active { transform: translateY(1px); }
 
+/* Plan Pipeline intake (Phase 2A) */
+.st-plan-pick { display: grid; gap: 6px; margin-bottom: 10px; }
+.st-plan-pick label { font-size: 12px; color: var(--muted, #8ba0ae); }
+.st-plan-pick-row { display: flex; gap: 8px; align-items: center; }
+.st-plan-pick-row select { flex: 1 1 auto; min-width: 0; }
+#st-plan-load { flex: 0 0 auto; font: inherit; font-size: 12.5px; cursor: pointer; padding: 8px 14px; border-radius: 6px;
+  border: 1px solid var(--glass-line, rgba(150,200,230,.2)); background: rgba(10, 27, 45, .8); color: var(--ink, #e8f6ff); }
+#st-plan-text { width: 100%; box-sizing: border-box; resize: vertical; }
+
 /* Full Custom sections (Phase 2) */
 .af-custom { border-top: 1px solid var(--glass-line, rgba(150,200,230,.18)); padding: 14px 18px; }
 .af-custom-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

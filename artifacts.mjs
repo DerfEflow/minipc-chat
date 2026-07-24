@@ -13,7 +13,7 @@ import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { markdownToDocx, markdownToPdf, parseTable, toCsv, rowsToXlsx } from "./docwriters.mjs";
 
-const TYPES = new Set(["markdown", "docx", "pdf", "spreadsheet", "json", "code", "report", "checklist", "other"]);
+const TYPES = new Set(["markdown", "docx", "pdf", "spreadsheet", "json", "code", "report", "checklist", "plan", "other"]);
 const nowIso = () => new Date().toISOString();
 const wordCount = (s) => (String(s || "").trim().match(/\S+/g) || []).length;
 const tokenize = (s) => (String(s || "").toLowerCase().match(/[a-z0-9]{2,}/g) || []);

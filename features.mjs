@@ -172,6 +172,20 @@ export const FEATURES = [
     ],
   },
   {
+    id: "plans",
+    brief: "turn a chat plan into a project",
+    aliases: ["plan", "plans", "roadmap", "phases", "task list", "mvp", "save plan", "send to crucible", "start a project"],
+    name: "Plans (chat to Crucible)",
+    where: "in the conversation, the AI offers to save a plan; in The Crucible, 'Start from a plan'",
+    what: "A plan built in the chat (a roadmap, phases, a task list, an MVP definition) can be saved, revisited, downloaded, reloaded to edit, or opened in The Crucible to start a real project.",
+    how: [
+      "Talk through what you want to build; ask the AI for a roadmap, phases, a task list, or an MVP.",
+      "When a full plan is on the table the AI offers to save it. Saved plans live in the plan library with full history, so you can reload and edit any version.",
+      "In The Crucible, open 'Start from a plan': pick a saved plan (or paste one), name the project, and it fills the brief. From there discuss it further or just build; the build proceeds the normal way.",
+    ],
+    notes: "Saving a plan uses the same versioned-artifact system as documents, so nothing is ever lost and every edit can be undone.",
+  },
+  {
     id: "long-jobs",
     brief: "hours-long background jobs",
     aliases: ["job", "jobs", "long job", "long-run", "long run", "overnight", "background task", "36 hours", "keep working", "big task"],

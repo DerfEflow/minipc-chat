@@ -806,6 +806,23 @@
         '<summary data-lex="drawer_brief"></summary>' +
         '<textarea id="st-prompt" rows="3"></textarea>' +
       '</details>' +
+      // Plan Pipeline (Phase 2A): start a project from a plan built in chat. Paste one, or pick a
+      // saved plan; it names the project and fills the brief, then the normal build proceeds.
+      '<details class="st-drawer st-plan-drawer" id="dr-plan">' +
+        '<summary data-lex="plan_drawer"></summary>' +
+        '<div class="st-plan-pick" id="st-plan-pick">' +
+          '<label data-lex="plan_from_saved"></label>' +
+          '<div class="st-plan-pick-row">' +
+            '<select id="st-plan-select" aria-label="Saved plans"></select>' +
+            '<button type="button" id="st-plan-load" data-lex="plan_load"></button>' +
+          '</div>' +
+        '</div>' +
+        '<textarea id="st-plan-text" rows="4" data-lex-ph="plan_paste_ph"></textarea>' +
+        '<div class="st-row">' +
+          '<input id="st-plan-name" type="text" autocomplete="off" data-lex-ph="plan_name_ph" />' +
+          '<button type="button" id="st-plan-start" class="st-primary" data-lex="plan_start"></button>' +
+        '</div>' +
+      '</details>' +
       '<details class="st-drawer" id="dr-models" open>' +
         '<summary data-lex="drawer_models"></summary>' +
         '<div class="st-tools" id="st-tools">' +
@@ -1020,6 +1037,7 @@
   // every register change, so no string can be left behind in the old voice.
   function paintLexicon() {
     for (const el of document.querySelectorAll("[data-lex]")) el.textContent = L(el.dataset.lex);
+    for (const el of document.querySelectorAll("[data-lex-ph]")) el.placeholder = L(el.dataset.lexPh);
     const prompt = $("#st-prompt");
     if (prompt) prompt.placeholder = L("start_prompt_ph");
     const path = $("#st-new-path");
@@ -1068,6 +1086,61 @@
     }
   }
 
+  /*
+   * The Plan Pipeline intake (Phase 2A). Load a plan built in chat (saved as a "plan" artifact),
+   * or paste one, then start a project from it: it names the workspace and fills the brief, and
+   * the build proceeds the normal way. Opening the drawer loads the saved-plan list once.
+   */
+  async function loadPlanList() {
+    const sel = $("#st-plan-select");
+    if (!sel) return;
+    try {
+      const r = await fetch("/artifacts?type=plan");
+      const j = await r.json();
+      const items = (j && j.items) || [];
+      sel.innerHTML = '<option value="">' + L("plan_none") + "</option>"
+        + items.map((a) => '<option value="' + a.id + '">' + (a.title || "Untitled plan").replace(/</g, "&lt;") + "</option>").join("");
+      sel.dataset.loaded = "1";
+    } catch {}
+  }
+
+  function wirePlan(status) {
+    const drawer = $("#dr-plan");
+    if (drawer) drawer.addEventListener("toggle", () => { if (drawer.open && $("#st-plan-select") && !$("#st-plan-select").dataset.loaded) loadPlanList(); });
+    const loadBtn = $("#st-plan-load");
+    if (loadBtn) loadBtn.addEventListener("click", async () => {
+      const id = $("#st-plan-select") && $("#st-plan-select").value;
+      if (!id) { status(L("plan_pick_first"), true); return; }
+      try {
+        const r = await fetch("/artifacts/" + encodeURIComponent(id));
+        const j = await r.json();
+        const a = j && (j.artifact || j.item || j);
+        const content = (a && (a.content || a.currentContent)) || "";
+        const title = (a && a.title) || "";
+        if (content) $("#st-plan-text").value = content;
+        if (title && $("#st-plan-name")) $("#st-plan-name").value = title;
+        status(L("plan_loaded"));
+      } catch { status(L("plan_load_failed"), true); }
+    });
+    const startBtn = $("#st-plan-start");
+    if (startBtn) startBtn.addEventListener("click", () => {
+      const plan = $("#st-plan-text") ? $("#st-plan-text").value.trim() : "";
+      if (!plan) { status(L("plan_empty"), true); return; }
+      const name = ($("#st-plan-name") && $("#st-plan-name").value.trim()) || plan.split("\n")[0].replace(/^#+\s*/, "").slice(0, 40) || "New project";
+      // Seed the brief with the plan, mark it as the agreed spec, and drop the name into the new-
+      // folder field so the user confirms a folder the normal way. Journey moves to "clarify".
+      const brief = "PROJECT: " + name + "\n\nBUILD THIS PLAN:\n" + plan;
+      if ($("#st-prompt")) $("#st-prompt").value = brief;
+      if ($("#st-new-name")) $("#st-new-name").value = name;
+      const folder = $("#dr-folder"); if (folder) folder.open = true;
+      const nb = $("#st-new"); if (nb) { nb.hidden = false; }
+      setJourneyPhase("clarify");
+      saveDraft();
+      status(L("plan_started"));
+      const prompt = $("#st-prompt"); if (prompt) prompt.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  }
+
   function wireStarter() {
     const status = (msg, bad) => { const el = $("#st-status"); if (el) { el.textContent = msg || ""; el.classList.toggle("bad", !!bad); } };
     $("#st-add").addEventListener("click", () => { const n = $("#st-new"); n.hidden = !n.hidden; if (!n.hidden) $("#st-new-path").focus(); });
@@ -1097,6 +1170,7 @@
         document.dispatchEvent(new CustomEvent("dominion-ide-workspace"));
       } catch { status("The server could not be reached.", true); }
     });
+    wirePlan(status);
     wireBrowse(status);
     wireTools();
     wireIntake(status);
