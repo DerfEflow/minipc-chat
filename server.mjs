@@ -67,6 +67,7 @@ import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove,
 import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor, adequacyWarning, chunksForPart } from "./ideaf.mjs";
 import { isRepoCmd, startBranchPlan, salvageCommitPlan, githubPushPlan, buildBranch } from "./idegit.mjs";
 import { createTelemetry, estimatePartTokens } from "./idetelemetry.mjs";
+import { taskRoadmapMessages, parseTaskRoadmap, topoOrder, readyTasks, filesCollide, resolveTaskAssignments, reduceTaskGoal, classifyReduction } from "./idetasks.mjs";
 import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } from "./ideafrun.mjs";
 import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
@@ -1275,6 +1276,12 @@ async function handleIde(req, res, u) {
   // let the user assign a model + agent count to each BEFORE any build spends money. One divider
   // call, gated like a build (identity + credits), estimate rides on each part.
   if (req.method === "POST" && path === "/ide/divide") return handleIdeDivide(req, res, T, body);
+  // Task-graph mode (Fred's redesign): preview the numbered task roadmap so the window can show it,
+  // let the user group tasks, and assign models/agents. One orchestrator call, gated + metered.
+  if (req.method === "POST" && path === "/ide/tasks") return handleIdeTasks(req, res, T, body);
+  // "Can N agents split this task?" A single divider call on one task, then the referee's verdict:
+  // clean / partial / irreducible. Gated + metered like any model call.
+  if (req.method === "POST" && path === "/ide/reduce") return handleIdeReduce(req, res, T, body);
   // The live estimate the counters read as the user tinkers: for one part on one model at N
   // agents, or a whole plan. Pure math over the telemetry store; no model call, so it is free.
   if (req.method === "POST" && path === "/ide/estimate") {
@@ -1822,6 +1829,56 @@ async function handleIdeDivide(req, res, T, body) {
   } catch (e) { return json(502, { error: String((e && e.message) || e) }); }
 }
 
+// Task roadmap preview (Fred's redesign): the orchestrator turns the goal into a numbered task
+// list. Same gate + metering as a build turn (one model call). Returns tasks with their files and
+// dependencies so the window can render and group them.
+async function handleIdeTasks(req, res, T, body) {
+  const json = (code, o) => sjson(res, code, o);
+  if (!ideGate.allowed(T)) return json(403, { error: "Not available for this account." });
+  if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) return json(402, { error: "Building needs credits. Add credits in Setup first.", code: "needs_credits" });
+  const prompt = String(body.prompt || "").trim();
+  if (!prompt) return json(400, { error: "Say what you want built first." });
+  const reg = normalizeRegister(body.register);
+  const persona = personaVoice(normalizeCrucibleMode(body.mode));
+  const maxTasks = Math.max(3, Math.min(Number(body.maxTasks) || 12, 20));
+  const model = String(body.model || "").trim() && modelById(body.model) ? body.model : defaultModelFor(!!T.isOwner);
+  try {
+    const r = await ideChatOnce(model, taskRoadmapMessages({ goal: prompt, maxTasks, register: reg, persona }), {});
+    if (r.costUsd) { try { await meterTurn(T, r.costUsd, prompt, ""); } catch {} }
+    if (!r.ok) return json(502, { error: r.error || "The orchestrator could not be reached." });
+    const parsed = parseTaskRoadmap(r.content, maxTasks);
+    if (!parsed.ok) return json(200, { ok: false, reason: parsed.error, raw: String(r.content || "").slice(0, 2000) });
+    const topo = topoOrder(parsed.tasks);
+    return json(200, { ok: true, tasks: parsed.tasks, schedulable: topo.ok, scheduleError: topo.ok ? "" : topo.error, costUsd: r.costUsd || 0 });
+  } catch (e) { return json(502, { error: String((e && e.message) || e) }); }
+}
+
+// Reduce check: can `agents` split ONE task? Runs the divider on that task, referees the result,
+// returns the verdict for the UI (checking.../clean/partial/irreducible).
+async function handleIdeReduce(req, res, T, body) {
+  const json = (code, o) => sjson(res, code, o);
+  if (!ideGate.allowed(T)) return json(403, { error: "Not available for this account." });
+  if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) return json(402, { error: "Building needs credits.", code: "needs_credits" });
+  const task = body.task || null;
+  const agents = Math.max(2, Math.min(Number(body.agents) || 2, 6));
+  if (!task || !task.title || !Array.isArray(task.files) || !task.files.length) return json(400, { error: "a task with a title and files is required" });
+  if (task.files.length < 2) return json(200, { mode: "irreducible", usableAgents: 1, note: "A one-file task cannot be split; one agent will do it." });
+  const reg = normalizeRegister(body.register);
+  const persona = personaVoice(normalizeCrucibleMode(body.mode));
+  const model = String(body.model || "").trim() && modelById(body.model) ? body.model : defaultModelFor(!!T.isOwner);
+  try {
+    const dv = await ideChatOnce(model, dividerMessages({ goal: reduceTaskGoal(task, agents), maxParts: agents, register: reg, persona }), {});
+    if (dv.costUsd) { try { await meterTurn(T, dv.costUsd, task.title, ""); } catch {} }
+    if (!dv.ok) return json(502, { error: dv.error || "The divider could not be reached." });
+    const plan = parseDividerPlan(dv.content, agents);
+    const dj = plan.ok ? verifyDisjoint(plan.parts) : { ok: false };
+    const taskFiles = new Set(task.files.map((f) => String(f).toLowerCase()));
+    const cleanParts = (plan.ok ? plan.parts : []).map((p) => ({ ...p, files: (p.files || []).filter((f) => taskFiles.has(String(f).toLowerCase())) })).filter((p) => p.files.length);
+    const verdict = classifyReduction({ parts: cleanParts, requestedAgents: agents, disjointOk: dj.ok });
+    return json(200, { mode: verdict.mode, usableAgents: verdict.usableAgents, note: verdict.note, costUsd: dv.costUsd || 0 });
+  } catch (e) { return json(502, { error: String((e && e.message) || e) }); }
+}
+
 async function runIdeBuild(job, { T, workspace, prompt, assignments, register, mode }) {
   const reg = normalizeRegister(register);
   const persona = personaVoice(normalizeCrucibleMode(mode));
@@ -2001,6 +2058,161 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
       return { sealed: false, failures };
     };
 
+    /*
+     * THE TASK-GRAPH BUILD (Fred's redesign 2026-07-23). The orchestrator emits a NUMBERED task
+     * roadmap (no phases, no timelines); file ownership is the collision map, not the structure.
+     * The runner schedules in waves: every task whose dependencies are done and whose files do not
+     * collide with the rest of the wave runs together (model calls parallel, writes sequential,
+     * one snapshot). A task the user gave more than one agent is DIVIDED recursively by the same
+     * divider+referee; if it will not split cleanly it is declared irreducible and one agent does
+     * it. Same mechanism at every level: divide, referee (cookie rule), run.
+     */
+    const runTaskGraph = async () => {
+      const af = (assignments && assignments.af) || {};
+      const workerModel = (af.rows && af.rows[0] && af.rows[0].model) || planModel;
+      const divModel = (af.divider && af.divider.model) || planModel;
+
+      // The roadmap: use the client's confirmed one if present (it was previewed and grouped),
+      // else ask the orchestrator now.
+      let tasks;
+      if (Array.isArray(af.taskPlan) && af.taskPlan.length) {
+        const parsed = parseTaskRoadmap(af.taskPlan.map((t) => t.n + ". " + t.title + "\nFILES: " + (t.files || []).join(", ") + "\nNEEDS: " + ((t.needs || []).join(", ") || "none")).join("\n"));
+        tasks = parsed.ok ? parsed.tasks : null;
+      }
+      if (!tasks) {
+        ideJobs.emit(job.id, { type: "move", id: "tg-plan", title: "Plan the tasks", state: "running", model: divModel });
+        const r = await chat({ model: divModel, messages: taskRoadmapMessages({ goal: prompt, register: reg, persona }) });
+        spend(r.costUsd);
+        if (r.costUsd) { await meterTurn(T, r.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: r.costUsd, move: "tg-plan" }); }
+        if (!r.ok) { ideJobs.finish(job.id, { type: "error", message: r.error || "The orchestrator could not be reached." }); return false; }
+        const parsed = parseTaskRoadmap(r.content);
+        if (!parsed.ok) { ideJobs.finish(job.id, { type: "error", message: "The task plan came back garbled (" + parsed.error + "). Try again, or simplify the ask." }); return false; }
+        tasks = parsed.tasks;
+        ideJobs.emit(job.id, { type: "move", id: "tg-plan", title: "Plan the tasks", state: "done", files: 0 });
+      }
+
+      const topo = topoOrder(tasks);
+      if (!topo.ok) { ideJobs.finish(job.id, { type: "error", message: "The task plan has a dependency loop (" + topo.error + "). Try again." }); return false; }
+
+      const groups = Array.isArray(af.groups) ? af.groups : [];
+      const assignList = resolveTaskAssignments(tasks, groups, { model: workerModel, agents: 1 });
+      const assignByN = new Map(assignList.map((a) => [a.n, a]));
+
+      // Blueprint: one row per task, in order, with its dependencies shown.
+      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), af: true,
+        moves: tasks.map((t) => ({ id: "tg-" + t.n, title: t.n + ". " + t.title, files: t.files || [],
+          why: (t.needs && t.needs.length ? "Runs after task(s) " + t.needs.join(", ") + ". " : "") + "Owns: " + (t.files || []).join(", ") })) });
+
+      // Budget freeze for the whole roadmap before any task runs.
+      const wmRec = modelById(workerModel) || {};
+      const est = estimateMove({ manifestBytes: 8000, inCost: wmRec.inCost || 0, outCost: wmRec.outCost || 0 });
+      const b = budgetCheck({ spentUsd: budget.spentUsd, capUsd: budget.capUsd, nextEstUsd: est.usd * tasks.length });
+      if (b.stop) {
+        const answer = await ask("budget", phrase("budget_question", reg, money(budget.capUsd), money(budget.spentUsd)), [phrase("budget_keep", reg), phrase("budget_stop", reg)]);
+        if (answer === null) return false;
+        if (!ANSWER.keepGoing.test(answer)) { ideJobs.finish(job.id, { type: "stopped", message: phrase("budget_stopped", reg) }); return false; }
+        budget.capUsd += Math.max(capOriginal, 0.5);
+      }
+
+      const snap = await engine.snapshot(job, workspace);
+      if (!snap.ok) { ideJobs.finish(job.id, { type: "error", message: "No restore point could be made, so nothing was written. " + (snap.error || "") }); return false; }
+
+      // Run ONE unit (a whole task, or one sub-part of a divided task): a model call whose result
+      // is filtered to the files it owns. Returns the parsed+owned files, never writes (the wave
+      // writes sequentially so nothing races on disk).
+      const runUnit = async ({ id, title, files, grant, model, contract }) => {
+        ideJobs.emit(job.id, { type: "move", id, title, state: "running", model });
+        try {
+          const manifest = await engine.readManifest(workspace.root, files || []);
+          const move = { title, files, why: "Own these files only. " + (contract || "") };
+          const res = await chat({ model, messages: buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal: prompt }) });
+          return { id, title, res, grant: grant || files };
+        } catch (e) { return { id, title, res: { ok: false, error: String((e && e.message) || e), costUsd: 0 }, grant: grant || files }; }
+      };
+
+      // Expand a task into the UNITS that will run for it. One agent -> one unit. More than one ->
+      // the task is divided by the same divider+referee; the verdict (clean/partial/irreducible)
+      // is reported honestly and only disjoint sub-parts become units.
+      const unitsForTask = async (task) => {
+        const a = assignByN.get(task.n) || { model: workerModel, agents: 1 };
+        const model = a.model || workerModel;
+        if ((a.agents || 1) <= 1 || (task.files || []).length <= 1) {
+          return [{ id: "tg-" + task.n, title: task.n + ". " + task.title, files: task.files, grant: task.files, model, contract: "" }];
+        }
+        // Recursive division of THIS task.
+        const dv = await chat({ model: divModel, messages: dividerMessages({ goal: reduceTaskGoal(task, a.agents), maxParts: a.agents, register: reg, persona }) });
+        spend(dv.costUsd);
+        if (dv.costUsd) { await meterTurn(T, dv.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: dv.costUsd, move: "tg-" + task.n }); }
+        const plan = dv.ok ? parseDividerPlan(dv.content, a.agents) : { ok: false, parts: [] };
+        const dj = plan.ok ? verifyDisjoint(plan.parts) : { ok: false };
+        // Sub-parts may only own files THIS task was granted (a divider cannot invent new files).
+        const taskFiles = new Set((task.files || []).map((f) => String(f).toLowerCase()));
+        const cleanParts = (plan.ok ? plan.parts : []).map((p) => ({ ...p, files: (p.files || []).filter((f) => taskFiles.has(String(f).toLowerCase())) })).filter((p) => p.files.length);
+        const verdict = classifyReduction({ parts: cleanParts, requestedAgents: a.agents, disjointOk: dj.ok });
+        if (verdict.note) ideJobs.emit(job.id, { type: "run", command: "divide task " + task.n, ok: true, output: verdict.note });
+        if (verdict.mode === "irreducible") {
+          return [{ id: "tg-" + task.n, title: task.n + ". " + task.title, files: task.files, grant: task.files, model, contract: "" }];
+        }
+        return verdict.parts.map((p, i) => ({ id: "tg-" + task.n + "-" + (i + 1), title: task.n + "." + (i + 1) + " " + (p.title || task.title), files: p.files, grant: p.files, model, contract: "CONTRACT: " + (p.contract || "") }));
+      };
+
+      // The wave scheduler. Each pass takes the ready tasks (deps done) and packs a file-disjoint
+      // wave, runs every unit's model call in parallel, then writes sequentially.
+      const done = new Set(); const hardFailed = new Set();
+      while (done.size + hardFailed.size < tasks.length) {
+        const ready = readyTasks(tasks, { done, running: [] }).filter((t) => !hardFailed.has(t.n) && !t.needs.some((n) => hardFailed.has(n)));
+        if (!ready.length) {
+          // Anything left is blocked only by a failed dependency; stop honestly.
+          const blocked = tasks.filter((t) => !done.has(t.n) && !hardFailed.has(t.n)).map((t) => t.n);
+          if (blocked.length) ideJobs.emit(job.id, { type: "run", command: "schedule", ok: false, output: "Tasks " + blocked.join(", ") + " were skipped because a task they need did not finish." });
+          break;
+        }
+        // Pack a wave of mutually file-disjoint ready tasks (they are already dep-satisfied).
+        const wave = [];
+        for (const t of ready) { if (!wave.some((w) => filesCollide(w, t))) wave.push(t); }
+
+        // Expand each wave task into units (this is where multi-agent tasks divide).
+        const unitBatches = await Promise.all(wave.map((t) => unitsForTask(t).then((units) => ({ t, units }))));
+        // All model calls across the whole wave run at once.
+        const flat = [];
+        for (const { t, units } of unitBatches) for (const u of units) flat.push({ t, u });
+        const settled = await Promise.all(flat.map(({ t, u }) => runUnit(u).then((r) => ({ t, r }))));
+
+        // Writes sequential. Track per-task success: a task is done only if ALL its units held.
+        const taskOk = new Map(wave.map((t) => [t.n, true]));
+        for (const { t, r } of settled) {
+          spend(r.res.costUsd);
+          if (r.res.costUsd) { await meterTurn(T, r.res.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: r.res.costUsd, move: r.id }); }
+          try {
+            const outTok = (r.res.usage && (r.res.usage.completion_tokens ?? r.res.usage.output_tokens)) || 0;
+            if (outTok > 0 && r.res.ms > 0 && r.res.model) buildTelemetry.record({ model: r.res.model, outTokens: outTok, ms: r.res.ms, costUsd: r.res.costUsd || 0 });
+          } catch {}
+          if (ac.signal.aborted) { await salvage("interrupted", "task graph"); return false; }
+          if (!r.res.ok) { ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "failed", message: r.res.error || "The model call failed." }); taskOk.set(t.n, false); continue; }
+          const parsed = parseFileBlocks(r.res.content);
+          const own = ownershipFilter(parsed.files, r.grant || []);
+          for (const d of own.dropped) ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "warned", message: d.path + ": outside this task's files, refused (the cookie rule)" });
+          if (!own.kept.length) { ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "failed", message: "It returned no files inside its task." }); taskOk.set(t.n, false); continue; }
+          const carve = carveOutReport(own.kept);
+          if (carve) { ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "blocked", message: carve.message }); await salvage("interrupted", "carve-out"); ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) }); return false; }
+          await engine.writeFiles(job, workspace, own.kept);
+          ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "done", files: own.kept.length });
+        }
+        for (const t of wave) { if (taskOk.get(t.n)) done.add(t.n); else hardFailed.add(t.n); }
+      }
+
+      // One check over the whole build; a QC pass if the crew has one.
+      const v = await engine.verify(job, workspace);
+      if (afSpec && afSpec.qc) {
+        const checkOutput = v && v.ran && !v.ok ? String(v.output || "") : "";
+        const qcStage = await runAfStage({ stageMoves: [afQcMove(tasks.map((t) => ({ files: t.files, title: t.title, contract: "" })), afSpec.qc.task)], assign: afAssignFor(afSpec.qc.model || "") || resolved, allowEmpty: true });
+        if (qcStage.sealed) { await salvage("interrupted", "qc"); return false; }
+        await engine.verify(job, workspace);
+      }
+      if (hardFailed.size) await salvage("partial", hardFailed.size + " task(s) did not finish");
+      return true;
+    };
+
     const runAfCrew = async () => {   // true = pipeline complete; false = the job was finished here
       const maxParts = afSpec.workers.reduce((s, w) => s + (w.n || 1), 0);
       const divModel = afSpec.divider.model || planModel;
@@ -2110,7 +2322,13 @@ async function runIdeBuild(job, { T, workspace, prompt, assignments, register, m
       return true;
     };
 
-    if (afSpec && !afSpec.error && !small.small) {
+    // Task-graph mode (Fred's redesign) wins when the client sends it, for any non-trivial build.
+    // It is the same AF window, in its task-roadmap shape. Small asks still skip the crew.
+    const taskMode = !!(assignments && assignments.af && (assignments.af.taskMode || (Array.isArray(assignments.af.taskPlan) && assignments.af.taskPlan.length)));
+    if (taskMode && !small.small) {
+      if (!(await runTaskGraph())) return;
+      afRan = true;
+    } else if (afSpec && !afSpec.error && !small.small) {
       if (!(await runAfCrew())) return;
       afRan = true;
     } else if (afSpec && afSpec.error) {
