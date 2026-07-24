@@ -1,3 +1,11 @@
 # Shell scripts must stay LF — a CRLF shebang breaks in the Linux container.
 *.sh text eol=lf
 start.sh text eol=lf
+
+# Binary assets: never apply line-ending conversion (would corrupt PDFs, images, video).
+*.pdf binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary
+*.mp4 binary
