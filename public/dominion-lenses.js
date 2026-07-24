@@ -38,6 +38,7 @@
     logOpen: false,         // past-builds log panel visible
     verifyAnnounced: "",    // job whose first recorded check advanced the shared journey
     endedAnnounced: "",     // failed/stopped job whose retryable ending was announced
+    autoWorkshop: "",       // job whose completion already flipped the view to the Workshop (once)
   };
 
   // The Crucible's working mode drives how much machinery each lens shows.
@@ -176,6 +177,7 @@
     state.previewOn = false;
     state.verifyAnnounced = "";
     state.endedAnnounced = "";
+    state.autoWorkshop = "";
     state.doneWitnessedLive.clear();
     render();
 
@@ -266,6 +268,14 @@
     if (d.outcome === "done" && state.doneWitnessedLive.has(state.jobId) && state.doneAnnounced !== state.jobId) {
       state.doneAnnounced = state.jobId;
       try { document.dispatchEvent(new CustomEvent("dominion-build-done", { detail: { jobId: state.jobId } })); } catch {}
+    }
+    // Land the reader on the Workshop when their build finishes: the Blueprint is the plan (the
+    // "during"), the Workshop is the app itself (the "here it is"). Once per job, and only for a
+    // build watched live, so a manual switch back to the Blueprint is respected (Fred, 2026-07-24:
+    // the Workshop felt dead because nobody was ever taken to it). setLens re-renders, so return.
+    if (d.outcome === "done" && state.doneWitnessedLive.has(state.jobId) && state.autoWorkshop !== state.jobId) {
+      state.autoWorkshop = state.jobId;
+      if (state.lens !== "workshop") { setLens("workshop"); return; }
     }
     if ((d.outcome === "error" || d.outcome === "stopped")
       && state.doneWitnessedLive.has(state.jobId) && state.endedAnnounced !== state.jobId) {
@@ -594,6 +604,16 @@
     const wrap = document.createElement("div");
     wrap.className = "cru-workshop";
     wrap.dataset.mode = modeOf();
+
+    // Honest empty state (Fred, 2026-07-24: the Workshop read as a dead tab when a build had not
+    // produced anything yet). Say what this tab IS, so it looks intentional rather than broken.
+    if (!d.runs.length && !d.files.size && d.outcome !== "done") {
+      const intro = document.createElement("p");
+      intro.className = "cru-note w-intro";
+      intro.textContent = "This is where your finished app lives. As the build runs, you will try your app "
+        + "here, see the checks it passed, and view the code. Nothing to show yet.";
+      wrap.append(intro);
+    }
 
     const mode = modeOf();
     const studioCode = mode === "vibe" && window.dominionStudioHas && window.dominionStudioHas("code");
