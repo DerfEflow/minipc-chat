@@ -1138,8 +1138,15 @@ const ideJobs = createIdeJobs({ dir: dataPath("ide"), log: (m) => console.log(m)
 // capturing it directly is a temporal-dead-zone crash at boot. The indirection is deliberate.
 const ideFeature = createIdeFeature({
   gate: ideGate, storeFor: ideStoreFor, jobs: ideJobs,
-  billing: { canChat: (email) => billing.canChat(email) },
-  multiTenant: MULTI_TENANT, log: (m) => console.log(m),
+  // The Engineer gate needs real account state (card + auto-recharge), not just canChat — the
+  // wrapper stays narrow on purpose: exactly what the feature uses, nothing more.
+  billing: { canChat: (email) => billing.canChat(email),
+             account: (email) => billing.account(email),
+             setAutorecharge: (email, on, usd) => billing.setAutorecharge(email, on, usd) },
+  multiTenant: MULTI_TENANT,
+  // Engineer launch gate (Fred, 2026-07-25): greyed Coming Soon for guests until this flips.
+  engineerPublic: cfgGet("ENGINEER_PUBLIC", "0") === "1",
+  log: (m) => console.log(m),
   vapidPublicKey: IDE_VAPID_PUBLIC,
 });
 // Cloudflare Access JWT verification: identity comes from a SIGNATURE, not from a hostname.
@@ -1214,7 +1221,10 @@ async function meterTurn(T, costUsd, promptText, answer) {
       usersStore.addSponsoredSpend(T.email, costUsd || 0);              // pauses the account at the cap
       credits = creditsForCostUsd(costUsd || 0);   // display-equivalent for the session budget window
     }
-    if (T.consented) trainingSinkRecord({ ts: new Date().toISOString(), uid: T.uid, role: T.role, prompt: String(promptText || "").slice(0, 4000), answer: String(answer || "").slice(0, 8000) });
+    // THE PIPELINE GATE (Fred, 2026-07-25): consent alone is no longer enough — a user who checked
+    // the opt-out box has genuinely severed the training sink. Their turns are used ONLY for their
+    // own sessions; nothing of theirs lands in the shared JSONL, ever.
+    if (T.consented && !T.trainingOptOut) trainingSinkRecord({ ts: new Date().toISOString(), uid: T.uid, role: T.role, prompt: String(promptText || "").slice(0, 4000), answer: String(answer || "").slice(0, 8000) });
     return { credits };
   } catch { return null; }
 }
@@ -2659,7 +2669,7 @@ async function handleAccount(req, res, u) {
   const p = u.pathname;
   if (req.method === "GET" && p === "/account") {
     const out = { email: T.email, role: T.role, status: T.status, isOwner: T.isOwner, invited: !!T.invited,
-      consented: !!T.consented, tutorialSeen: !!T.tutorialSeen, multiTenant: MULTI_TENANT,
+      consented: !!T.consented, trainingOptOut: !!T.trainingOptOut, tutorialSeen: !!T.tutorialSeen, multiTenant: MULTI_TENANT,
       ideMode: ideAllowed(T),
       pricing: billing.pricing, stripeConfigured: stripe.enabled, publishableKey: stripe.publishableKey };
     if (!T.isOwner && T.role === "credit") out.credits = billing.account(T.email);
@@ -2671,7 +2681,13 @@ async function handleAccount(req, res, u) {
     const r = billing.redeem(String(body.code || ""), T.email);
     return sjson(res, r.error ? 400 : 200, r);
   }
-  if (req.method === "POST" && p === "/account/consent") { usersStore.markConsented(T.email); return sjson(res, 200, { ok: true }); }
+  if (req.method === "POST" && p === "/account/consent") {
+    // Accept-and-continue, optionally WITH the training opt-out (Fred, 2026-07-25). The opt-out is
+    // recorded server-side and gates the pipeline at meterTurn — a genuine severance, not UI paint.
+    usersStore.markConsented(T.email);
+    if (body && typeof body.optOut === "boolean") usersStore.setTrainingOptOut(T.email, body.optOut);
+    return sjson(res, 200, { ok: true, trainingOptOut: !!(body && body.optOut) });
+  }
   if (req.method === "POST" && p === "/account/tutorial-seen") { usersStore.markTutorialSeen(T.email); return sjson(res, 200, { ok: true }); }
   return sjson(res, 404, { error: "not found" });
 }

@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createIdeFeature, createIdeGate } from "./ide.mjs";
 
-function rig({ autorecharge = false, hasCard = false } = {}) {
+function rig({ autorecharge = false, hasCard = false, engineerPublic = true } = {}) {
   const acct = { autorecharge, hasCard, topupUsd: 12.5 };
   const calls = [];
   const prefs = { engaged: true, mode: "", language: "technical", assignments: {} };
@@ -21,7 +21,7 @@ function rig({ autorecharge = false, hasCard = false } = {}) {
     }),
     jobs: { listFor: () => [] },
     billing: { account: () => ({ ...acct }), setAutorecharge: (email, on, usd) => { calls.push({ email, on, usd }); acct.autorecharge = !!on; return { ok: true }; } },
-    multiTenant: true,
+    multiTenant: true, engineerPublic,
   });
   return { feature, acct, calls, prefs };
 }
@@ -88,6 +88,15 @@ test("the owner is exempt; single-tenant mode is fully dormant", () => {
     storeFor: () => ({ prefs: () => ({}), setPrefs: (p) => p, list: () => [] }),
     jobs: { listFor: () => [] }, billing: null, multiTenant: false });
   assert.equal(single.setPrefs(CREDIT, { mode: "engineer" }).status, 200, "no tenancy -> no gate");
+});
+
+test("LAUNCH GATE: ENGINEER_PUBLIC off = Coming Soon for guests even with top-off armed; owner untouched", () => {
+  const { feature } = rig({ autorecharge: true, hasCard: true, engineerPublic: false });
+  const r = feature.setPrefs(CREDIT, { mode: "engineer" });
+  assert.equal(r.status, 403);
+  assert.equal(r.body.code, "engineer_coming_soon", "armed top-off does not bypass the launch gate");
+  assert.match(r.body.error, /coming soon/i);
+  assert.equal(feature.setPrefs(OWNER, { mode: "engineer" }).status, 200, "Fred keeps Engineer during the rebuild");
 });
 
 test("non-engineer modes pass through untouched (the gate guards one door only)", () => {

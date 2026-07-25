@@ -258,7 +258,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
    mirrors the deliberate decision in /chats/sync: syncing things you already own is not billable
    work. Starting a job IS billable, so it takes the full wall.
    ============================================================================================ */
-export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = false, log = () => {}, vapidPublicKey = "" } = {}) {
+export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = false, engineerPublic = false, log = () => {}, vapidPublicKey = "" } = {}) {
   if (!gate) throw new Error("createIdeFeature needs a gate");
   if (!storeFor) throw new Error("createIdeFeature needs storeFor(T)");
   if (!jobs) throw new Error("createIdeFeature needs a job spine");
@@ -271,6 +271,11 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
   // Engineer on the very next request — no cached grant to game.
   function engineerGate(T) {
     if (!multiTenant || T.isOwner) return null;   // the owner has no credit ledger to protect
+    // LAUNCH GATE (Fred, 2026-07-25): until Engineer is finished, guests see it greyed out as
+    // Coming Soon — server-refused here, cosmetically greyed client-side off the state flag.
+    // Flip ENGINEER_PUBLIC=1 when the rebuild ships; the top-off rule below then takes over.
+    if (!engineerPublic) return { code: "engineer_coming_soon",
+      error: "The Engineer interface is coming soon. It is being rebuilt and will unlock for accounts with Automatic Top-Off enabled." };
     if (T.role === "sponsored") return { code: "engineer_unavailable",
       error: "Engineer requires a billing account with automatic top-off. Sponsored accounts cannot enable it." };
     let acct = null; try { acct = billing && billing.account(T.email); } catch {}
@@ -328,6 +333,9 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       return ok({
         allowed: true,
         isOwner: !!T.isOwner,
+        // The client greys the Engineer tab + labels it Coming Soon off this flag (server still
+        // refuses entry regardless — the grey is honesty, the 403 is the wall).
+        engineerComingSoon: !!(multiTenant && !T.isOwner && !engineerPublic),
         prefs: servedPrefs,
         workspaces: store.list(),
         jobs: jobs.listFor(T.uid),

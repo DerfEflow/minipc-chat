@@ -136,6 +136,16 @@
     sheet.append(sheetHeader("First access", "Consent notice"));
     const body = node("div", "dt-consent-body");
     body.append(node("p", "dt-consent-copy", content.consent || ""));
+    // The GENUINE opt-out (Fred, 2026-07-25): checking it severs the training pipeline server-side.
+    const optRow = node("label", "dt-consent-optout");
+    optRow.style.cssText = "display:flex;gap:10px;align-items:flex-start;margin:10px 0;cursor:pointer;font-size:0.95em";
+    const optBox = document.createElement("input");
+    optBox.type = "checkbox"; optBox.id = "dt-consent-optout-box"; optBox.style.marginTop = "3px";
+    optRow.append(optBox, node("span", "", content.consentOptOutLabel || "Do not use my conversations to improve the assistant. Keep everything I write for my sessions only."));
+    body.append(optRow);
+    const zdr = node("p", "dt-consent-copy", content.consentZdrNotice || "");
+    zdr.style.cssText = "opacity:.75;font-size:0.9em";
+    if (content.consentZdrNotice) body.append(zdr);
     const actions = node("div", "dt-consent-actions");
     const accept = node("button", "dt-primary-button", "Accept and continue");
     accept.type = "button";
@@ -143,8 +153,9 @@
       accept.disabled = true;
       accept.textContent = "Saving";
       try {
-        await api("/account/consent", { method: "POST", body: {} });
+        await api("/account/consent", { method: "POST", body: { optOut: !!optBox.checked } });
         state.account.consented = true;
+        state.account.trainingOptOut = !!optBox.checked;
         endDialog(false);
         if (!state.account.tutorialSeen) showTutorial();
         else state.guide.hidden = false;

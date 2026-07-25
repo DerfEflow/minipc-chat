@@ -495,6 +495,7 @@ function renderAll() {
   wrap.querySelectorAll(".turn, .err").forEach((n) => n.remove());
   const c = cur();
   empty.style.display = (c && c.messages.length) ? "none" : "";
+  updateFocusMode();   // Chat Focus Mode follows the open chat: first sent message folds the chrome
   if (c) {
     let lastAi = -1; for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { lastAi = i; break; }
     c.messages.forEach((m, i) => renderMsg(m, i, i === lastAi));
@@ -735,6 +736,11 @@ function paceMeasured(key) {
 
 function renderPace() {
   if (!paceWarn) return;
+  // Dismissible, once per session (Fred, 2026-07-25): the ✕ hides the slow-settings warning for
+  // the rest of THIS browser session; a fresh visit gets one fresh warning. sessionStorage, not
+  // localStorage, on purpose — the warning exists to save beginners from a silent wait, so it may
+  // return tomorrow, but never nags twice in one sitting.
+  try { if (sessionStorage.getItem("dominion.pace.dismissed.v1") === "1") { paceWarn.hidden = true; paceWarn.innerHTML = ""; return; } } catch {}
   const s = paceSetup();
   const read = paceRead(s);
   if (!read.slow) { paceWarn.hidden = true; paceWarn.innerHTML = ""; paceOpen = false; return; }
@@ -752,6 +758,8 @@ function renderPace() {
       '<span>SLOW SETTINGS · this reply will take a while. It is working the whole time.</span>' +
       '<span class="pace-caret">' + (paceOpen ? "hide" : "why?") + '</span>' +
     '</button>' +
+    '<button type="button" id="pace-dismiss" title="Dismiss for this session" aria-label="Dismiss the slow-settings warning for this session" ' +
+      'style="position:absolute;top:2px;right:4px;background:none;border:0;color:inherit;font-size:15px;line-height:1;cursor:pointer;padding:4px;opacity:.8">×</button>' +
     (paceOpen
       ? '<div class="pace-body">' +
           '<ul>' + read.why.map((w) => "<li>" + escapeHtml(w) + "</li>").join("") + '</ul>' +
@@ -759,8 +767,11 @@ function renderPace() {
           (measured ? '<span class="pace-measured">' + escapeHtml(measured) + "</span>" : "") +
         '</div>'
       : "");
+  paceWarn.style.position = "relative";   // anchor for the dismiss ✕
   const t = document.getElementById("pace-toggle");
   if (t) t.onclick = () => { paceOpen = !paceOpen; renderPace(); };
+  const dx = document.getElementById("pace-dismiss");
+  if (dx) dx.onclick = () => { try { sessionStorage.setItem("dominion.pace.dismissed.v1", "1"); } catch {} paceWarn.hidden = true; paceWarn.innerHTML = ""; };
 }
 
 // Record what a finished turn actually cost in wall-clock, per exact setup. A rolling mean, capped
@@ -1564,6 +1575,29 @@ function wireBudgetUi() {
   const bc = document.getElementById("bcredits"); if (bc) bc.addEventListener("click", () => { location.href = "/setup.html"; });
 }
 try { wireBudgetUi(); fetchBudget(); } catch {}
+
+/*
+ * CHAT FOCUS MODE (Fred, 2026-07-25) — mobile. Once the open chat has a sent message, the
+ * model/mode/privacy container and the panel-button container fold into the header; each comes
+ * back through its own handle (small drawer for controls, narrow right-edge handle for panels).
+ * The class only ever reflects the OPEN chat, so a fresh chat always starts with full chrome.
+ * All visual gating lives in CSS behind a max-width media query — desktop never changes.
+ */
+function chatHasUserMsg() { const c = chats.find((x) => x.id === curId); return !!(c && c.messages && c.messages.some((m) => m.role === "user")); }
+function updateFocusMode() {
+  const on = chatHasUserMsg();
+  document.body.classList.toggle("chat-focus", on);
+  if (!on) document.body.classList.remove("reveal-controls", "reveal-actions");
+  const h1 = document.getElementById("focus-controls-handle"), h2 = document.getElementById("focus-actions-handle");
+  if (h1) h1.hidden = !on;
+  if (h2) h2.hidden = !on;
+}
+(function wireFocusHandles() {
+  const h1 = document.getElementById("focus-controls-handle"), h2 = document.getElementById("focus-actions-handle");
+  if (h1) h1.addEventListener("click", () => { const on = document.body.classList.toggle("reveal-controls"); document.body.classList.remove("reveal-actions"); h1.setAttribute("aria-expanded", on ? "true" : "false"); });
+  if (h2) h2.addEventListener("click", () => { const on = document.body.classList.toggle("reveal-actions"); document.body.classList.remove("reveal-controls"); h2.setAttribute("aria-expanded", on ? "true" : "false"); });
+})();
+try { updateFocusMode(); } catch {}
 
 // ---------- memory panel (Phase 2) ----------
 function badge(text, cls) { const b = document.createElement("span"); b.className = "mbadge" + (cls ? " " + cls : ""); b.textContent = text; return b; }

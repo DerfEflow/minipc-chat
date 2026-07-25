@@ -36,6 +36,29 @@
   #bmodal .bhead button{background:none;border:0;color:inherit;font-size:22px;cursor:pointer;line-height:1}
   #bmodal #bmsg{white-space:pre-wrap;margin:0 0 14px}
   #bmodal .bacts{display:flex;gap:10px;flex-wrap:wrap}
+  /*
+   * CHAT FOCUS MODE (Fred, 2026-07-25) — mobile only. After the first sent message the two header
+   * containers fold away, the header spans the full width, and the chat owns the screen. Each
+   * container returns through its own handle; the header never covers the handles.
+   */
+  .focus-handle{display:none}
+  @media (max-width: 720px){
+    body.chat-focus #commandbar{position:relative;width:100%}
+    body.chat-focus .command-controls,
+    body.chat-focus .command-actions{display:none}
+    body.chat-focus .focus-handle{display:flex;align-items:center;justify-content:center;
+      background:#0d1117;color:#cfd8e3;border:1px solid rgba(255,255,255,.22);border-radius:8px;
+      width:34px;height:30px;cursor:pointer;flex:0 0 auto}
+    body.chat-focus #focus-actions-handle{position:absolute;right:0;top:50%;transform:translateY(-50%);
+      width:16px;height:44px;border-radius:8px 0 0 8px;border-right:0;z-index:30}
+    /* Revealed states: each container drops in as a full-width sheet under the header. */
+    body.chat-focus.reveal-controls .command-controls{display:flex;position:absolute;top:100%;left:0;right:0;
+      z-index:60;background:#0b0f14;border-bottom:1px solid rgba(255,255,255,.18);padding:10px;flex-wrap:wrap;gap:8px}
+    body.chat-focus.reveal-actions .command-actions{display:flex;position:absolute;top:100%;left:0;right:0;
+      z-index:60;background:#0b0f14;border-bottom:1px solid rgba(255,255,255,.18);padding:10px;justify-content:space-around}
+  }
+  /* Composer placeholder (Fred, 2026-07-25): plain wording at 20% transparency. */
+  #input::placeholder{opacity:.8}
 </style>
 </head>
 <body>
@@ -176,6 +199,21 @@
         <span id="activity-status" class="brand-status" aria-live="polite">System ready</span>
       </div>
     </div>
+
+    <!--
+      CHAT FOCUS MODE handles (Fred, 2026-07-25). On mobile, once the first message is sent, the
+      model/mode/privacy controls and the panel buttons fold into the header and these two handles
+      appear: a small drawer tab for the controls, a narrow edge handle on the right for the
+      panels. The chat fills the screen; the header spans full width but never covers the handles.
+    -->
+    <button id="focus-controls-handle" class="focus-handle" type="button" hidden
+            title="Model, mode, and privacy controls" aria-label="Show model, operating mode, and privacy controls" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path fill="currentColor" d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/></svg>
+    </button>
+    <button id="focus-actions-handle" class="focus-handle focus-handle-edge" type="button" hidden
+            title="Panels: artifacts, tools, settings" aria-label="Show the panel buttons" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true" width="14" height="14"><path fill="currentColor" d="M9 5l7 7-7 7-1.4-1.4L13.2 12 7.6 6.4z" transform="rotate(180 12 12)"/></svg>
+    </button>
 
     <div class="command-controls">
       <div class="command-select model-select" id="model-picker">
@@ -343,7 +381,7 @@
             </svg>
           </button>
         </div>
-        <textarea id="input" rows="1" placeholder="Give Dominion a directive…" autocomplete="off"></textarea>
+        <textarea id="input" rows="1" placeholder="Type your input here" autocomplete="off"></textarea>
         <div id="bar-mid"></div>
         <button id="speak" class="mic" title="Speak answers aloud (off)" aria-label="Toggle spoken answers">
           <svg class="glyph"><use href="#i-speaker"></use></svg>
@@ -514,9 +552,9 @@
   <script src="/dominion-lenses.js?v=14" defer></script>
   <script src="/dominion-beginner.js?v=2" defer></script>
   <script src="/dominion-vibe.js?v=1" defer></script>
-  <script src="/app.js?v=51"></script>
+  <script src="/app.js?v=52"></script>
   <script src="/dominion-ui.js?v=39"></script>
-  <script src="/dominion-tenant.js?v=4" defer></script>
+  <script src="/dominion-tenant.js?v=5" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>
 </body>
 </html>

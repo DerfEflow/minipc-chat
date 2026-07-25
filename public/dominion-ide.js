@@ -1380,7 +1380,7 @@
     const wrap = document.createElement("div");
     wrap.id = "eng-topoff";
     wrap.style.cssText = "position:fixed;inset:0;z-index:2147480000;display:flex;align-items:center;justify-content:center;background:rgba(0,3,8,.55);backdrop-filter:blur(8px);padding:18px";
-    const unavailable = d && d.code === "engineer_unavailable";
+    const unavailable = d && (d.code === "engineer_unavailable" || d.code === "engineer_coming_soon");
     wrap.innerHTML = '<div style="max-width:520px;background:#0d1117;border:1px solid rgba(214,150,90,.55);border-radius:12px;padding:22px;color:#e8edf2;font-size:15px;line-height:1.5">' +
       '<div style="font-size:17px;font-weight:700;margin-bottom:10px">Engineer requires Automatic Top-Off</div>' +
       (unavailable
@@ -2507,6 +2507,16 @@
         state.mode = "vibe";
         try { localStorage.setItem(MODE_KEY, "vibe"); } catch {}
         showTopoffPanel(s.prefs.engineerLocked);
+      }
+      // Launch gate (Fred, 2026-07-25): Engineer greyed as Coming Soon for guests until the
+      // rebuild ships. The grey is honesty; the server 403 is the actual wall.
+      if (s.engineerComingSoon) {
+        state.engineerComingSoon = true;
+        for (const b of document.querySelectorAll('[data-mode="engineer"]')) {
+          b.disabled = true; b.style.opacity = "0.45"; b.style.cursor = "not-allowed";
+          b.title = "Engineer — coming soon";
+          if (!/coming soon/i.test(b.textContent)) b.textContent = (b.textContent || "Engineer").trim() + " · Coming soon";
+        }
       }
       if (state.open && (state.mode || readMode())) applyMode(state.mode || readMode(), { save: false });
       announceIdeState();

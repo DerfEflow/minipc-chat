@@ -6,8 +6,21 @@
  * Writing rules honored: no em dashes, no "not X but Y" antithesis.
  */
 
+// Rewritten 2026-07-25 (Fred): say exactly what is and is not collected, and carry a GENUINE
+// opt-out — the checkbox severs the training pipeline server-side (see /account/consent +
+// meterTurn's pipeline gate), it is not decorative.
 export const CONSENT_TEXT =
-  "Dominion AI is a shared, learning assistant. Your conversations may be used to train and improve the assistant's reasoning for everyone. Sensitive personal details are yours; keep them out of chat if you would not want them used to improve the model. By continuing you acknowledge this.";
+  "Dominion AI is a shared, learning assistant. To help the assistant sound more natural in conversation, " +
+  "it learns from speech patterns in everyday chats. This collection contains no personally identifiable " +
+  "information: no names, no accounts, no contact details, no documents — speech patterns only. " +
+  "If you prefer, you can opt out below; anything retained from your inputs will then be used only for " +
+  "your own sessions, and nothing of yours feeds the shared assistant.";
+
+export const CONSENT_ZDR_NOTICE =
+  "Building an app? Zero-Data Retention settings for app development are available in the Crucible App Builder interface.";
+
+export const CONSENT_OPTOUT_LABEL =
+  "Do not use my conversations to improve the assistant. Keep everything I write for my sessions only.";
 
 export const FORGE_MODE_WARNING =
   "Forge Mode performs much better, with fewer errors and higher-quality output. It takes longer on the smaller models and burns credits faster than normal. Use it when quality counts.";
@@ -116,4 +129,4 @@ export const TUTORIAL = {
 };
 
 // A compact payload for the front end (tutorial + the two standalone strings).
-export const onboardingPayload = () => ({ tutorial: TUTORIAL, consent: CONSENT_TEXT, forgeModeWarning: FORGE_MODE_WARNING });
+export const onboardingPayload = () => ({ tutorial: TUTORIAL, consent: CONSENT_TEXT, consentZdrNotice: CONSENT_ZDR_NOTICE, consentOptOutLabel: CONSENT_OPTOUT_LABEL, forgeModeWarning: FORGE_MODE_WARNING });

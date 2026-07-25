@@ -38,8 +38,10 @@ export function createUsersStore({ dir, ownerEmail }) {
     sponsoredSpentUsd REAL NOT NULL DEFAULT 0,      -- rolling monthly spend against the cap
     capPeriod TEXT,                                 -- YYYY-MM the spend window applies to
     createdAt TEXT, updatedAt TEXT )`);
-  // Additive migrations (safe to re-run): invite gate + one-time tutorial flag.
-  for (const col of ["invited INTEGER NOT NULL DEFAULT 0", "tutorialSeen INTEGER NOT NULL DEFAULT 0"]) {
+  // Additive migrations (safe to re-run): invite gate + one-time tutorial flag + training opt-out
+  // (Fred, 2026-07-25: the consent notice carries a genuine opt-out — a checked box severs the
+  // training-sink pipeline entirely; inputs are then used only for the user's own sessions).
+  for (const col of ["invited INTEGER NOT NULL DEFAULT 0", "tutorialSeen INTEGER NOT NULL DEFAULT 0", "trainingOptOut INTEGER NOT NULL DEFAULT 0"]) {
     try { db.exec(`ALTER TABLE users ADD COLUMN ${col}`); } catch {}
   }
   const now = () => new Date().toISOString();
@@ -49,6 +51,7 @@ export function createUsersStore({ dir, ownerEmail }) {
     setRole: db.prepare("UPDATE users SET role=?, updatedAt=? WHERE email=?"),
     setStatus: db.prepare("UPDATE users SET status=?, updatedAt=? WHERE email=?"),
     consent: db.prepare("UPDATE users SET consented=1, updatedAt=? WHERE email=?"),
+    optOut: db.prepare("UPDATE users SET trainingOptOut=?, updatedAt=? WHERE email=?"),
     invite: db.prepare("UPDATE users SET invited=1, updatedAt=? WHERE email=?"),
     tutorial: db.prepare("UPDATE users SET tutorialSeen=1, updatedAt=? WHERE email=?"),
     setCap: db.prepare("UPDATE users SET sponsoredCapUsd=?, updatedAt=? WHERE email=?"),
@@ -85,6 +88,7 @@ export function createUsersStore({ dir, ownerEmail }) {
     const row = autocreate ? ensure(email) : stmt.get.get(email);
     if (!row) return { email, uid: userIdFor(email), role: "credit", status: "active", isOwner: email === OWNER, invited: email === OWNER, tutorialSeen: false };
     return { email: row.email, uid: row.uid, role: row.role, status: row.status, consented: !!row.consented,
+      trainingOptOut: !!row.trainingOptOut,
       isOwner: row.role === "owner", invited: row.role === "owner" || !!row.invited, tutorialSeen: !!row.tutorialSeen,
       sponsoredCapUsd: row.sponsoredCapUsd, sponsoredSpentUsd: row.sponsoredSpentUsd, capPeriod: row.capPeriod };
   }
@@ -106,6 +110,9 @@ export function createUsersStore({ dir, ownerEmail }) {
     setRole: (email, role) => { if (!ROLES.includes(role)) return { error: "bad role" }; stmt.setRole.run(role, now(), String(email).toLowerCase()); return { ok: true }; },
     setStatus: (email, status) => { stmt.setStatus.run(status, now(), String(email).toLowerCase()); return { ok: true }; },
     markConsented: (email) => { stmt.consent.run(now(), String(email).toLowerCase()); return { ok: true }; },
+    // The genuine opt-out (Fred, 2026-07-25): flips the training pipeline off for this account.
+    // Reversible only by the user's own explicit choice; nothing else writes it.
+    setTrainingOptOut: (email, on) => { stmt.optOut.run(on ? 1 : 0, now(), String(email).toLowerCase()); return { ok: true }; },
     markInvited: (email) => { stmt.invite.run(now(), String(email).toLowerCase()); return { ok: true }; },
     markTutorialSeen: (email) => { stmt.tutorial.run(now(), String(email).toLowerCase()); return { ok: true }; },
     setSponsoredCap: (email, usd) => { stmt.setCap.run(Number(usd) || 0, now(), String(email).toLowerCase()); return { ok: true }; },
