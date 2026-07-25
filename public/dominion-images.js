@@ -1,8 +1,10 @@
-// Dominion Forge Images — Codex design wired live. Self-contained IIFE, same contract as
+// Dominion Image Generator — Codex design wired live. Self-contained IIFE, same contract as
 // dominion-forge.js: injects its own DOM under #dfi-root, owns the slide-right reveal (the
 // whole interface slides off RIGHT; back/close in the command rail return), and keeps every
-// forged image in the DEVICE's IndexedDB vault. Brand rule: the engine cell reads DOMINION
-// FORGE, never a model name. Server wire: /api/images/{config,generate,refine,batch,batches}.
+// generated image in the DEVICE's IndexedDB store. Brand rule: the engine cell reads DOMINION
+// AI, never a model name. All user-facing copy is plain language — the words on screen say
+// what actually happens (saved in this browser / downloaded / saved to your folder), no theme.
+// Server wire: /api/images/{config,generate,refine,batch,batches}.
 (() => {
   "use strict";
 
@@ -175,7 +177,7 @@
     const p = (n) => String(n).padStart(2, "0");
     const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
     const tail = slug(rec.prompt);
-    return `dominion-forge-${pad4(rec.seq || 0)}-${stamp}${tail ? "-" + tail : ""}.png`;
+    return `dominion-image-${pad4(rec.seq || 0)}-${stamp}${tail ? "-" + tail : ""}.png`;
   }
 
   // queryPermission/requestPermission are Chromium extensions to FileSystemHandle. A handle that
@@ -202,10 +204,10 @@
       if (folderPerm !== "granted") folderPerm = await askPerm(h);
       await handlePut(FOLDER_KEY, h);
       renderFolderBar();
-      setStatus(`Linked to ${h.name}. Forged images will be written there.`);
+      setStatus(`Folder set to ${h.name}. New images will be saved there automatically.`);
     } catch (e) {
       if (e && e.name === "AbortError") return;          // the user closed the picker: not an error
-      showFault("Could not link that folder: " + (e && e.message ? e.message : "unknown error"));
+      showFault("Could not use that folder: " + (e && e.message ? e.message : "unknown error"));
     }
   }
   async function reconnectFolder() {
@@ -214,7 +216,7 @@
       folderPerm = await askPerm(folderHandle);
       renderFolderBar();
       if (folderPerm === "granted") setStatus(`Reconnected to ${folderHandle.name}.`);
-    } catch { showFault("This browser would not restore the folder permission. Link it again."); }
+    } catch { showFault("This browser would not restore access to that folder. Choose it again."); }
   }
   async function unlinkFolder() {
     folderHandle = null; folderPerm = "none";
@@ -272,16 +274,16 @@
     let recs = [];
     try { recs = await vaultAll(); } catch {}
     const pending = recs.filter((r) => !r.savedAt);
-    if (!pending.length) { setStatus("Every image in the vault is already in the folder."); return; }
+    if (!pending.length) { setStatus("Every image is already saved in the folder."); return; }
     if (btn) { btn.disabled = true; btn.textContent = "SAVING…"; }
     let done = 0;
     for (const rec of pending) {
       if (!(await writeToFolder(rec))) break;
       done++;
-      if (done % 5 === 0) setStatus(`Writing to ${folderHandle.name}… ${done}/${pending.length}`);
+      if (done % 5 === 0) setStatus(`Saving to ${folderHandle.name}… ${done}/${pending.length}`);
     }
     if (btn) { btn.disabled = false; btn.textContent = "SAVE ALL"; }
-    setStatus(`${done} image${done === 1 ? "" : "s"} written to ${folderHandle.name}.`);
+    setStatus(`${done} image${done === 1 ? "" : "s"} saved to ${folderHandle.name}.`);
     renderFolderBar();
     renderGallery();
   }
@@ -298,6 +300,9 @@
     const bar = $("#dfi-folder-bar");
     if (!bar) return;
     const nameEl = $("#dfi-folder-name"), actions = $("#dfi-folder-actions");
+    // On phones there is no folder to set, so the bar is titled for what it can do there.
+    const heading = bar.querySelector(".folder-copy > span");
+    if (heading) heading.textContent = folderSupported() ? "DOWNLOAD FOLDER" : "SAVING IMAGES";
     actions.innerHTML = "";
     const mkBtn = (label, fn, cls) => {
       const b = document.createElement("button");
@@ -311,17 +316,17 @@
 
     if (!folderSupported()) {
       bar.dataset.state = "unsupported";
-      nameEl.textContent = shareSupported() ? "SAVE TO PHOTOS" : "NOT AVAILABLE HERE";
+      nameEl.textContent = shareSupported() ? "SAVE TO PHOTOS" : "DOWNLOAD ONLY";
       setStatus(shareSupported()
-        ? "This browser cannot hold a folder link, so open any image and use Save to Photos. It lands in your camera roll and your usual backup takes it from there."
-        : "This browser can neither link a folder nor open a share sheet. Use Download on any image.");
+        ? "Phones can't auto-save to a folder. Open any image and tap Save to Photos or Download."
+        : "Open any image and tap Download to save it to this device.");
       return;
     }
     if (!folderHandle) {
       bar.dataset.state = "unlinked";
-      nameEl.textContent = "NOT LINKED";
-      setStatus("Link a folder and every forged image is written there, so your own backup carries it to your other devices.");
-      mkBtn("LINK FOLDER", () => linkFolder(), "active");
+      nameEl.textContent = "NOT SET";
+      setStatus("Choose a folder on this computer and every new image is saved there automatically.");
+      mkBtn("CHOOSE FOLDER", () => linkFolder(), "active");
       return;
     }
     if (folderPerm !== "granted") {
@@ -332,8 +337,8 @@
       let waiting = 0;
       try { waiting = (await vaultAll()).filter((r) => !r.savedAt).length; } catch {}
       setStatus(waiting
-        ? `${waiting} image${waiting === 1 ? " is" : "s are"} in the vault but NOT in your folder. This browser drops folder permission when it restarts: one click restores it, then SAVE ALL writes them out.`
-        : "This browser needs one click to restore access to that folder after a restart.");
+        ? `${waiting} image${waiting === 1 ? " is" : "s are"} not in your folder yet. The browser asks for folder access again after a restart: tap RECONNECT, then SAVE ALL.`
+        : "Tap RECONNECT to give this browser access to your folder again.");
       mkBtn("RECONNECT", () => reconnectFolder(), "active");
       mkBtn("UNLINK", () => unlinkFolder());
       return;
@@ -345,16 +350,16 @@
     try { recs = await vaultAll(); } catch {}
     const saved = recs.filter((r) => r.savedAt).length;
     setStatus(autoSave
-      ? `Auto-saving every new image here. ${saved} of ${recs.length} in the vault written so far.`
-      : `Auto-save is off. ${saved} of ${recs.length} in the vault written so far.`);
+      ? `Auto-saving every new image here. ${saved} of ${recs.length} saved so far.`
+      : `Auto-save is off. ${saved} of ${recs.length} saved so far.`);
 
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "power-toggle";
     toggle.setAttribute("role", "switch");
     toggle.setAttribute("aria-checked", String(autoSave));
-    toggle.setAttribute("aria-label", "Auto-save forged images to the linked folder");
-    toggle.title = "Auto-save every forged image";
+    toggle.setAttribute("aria-label", "Auto-save new images to this folder");
+    toggle.title = "Auto-save every new image";
     toggle.innerHTML = "<i></i>";
     toggle.addEventListener("click", () => {
       autoSave = !autoSave;
@@ -432,7 +437,7 @@
     try {
       const file = new File([rec.blob], fileNameFor(rec), { type: "image/png" });
       if (navigator.canShare && !navigator.canShare({ files: [file] })) throw new Error("unsupported");
-      await navigator.share({ files: [file], title: "Dominion Forge" });
+      await navigator.share({ files: [file], title: "Dominion AI" });
       return true;
     } catch (e) {
       if (e && e.name === "AbortError") return false;
@@ -476,7 +481,7 @@
     $("#size-label").textContent = SIZES[state.aspect];
     const lit = { low: 3, medium: 6, high: 10 }[state.quality] || 6;
     $$("#dfi-root .energy-meter i").forEach((bar, i) => bar.classList.toggle("lit", i < lit));
-    $("b", $("#forge-button")).textContent = state.batch ? "ADD TO THE BATCH" : "IGNITE THE FORGE";
+    $("b", $("#forge-button")).textContent = state.batch ? "ADD TO BATCH" : "GENERATE";
   }
 
   /* ---------- the deck-side working state ----------------------------------------------------
@@ -540,7 +545,7 @@
   function buildPanel() {
     const root = document.createElement("section");
     root.id = "dfi-root";
-    root.setAttribute("aria-label", "Dominion Forge Images");
+    root.setAttribute("aria-label", "Dominion image generator");
     root.innerHTML = `
   <div class="scene" aria-hidden="true">
     <div class="scene-grid"></div>
@@ -566,18 +571,18 @@
         </button>
         <div class="brand-reactor" aria-hidden="true"><span></span><i></i></div>
         <div>
-          <p class="eyebrow">DOMINION CREATIVE SYSTEMS</p>
-          <h1>FORGE <span>IMAGES</span></h1>
+          <p class="eyebrow">DOMINION AI</p>
+          <h1>IMAGE <span>GENERATOR</span></h1>
         </div>
       </div>
 
-      <div class="rail-status" aria-label="Forge status">
-        <div class="status-cell"><span class="pulse-dot"></span><small>ENGINE</small><b>DOMINION FORGE</b></div>
-        <div class="status-cell"><svg viewBox="0 0 24 24"><path d="M4 8h16v11H4zM8 8V5h8v3M8 12h8M8 15h5"/></svg><small>ARCHIVE</small><b>THIS DEVICE</b></div>
-        <div class="status-cell"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg><small>VAULT LOAD</small><b id="dfi-vault-load">—</b></div>
+      <div class="rail-status" aria-label="Status">
+        <div class="status-cell"><span class="pulse-dot"></span><small>ENGINE</small><b>DOMINION AI</b></div>
+        <div class="status-cell"><svg viewBox="0 0 24 24"><path d="M4 8h16v11H4zM8 8V5h8v3M8 12h8M8 15h5"/></svg><small>SAVED ON</small><b>THIS DEVICE</b></div>
+        <div class="status-cell"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg><small>STORAGE</small><b id="dfi-vault-load">—</b></div>
       </div>
 
-      <button class="rail-button close-button" type="button" aria-label="Close Forge Images">
+      <button class="rail-button close-button" type="button" aria-label="Close the image generator">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
       </button>
     </header>
@@ -605,7 +610,7 @@
                Everything below this is optional, for those who go looking. -->
           <button id="forge-button" class="forge-button" type="button">
             <span class="forge-core" aria-hidden="true"><i></i></span>
-            <span><small>DOMINION IMAGE ENGINE</small><b>IGNITE THE FORGE</b></span>
+            <span><small>DOMINION AI</small><b>GENERATE</b></span>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M14 7l5 5-5 5"/></svg>
           </button>
           <!-- Wordless blinking arrow, directly beneath the button, for about five seconds after
@@ -625,7 +630,7 @@
             </span>
           </div>
           <p class="forge-deck-note" id="dfi-deck-note" hidden></p>
-          <p class="forge-optional-note">Just want a picture? Type it above and forge. The settings below are optional.</p>
+          <p class="forge-optional-note">Just want a picture? Type it above and press Generate. The settings below are optional.</p>
           <div class="reference-well" id="dfi-ref-well" tabindex="0" role="button" aria-label="Add reference images">
             <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 15l3-3 3 3 2-2 3 3M15.5 8.5h.01"/></svg>
             <div><b>ADD YOUR OWN IMAGES</b><small id="dfi-ref-note">Optional. Copy the look of pictures you add (up to ${REF_CAP})</small></div>
@@ -660,9 +665,9 @@
         </section>
 
         <section class="telemetry-module" aria-live="polite">
-          <div class="telemetry-line"><span>EST. IMAGE TOKENS</span><b id="token-estimate">1,767</b></div>
-          <div class="telemetry-line"><span>EST. OUTPUT COST</span><b id="cost-estimate">$0.053</b></div>
-          <div class="telemetry-line"><span>DELIVERY ROUTE</span><b id="route-estimate">IMMEDIATE</b></div>
+          <div class="telemetry-line"><span>EST. TOKENS</span><b id="token-estimate">1,767</b></div>
+          <div class="telemetry-line"><span>EST. COST</span><b id="cost-estimate">$0.053</b></div>
+          <div class="telemetry-line"><span>DELIVERY</span><b id="route-estimate">IMMEDIATE</b></div>
           <div class="energy-meter"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
           <p>Published OpenAI figures per setting. The final charge follows real usage.</p>
         </section>
@@ -679,12 +684,12 @@
         <div class="vault-caustic" aria-hidden="true"></div>
         <header class="vault-header">
           <div>
-            <p class="eyebrow"><span class="pulse-dot"></span> LOCAL CREATION VAULT</p>
-            <h2>YOUR <span>FORGED VISIONS</span></h2>
-            <p class="vault-note">Kept in this browser on this device, never in the cloud. Browser storage is not permanent, so download the ones you want to keep.</p>
+            <p class="eyebrow"><span class="pulse-dot"></span> GALLERY</p>
+            <h2>YOUR <span>IMAGES</span></h2>
+            <p class="vault-note">Saved in this browser, on this device — never in the cloud. Download the ones you want to keep.</p>
           </div>
           <div class="vault-actions">
-            <label class="search-control"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg><input id="dfi-search" type="search" placeholder="Search this device" aria-label="Search local gallery"></label>
+            <label class="search-control"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg><input id="dfi-search" type="search" placeholder="Search your images" aria-label="Search your images"></label>
             <button type="button" class="filter-button active" data-filter="all">ALL <span id="dfi-count-all">0</span></button>
             <button type="button" class="filter-button" data-filter="favorite" aria-label="Show favorites"><svg viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg></button>
             <button type="button" class="filter-button" data-filter="batch">BATCH</button>
@@ -693,7 +698,7 @@
 
         <div class="generation-strip" id="generation-strip" hidden>
           <div class="forge-spinner"><i></i><i></i><i></i></div>
-          <div><b>FORGE CHAMBER ACTIVE</b><span id="generation-status">Charging creative lattice…</span></div>
+          <div><b>WORKING</b><span id="generation-status">Starting…</span></div>
           <div class="progress-track"><i id="generation-progress"></i></div>
           <strong id="generation-percent">0%</strong>
         </div>
@@ -703,16 +708,16 @@
         <section class="folder-bar" id="dfi-folder-bar">
           <div class="folder-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/><path d="M8 13h8M12 11v4"/></svg></div>
           <div class="folder-copy">
-            <span>DEVICE FOLDER</span>
-            <b id="dfi-folder-name">NOT LINKED</b>
-            <small id="dfi-folder-note">Link a folder and every forged image is written there, so your own backup carries it to your other devices.</small>
+            <span>DOWNLOAD FOLDER</span>
+            <b id="dfi-folder-name">NOT SET</b>
+            <small id="dfi-folder-note">Choose a folder on this computer and every new image is saved there automatically.</small>
           </div>
           <div class="folder-actions" id="dfi-folder-actions"></div>
         </section>
 
         <footer class="vault-footer">
-          <div><span class="storage-light"></span><b id="dfi-vault-title">LOCAL VAULT</b><small id="dfi-vault-stats">—</small></div>
-          <button type="button" id="dfi-purge">PURGE VAULT <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button>
+          <div><span class="storage-light"></span><b id="dfi-vault-title">STORAGE</b><small id="dfi-vault-stats">—</small></div>
+          <button type="button" id="dfi-purge">DELETE ALL <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button>
         </footer>
       </section>
     </main>
@@ -797,7 +802,7 @@
     }));
 
     $("#dfi-purge", root).addEventListener("click", async () => {
-      if (!confirm("Purge every image from the on-device vault? This cannot be undone.")) return;
+      if (!confirm("Delete every image saved on this device? This cannot be undone.")) return;
       await vaultClear();
       renderGallery();
     });
@@ -827,7 +832,7 @@
     });
     const note = $("#dfi-ref-note");
     if (note) note.textContent = state.refs.length
-      ? state.refs.length + " of " + REF_CAP + " plates staged · immediate forges only"
+      ? state.refs.length + " of " + REF_CAP + " added · single pictures only, not batches"
       : "Optional. Copy the look of pictures you add (up to " + REF_CAP + ")";
   }
 
@@ -909,7 +914,7 @@
     if (state.batch) {
       if (state.refs.length) return showFault("Your own images only work on a single picture made right now. Turn off the batch, or remove your images.");
       const maxItems = CFG.batch.maxItemsOwner || 200;
-      if (state.queue.length >= maxItems) return showFault("The foundry queue is full.");
+      if (state.queue.length >= maxItems) return showFault("The batch is full.");
       state.queue.push({ prompt, quality: state.quality, aspect: state.aspect });
       saveQueue();
       renderFoundry();
@@ -965,7 +970,7 @@
         : (wantFolder ? " · NOT written to your folder yet (tap RECONNECT below)" : "");
       stripDone("Your picture is ready" + (took ? " · took " + took + "s" : "") + where + " · " + (r.usage && r.usage.outputTokens ? r.usage.outputTokens.toLocaleString() + " tokens · " : "") + fmtUsd(r.costUsd || 0));
       if (!unsaved) setDeckNote("Your picture is ready" + (took ? ", made in " + took + " seconds" : "") + ". It is in the gallery" + (wide() ? " on the right." : " below."));
-      if (wantFolder && !wrote) showFault(`The image is safe in the on-device vault, but it was NOT written to ${folderHandle.name}. Your browser drops folder permission when it restarts. Tap RECONNECT in the vault bar, then SAVE ALL to catch up.`);
+      if (wantFolder && !wrote) showFault(`Your image is saved in this browser, but was NOT saved to ${folderHandle.name}. The browser asks for folder access again after it restarts. Tap RECONNECT in the folder bar, then SAVE ALL to catch up.`);
       renderFolderBar();
       state.refs = [];
       renderRefs();
@@ -1038,7 +1043,7 @@
     }
   }
   const JOB_LABELS = {
-    validating: "VALIDATING", in_progress: "FORGING", finalizing: "FINALIZING",
+    validating: "VALIDATING", in_progress: "GENERATING", finalizing: "FINALIZING",
     completed: "READY", failed: "FAILED · REFUNDED", expired: "EXPIRED · REFUNDED", cancelled: "CANCELLED · REFUNDED", cancelling: "CANCELLING",
   };
   async function collectBatch(id, btn) {
@@ -1048,7 +1053,7 @@
     // COLLECT is the warm click for a batch, same reasoning as the forge button (see armFolder).
     const wantFolder = !!(autoSave && folderHandle);
     const folderArmed = await armFolder();
-    stripBusy("FOUNDRY DELIVERY", "Collecting forged visions…");
+    stripBusy("BATCH READY", "Collecting your images…");
     startProgress();
     try {
       for (;;) {
@@ -1059,7 +1064,7 @@
           if (folderArmed && folderReady() && (await writeToFolder(rec))) wrote++;
           saved++;
         }
-        $("#generation-status").textContent = `Collecting forged visions… ${saved}/${r.total}`;
+        $("#generation-status").textContent = `Collecting your images… ${saved}/${r.total}`;
         renderGallery();
         offset += (r.images || []).length;
         if (r.done || !(r.images || []).length) {
@@ -1067,8 +1072,8 @@
           const settle = r.refundedCredits ? ` · ${r.refundedCredits} credit${r.refundedCredits === 1 ? "" : "s"} returned` : r.extraCredits ? ` · ${r.extraCredits} extra credit${r.extraCredits === 1 ? "" : "s"} for overage` : "";
           const where = wrote ? ` · ${wrote} written to ${folderHandle.name}`
             : (wantFolder ? " · NOT written to your folder yet (tap RECONNECT below)" : "");
-          stripDone(`${saved} vision${saved === 1 ? "" : "s"} sealed to the vault` + where + (r.failed ? ` · ${r.failed} failed` : "") + (r.costUsd != null ? ` · ${fmtUsd(r.costUsd)} actual` : "") + settle);
-          if (wantFolder && saved && !wrote) showFault(`${saved} image${saved === 1 ? " is" : "s are"} safe in the on-device vault, but none reached ${folderHandle.name}. Your browser drops folder permission when it restarts. Tap RECONNECT in the vault bar, then SAVE ALL.`);
+          stripDone(`${saved} image${saved === 1 ? "" : "s"} added to your gallery` + where + (r.failed ? ` · ${r.failed} failed` : "") + (r.costUsd != null ? ` · ${fmtUsd(r.costUsd)} actual` : "") + settle);
+          if (wantFolder && saved && !wrote) showFault(`${saved} image${saved === 1 ? " is" : "s are"} saved in this browser, but none were saved to ${folderHandle.name}. The browser asks for folder access again after it restarts. Tap RECONNECT in the folder bar, then SAVE ALL.`);
           renderFolderBar();
           dismissed.add(id);
           saveDismissed();
@@ -1093,8 +1098,8 @@
     const label = JOB_LABELS[j.status] || j.status.toUpperCase();
     card.innerHTML = `
       <div class="creation-art art-forge"><i></i><i></i><i></i></div>
-      <div class="card-chrome"><span>FOUNDRY · ${esc(label)}</span></div>
-      <div class="creation-meta"><div><b>${j.count} VISION${j.count === 1 ? "" : "S"} IN THE FOUNDRY</b><small>${new Date(j.ts).toLocaleString()} · ${fmtUsd(j.estUsd)} charged at seal</small></div></div>`;
+      <div class="card-chrome"><span>BATCH · ${esc(label)}</span></div>
+      <div class="creation-meta"><div><b>BATCH OF ${j.count} IMAGE${j.count === 1 ? "" : "S"}</b><small>${new Date(j.ts).toLocaleString()} · ${fmtUsd(j.estUsd)} charged when sent</small></div></div>`;
     const meta = card.querySelector(".creation-meta");
     if (j.status === "completed") {
       const c = document.createElement("button");
@@ -1168,7 +1173,7 @@
         card.innerHTML = `
           <div class="creation-art"><img class="creation-img" alt="${esc(t.prompt.slice(0, 80))}" src="data:image/png;base64,${t.b64}"></div>
           <div class="card-chrome"><span>UNSAVED · long-press to keep</span></div>
-          <div class="creation-meta"><div><b>${esc(t.prompt.toUpperCase().slice(0, 60) || "FORGED VISION")}</b><small>${esc(cap(t.quality))} · ${esc(cap(t.aspect))} · not on this device</small></div></div>`;
+          <div class="creation-meta"><div><b>${esc(t.prompt.toUpperCase().slice(0, 60) || "UNTITLED")}</b><small>${esc(cap(t.quality))} · ${esc(cap(t.aspect))} · not on this device</small></div></div>`;
         const open = document.createElement("button");
         open.className = "card-action";
         open.setAttribute("aria-label", "Open image");
@@ -1188,7 +1193,7 @@
       card.innerHTML = `
         <div class="creation-art"><img class="creation-img" loading="lazy" alt="${esc(rec.prompt.slice(0, 80))}"></div>
         <div class="card-chrome"><span>${rec.source === "batch" ? "BATCH" : "STANDARD"} · ${pad4(rec.seq || 0)}${rec.savedAt ? " · SAVED" : ""}</span></div>
-        <div class="creation-meta"><div><b>${esc(rec.prompt.toUpperCase().slice(0, 60) || "FORGED VISION")}</b><small>${esc(cap(rec.quality))} · ${esc(cap(rec.aspect))} · ${SIZES[rec.aspect] || ""}</small></div></div>`;
+        <div class="creation-meta"><div><b>${esc(rec.prompt.toUpperCase().slice(0, 60) || "UNTITLED")}</b><small>${esc(cap(rec.quality))} · ${esc(cap(rec.aspect))} · ${SIZES[rec.aspect] || ""}</small></div></div>`;
       card.querySelector(".creation-img").src = url;
       const fav = document.createElement("button");
       fav.className = "favorite" + (rec.favorite ? " active" : "");
@@ -1214,13 +1219,13 @@
     if (!shown.length && !state.jobs.length && !(state.transient || []).length && !state.generating) {
       const empty = document.createElement("p");
       empty.className = "gallery-empty";
-      empty.textContent = q ? "NOTHING IN THE VAULT MATCHES THAT SEARCH." : "THE VAULT AWAITS ITS FIRST FORGED VISION. EVERYTHING YOU CREATE STAYS ON THIS DEVICE.";
+      empty.textContent = q ? "NO IMAGES MATCH THAT SEARCH." : "NO IMAGES YET. EVERYTHING YOU CREATE IS SAVED ON THIS DEVICE.";
       gallery.append(empty);
     }
 
     renderFolderBar();
-    $("#dfi-vault-title").textContent = recs.length ? "LOCAL VAULT HEALTHY" : "LOCAL VAULT";
-    $("#dfi-vault-stats").textContent = `${recs.length} creation${recs.length === 1 ? "" : "s"}`;
+    $("#dfi-vault-title").textContent = "STORAGE";
+    $("#dfi-vault-stats").textContent = `${recs.length} image${recs.length === 1 ? "" : "s"}`;
     updateStorage(recs.length);
     // Cards are rebuilt from scratch here, so their reflections start at the default position.
     // Seed them now rather than leaving every card identically lit until the next scroll.
@@ -1232,7 +1237,7 @@
       const est = await navigator.storage.estimate();
       const gb = (n) => (n / 1e9).toFixed(n >= 1e8 ? 2 : 3);
       $("#dfi-vault-load").textContent = `${gb(est.usage || 0)} GB / ${Math.round((est.quota || 0) / 1e9)} GB`;
-      $("#dfi-vault-stats").textContent = `${count} creation${count === 1 ? "" : "s"} · ${gb(est.usage || 0)} GB used`;
+      $("#dfi-vault-stats").textContent = `${count} image${count === 1 ? "" : "s"} · ${gb(est.usage || 0)} GB used`;
     } catch {}
   }
 
@@ -1242,7 +1247,7 @@
     const card = document.createElement("div");
     card.className = "dfi-viewer-card";
     card.innerHTML = `
-      <img src="${url}" alt="${esc(rec.prompt || "Forged vision")}">
+      <img src="${url}" alt="${esc(rec.prompt || "Generated image")}">
       <div class="dfi-viewer-meta">
         <p>${esc(rec.prompt || "(no description saved)")}</p>
         <small>${esc(cap(rec.quality))} · ${SIZES[rec.aspect] || ""} · ${new Date(rec.ts).toLocaleString()} · ${rec.source === "batch" ? "FROM A BATCH" : "MADE NOW"}</small>
@@ -1253,7 +1258,7 @@
     dl.className = "primary";
     dl.textContent = "DOWNLOAD";
     dl.href = url;
-    dl.download = "dominion-forge-" + new Date(rec.ts).toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png";
+    dl.download = "dominion-image-" + new Date(rec.ts).toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png";
     const fav = document.createElement("button");
     fav.textContent = rec.favorite ? "★ FAVORITED" : "☆ FAVORITE";
     fav.addEventListener("click", async () => {
@@ -1323,8 +1328,8 @@
     document.body.classList.toggle("dfi-parked", parked);
     handle.setAttribute("aria-expanded", String(!parked));
     handle.setAttribute("aria-label", parked
-      ? "Slide the Forge Images pane back into view"
-      : "Slide the Forge Images pane aside");
+      ? "Slide the image generator back into view"
+      : "Slide the image generator aside");
 
     // transitionend is the accurate signal but it is not guaranteed: it never fires when reduced
     // motion zeroes the duration, and it is dropped if the transition is interrupted. The timer
@@ -1347,7 +1352,7 @@
     const handle = $("#dfi-door-handle");
     if (handle) {
       handle.setAttribute("aria-expanded", "true");
-      handle.setAttribute("aria-label", "Slide the Forge Images pane aside");
+      handle.setAttribute("aria-label", "Slide the image generator aside");
     }
   }
 
@@ -1462,8 +1467,8 @@
     const btn = document.createElement("button");
     btn.className = "dfi-trigger";
     btn.id = "dfi-trigger";
-    btn.title = "Dominion Forge Images";
-    btn.setAttribute("aria-label", "Open Dominion Forge Images");
+    btn.title = "Image Generator";
+    btn.setAttribute("aria-label", "Open the image generator");
     btn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="9" cy="10" r="2" fill="currentColor"/><path d="M4.5 18l5-5 3.5 3.5L17 12l2.5 2.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     btn.addEventListener("click", openPanel);
     if (barLeft) barLeft.append(btn);
