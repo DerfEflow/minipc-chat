@@ -29,11 +29,11 @@ t("the always-on index stays small enough to ride every turn", () => {
   const idx = featureIndex();
   const approxTokens = Math.ceil(idx.length / 4);
   if (approxTokens > 400) throw new Error("index is " + approxTokens + " tokens, too heavy for every call");
-  if (!/Forge Images/.test(idx)) throw new Error("index missing image generation");
+  if (!/Image Generator/.test(idx)) throw new Error("index missing image generation");
 });
 
 t("lookup answers for names, ids, keywords and 'all'", () => {
-  for (const q of ["images", "Dominion Forge Images", "image", "forge dial", "documents", "artifacts", "voice", "chat sync", "privacy", "connectors"]) {
+  for (const q of ["images", "Image Generator", "image", "forge dial", "documents", "artifacts", "voice", "chat sync", "privacy", "connectors"]) {
     const r = featureHelp(q);
     if (!/WHERE:/.test(r)) throw new Error("no answer for: " + q);
   }
@@ -43,7 +43,7 @@ t("lookup answers for names, ids, keywords and 'all'", () => {
 t("an unknown topic says so and lists the real options, never invents one", () => {
   const r = featureHelp("time machine");
   if (!/No feature matches/.test(r)) throw new Error("did not admit the miss");
-  if (!/Dominion Forge Images/.test(r)) throw new Error("did not offer the real list");
+  if (!/Image Generator/.test(r)) throw new Error("did not offer the real list");
 });
 
 /*
@@ -74,8 +74,8 @@ t("the controls the map points at exist in the interface", () => {
     ['id="sb-setup"', "the Setup button"],
   ];
   for (const [needle, label] of musts) if (!html.includes(needle)) throw new Error("interface is missing " + label + " (" + needle + ")");
-  if (!imagesJs.includes('id = "dfi-trigger"')) throw new Error("the image studio trigger is gone");
-  if (!imagesJs.includes("IGNITE THE FORGE")) throw new Error("the ignite control the map names is gone");
+  if (!imagesJs.includes('id = "dfi-trigger"')) throw new Error("the image generator trigger is gone");
+  if (!imagesJs.includes("GENERATE")) throw new Error("the generate control the map names is gone");
   if (!imagesJs.includes("MAKE SEVERAL AT ONCE")) throw new Error("the batch control the map names is gone");
   if (!imagesJs.includes("MAKING YOUR PICTURE")) throw new Error("the working line the map names is gone");
   // The compass is now the route the map sends people down, so it has to be a real control.
