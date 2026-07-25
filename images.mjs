@@ -197,7 +197,7 @@ export function createImagesFeature(deps) {
   function handleConfig(req, res) {
     json(res, 200, {
       available: !!key(),
-      brand: "Dominion Forge Images",
+      brand: "Dominion Image Generator",
       model,
       sizes: IMAGE_SIZES,
       qualities: IMAGE_QUALITIES,

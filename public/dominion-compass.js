@@ -46,7 +46,7 @@
   const PANELS = {
     images:   { axis: "x", sign: +1, root: "#dfi-root", anim: "dfi-anim", open: "dfi-open",
                 shellTo: 108, rootFrom: -104, unit: "vw",
-                label: "Image forge", icon: "M4 17l5-6 4 5 3-4 4 5H4z", open_: () => window.openForgeImages, close: () => window.closeForgeImages },
+                label: "Images", icon: "M4 17l5-6 4 5 3-4 4 5H4z", open_: () => window.openForgeImages, close: () => window.closeForgeImages },
     dial:     { axis: "x", sign: -1, root: "#dfd-root", anim: "dfd-anim", open: "dfd-open",
                 shellTo: -108, rootFrom: 104, unit: "vw",
                 label: "Forge dial", icon: "M12 4v4M12 16v4M4 12h4M16 12h4", open_: () => window.openForgeDial, close: () => window.closeForgeDial },
