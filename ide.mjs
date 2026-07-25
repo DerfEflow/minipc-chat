@@ -266,6 +266,19 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
   const ok = (body) => ({ status: 200, body });
   const err = (status, code, error) => ({ status, code, body: { error, code } });
 
+  // Engineer entry check (Fred, 2026-07-25). null = allowed; otherwise the refusal payload.
+  // Reads LIVE billing state every time, so flipping auto-recharge off in settings blocks
+  // Engineer on the very next request — no cached grant to game.
+  function engineerGate(T) {
+    if (!multiTenant || T.isOwner) return null;   // the owner has no credit ledger to protect
+    if (T.role === "sponsored") return { code: "engineer_unavailable",
+      error: "Engineer requires a billing account with automatic top-off. Sponsored accounts cannot enable it." };
+    let acct = null; try { acct = billing && billing.account(T.email); } catch {}
+    if (acct && acct.autorecharge && acct.hasCard) return null;
+    return { code: "engineer_topoff_required", needsCard: !(acct && acct.hasCard),
+      error: "The Engineer interface requires Automatic Top-Off to be enabled." };
+  }
+
   // Identity + account state + exposure. Everything below this line assumes a real, allowed user.
   // Workspace assignments win, else the account-level board, exactly as /ide/route/preview reads
   // them. One source of truth: the build must never route differently from what the board shows.
@@ -304,10 +317,18 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
     state(T) {
       const blocked = wall(T); if (blocked) return blocked;
       const store = storeFor(T);
+      // Downgrade-on-read: a stored Engineer pref with top-off since disarmed serves as vibe with
+      // engineerLocked, so the interface (and everything created in it) blocks the moment the
+      // grant lapses. The stored value stays — re-arming top-off restores Engineer untouched.
+      const servedPrefs = { ...(store.prefs() || {}) };
+      if (servedPrefs.mode === "engineer") {
+        const g = engineerGate(T);
+        if (g) { servedPrefs.mode = "vibe"; servedPrefs.engineerLocked = g; }
+      }
       return ok({
         allowed: true,
         isOwner: !!T.isOwner,
-        prefs: store.prefs(),
+        prefs: servedPrefs,
         workspaces: store.list(),
         jobs: jobs.listFor(T.uid),
         limits: { maxWorkspaces: MAX_WORKSPACES },
@@ -323,11 +344,40 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
     setPrefs(T, body) {
       const blocked = wall(T); if (blocked) return blocked;
       const store = storeFor(T);
+      const mode = body && typeof body.mode === "string" ? body.mode : undefined;
+      // THE ENGINEER GATE (Fred, 2026-07-25): entering Engineer is refused server-side unless
+      // automatic top-off is armed. The client shows the one-click enable panel off this 403.
+      if (mode === "engineer") { const g = engineerGate(T); if (g) return { status: 403, body: g }; }
       return ok({ prefs: store.setPrefs({
         engaged: !!(body && body.engaged),
         assignments: body && body.assignments,
         language: body && body.language,
+        ...(mode !== undefined ? { mode } : {}),
       }) });
+    },
+
+    /*
+     * THE ENGINEER GATE (Fred, 2026-07-25) — a hard rule that cannot be subverted from the client:
+     * the Engineer interface requires AUTOMATIC TOP-OFF to be armed (a saved card + auto-recharge
+     * on). Enabling is one click inside Engineer (topoffEnable below); DISABLING lives only in the
+     * billing settings, and the moment it is off the served prefs downgrade out of Engineer
+     * (state() below), which blocks the interface and everything created in it. The owner is
+     * exempt (no credit ledger); sponsored comp accounts have no card and cannot arm it, so
+     * Engineer is closed to them, said plainly. Per-project created-in-Engineer tagging rides
+     * Fred's next Engineer round — the interface wall is what ships now.
+     */
+    engineerGate,
+    topoffEnable(T) {
+      const blocked = wall(T); if (blocked) return blocked;
+      if (!multiTenant || T.isOwner) return ok({ ok: true, exempt: true });
+      if (T.role === "sponsored") return { status: 403, body: { code: "engineer_unavailable",
+        error: "Engineer requires a billing account with automatic top-off. Sponsored accounts cannot enable it." } };
+      let acct = null; try { acct = billing && billing.account(T.email); } catch {}
+      if (!acct || !acct.hasCard) return ok({ ok: false, needsCard: true,
+        message: "Add a card in Setup first — automatic top-off needs a saved payment method." });
+      try { billing.setAutorecharge(T.email, true, acct.topupUsd); } catch (e) { return err(500, "topoff_failed", "Could not enable automatic top-off: " + (e && e.message)); }
+      log("[ide] engineer top-off armed for " + T.email);
+      return ok({ ok: true });
     },
 
     listWorkspaces(T) {

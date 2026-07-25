@@ -1260,7 +1260,7 @@
     wireTools();
     wireIntake(status);
     for (const b of document.querySelectorAll("#st-mode-switch button")) {
-      b.addEventListener("click", () => applyMode(b.dataset.mode));
+      b.addEventListener("click", () => requestMode(b.dataset.mode));
     }
     $("#st-go").addEventListener("click", () => beginIntake(status));
   }
@@ -1359,6 +1359,50 @@
    */
   const readMode = () => { try { const v = localStorage.getItem(MODE_KEY); return MODES.includes(v) ? v : ""; } catch { return ""; } };
 
+  /*
+   * THE ENGINEER GATE, client half (Fred, 2026-07-25). Entering Engineer asks the server first;
+   * a 403 means Automatic Top-Off is not armed, and the one-click enable panel appears instead.
+   * The server is the wall (it refuses the pref and downgrades served prefs when top-off lapses);
+   * this panel is the door handle. A network blip lets the UI in rather than bricking the app —
+   * every real spend still hits the server-side gate.
+   */
+  async function requestMode(m) {
+    if (m !== "engineer") return applyMode(m);
+    try {
+      const r = await fetch("/ide/prefs", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ engaged: state.engaged, mode: "engineer", language: MODE_REG.engineer }) });
+      if (r.status === 403) { const d = await r.json().catch(() => ({})); showTopoffPanel(d); return; }
+    } catch {}
+    applyMode("engineer");
+  }
+  function showTopoffPanel(d) {
+    if (document.getElementById("eng-topoff")) return;
+    const wrap = document.createElement("div");
+    wrap.id = "eng-topoff";
+    wrap.style.cssText = "position:fixed;inset:0;z-index:2147480000;display:flex;align-items:center;justify-content:center;background:rgba(0,3,8,.55);backdrop-filter:blur(8px);padding:18px";
+    const unavailable = d && d.code === "engineer_unavailable";
+    wrap.innerHTML = '<div style="max-width:520px;background:#0d1117;border:1px solid rgba(214,150,90,.55);border-radius:12px;padding:22px;color:#e8edf2;font-size:15px;line-height:1.5">' +
+      '<div style="font-size:17px;font-weight:700;margin-bottom:10px">Engineer requires Automatic Top-Off</div>' +
+      (unavailable
+        ? '<p style="margin:0 0 6px">' + (d.error || "Not available on this account.") + '</p>'
+        : '<p style="margin:0 0 10px">The Engineer interface runs long, real builds, so it needs an account that cannot stall mid-job.</p>' +
+          '<button id="eng-topoff-go" type="button" style="background:#d6965a;color:#111;border:0;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer;margin:2px 0 8px">Enable Automatic Top-Off</button>' +
+          '<div style="font-size:12px;opacity:.75">You will only be charged when your account runs low ($1 remaining), and credits will be added at your pre-set top-off amount in Settings.</div>') +
+      '<div style="margin-top:14px"><button id="eng-topoff-x" type="button" style="background:none;border:1px solid rgba(255,255,255,.3);color:inherit;border-radius:8px;padding:6px 14px;cursor:pointer">Close</button></div></div>';
+    document.body.appendChild(wrap);
+    const x = wrap.querySelector("#eng-topoff-x"); if (x) x.onclick = () => wrap.remove();
+    const go = wrap.querySelector("#eng-topoff-go");
+    if (go) go.onclick = async () => {
+      go.disabled = true;
+      try {
+        const r = await fetch("/ide/topoff-enable", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        const j = await r.json().catch(() => ({}));
+        if (j && j.ok) { wrap.remove(); applyMode("engineer"); return; }   // armed: the button is gone for good
+        if (j && j.needsCard) { location.href = "/setup.html"; return; }   // add a card, then come back
+        go.disabled = false;
+      } catch { go.disabled = false; }
+    };
+  }
   function applyMode(m, { save = true } = {}) {
     if (!MODES.includes(m)) return;
     state.mode = m;
@@ -1488,7 +1532,7 @@
       b.addEventListener("click", () => {
         markWelcomed();
         el.remove();
-        applyMode(b.dataset.mode);
+        requestMode(b.dataset.mode);
         maybeShowIntro();
         document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
       });
@@ -2456,6 +2500,13 @@
       if (!readMode() && s.prefs && MODES.includes(s.prefs.mode)) {
         state.mode = s.prefs.mode;
         try { localStorage.setItem(MODE_KEY, s.prefs.mode); } catch {}
+      }
+      // Engineer gate lapse: the server serves engineerLocked when top-off was disarmed. This
+      // device drops out of Engineer immediately and shows the enable panel once.
+      if (s.prefs && s.prefs.engineerLocked && (readMode() === "engineer" || state.mode === "engineer")) {
+        state.mode = "vibe";
+        try { localStorage.setItem(MODE_KEY, "vibe"); } catch {}
+        showTopoffPanel(s.prefs.engineerLocked);
       }
       if (state.open && (state.mode || readMode())) applyMode(state.mode || readMode(), { save: false });
       announceIdeState();

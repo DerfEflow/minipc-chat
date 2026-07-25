@@ -1293,6 +1293,9 @@ async function handleIde(req, res, u) {
 
   const body = (await readJsonBody(req)) || {};
   if (req.method === "POST" && path === "/ide/prefs") return send(ideFeature.setPrefs(T, body));
+  // Engineer gate: the one-click Automatic Top-Off arm (Fred, 2026-07-25). Disarming lives in
+  // billing settings only; the gate re-reads live billing state on every Engineer entry.
+  if (req.method === "POST" && path === "/ide/topoff-enable") return send(ideFeature.topoffEnable(T));
   if (req.method === "POST" && path === "/ide/route/preview") return send(ideFeature.previewRoute(T, body));
   // AF Full Custom (Phase 2): a divide-only PREVIEW so the window can show the proposed parts and
   // let the user assign a model + agent count to each BEFORE any build spends money. One divider
