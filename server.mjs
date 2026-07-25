@@ -264,7 +264,12 @@ const TYPES = {
   ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
   ".webmanifest": "application/manifest+json; charset=utf-8",
   ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+  ".webp": "image/webp", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
   ".mp4": "video/mp4",
+  // Self-hosted Domine (the Crucible's reading face). Served as font/woff2 rather than falling
+  // through to octet-stream: some proxies refuse to compress or cache an unknown type, and it costs
+  // one line to be correct.
+  ".woff2": "font/woff2",
   // Generated-document downloads (the /exports route).
   ".pdf": "application/pdf",
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

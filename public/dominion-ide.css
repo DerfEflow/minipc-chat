@@ -637,6 +637,59 @@ body.ide-open #ide-root { transform: none; }
 .st-tools-btns button.on { color: var(--ink, #e8f6ff); border-color: rgba(118, 255, 104, .45);
   box-shadow: 0 0 14px rgba(118, 255, 104, .18), inset 0 1px 0 rgba(225,247,255,.12); }
 
+/* ============================================================================================
+   DOMINE: the Crucible's reading face (Fred's ruling 2026-07-24, for all three profiles).
+
+   WHY SELF-HOSTED AND NOT GOOGLE'S CDN. Three reasons, in order of weight. This app is an
+   installable PWA with a service worker, and a font fetched from a third party is a font that is
+   missing the moment the network is: the two files below sit in the SW shell, so the conversation
+   reads correctly offline. Second, every visit to a Google font URL tells Google who is using
+   Dominion and when, which is not a thing to hand over for a typeface. Third, it is 43kB total for
+   the whole 400-to-700 weight range, so there is nothing to gain by outsourcing it.
+
+   Domine is licensed under the SIL Open Font License 1.1 (Impallari Type), which permits
+   redistribution with the license alongside; the license text ships next to the files at
+   /assets/fonts/Domine-OFL.txt.
+
+   ONE FAMILY, TWO FILES: the latin subset covers ordinary English, and latin-ext carries the
+   accents. Both declare `font-weight: 400 700` because this is a VARIABLE font, so bold in a chat
+   bubble is a real weight axis rather than a browser's synthetic smear. font-display: swap means
+   the text appears immediately in the fallback and swaps when the file lands, which is the right
+   trade for a conversation: never a blank bubble.
+   ============================================================================================ */
+@font-face {
+  font-family: "Domine";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/assets/fonts/domine-latin-var.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Domine";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/assets/fonts/domine-latin-ext-var.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308,
+    U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113,
+    U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* The Crucible's chat reads in Domine in EVERY profile. Deliberately scoped to the conversation
+   (bubbles, what is typed, the agreed-vision card) and not to the surrounding machinery: labels,
+   drawer summaries, model rows and the mono readouts keep the console face, because a serif in a
+   9px uppercase tracking-heavy label is a legibility loss, not a gain. */
+#ide-root {
+  --font-chat: "Domine", Georgia, "Times New Roman", serif;
+}
+.st-chat-log .cb,
+.st-chat-log .cb-vision div,
+.st-chat-row textarea {
+  font-family: var(--font-chat);
+}
+
 /* ---------- the intake conversation -------------------------------------------------------
  * A small chat that earns its keep before money moves. Minimized, it folds to just its head. */
 .st-chat { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; padding: 10px; border-radius: 4px;

@@ -25,7 +25,12 @@
 #ide-root.bg-on:has(#bg-shell.bg-watching) #cru { display: block !important; }
 
 .bg-shell {
-  --bg-font: ui-rounded, "Segoe UI Variable Display", "Segoe UI", Nunito, Quicksand, system-ui, sans-serif;
+  /* Domine (declared in dominion-ide.css, self-hosted) is the Crucible's reading face in all three
+     profiles, per Fred 2026-07-24. It replaces the rounded sans this shipped with: a serif built for
+     on-screen body text is both friendlier at this size and closer to the house's old-world look.
+     Georgia is the fallback for the moment before the file lands, and it is a serif too, so the swap
+     changes the shape of the letters without changing the shape of the paragraph. */
+  --bg-font: "Domine", Georgia, "Times New Roman", serif;
   /* 30% larger than the app's normal reading size, per the ruling. Everything in this surface
      sizes in em from here, so one number moves the whole beginner interface. */
   --bg-text: 1.3rem;
@@ -34,6 +39,15 @@
   width: 100%;
   min-width: 0;
   font-family: var(--bg-font);
+}
+
+/* The small uppercase labels stay on the console face. A serif set at 0.6em in caps with heavy
+   tracking is harder to read, not warmer: Domine earns its place in the sentences, not the signage. */
+.bg-projects-h,
+.bg-pong-hint,
+.bg-meter-copy small,
+.bg-help-card header b {
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
 }
 
 /* Any author `display` declaration outranks the UA's `[hidden] { display: none }`, so a view with
