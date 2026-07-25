@@ -7,9 +7,15 @@
  *   4. the system prompt enforces Fred's rulings per register: plain bans the jargon words,
  *      technical does not, and both demand one-question-at-a-time and the three-question floor
  *   5. client-supplied history is sanitized: roles clamped, sizes capped, system prompt is OURS
+ *   6. the beginner rules Fred set on 2026-07-24: the is-it-even-an-app gate, the seven named
+ *      things to learn, the hard seven-turn cap, and the device-correct sketch instruction
+ *   7. the three conversations behind one door (intake, review, stuck) get their own prompts, and
+ *      the review conversation's CHANGE READY parses like a vision
+ *   8. picture parts survive sanitizing while a remote URL never does
  */
 import assert from "node:assert/strict";
-import { intakeSystem, parseIntake, intakeMessages, VISION_MARKER } from "./ideintake.mjs";
+import { intakeSystem, reviewSystem, stuckSystem, parseIntake, intakeMessages, sanitizeContent,
+         hasImages, VISION_MARKER, CHANGE_MARKER } from "./ideintake.mjs";
 
 let passed = 0, failed = 0;
 function t(name, fn) {
@@ -125,6 +131,108 @@ await t("history is sanitized: roles clamped, sizes capped, and the system promp
   assert.equal(msgs[3].content.length, 4000, "content capped at 4000 chars");
   const cap = intakeMessages({ history: Array.from({ length: 100 }, (_, i) => ({ role: "user", content: "m" + i })) });
   assert.equal(cap.length, 41, "history capped at the last 40 turns");
+});
+
+/* ---------- Fred's beginner rules, 2026-07-24 ---------------------------------------------- */
+
+await t("the beginner interviewer must first decide whether it is even an app", () => {
+  const b = intakeSystem("plain", "beginner");
+  assert.ok(/IS IT EVEN AN APP/i.test(b), "the gate must be in the prompt");
+  assert.ok(/website/i.test(b) && /spreadsheet/i.test(b), "it must name what else it could be");
+  assert.ok(/Do not build an app for someone who does not need one/i.test(b));
+  // The expert modes are not put through this: they know what they asked for.
+  assert.ok(!/IS IT EVEN AN APP/i.test(intakeSystem("technical", "engineer")));
+});
+
+await t("all seven things Fred listed are in the beginner prompt", () => {
+  const b = intakeSystem("plain", "beginner");
+  for (const [n, re] of [
+    ["look", /LOOK like/], ["use", /USE it for/], ["who", /WHO they want using/],
+    ["like it", /LIKE it/], ["category", /KIND of app/], ["time", /TIME they have/],
+    ["budget", /BUDGET in mind/],
+  ]) assert.ok(re.test(b), "the beginner checklist is missing: " + n);
+});
+
+await t("the seven-turn cap is hard, and it is only in beginner mode", () => {
+  const b = intakeSystem("plain", "beginner");
+  assert.ok(/HARD TURN CAP/.test(b), "the cap must be stated");
+  assert.ok(/SEVEN replies/.test(b), "seven, per the ruling");
+  assert.ok(/Never ask an eighth question/i.test(b));
+  assert.ok(!/HARD TURN CAP/.test(intakeSystem("technical", "engineer")));
+});
+
+await t("the sketch instruction names the control the person can actually see", () => {
+  const phone = intakeSystem("plain", "beginner", "mobile");
+  assert.ok(/CAMERA button/.test(phone), "a phone gets the camera");
+  assert.ok(/photo of it/i.test(phone), "and the paper-and-photo suggestion");
+  assert.ok(!/PAPERCLIP/.test(phone), "a phone must not be sent to the paperclip");
+  const desk = intakeSystem("plain", "beginner", "desktop");
+  assert.ok(/PAPERCLIP button/.test(desk), "a computer gets the paperclip");
+  assert.ok(!/CAMERA button/.test(desk));
+});
+
+await t("three conversations, three prompts, one door", () => {
+  const rev = reviewSystem("plain", "beginner");
+  assert.ok(/Never interview them again/i.test(rev), "review must not re-interview");
+  assert.ok(rev.includes(CHANGE_MARKER), "review must define its marker");
+  assert.ok(/put it on the internet/i.test(rev), "review carries the deploy talk");
+  assert.ok(/screenshot/i.test(rev), "and the paste-a-screenshot invitation");
+  const stuck = stuckSystem("plain", "beginner");
+  assert.ok(/HELP, I'M STUCK/.test(stuck));
+  assert.ok(/Never start a build from here/i.test(stuck), "the side conversation stays a side conversation");
+  assert.ok(!stuck.includes(CHANGE_MARKER), "stuck agrees nothing");
+  // Each phase reaches intakeMessages, and the system prompt is still ours in every one.
+  for (const [phase, needle] of [["review", "looking at it right now"], ["stuck", "HELP, I'M STUCK"], ["intake", "intake interviewer"]]) {
+    const msgs = intakeMessages({ phase, history: [{ role: "user", content: "hi" }] });
+    assert.equal(msgs[0].role, "system");
+    assert.ok(msgs[0].content.includes(needle), phase + " got the wrong system prompt");
+  }
+});
+
+await t("CHANGE READY parses exactly like a vision, and the two never cross", () => {
+  const reply = "Right, I see it.\nCHANGE READY\n- Make the buttons bigger\n- Use blue instead of green";
+  const asChange = parseIntake(reply, { marker: CHANGE_MARKER });
+  assert.ok(asChange.vision.includes("buttons bigger"));
+  assert.equal(asChange.reply, "Right, I see it.");
+  // Read with the intake marker, the same text agrees nothing: a review reply can never trip a
+  // first build, and an intake reply can never trip a change.
+  assert.equal(parseIntake(reply, { marker: VISION_MARKER }).vision, null);
+  assert.equal(parseIntake("Lead.\nVISION READY\n- a thing", { marker: CHANGE_MARKER }).vision, null);
+});
+
+await t("pictures survive sanitizing; a remote URL never does", () => {
+  const dataUrl = "data:image/jpeg;base64," + "A".repeat(64);
+  const kept = sanitizeContent([{ type: "text", text: "here is my sketch" }, { type: "image_url", image_url: { url: dataUrl } }]);
+  assert.ok(Array.isArray(kept), "a picture turn stays multimodal");
+  assert.equal(kept.length, 2);
+  assert.equal(kept[1].image_url.url, dataUrl);
+  // The one that matters for safety: a part naming somewhere else is dropped, never fetched.
+  const remote = sanitizeContent([{ type: "text", text: "look" }, { type: "image_url", image_url: { url: "https://example.com/x.png" } }]);
+  assert.equal(remote, "look", "a remote URL is dropped and the text collapses to a plain string");
+  // A lone text part collapses to a string so non-vision models keep their ordinary path.
+  assert.equal(sanitizeContent([{ type: "text", text: "just words" }]), "just words");
+  // Cap: two pictures per turn.
+  const many = sanitizeContent([1, 2, 3].map(() => ({ type: "image_url", image_url: { url: dataUrl } })));
+  assert.equal(many.filter((p) => p.type === "image_url").length, 2);
+  // And a giant base64 blob is refused rather than forwarded to a provider.
+  assert.equal(sanitizeContent([{ type: "image_url", image_url: { url: "data:image/png;base64," + "A".repeat(6_000_000) } }]), "");
+});
+
+await t("hasImages spots the turn that needs a model with eyes", () => {
+  const dataUrl = "data:image/png;base64,AAAA";
+  assert.equal(hasImages([{ role: "user", content: "words only" }]), false);
+  assert.equal(hasImages([{ role: "user", content: [{ type: "image_url", image_url: { url: dataUrl } }] }]), true);
+  assert.equal(hasImages(null), false);
+});
+
+await t("a picture turn survives the full sanitize path into provider shape", () => {
+  const dataUrl = "data:image/jpeg;base64," + "B".repeat(40);
+  const msgs = intakeMessages({ history: [
+    { role: "user", content: [{ type: "text", text: "my drawing" }, { type: "image_url", image_url: { url: dataUrl } }] },
+  ] });
+  assert.equal(msgs.length, 2);
+  assert.ok(Array.isArray(msgs[1].content), "the picture reaches the provider");
+  assert.equal(msgs[1].role, "user");
 });
 
 console.log("\nideintake: " + passed + " passed, " + failed + " failed");

@@ -72,7 +72,7 @@ import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } fr
 import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
-import { intakeMessages, parseIntake } from "./ideintake.mjs";
+import { intakeMessages, parseIntake, hasImages, VISION_MARKER, CHANGE_MARKER } from "./ideintake.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
 import { sweepFindings, sweepReport, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
 import { helpVoice } from "./idehelp.mjs";
@@ -1444,7 +1444,19 @@ async function handleIde(req, res, u) {
     if (blocked) return send(blocked);
     const reg = normalizeRegister(body.register);
     const mode = normalizeCrucibleMode(body.mode || ((ideFeature.state(T).body || {}).prefs || {}).mode);
-    const messages = intakeMessages({ register: reg, mode, history: body.messages });
+    /*
+     * Three conversations share this door (Fred's beginner rebuild, 2026-07-24), because they share
+     * everything that matters: the same tenant wall, the same metering, the same sanitizer, the same
+     * marker parser. Only the system prompt and the marker differ.
+     *   intake  the interview before a build          -> VISION READY
+     *   review  the app exists and is on screen       -> CHANGE READY
+     *   stuck   the HELP, I'M STUCK side conversation -> no marker at all
+     * `device` reaches the prompt so the interviewer names the CAMERA on a phone and the PAPERCLIP
+     * on a computer, rather than describing a control the person cannot see.
+     */
+    const phase = body.phase === "review" ? "review" : body.phase === "stuck" ? "stuck" : "intake";
+    const device = body.device === "mobile" ? "mobile" : "desktop";
+    const messages = intakeMessages({ register: reg, mode, history: body.messages, device, phase });
     if (messages.length < 2) return send({ status: 400, body: { error: "Say what you want built first." } });
     // The same brain that will do the engineering conducts the interview: the workspace's
     // build_code assignment, resolved exactly the way the build itself will resolve it.
@@ -1455,11 +1467,27 @@ async function handleIde(req, res, u) {
         || ((ideFeature.state(T).body.prefs || {}).assignments || {});
     } catch {}
     const resolved = resolveAssignments(stored, { allInOne: stored.allInOne || "", fallback: defaultModelFor(!!T.isOwner) });
-    const model = resolved.build_code || defaultModelFor(!!T.isOwner);
+    let model = resolved.build_code || defaultModelFor(!!T.isOwner);
+    /*
+     * A photographed sketch is useless to a model that cannot see. When the turn carries a picture
+     * and the interviewer's own model is not vision-capable, this ONE turn is routed to a model that
+     * is. Silence would be worse than the switch: the alternative is an interviewer confidently
+     * discussing a drawing it never received.
+     */
+    const carriesImage = hasImages(body.messages);
+    if (carriesImage && !isVisionCapable(model)) {
+      const seeing = pickVisionModel();
+      if (seeing) model = seeing;
+      else return send({ status: 200, body: { error: "No picture-reading model is available on this server, so I cannot look at that. Tell me in words instead and we will keep going." } });
+    }
     const r = await ideChatOnce(model, messages);
-    if (r.costUsd) { try { await meterTurn(T, r.costUsd, "crucible intake", ""); } catch {} }
+    if (r.costUsd) { try { await meterTurn(T, r.costUsd, "crucible " + phase, ""); } catch {} }
     if (!r.ok) return send({ status: 200, body: { error: r.error || "The model could not be reached. Try again." } });
-    const parsed = parseIntake(r.content);
+    // The review conversation agrees CHANGES, not visions, so it looks for its own marker. The
+    // stuck conversation agrees nothing: it gets no marker, so its whole reply stays prose.
+    const parsed = phase === "review" ? parseIntake(r.content, { marker: CHANGE_MARKER })
+                 : phase === "stuck" ? { reply: String(r.content || "").trim(), vision: null, mockups: [] }
+                 : parseIntake(r.content, { marker: VISION_MARKER });
     /*
      * Honesty about money and complexity (the Vibe Coder spine, SOW ruling 2026-07-21): the
      * moment a vision exists, the server computes what it implies. Flags come from a
@@ -1467,14 +1495,16 @@ async function handleIde(req, res, u) {
      * Beginners get these facts later, at the deploy talk, in gentler words; the client decides.
      */
     let involves = null;
-    if (parsed.vision) {
+    if (parsed.vision && phase === "intake") {
       const rec = modelById(model) || {};
       const moves = Math.max(2, Math.min(12, (parsed.vision.match(/^\s*[-*]/gm) || []).length));
       const x = visionExtras(parsed.vision, { moves, inCost: rec.inCost || 0, outCost: rec.outCost || 0 });
       involves = { flags: x.flags, band: costBand(x.est) };
     }
+    // `vision` stays the field name in both phases so one client path reads either; `phase` tells
+    // the client whether the bullets are a first build or a change to an app that already exists.
     return send({ status: 200, body: { ok: true, reply: parsed.reply, vision: parsed.vision,
-      mockups: parsed.mockups || [], involves, mode, costUsd: r.costUsd } });
+      mockups: parsed.mockups || [], involves, mode, phase, costUsd: r.costUsd } });
   }
 
   if (req.method === "POST" && path === "/ide/job") {

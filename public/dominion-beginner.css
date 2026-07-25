@@ -1,0 +1,500 @@
+/* ============================================================================================
+   The Crucible in Beginner mode: Crucible App Builder.
+   Fred's ruling 2026-07-24. Written after watching a non-technical person try the expert page.
+
+   THE SHAPE IS THE MESSAGE. A beginner does not need a panel of controls with the useful parts
+   hidden; they need a conversation big enough to trust, a way to shout for help, and nothing else
+   on the screen. So: one chat the full width of the screen and half its height, text a third
+   larger than the app's normal size in a friendly rounded face, the primary action ABOVE it where
+   it cannot be missed, saved work along the bottom, and one square red-alert button underneath.
+
+   Everything here is scoped under #ide-root so it cannot leak into chat, the dial, or the forge.
+   ============================================================================================ */
+
+/* The expert page and both build lenses stand down completely in beginner mode. Not dimmed, not
+   collapsed: absent, so nothing behind the conversation can be tapped by accident. */
+#ide-root.bg-on #ide-start,
+#ide-root.bg-on #cru,
+#ide-root.bg-on .ide-ask { display: none !important; }
+#ide-root:not(.bg-on) #bg-shell { display: none; }
+
+/* While the beginner is watching the machinery instead of playing (the "show me what it is doing"
+   link), the game stands down and the ordinary build view comes back. The :has() carries higher
+   specificity than the blanket hide above it, which is what lets one class flip the two. */
+#ide-root.bg-on #bg-shell.bg-watching #bg-view-building { display: none; }
+#ide-root.bg-on:has(#bg-shell.bg-watching) #cru { display: block !important; }
+
+.bg-shell {
+  --bg-font: ui-rounded, "Segoe UI Variable Display", "Segoe UI", Nunito, Quicksand, system-ui, sans-serif;
+  /* 30% larger than the app's normal reading size, per the ruling. Everything in this surface
+     sizes in em from here, so one number moves the whole beginner interface. */
+  --bg-text: 1.3rem;
+  position: relative;
+  z-index: 3;
+  width: 100%;
+  min-width: 0;
+  font-family: var(--bg-font);
+}
+
+/* Any author `display` declaration outranks the UA's `[hidden] { display: none }`, so a view with
+   `display: grid` on its class stays on screen no matter what the attribute says. That is not
+   theory: the first build of this showed the conversation and the Pong screen stacked on top of one
+   another (caught in the browser, 2026-07-24). Attribute + class outranks class alone, so this one
+   rule makes hidden mean hidden for all four views. */
+.bg-view[hidden] { display: none; }
+
+/* ---------- the conversation view ------------------------------------------------------- */
+.bg-view-chat { display: grid; gap: 14px; }
+
+/* BUILD IT sits ABOVE the chat, so the moment it appears it is between the person's eyes and the
+   conversation rather than below the fold. */
+.bg-build-bar { display: grid; place-items: center; }
+.bg-build-bar[hidden] { display: none; }
+.bg-build-btn {
+  width: min(100%, 460px);
+  padding: 18px 26px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: calc(var(--bg-text) * 1.05);
+  font-weight: 800;
+  letter-spacing: .14em;
+  color: #06180c;
+  border: 1px solid rgba(160, 255, 133, .8);
+  border-radius: 14px;
+  background: linear-gradient(180deg, #b8ff9d, #4fd35f 60%, #2ea347);
+  box-shadow: 0 10px 30px rgba(80, 220, 90, .3), inset 0 1px 0 rgba(255, 255, 255, .5);
+}
+.bg-build-btn:hover { filter: brightness(1.07); }
+.bg-build-btn:active { transform: translateY(1px); }
+.bg-build-bar.just-arrived .bg-build-btn { animation: bg-pop 1.1s ease 3; }
+@keyframes bg-pop {
+  0%, 100% { box-shadow: 0 10px 30px rgba(80, 220, 90, .3), inset 0 1px 0 rgba(255, 255, 255, .5); }
+  50% { box-shadow: 0 10px 46px rgba(120, 255, 130, .75), inset 0 1px 0 rgba(255, 255, 255, .6); }
+}
+@media (prefers-reduced-motion: reduce) { .bg-build-bar.just-arrived .bg-build-btn { animation: none; } }
+
+/* The chat: full width, half the screen tall. */
+.bg-chat {
+  display: grid;
+  grid-template-rows: 1fr auto auto auto;
+  height: 50vh;
+  min-height: 320px;
+  /* A grid item defaults to min-width:auto, which refuses to shrink below its content's minimum.
+     The composer row's minimum includes a textarea's intrinsic 20-column width, so without this the
+     row measured 378px inside a 343px chat and pushed the send button off the screen edge (caught
+     in the browser, 2026-07-24). Every row here is allowed to be narrower than its content wants. */
+  border: 1px solid rgba(151, 200, 235, .22);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(10, 26, 42, .82), rgba(3, 10, 18, .92));
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .12), 0 18px 44px rgba(0, 0, 0, .45);
+  overflow: hidden;
+}
+.bg-chat > * { min-width: 0; }
+.bg-log {
+  padding: 20px 20px 8px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-size: var(--bg-text);
+  line-height: 1.55;
+}
+.bgb { max-width: 86%; padding: 14px 17px; border-radius: 16px; }
+.bgb p { margin: 0; }
+.bgb-ai {
+  align-self: flex-start;
+  color: #eaf6ff;
+  border: 1px solid rgba(151, 200, 235, .2);
+  background: linear-gradient(180deg, rgba(18, 42, 66, .9), rgba(8, 22, 38, .95));
+  border-bottom-left-radius: 5px;
+}
+.bgb-me {
+  align-self: flex-end;
+  color: #06180c;
+  background: linear-gradient(180deg, #cdf7c2, #8fe08a);
+  border-bottom-right-radius: 5px;
+}
+.bgb-pic { display: block; max-width: 100%; margin-top: 8px; border-radius: 10px; }
+.bgb-thinking { display: flex; gap: 6px; align-items: center; }
+.bgb-thinking i {
+  width: 9px; height: 9px; border-radius: 50%; background: var(--copper-hot, #d4823c);
+  animation: bg-blink 1.2s infinite;
+}
+.bgb-thinking i:nth-child(2) { animation-delay: .18s; }
+.bgb-thinking i:nth-child(3) { animation-delay: .36s; }
+@keyframes bg-blink { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .bgb-thinking i { animation-duration: 3s; } }
+
+.bgb-vision {
+  align-self: stretch;
+  max-width: 100%;
+  border: 1px solid rgba(160, 255, 133, .4);
+  background: linear-gradient(180deg, rgba(24, 60, 30, .55), rgba(6, 20, 10, .8));
+}
+.bgb-vision h4 {
+  margin: 0 0 8px;
+  font-size: calc(var(--bg-text) * .72);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--lime-hot, #b9ff9d);
+}
+.bgb-vision div { white-space: pre-wrap; font-size: calc(var(--bg-text) * .92); }
+
+/* the composer */
+.bg-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid rgba(151, 200, 235, .16);
+  background: rgba(2, 8, 14, .5);
+}
+.bg-row { min-width: 0; }
+.bg-row textarea {
+  /* basis 0, not auto: a textarea's intrinsic width is 20 columns, and an auto basis makes that
+     the starting size every sibling then has to fight for room against. */
+  flex: 1 1 0;
+  min-width: 0;
+  resize: none;
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: calc(var(--bg-text) * .92);
+  line-height: 1.4;
+  color: var(--ink, #eaf6ff);
+  border: 1px solid rgba(151, 200, 235, .25);
+  border-radius: 12px;
+  background: rgba(3, 12, 20, .75);
+}
+.bg-row textarea:focus-visible { outline: 2px solid rgba(160, 255, 133, .6); outline-offset: 1px; }
+.bg-icon, .bg-send {
+  flex: 0 0 auto;
+  display: grid; place-items: center;
+  width: 48px; height: 48px;
+  cursor: pointer;
+  border-radius: 12px;
+  border: 1px solid rgba(185, 107, 50, .45);
+  background: linear-gradient(180deg, rgba(16, 34, 54, .9), rgba(5, 13, 22, .95));
+  color: var(--copper-hot, #d4823c);
+}
+.bg-icon svg, .bg-send svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.bg-icon:hover, .bg-send:hover { filter: brightness(1.15); }
+.bg-send { border-color: rgba(160, 255, 133, .55); color: #b9ff9d; }
+
+.bg-tray { display: flex; gap: 8px; padding: 10px 14px 0; }
+.bg-tray[hidden] { display: none; }
+.bg-tray-cell { position: relative; }
+.bg-tray-cell img { display: block; width: 64px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid rgba(151, 200, 235, .3); }
+.bg-tray-cell button {
+  position: absolute; top: -7px; right: -7px; width: 22px; height: 22px;
+  display: grid; place-items: center; cursor: pointer;
+  border-radius: 50%; border: 1px solid rgba(255, 150, 130, .6);
+  background: #180605; color: #ffb0a0; font: 700 13px/1 monospace;
+}
+
+/* Saved Projects: along the bottom of the chat window, centred, one button per app. */
+.bg-projects {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 12px 14px 14px;
+  border-top: 1px solid rgba(151, 200, 235, .14);
+  background: rgba(2, 8, 14, .35);
+}
+.bg-projects-h {
+  font-size: calc(var(--bg-text) * .62);
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--muted, #8ba0ae);
+}
+.bg-projects-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.bg-project {
+  padding: 9px 16px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: calc(var(--bg-text) * .74);
+  color: #eaf6ff;
+  border: 1px solid rgba(151, 200, 235, .28);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(18, 40, 62, .9), rgba(6, 16, 28, .95));
+}
+.bg-project:hover { border-color: rgba(160, 255, 133, .5); color: #d8ffcd; }
+.bg-project.none { cursor: default; color: var(--muted, #8ba0ae); border-style: dashed; background: none; }
+
+/* HELP, I'M STUCK: a big square, below the chat, on the left. It is deliberately the loudest thing
+   on the screen after BUILD IT, because its whole job is to be findable in a panic. */
+.bg-under { display: flex; justify-content: flex-start; }
+.bg-stuck {
+  width: 132px; height: 132px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: calc(var(--bg-text) * .8);
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: .08em;
+  color: #fff1ec;
+  border: 2px solid rgba(255, 120, 96, .7);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(120, 30, 20, .95), rgba(60, 10, 6, .98));
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .5), inset 0 1px 0 rgba(255, 190, 170, .3);
+}
+.bg-stuck:hover { border-color: rgba(255, 160, 140, .9); filter: brightness(1.1); }
+.bg-stuck:active { transform: translateY(1px); }
+
+/* ---------- the build view: a game and a robot ------------------------------------------- */
+.bg-view-building { display: grid; gap: 14px; justify-items: center; }
+.bg-build-title {
+  margin: 0;
+  text-align: center;
+  font-size: calc(var(--bg-text) * .95);
+  font-weight: 700;
+  color: #eaf6ff;
+}
+.bg-pong-wrap { position: relative; width: 100%; max-width: 640px; }
+#bg-pong {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 640 / 400;
+  touch-action: none;
+  border: 1px solid rgba(151, 200, 235, .25);
+  border-radius: 14px;
+  background: radial-gradient(120% 100% at 50% 0%, rgba(20, 44, 68, .8), rgba(2, 8, 14, .95));
+}
+#bg-pong:focus-visible { outline: 2px solid rgba(160, 255, 133, .6); }
+.bg-pong-hint {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+  font-size: calc(var(--bg-text) * .6);
+  letter-spacing: .1em;
+  color: rgba(234, 246, 255, .45);
+  pointer-events: none;
+}
+
+/* The welding robot and the honest counter it stands next to. */
+.bg-meter {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  max-width: 640px;
+  padding: 14px 16px;
+  border: 1px solid rgba(185, 107, 50, .35);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(16, 34, 54, .8), rgba(4, 11, 20, .92));
+}
+.bg-robot svg { width: 120px; height: 100px; }
+.bg-robot .r-body, .bg-robot .r-neck, .bg-robot .r-arm, .bg-robot .r-work, .bg-robot .r-torch rect {
+  fill: #9fc0d8; stroke: #3d5c74; stroke-width: 1.5;
+}
+.bg-robot .r-ant { fill: var(--copper-hot, #d4823c); }
+.bg-robot .r-eye { fill: #06202f; }
+.bg-robot .r-pupil { fill: #9dff92; animation: bg-look 3.4s ease-in-out infinite; }
+.bg-robot .r-mouth { fill: #3d5c74; }
+.bg-robot .r-arm { animation: bg-weld .5s ease-in-out infinite alternate; transform-origin: 84px 55px; }
+.bg-robot .r-torch { animation: bg-weld .5s ease-in-out infinite alternate; transform-origin: 84px 55px; }
+.bg-robot .r-spark-dots circle { fill: #fff3c4; animation: bg-spark .42s linear infinite; }
+.bg-robot .r-spark-dots circle:nth-child(2) { animation-delay: .14s; }
+.bg-robot .r-spark-dots circle:nth-child(3) { animation-delay: .28s; }
+@keyframes bg-look { 0%, 100% { transform: translateX(-1.5px); } 50% { transform: translateX(1.5px); } }
+@keyframes bg-weld { from { transform: rotate(-4deg); } to { transform: rotate(4deg); } }
+@keyframes bg-spark { 0% { opacity: 1; transform: translate(0, 0) scale(1); } 100% { opacity: 0; transform: translate(6px, 8px) scale(.4); } }
+@media (prefers-reduced-motion: reduce) {
+  .bg-robot .r-pupil, .bg-robot .r-arm, .bg-robot .r-torch, .bg-robot .r-spark-dots circle { animation: none; }
+}
+
+.bg-meter-copy { display: grid; gap: 7px; min-width: 0; }
+.bg-bar { height: 10px; border-radius: 999px; overflow: hidden; background: rgba(121, 255, 82, .1); }
+.bg-bar i {
+  display: block; height: 100%; width: 2%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #429a33, #b9ff9d);
+  box-shadow: 0 0 12px rgba(121, 255, 82, .5);
+  transition: width .6s ease;
+}
+.bg-meter-line {
+  display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline;
+  font-size: calc(var(--bg-text) * .78);
+}
+.bg-meter-line b { color: var(--lime-hot, #b9ff9d); }
+.bg-meter-line span { color: var(--muted, #8ba0ae); font-size: calc(var(--bg-text) * .66); }
+.bg-meter-copy small { color: var(--muted, #8ba0ae); font-size: calc(var(--bg-text) * .62); letter-spacing: .08em; }
+
+.bg-link {
+  padding: 6px 4px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: calc(var(--bg-text) * .68);
+  color: var(--muted, #8ba0ae);
+  border: 0; background: none;
+  text-decoration: underline;
+}
+.bg-link:hover { color: #eaf6ff; }
+
+/* ---------- the finished view ------------------------------------------------------------ */
+.bg-view-done { display: grid; place-items: center; min-height: 60vh; }
+.bg-see {
+  width: min(88vw, 560px);
+  min-height: 200px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: clamp(28px, 7vw, 54px);
+  font-weight: 900;
+  letter-spacing: .06em;
+  color: #06180c;
+  border: 2px solid rgba(190, 255, 170, .9);
+  border-radius: 24px;
+  background: linear-gradient(180deg, #d8ffc9, #6ee06f 55%, #35b04c);
+  box-shadow: 0 26px 70px rgba(80, 220, 90, .35), inset 0 2px 0 rgba(255, 255, 255, .6);
+  animation: bg-see-in .4s ease;
+}
+.bg-see:hover { filter: brightness(1.06); }
+.bg-see:active { transform: translateY(2px); }
+@keyframes bg-see-in { from { opacity: 0; transform: scale(.9); } }
+@media (prefers-reduced-motion: reduce) { .bg-see { animation: none; } }
+
+/* ---------- the preview and the review conversation -------------------------------------- */
+.bg-view-preview { display: grid; gap: 14px; }
+.bg-frame-wrap {
+  display: grid;
+  min-height: 46vh;
+  border: 1px solid rgba(151, 200, 235, .25);
+  border-radius: 16px;
+  overflow: hidden;
+  background: rgba(2, 8, 14, .6);
+}
+.bg-frame { width: 100%; height: 46vh; border: 0; background: #fff; }
+.bg-frame-note { margin: auto; padding: 24px; text-align: center; color: var(--muted, #8ba0ae); font-size: calc(var(--bg-text) * .8); }
+.bg-frame-note.is-bad { color: #ffb49a; }
+.bg-chat-review { height: 42vh; min-height: 280px; grid-template-rows: 1fr auto auto auto; }
+.bg-change-bar { display: grid; place-items: center; padding: 10px 14px 0; }
+.bg-change-bar[hidden] { display: none; }
+
+/* ---------- the help conversation, over everything --------------------------------------- */
+.bg-help {
+  position: fixed; inset: 0; z-index: 80;
+  display: grid; place-items: end center;
+  padding: 16px;
+  background: rgba(0, 4, 8, .72);
+}
+.bg-help[hidden] { display: none; }
+.bg-help-card {
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  width: min(96vw, 560px);
+  height: min(72vh, 620px);
+  border: 1px solid rgba(255, 120, 96, .45);
+  border-radius: 18px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(20, 30, 44, .97), rgba(4, 10, 18, .98));
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .7);
+  font-family: var(--bg-font, system-ui);
+}
+.bg-help-card header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 120, 96, .3);
+}
+.bg-help-card header b { font-size: 13px; letter-spacing: .18em; color: #ff9d84; }
+.bg-help-card header button {
+  width: 34px; height: 34px; cursor: pointer;
+  border-radius: 9px; border: 1px solid rgba(151, 200, 235, .25);
+  background: rgba(3, 12, 20, .8); color: #eaf6ff; font: 700 18px/1 monospace;
+}
+.bg-help-card .bg-log { font-size: 1.05rem; }
+
+/* ---------- phones ---------------------------------------------------------------------- */
+@media (max-width: 620px) {
+  .bg-shell { --bg-text: 1.2rem; }
+  .bg-chat { height: 52vh; min-height: 300px; }
+  .bg-log { padding: 14px 14px 6px; }
+  .bgb { max-width: 92%; }
+  .bg-icon, .bg-send { width: 44px; height: 44px; }
+  .bg-stuck { width: 118px; height: 118px; }
+  .bg-meter { grid-template-columns: 84px 1fr; padding: 12px; }
+  .bg-robot svg { width: 84px; height: 70px; }
+  .bg-frame, .bg-frame-wrap { min-height: 40vh; }
+  .bg-frame { height: 40vh; }
+}
+
+/* ============================================================================================
+   The Crucible Welcome Screen: a layer OVER the whole interface, blocking it out.
+   Three buttons, one word under each, nothing else. Once per session.
+   ============================================================================================ */
+.cw {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px 18px;
+  overflow-y: auto;
+  background:
+    radial-gradient(90% 70% at 50% 0%, rgba(24, 16, 8, .96), transparent 70%),
+    rgba(1, 4, 8, .97);
+  backdrop-filter: blur(3px);
+  animation: cw-in .22s ease;
+}
+@keyframes cw-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .cw { animation: none; } }
+.cw-card {
+  width: min(100%, 720px);
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 30px 24px 34px;
+  text-align: center;
+  border: 1px solid rgba(185, 107, 50, .45);
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(14, 33, 54, .92), rgba(3, 9, 17, .96));
+  box-shadow: 0 30px 90px rgba(0, 0, 0, .7), inset 0 1px 0 rgba(255, 193, 138, .16);
+}
+.cw-kicker {
+  font-size: 11px; letter-spacing: .3em; text-transform: uppercase;
+  color: var(--copper-hot, #d4823c);
+}
+.cw-card h2 {
+  margin: 6px 0 0;
+  font-size: clamp(22px, 4.4vw, 32px);
+  font-weight: 750;
+  letter-spacing: .02em;
+  color: var(--ink, #eaf6ff);
+}
+.cw-sub { margin: 0 0 14px; font-size: 13.5px; color: var(--muted, #8ba0ae); }
+.cw-choices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; width: 100%; }
+.cw-choice { display: grid; justify-items: center; gap: 6px; align-content: start; }
+.cw-btn {
+  width: 100%;
+  min-height: 86px;
+  padding: 14px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: clamp(15px, 2.4vw, 19px);
+  font-weight: 750;
+  letter-spacing: .04em;
+  color: var(--ink, #eaf6ff);
+  border: 1px solid rgba(151, 200, 235, .3);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(20, 46, 72, .95), rgba(6, 16, 28, .96));
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .14), 0 8px 22px rgba(0, 0, 0, .45);
+  transition: border-color .16s ease, box-shadow .16s ease, transform .12s ease;
+}
+.cw-btn:hover, .cw-btn:focus-visible {
+  border-color: rgba(160, 255, 133, .65);
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .18), 0 0 26px rgba(118, 255, 104, .18);
+}
+.cw-btn:active { transform: translateY(1px); }
+.cw-level { font-size: 12.5px; font-weight: 700; letter-spacing: .06em; color: var(--copper-hot, #d4823c); }
+.cw-why { font-size: 12px; line-height: 1.45; color: var(--muted, #8ba0ae); }
+@media (max-width: 620px) {
+  .cw-choices { grid-template-columns: 1fr; gap: 12px; }
+  .cw-btn { min-height: 64px; }
+  .cw-card { padding: 22px 16px 26px; }
+}
+
+/* The way out of the Crucible says where it goes, in words. */
+.ide-rail-back { width: auto !important; gap: 8px; padding: 0 14px 0 10px; }
+.ide-back-label {
+  font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  white-space: nowrap;
+}
+@media (max-width: 480px) { .ide-back-label { display: none; } }

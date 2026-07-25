@@ -91,34 +91,42 @@
     const rail = document.createElement("div");
     rail.className = "ide-rail";
 
+    /*
+     * The way out says where it goes (Fred, 2026-07-24). It used to be a bare arrow beside the words
+     * "Dominion Works", and people read the product name as the label of the button next to it, so
+     * the one control that leaves this screen was the least obvious thing on it.
+     */
     const back = document.createElement("button");
     back.type = "button";
-    back.className = "ide-rail-btn";
+    back.className = "ide-rail-btn ide-rail-back";
     back.id = "ide-back";
-    back.title = "Back to conversation";
-    back.setAttribute("aria-label", "Back to conversation");
-    back.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>';
+    back.title = "Return to chat";
+    back.setAttribute("aria-label", "Return to chat");
+    back.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>'
+      + '<span class="ide-back-label">Return to chat</span>';
 
+    // The title names the surface the CURRENT mode puts you in (paintRailTitle keeps it honest):
+    // App Builder, App Launcher, or Full Stack Platform.
     const title = document.createElement("div");
     title.className = "ide-rail-title";
-    title.innerHTML = '<span class="t">Dominion Works</span>'
-      + '<span class="s">Build surface for applications and design</span>';
+    title.innerHTML = '<span class="t" id="ide-rail-name"></span>';
 
-    const lamp = document.createElement("span");
-    lamp.className = "ide-lamp";
-    lamp.id = "ide-lamp";
-    lamp.dataset.state = "idle";
-    lamp.innerHTML = '<i aria-hidden="true"></i><span id="ide-lamp-text">Standby</span>';
-
+    /*
+     * THE STANDBY LAMP IS GONE (Fred, 2026-07-24: "no one knows what it does. Is it actually
+     * useful?"). It showed idle/running/waiting for jobs, which three other places already say in
+     * words a person can read: the rail button in the command bar carries the live count, the
+     * journey strip names the phase, and the beginner progress screen shows the build itself. A
+     * nondescript lamp that needs explaining is worse than the space it occupied.
+     */
     const close = document.createElement("button");
     close.type = "button";
     close.className = "ide-rail-btn";
     close.id = "ide-close";
-    close.title = "Close Dominion Works";
-    close.setAttribute("aria-label", "Close Dominion Works");
+    close.title = "Close";
+    close.setAttribute("aria-label", "Close");
     close.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 
-    rail.append(back, title, lamp, close);
+    rail.append(back, title, close);
 
     const stage = document.createElement("div");
     stage.className = "ide-stage";
@@ -1340,7 +1348,7 @@
     try { localStorage.setItem(MODE_KEY, m); } catch {}
     const root = $("#ide-root");
     if (root) root.dataset.mode = m;
-    const picker = $("#st-modes");
+    const picker = $("#cw");
     if (picker) picker.remove();
     // Switching modes re-lays the page; start it from the top (Fred, layout pass 07-23).
     const stage = $("#ide-stage");
@@ -1352,7 +1360,20 @@
     if (window.DominionLexicon) window.DominionLexicon.set(MODE_REG[m]);
     paintLexicon();
     paintJourney();
+    paintRailTitle();
     paintModeSwitch();
+    /*
+     * BEGINNER IS ITS OWN SURFACE NOW (Fred's ruling 2026-07-24). It is not the expert page with
+     * pieces hidden by CSS any more: `beginnerSurface` builds a conversation-first screen of its
+     * own, and the classic starter page plus both build lenses stand down while it is up. The two
+     * other modes are untouched.
+     */
+    const beginner = m === "beginner";
+    if (root) root.classList.toggle("bg-on", beginner);
+    if (window.dominionBeginner) {
+      if (beginner) window.dominionBeginner.open();
+      else window.dominionBeginner.close();
+    }
     paintTools();
     paintModelLine();
     paintStudio();
@@ -1369,29 +1390,79 @@
     }
   }
 
-  // The three cards, shown once. Everything else in the stage hides until the choice is made:
-  // the first question the surface asks is who it is talking to.
+  /*
+   * The surface is named for what the mode actually gives you (Fred, 2026-07-24). One product,
+   * three honest names: a beginner is building an app, a vibe coder is launching one, an engineer
+   * has the whole stack. The header carries it in every mode, so nobody has to remember which
+   * interface they are looking at.
+   */
+  const RAIL_NAME = {
+    beginner: "Crucible App Builder",
+    vibe: "Crucible App Launcher",
+    engineer: "Crucible Full Stack Platform",
+  };
+  function paintRailTitle() {
+    const el = $("#ide-rail-name");
+    if (el) el.textContent = RAIL_NAME[state.mode] || RAIL_NAME.beginner;
+  }
+
+  /* ---------- the Crucible Welcome Screen -----------------------------------------------------
+   * Fred's ruling 2026-07-24: the FIRST thing on opening the Crucible in a session is a layer OVER
+   * the whole interface, blocking it out, with three buttons and one word of explanation under each.
+   * It was previously a card list prepended into the page, which meant the machinery behind it was
+   * still visible around the edges and read as "here is a wall of controls, and also, choose".
+   *
+   * ONCE PER SESSION, not once ever: the mode is a decision about who is at the keyboard today, and
+   * on a shared or family device that changes. The chosen mode still persists, so the screen opens
+   * with the last choice already correct; it just asks again.
+   */
+  const WELCOME_KEY = "dominion.crucible.welcomed.v1";
+  const MODE_TITLE = { beginner: "Beginner", vibe: "Vibe Coder", engineer: "Engineer" };
+  const MODE_LEVEL = { beginner: "Newbie", vibe: "Intermediate", engineer: "Professional" };
+  /*
+   * Plain words on purpose, and NOT from the lexicon: this screen is read BEFORE a mode exists, so
+   * the register is still whatever the last session left behind. An engineer reading a plain
+   * sentence loses nothing; a first-timer reading "intentional feature set with upfront cost and
+   * complexity" loses the only decision this screen exists to help them make.
+   */
+  const MODE_WHY = {
+    beginner: "You describe it, we talk it through, and it gets built. No technical words, ever.",
+    vibe: "You know roughly how this works. Clear options and honest costs, no clutter.",
+    engineer: "Everything, in labelled drawers: models, budgets, code, diffs.",
+  };
+  const welcomedThisSession = () => { try { return sessionStorage.getItem(WELCOME_KEY) === "1"; } catch { return false; } };
+  const markWelcomed = () => { try { sessionStorage.setItem(WELCOME_KEY, "1"); } catch {} };
+
   function showModePicker() {
-    const stage = $("#ide-stage");
-    if (!stage || $("#st-modes")) return;
-    const el = document.createElement("section");
-    el.className = "st-modes";
-    el.id = "st-modes";
+    const root = $("#ide-root");
+    if (!root || $("#cw")) return;
+    const el = document.createElement("div");
+    el.className = "cw";
+    el.id = "cw";
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-modal", "true");
+    el.setAttribute("aria-label", "Crucible Welcome Screen");
     el.innerHTML =
-      '<h3 data-lex="mode_q"></h3>' +
-      MODES.map((m) =>
-        '<button type="button" class="st-mode-card" data-mode="' + m + '">' +
-          '<span class="mc-t" data-lex="mode_' + m + '_t"></span>' +
-          '<span class="mc-b" data-lex="mode_' + m + '_b"></span>' +
-        '</button>').join("") +
-      '<p class="st-modes-note" data-lex="mode_note"></p>';
-    stage.prepend(el);
-    stage.classList.add("picking");
+      '<div class="cw-card">' +
+        '<span class="cw-kicker">THE CRUCIBLE</span>' +
+        '<h2>How would you like to work?</h2>' +
+        '<p class="cw-sub">Pick the one that sounds like you. You can change it at any time.</p>' +
+        '<div class="cw-choices">' +
+          MODES.map((m) =>
+            '<div class="cw-choice">' +
+              '<button type="button" class="cw-btn" data-mode="' + m + '">' + MODE_TITLE[m] + '</button>' +
+              '<span class="cw-level">(' + MODE_LEVEL[m] + ')</span>' +
+              '<span class="cw-why">' + MODE_WHY[m] + '</span>' +
+            '</div>').join("") +
+        '</div>' +
+      '</div>';
+    root.append(el);
     paintLexicon();
-    for (const card of el.querySelectorAll(".st-mode-card")) {
-      card.addEventListener("click", () => {
-        stage.classList.remove("picking");
-        applyMode(card.dataset.mode);
+    for (const b of el.querySelectorAll(".cw-btn")) {
+      b.addEventListener("click", () => {
+        markWelcomed();
+        el.remove();
+        applyMode(b.dataset.mode);
         maybeShowIntro();
         document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
       });
@@ -1945,15 +2016,6 @@
       txt.textContent = "";
       count.textContent = "";
     }
-    paintLamp(asking ? "waiting" : (live.length ? "running" : "idle"), live.length);
-  }
-
-  function paintLamp(mode, n) {
-    const lamp = $("#ide-lamp"), text = $("#ide-lamp-text");
-    if (!lamp || !text) return;
-    lamp.dataset.state = mode === "idle" ? "idle" : "live";
-    text.textContent = mode === "waiting" ? "Waiting on you"
-      : mode === "running" ? (n > 1 ? n + " running" : "Running") : "Standby";
   }
 
   /*
@@ -2100,6 +2162,13 @@
   const INTRO_KEY = "dominion.crucible.intro.v1";
   function maybeShowIntro() {
     try { if (localStorage.getItem(INTRO_KEY) === "1") return; } catch {}
+    /*
+     * Never in beginner mode (Fred, 2026-07-24: the beginner screen is the conversation, the saved
+     * projects, the help button, "thats it, nothing else"). Everything this card explains is said in
+     * the conversation itself, at the moment it matters: the interviewer covers what the app will
+     * be, and the build path says plainly when the computer is not connected.
+     */
+    if (state.mode === "beginner") return;
     const stage = $("#ide-stage");
     if (!stage || $("#ide-intro")) return;
     const card = document.createElement("section");
@@ -2168,13 +2237,17 @@
     if (window.closeForgeDial) window.closeForgeDial();
     if (window.closeForgeImages) window.closeForgeImages();
     buildPanel();
-    // The first question the surface asks is who it is talking to. With a mode already chosen
-    // (this device or the account), it re-skins silently; without one, the three cards come
-    // first and the intro + tour wait for the answer.
+    /*
+     * The first question the surface asks is who it is talking to, ONCE PER SESSION (Fred,
+     * 2026-07-24). A remembered mode is applied underneath first, so the welcome layer covers a
+     * correctly-skinned screen and dismissing it never re-lays the page; only a session that has
+     * already answered skips straight in.
+     */
     const chosen = state.mode || readMode();
-    if (chosen) {
-      applyMode(chosen, { save: false });
-      maybeShowIntro();
+    if (chosen) applyMode(chosen, { save: false });
+    if (welcomedThisSession()) {
+      if (chosen) maybeShowIntro();
+      else showModePicker();
     } else {
       showModePicker();
     }
@@ -2231,8 +2304,9 @@
     // Force a style flush between the two classes so the lift transitions instead of jumping.
     void $("#ide-root").offsetWidth;
     document.body.classList.add("ide-open");
-    // The guided tour listens for this; it decides for itself whether to appear.
-    if (chosen) document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
+    // The guided tour listens for this; it decides for itself whether to appear. While the welcome
+    // layer is up nothing else may claim the screen, so the choice fires it instead.
+    if (chosen && !$("#cw")) document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
   }
 
   function closePanel() {
@@ -2432,6 +2506,43 @@
   window.ideEnsurePush = ensurePush;
   window.dominionStudioHas = (module) => state.mode !== "vibe" || state.studio.modules.has(module);
   window.dominionJourneyPhase = () => state.phase;
+
+  /*
+   * The bridge the beginner surface builds on (dominion-beginner.js). It deliberately exposes
+   * BEHAVIOUR, not internals: the beginner screen never reaches into this module's DOM or state, so
+   * the two can be reasoned about separately and the expert page keeps working untouched.
+   */
+  window.dominionIdeBridge = {
+    mode: () => state.mode,
+    setMode: (m) => applyMode(m),
+    workspaces: () => (state.workspaces || []).slice(),
+    workspaceId: () => (($("#st-ws") && $("#st-ws").value) || state.workspaceId || ""),
+    // Selecting a saved project routes through the real select so every other reader (the build
+    // path, the folder drawer, drafts) sees the same choice.
+    selectWorkspace: (id) => {
+      const sel = $("#st-ws");
+      if (sel && [...sel.options].some((o) => o.value === id)) { sel.value = id; state.workspaceId = id; return true; }
+      return false;
+    },
+    // Make a project folder for a beginner who has none, exactly as the silent auto-path does.
+    autoWorkspace: async (hint) => {
+      const r = await fetch("/ide/workspace/auto", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ hint: hint || "" }) });
+      const j = await r.json();
+      if (j && j.ok && j.workspace) {
+        state.workspaces.push(j.workspace);
+        state.workspaceId = j.workspace.id;
+        renderStarter();
+      }
+      return j || {};
+    },
+    startBuild: (prompt, status) => startBuild(prompt, status || (() => {})),
+    jobs: () => (state.jobs || []).slice(),
+    refreshJobs,
+    follow: (jobId, opts) => { if (window.dominionLenses) window.dominionLenses.follow(jobId, opts); },
+    journey: (phase) => setJourneyPhase(phase),
+    startFresh,
+  };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();

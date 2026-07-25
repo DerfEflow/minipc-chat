@@ -82,6 +82,21 @@ t("the controls the map points at exist in the interface", () => {
   const compassJs = readFileSync(join(HERE, "public", "dominion-compass.js"), "utf8");
   if (!compassJs.includes('el.id = "compass"')) throw new Error("the compass handle the map names is gone");
   if (!compassJs.includes("toggleDial")) throw new Error("pressing the compass no longer opens a menu");
+  // The beginner surface the crucible entry describes, control by control.
+  const beginnerJs = readFileSync(join(HERE, "public", "dominion-beginner.js"), "utf8");
+  for (const [needle, label] of [
+    ["BUILD IT", "the BUILD IT button"],
+    ["HELP,", "the HELP, I'M STUCK button"],
+    ["SEE MY APP", "the SEE MY APP button"],
+    ["Saved Projects", "the saved-projects row"],
+    ["None Saved", "the empty saved-projects state"],
+    ["bg-pong", "the Pong game"],
+    ["bg-cam", "the camera button"],
+    ["bg-clip", "the paperclip button"],
+  ]) if (!beginnerJs.includes(needle)) throw new Error("the beginner surface is missing " + label);
+  const ideJs = readFileSync(join(HERE, "public", "dominion-ide.js"), "utf8");
+  if (!ideJs.includes("Crucible App Builder")) throw new Error("the per-mode header the map names is gone");
+  if (!ideJs.includes("Return to chat")) throw new Error("the way out the map names is gone");
   if (!forgeJs.includes("Seal Setting")) throw new Error("the dial's close control the map names is gone");
   if (!appJs.includes("downloadArtifact")) throw new Error("artifact download is gone but the map promises it");
 });

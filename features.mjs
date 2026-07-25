@@ -23,7 +23,7 @@ export const FEATURES = [
     brief: "generate images",
     aliases: ["image", "images", "picture", "photo", "art", "draw", "generate image", "image generation", "forge images", "make an image"],
     name: "Dominion Forge Images",
-    where: "the compass handle in the middle of the message bar: press it and tap Image forge (or drag the handle right)",
+    where: "the compass handle in the message bar: press it and tap Image forge",
     what: "Generates images. The whole interface slides to the right and the image studio takes the screen.",
     how: [
       "Press the compass handle in the message bar (the small copper hub with three arrows) and tap Image forge. Dragging the handle to the right does the same thing.",
@@ -42,7 +42,7 @@ export const FEATURES = [
     brief: "effort and tool gate",
     aliases: ["dial", "effort", "ember", "flame", "furnace", "forge mode", "thinking level", "reasoning effort"],
     name: "The Forge dial (effort) and Forge Mode",
-    where: "the compass handle in the message bar: press it and tap Forge dial (or drag the handle left). The flame button beside the paperclip opens it too.",
+    where: "the compass handle in the message bar: press it and tap Forge dial",
     what: "Sets how hard the model thinks, and separately whether it may use tools.",
     how: [
       "Press the compass handle and tap Forge dial, or drag the handle to the LEFT, and the dial takes the screen.",
@@ -173,6 +173,27 @@ export const FEATURES = [
       "Open the sidebar with the menu button, then Setup at the bottom.",
       "Credits and payment live here, as do connectors such as GitHub, Supabase, Stripe, Railway and Zapier.",
     ],
+  },
+  {
+    // Added 2026-07-24 with the beginner rebuild: models were being asked "where do I build an app"
+    // and had nothing in the feature map to point at, only the guide that rides the Crucible's own
+    // prompts. This is the answer from anywhere in the product.
+    id: "crucible",
+    brief: "build a real app",
+    aliases: ["crucible", "app builder", "build an app", "make an app", "app launcher", "full stack",
+              "ide", "ide mode", "beginner mode", "vibe coder", "engineer mode", "pong", "build it"],
+    name: "The Crucible (App Builder)",
+    where: "the compass handle in the message bar: press it and tap The Crucible",
+    what: "Builds real, working apps on your own computer, through a conversation.",
+    how: [
+      "Press the compass handle in the message bar and tap The Crucible. A welcome screen asks how you want to work: Beginner (Newbie), Vibe Coder (Intermediate) or Engineer (Professional). It appears once per session.",
+      "Beginner is one big conversation: say what you want, answer a few questions, and press BUILD IT when it appears above the chat. A paperclip and a camera sit under the chat for sending a drawing of what you want.",
+      "Saved Projects along the bottom of the chat reopen anything built before. The big red HELP, I'M STUCK button opens a separate conversation that helps with whatever went wrong, pictures included.",
+      "While it builds you can play Pong against the machine; a welding robot shows how far along it is and roughly how long is left.",
+      "When it finishes, SEE MY APP opens the working app with a conversation under it: ask for changes there, and when you are happy it walks you through putting it on the internet.",
+      "Vibe Coder and Engineer show the same build with more control: model choices, budgets, the file tree, diffs, and the agent crew window.",
+    ],
+    notes: "Builds run on YOUR computer through the Dominion hands node, so that computer has to be on. A save point is taken before anything is written, and protected folders are refused. The header names the mode: Crucible App Builder, Crucible App Launcher, or Crucible Full Stack Platform. Return to chat is the button at the top left.",
   },
   {
     id: "plans",

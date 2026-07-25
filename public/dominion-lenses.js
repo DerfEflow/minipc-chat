@@ -253,6 +253,7 @@
     const body = $("#cru-body");
     if (!body) return;
     const d = digest(state.events);
+    announceProgress(d);
     paintCost(d);
     paintStop(d);
     if (state.jobId && d.runs.length && !d.outcome && state.verifyAnnounced !== state.jobId) {
@@ -288,6 +289,39 @@
     }
     maybeOfferPublish(d);
     paintLog();
+  }
+
+  /* ---------- the progress signal ------------------------------------------------------------
+   * The beginner build screen (dominion-beginner.js) shows a percentage and a time remaining while
+   * a person plays Pong. Both come from HERE, from the same journal everything else renders, so the
+   * cute robot and the Blueprint can never disagree about how far along the build is.
+   *
+   * WHAT THE NUMBERS MEAN, exactly, because a made-up number is worse than none (the image forge
+   * taught us that):
+   *   percent = finished moves / planned moves. Before a plan exists it is 0 and the screen says
+   *             "getting started" rather than inventing a fraction.
+   *   remaining = average REAL seconds per finished move, times the moves left. With nothing
+   *             finished yet there is no average, so no time is shown at all.
+   * Both are explicitly labelled as estimates in the UI.
+   */
+  let lastProgress = "";
+  function announceProgress(d) {
+    const moves = [...d.moves.values()];
+    const total = moves.length;
+    const done = moves.filter((m) => m.state === "done").length;
+    const percent = total ? Math.min(99, Math.round((done / total) * 100)) : 0;
+    const elapsedMs = d.started ? (d.ended || Date.now()) - d.started : 0;
+    // Only a finished move proves how long a move takes on this build, with this model, today.
+    const perMove = done > 0 && elapsedMs > 0 ? elapsedMs / done : 0;
+    const remainingMs = perMove && total > done ? Math.round(perMove * (total - done)) : 0;
+    const detail = { jobId: state.jobId, percent, done, total, remainingMs,
+                     outcome: d.outcome || "", title: d.title || "" };
+    // Dispatch only on a real change: renderNow runs on every event, and a listener redrawing a
+    // canvas for an unchanged number is work nobody sees.
+    const sig = [detail.jobId, percent, done, total, Math.round(remainingMs / 5000), detail.outcome].join("|");
+    if (sig === lastProgress) return;
+    lastProgress = sig;
+    try { document.dispatchEvent(new CustomEvent("dominion-build-progress", { detail })); } catch {}
   }
 
   /*
