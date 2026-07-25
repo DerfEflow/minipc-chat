@@ -33,7 +33,8 @@ import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./ro
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
-import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS } from "./models.catalog.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL } from "./models.catalog.mjs";
+import { createLoopWatch, contextExceeded, supervisorPrompt, parseVerdict, pauseInstruction, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
 
 /*
  * Does this turn actually ask for work ON a machine? Used only to decide whether the "you forgot
@@ -5030,15 +5031,22 @@ async function handleChat(req, res) {
       // truncated long docs on every model). This is only the CHUNK size — the continuation loop below
       // resumes past finish_reason "length" until the whole answer is written, on ANY model.
       const outCap = outLimitFor(cloudModel, mode);
-      // Cloud models are fast + cheap per round (unlike the CPU-prefill local path), so they get a
-      // deeper research budget. LIVE LESSON 2026-07-12: MiniMax burned all rounds on web searches,
-      // then answered EMPTY when tools vanished — the user saw "(no response)". Two guards below:
-      // a conclude-now nudge when the tool budget runs out, and one retry if content comes back empty.
-      // Raised 8 -> 16 (Fred, 2026-07-25): a whole-app review or a many-file/paged-document job reads
-      // one chunk per round, and 8 ran out mid-task, forcing "I only got through part of it." 16 gives
-      // real multi-file headroom; DeepSeek is cheap per round, the conclude-nudge + empty-retry guards
-      // still occupy the last two rounds, and truly huge asks should ride long_job (budget-fused).
-      const CLOUD_MAX_ROUNDS = 16;
+      /*
+       * SUPERVISED CONTINUATION (Fred, 2026-07-25) — replaces the fixed round cap entirely.
+       * The worker runs as long as it is genuinely advancing; it is paused only for quality,
+       * fidelity, or context-window reasons (supervisor.mjs holds the gates + tests):
+       *   - loop detection (same tool call 3x)                — deterministic, every round
+       *   - context headroom (75% of the worker's window)     — deterministic, every round
+       *   - session budget spent                              — deterministic, every round
+       *   - progress verdict from the supervisor model        — every 8 rounds, digest-fed
+       *   - hard runaway fuse (64)                            — insurance, not a work limit
+       * Any pause orders the worker to report: done-so-far, what remains, why it stopped, naming
+       * the monitored model. LIVE LESSON 2026-07-12 still honored: schemas stay attached with
+       * tool_choice:"none" in the conclude rounds, and one empty-retry follows the nudge.
+       */
+      let concludeAt = Infinity, pauseReason = "";
+      const loopWatch = createLoopWatch();
+      const liveCostUsd = () => ((inTokTotal * ((cloudRec && cloudRec.inCost) || 0)) + (outTokTotal * ((cloudRec && cloudRec.outCost) || 0))) / 1e6;
       // No-truncation: how many times a single final answer may be resumed after hitting the output
       // cap. outCap tokens x (1 + CONT_MAX) is the practical ceiling on one answer — generous enough
       // for any report/doc Fred asks for, bounded so a runaway model can't loop forever.
@@ -5047,17 +5055,41 @@ async function handleChat(req, res) {
       const CONTINUE_NUDGE = "[Dominion system notice — not Fred] Your reply was cut off at the output-length limit before it finished. Continue from the EXACT point you stopped. Do not repeat any earlier text, do not add a preface, recap, or apology, do not restate the last line — resume mid-sentence if that is where you stopped and write straight through to the natural end of the full response.";
       let concludeNudged = false, emptyRetried = false, intentNudged = false, lastReasoning = "", promisePrefix = "";
 
-      for (let round = 0; round < CLOUD_MAX_ROUNDS && !aborted; round++) {
+      for (let round = 0; !aborted; round++) {
         roundsUsed = round + 1;
-        // The last TWO rounds are conclusion rounds (room for the nudge AND one empty-retry).
-        // Schemas stay attached with tool_choice:"none" — agent models go mute when tools vanish
-        // mid-conversation (live MiniMax failure); the API-level block is what stops further calls.
-        const concludePhase = !!cloudTools && round >= CLOUD_MAX_ROUNDS - 2;
+        // ---- deterministic supervisor gates (code, free, every round) -------------------------
+        if (concludeAt === Infinity && round >= SUP_HARD_CAP) {
+          concludeAt = round; pauseReason = "the hard safety fuse fired (" + SUP_HARD_CAP + " work rounds in one turn)";
+        }
+        if (concludeAt === Infinity && contextExceeded({ messages, ctx: (cloudRec && cloudRec.ctx) || 128000, fraction: SUP_CTX_FRACTION })) {
+          concludeAt = round; pauseReason = "the conversation reached " + Math.round(SUP_CTX_FRACTION * 100) + "% of the model's context window";
+        }
+        if (concludeAt === Infinity && SB && chatId && round > 0) {
+          const remUsd = T.isOwner ? (SB.remaining - liveCostUsd()) : (SB.remaining / 100 - liveCostUsd());
+          if (remUsd <= 0) { concludeAt = round; pauseReason = "the session budget is spent"; }
+        }
+        // ---- the one fuzzy question, every 8th round: is this actually advancing? -------------
+        if (concludeAt === Infinity && cloudTools && round > 0 && round % SUP_CHECK_EVERY === 0) {
+          working("supervisor check");
+          const sv = await cloudChatStream(UTILITY_MODEL,
+            [{ role: "user", content: supervisorPrompt({ goal: lastUserText, rounds: round, toolSummaries }) }],
+            { temperature: 0, num_predict: 200, signal: ac.signal, tools: null, toolChoice: "none" }, null);
+          const verdict = parseVerdict(sv && sv.ok ? sv.content : "");
+          sse({ type: "supervisor", monitored: cloudModel, supervisor: UTILITY_MODEL, round,
+                progressing: verdict.progressing, reason: verdict.reason });
+          console.log(`[dominion-ai] supervisor @${round} on ${cloudModel}: ${verdict.progressing ? "progressing" : "STALLED"} — ${verdict.reason}`);
+          if (!verdict.progressing) { concludeAt = round; pauseReason = "the supervisor judged the work stalled (" + verdict.reason + ")"; }
+        }
+        // Conclusion rounds (room for the nudge AND one empty-retry). Schemas stay attached with
+        // tool_choice:"none" — agent models go mute when tools vanish mid-conversation (live
+        // MiniMax failure); the API-level block is what stops further calls.
+        const concludePhase = !!cloudTools && round >= concludeAt;
         const toolsThisRound = (cloudTools && !concludePhase) ? cloudTools : null;
         if (concludePhase && !concludeNudged) {
           concludeNudged = true;
           // user-role, not system: agent-tuned models weight a trailing user instruction far higher.
-          messages.push({ role: "user", content: "[Dominion system notice — not Fred] STOP RESEARCHING. Tool calls are disabled from here on. Do NOT describe what you would search next. Write your conclusion for the user NOW in plain text from the results already gathered — if the evidence is inconclusive, say so plainly and summarize what you found." });
+          messages.push({ role: "user", content: pauseInstruction({ reason: pauseReason || "the work-round budget ran out", model: cloudModel }) });
+          sse({ type: "supervisor", monitored: cloudModel, supervisor: UTILITY_MODEL, paused: true, reason: pauseReason || "conclusion" });
         }
         working(round === 0 ? "thinking" : "writing");
         let streamed = false;
@@ -5093,6 +5125,10 @@ async function handleChat(req, res) {
 
         const calls = Array.isArray(or.toolCalls) ? or.toolCalls : [];
         if (calls.length && toolsThisRound) {
+          // Deterministic loop gate: the same call with identical arguments 3x is a stall — flag it
+          // now so the NEXT round enters the conclude phase with an honest reason.
+          const lw = loopWatch.note(calls);
+          if (lw.looping && concludeAt === Infinity) { concludeAt = round + 1; pauseReason = "the model kept repeating the same action (" + lw.sig + ")"; }
           working("running tools");
           // Record the assistant's tool-call turn, then run each call through the same gates the
           // local loop uses (this block deliberately mirrors the local one — same lifecycle,
@@ -5236,7 +5272,7 @@ async function handleChat(req, res) {
           if (contLeft <= 0 && fr === "length") console.log(`[dominion-ai] continuation budget (${CONT_MAX}) exhausted for ${cloudModel} — answer may still be capped`);
         }
         answer = answer.trim();
-        if (!answer && !emptyRetried && round + 1 < CLOUD_MAX_ROUNDS) {
+        if (!answer && !emptyRetried && round + 1 < SUP_HARD_CAP) {
           // Reasoning models sometimes think without speaking (all output in the reasoning channel).
           // One explicit retry: demand plain text. If it's empty again, fall back to reasoning below.
           emptyRetried = true;
@@ -5247,7 +5283,7 @@ async function handleChat(req, res) {
         // with nothing done. The three older guards test the SHAPE of a reply (truncated, empty,
         // out of tool budget); this one reads its MEANING, because a broken promise arrives with a
         // perfectly healthy shape: real text, clean stop, no tool calls. One nudge per turn.
-        if (!intentNudged && answer && round + 1 < CLOUD_MAX_ROUNDS && !concludePhase) {
+        if (!intentNudged && answer && round + 1 < SUP_HARD_CAP && !concludePhase) {
           const intent = unkeptIntent(answer, { toolsAvailable: !!(cloudTools && cloudTools.length) });
           if (intent.unkept) {
             intentNudged = true;
