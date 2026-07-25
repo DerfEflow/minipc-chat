@@ -2932,7 +2932,7 @@ function machinesBlock(T) {
     "\nD:\\ is the backup SSD and is permanently walled off on every machine; never plan work that touches it. Never claim a path does not exist because it is not on the machine you happen to be thinking of; check the map above first. When you finish a tool action, name the machine you acted on.";
 }
 
-function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true, machines = "" } = {}) {
+function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true, machines = "", mode = "normal" } = {}) {
   // Tool-less turns (as_fred voice work, chat-bench models) get a LEAN prompt: identity, house
   // style, Wolfe Logic, mode, persona. The tool doctrine below is dead weight when no tool schemas
   // ride the call (Fred's token rule, 2026-07-18: the Substack writer must not pay for machinery
@@ -2942,13 +2942,27 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
     "You have real tools (hands) that reach his actual machines; the ENVIRONMENT block below says which. Use them when they help,",
     "don't just describe what could be done; do it. Prefer reading current state (e.g. deck_list_projects,",
     "forge_read) before acting so you work from facts, not guesses.",
-    "Keep replies concise and direct. Don't fabricate file contents, project ids, or results — read them.",
+    "Be accurate and honest. Don't fabricate file contents, project ids, or results — read them.",
     "Real code/file changes go through forge_send. The sandbox is your private scratch space for drafts/notes.",
     "When you finish a tool action, briefly confirm what you actually did.",
   ].join(" ") : [
     "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is " + new Date().toISOString().slice(0, 10) + ".",
-    "Keep replies concise, direct, and honest. Never fabricate facts, quotes, sources, or events.",
+    "Be accurate and honest. Never fabricate facts, quotes, sources, or events.",
   ].join(" ");
+  // MODE-AWARE THOROUGHNESS (Fred, 2026-07-25). The old blanket "keep replies concise" order pushed
+  // every turn toward short, partial output — the exact opposite of what long work needs. Fast mode
+  // stays brief; every other mode is told to FINISH the whole job and never return partial work as if
+  // it were done. as_fred is exempt: its own voice fragment governs length and tone.
+  if (mode === "fast") {
+    s += " Keep this reply brief and direct.";
+  } else if (mode !== "as_fred") {
+    s += " COMPLETENESS: do the entire task in this one turn. If you were asked to read or process a" +
+         " document, file, or list, cover ALL of it — page through with your tools to the very end" +
+         " rather than stopping partway and reporting partial work as finished. Never truncate a real" +
+         " answer to save space; length is fine when the task needs it, but add no filler. Stop early" +
+         " only on a genuine, repeated failure after trying more than one method, and then say exactly" +
+         " what failed and what you tried.";
+  }
   // The machine map rides every TOOL turn (a tool-less turn has nothing to route, so it stays lean).
   // Built by the caller, which knows the tenant — see machinesBlock().
   if (withTools && machines) s += machines;
@@ -3187,9 +3201,10 @@ const fmtUsd = (n) => (n <= 0 ? "$0.00" : n < 0.01 ? "$" + n.toFixed(3) : "$" + 
 const fmtCostRange = (lo, hi) => (Math.abs(hi - lo) < 0.005 ? "≈ " + fmtUsd((lo + hi) / 2) : "≈ " + fmtUsd(lo) + "–" + fmtUsd(hi));
 // Output-length bands per mode (rough — the only fuzzy variable; §6 keys them off the router mode).
 const OUT_BAND = { fast: [80, 220], normal: [300, 800], draft: [1200, 3000], deep_think: [1200, 3000], long_context: [1500, 3500] };
-function estimatePreflight(input = {}) {
+function estimatePreflight(input = {}, isOwner = false) {
   const history = Array.isArray(input.messages) ? input.messages : [];
   const forced = (typeof input.model === "string" && input.model && input.model !== "auto" && input.model !== "local") ? input.model : "";
+  const explicitLocal = (input.model === "local");
   const reqMode = typeof input.mode === "string" ? input.mode : "auto";
   const lastUser = [...history].reverse().find((m) => m && m.role === "user");
   const lastUserText = lastUser ? String(lastUser.content || "") : "";
@@ -3211,7 +3226,14 @@ function estimatePreflight(input = {}) {
   const pendingAttachChars = Math.max(0, Math.min(ATTACH_MAX_TEXT_FILES * ATTACH_MAX_TEXT_CHARS, Number(input.attachChars) || 0));
   const tokensIn = estTokens(totalInputChars) + 900 + pendingImages * ATTACH_IMG_EST_TOKENS + estTokens(pendingAttachChars);
 
-  const cloud = isCloudModel(forced) ? forced : "";
+  // Owner "Auto" resolves to the owner default cloud engine (mirrors handleChat), so the cost chip
+  // shows the REAL model + price instead of a phantom "free local". Falls back to local only when the
+  // privacy mode forbids the cloud default.
+  let cloud = isCloudModel(forced) ? forced : "";
+  if (!cloud && isOwner && !explicitLocal) {
+    const ownerDefault = defaultModelFor(true);
+    if (modeAllows(input.privacyMode, ownerDefault).allowed) cloud = ownerDefault;
+  }
   if (pendingImages > 0 && !(cloud && isVisionCapable(cloud))) {
     return { backend: "blocked", blocked: "attachments_unsupported", mode: normalizeMode(input.privacyMode),
       model: cloud ? ((modelById(cloud) || {}).name || cloud) : "Local Qwen", estCost: "blocked", estLatency: "—",
@@ -4467,6 +4489,9 @@ async function handleChat(req, res) {
   const userTemp = (typeof input.temperature === "number" && input.temperature >= 0 && input.temperature <= 2) ? input.temperature : undefined;
   const reqMode = typeof input.mode === "string" ? input.mode : "auto";
   const forced = (typeof input.model === "string" && input.model && input.model !== "auto" && input.model !== "local") ? input.model : "";
+  // "local" is an EXPLICIT owner pick (Command Deck / Private-mode work); "auto" (or no pick) is NOT.
+  // The owner-auto block below routes Auto to the real default engine, never the local Qwen.
+  const explicitLocal = (input.model === "local");
   // Cloud override: the user explicitly picked a premium OpenRouter model for THIS turn. When set,
   // we keep all upstream context assembly (persona, memory, retrieval) but skip the local router's
   // model pick + local tools, and stream the answer from OpenRouter instead of Ollama.
@@ -4515,6 +4540,18 @@ async function handleChat(req, res) {
       sse({ type: "error", code: "privacy_mode_block", mode: privacyMode, model: cloudModel, message: gate.reason });
       sse({ type: "stopped", reason: "privacy_mode_block" }); return endStream();
     }
+  }
+  // OWNER AUTO -> DEFAULT CLOUD ENGINE (Fred, 2026-07-25). This is THE fix for the long-standing
+  // "it truncates and I have to nudge it" complaint. "Auto" (or no pick) used to leave cloudModel
+  // empty for the owner too, which silently dropped every Auto turn onto the local Qwen — the one
+  // path with no auto-continue, a small context window, and a 6-round cap. Fred never wants local
+  // answering chat, so Auto now resolves to his real default (DeepSeek V4 Pro), which carries the
+  // full finish-the-job machinery. Explicit "local" still runs local (Command Deck / Private mode).
+  // If the current privacy mode forbids the cloud default (Trusted/Private), fall BACK to local
+  // rather than refuse: Auto means "you choose for me," and local is allowed in every mode.
+  if (T.isOwner && !cloudModel && !explicitLocal) {
+    const ownerDefault = defaultModelFor(true);
+    if (modeAllows(privacyMode, ownerDefault).allowed) cloudModel = ownerDefault;
   }
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
@@ -4745,7 +4782,7 @@ async function handleChat(req, res) {
   let ctxInfo;
   try { ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model }, T); }
   catch { ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" }; }
-  const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier, { withTools: attachTools, machines: attachTools ? machinesBlock(T) : "" }) }];
+  const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier, { withTools: attachTools, machines: attachTools ? machinesBlock(T) : "", mode }) }];
   // Off-but-available connectors, by NAME only (Fred, 2026-07-19). Without this, a disabled
   // connector is indistinguishable from a missing capability: the model has no schema for it, so
   // it answers "I can't do that" and the user believes the app cannot, rather than that a switch
@@ -4919,7 +4956,11 @@ async function handleChat(req, res) {
       // deeper research budget. LIVE LESSON 2026-07-12: MiniMax burned all rounds on web searches,
       // then answered EMPTY when tools vanished — the user saw "(no response)". Two guards below:
       // a conclude-now nudge when the tool budget runs out, and one retry if content comes back empty.
-      const CLOUD_MAX_ROUNDS = 8;
+      // Raised 8 -> 16 (Fred, 2026-07-25): a whole-app review or a many-file/paged-document job reads
+      // one chunk per round, and 8 ran out mid-task, forcing "I only got through part of it." 16 gives
+      // real multi-file headroom; DeepSeek is cheap per round, the conclude-nudge + empty-retry guards
+      // still occupy the last two rounds, and truly huge asks should ride long_job (budget-fused).
+      const CLOUD_MAX_ROUNDS = 16;
       // No-truncation: how many times a single final answer may be resumed after hitting the output
       // cap. outCap tokens x (1 + CONT_MAX) is the practical ceiling on one answer — generous enough
       // for any report/doc Fred asks for, bounded so a runaway model can't loop forever.
@@ -5537,7 +5578,9 @@ const server = http.createServer(async (req, res) => {
     // Pre-send cost estimate (§6): deterministic preflight, no model call. The composer chip polls this.
     if (path === "/estimate" && req.method === "POST") {
       const body = await readJsonBody(req) || {};
-      const est = estimatePreflight(body);
+      let estOwner = false;
+      try { estOwner = !!resolveTenant(req).isOwner; } catch {}
+      const est = estimatePreflight(body, estOwner);
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify(est));
     }

@@ -29,6 +29,8 @@ async function t(name, fn) {
     .catch((e) => { failed++; console.error("FAIL  " + name + "\n      " + (e && e.stack || e)); });
 }
 
+// Requests pass model:"local" explicitly: these test the local job/persist machinery, and as of
+// 2026-07-25 owner "auto" resolves to the cloud default (DeepSeek), not local (handleChat owner-auto).
 // ---- mock Ollama ----
 const mock = { delayMs: 400, answer: "" };
 const mockSrv = http.createServer((req, res) => {
@@ -127,7 +129,7 @@ const expected1 = mock.answer.trim();
 let jobId1 = null;
 await sseRequest("/chat", {
   method: "POST",
-  body: { messages: [{ role: "user", content: "persist me" }], mode: "normal", model: "auto", chatId: "pchat1" },
+  body: { messages: [{ role: "user", content: "persist me" }], mode: "normal", model: "local", chatId: "pchat1" },
   onEvent: (ev, events) => { if (ev.type === "job") jobId1 = ev.id; if (events.filter((e) => e.type === "token").length >= 3) return false; },   // die mid-stream
 });
 // Let it finish server-side, then confirm the durable store shows it done.
@@ -175,7 +177,7 @@ mock.answer = "never returns";
 let jobId2 = null;
 await sseRequest("/chat", {
   method: "POST",
-  body: { messages: [{ role: "user", content: "orphan me" }], mode: "normal", model: "auto", chatId: "pchat2" },
+  body: { messages: [{ role: "user", content: "orphan me" }], mode: "normal", model: "local", chatId: "pchat2" },
   onEvent: (ev) => { if (ev.type === "job") { jobId2 = ev.id; return false; } },   // grab id, drop socket; run keeps going
 });
 // Make sure it's registered as running before we pull the plug.
@@ -199,8 +201,8 @@ await t("P2b: attaching the orphan yields the server_restart explanation + stopp
 // ================= P4: concurrency isn't accidentally blocked (owner exempt) =================
 await t("P4: two runs in different chats generate concurrently", async () => {
   mock.delayMs = 500; mock.answer = "concurrent";
-  const p1 = sseRequest("/chat", { method: "POST", body: { messages: [{ role: "user", content: "one" }], mode: "normal", model: "auto", chatId: "cc1" } });
-  const p2 = sseRequest("/chat", { method: "POST", body: { messages: [{ role: "user", content: "two" }], mode: "normal", model: "auto", chatId: "cc2" } });
+  const p1 = sseRequest("/chat", { method: "POST", body: { messages: [{ role: "user", content: "one" }], mode: "normal", model: "local", chatId: "cc1" } });
+  const p2 = sseRequest("/chat", { method: "POST", body: { messages: [{ role: "user", content: "two" }], mode: "normal", model: "local", chatId: "cc2" } });
   const [r1, r2] = await Promise.all([p1, p2]);
   assert.ok(r1.events.some((e) => e.type === "done"), "first run completed");
   assert.ok(r2.events.some((e) => e.type === "done"), "second concurrent run completed (not refused)");
@@ -218,7 +220,7 @@ await t("P5: a cursor that fell off the RAM tail rebuilds the full answer (reset
   let jobId5 = null;
   const r0 = await sseRequest("/chat", {
     method: "POST",
-    body: { messages: [{ role: "user", content: "spill" }], mode: "normal", model: "auto", chatId: "pchat5" },
+    body: { messages: [{ role: "user", content: "spill" }], mode: "normal", model: "local", chatId: "pchat5" },
     onEvent: (ev) => { if (ev.type === "job") jobId5 = ev.id; },
   });
   assert.ok(r0.events.some((e) => e.type === "done"), "the run finished (record stays in RAM with a spilled tail)");

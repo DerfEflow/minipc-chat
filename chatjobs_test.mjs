@@ -27,6 +27,9 @@ function t(name, fn) {
     .catch((e) => { failed++; console.error("FAIL  " + name + "\n      " + (e && e.message)); });
 }
 
+// These tests exercise the job/stream/reattach/stop machinery through the LOCAL path, so requests
+// pass model:"local" explicitly. As of 2026-07-25 owner "auto" resolves to the cloud default
+// (DeepSeek), not local — see handleChat's owner-auto block — so "auto" here would try to egress.
 // ---- mock Ollama: /api/chat answers after a configurable delay (the "slow model") ----
 const mock = { delayMs: 600, answer: "", inflightAborted: false };
 const mockSrv = http.createServer((req, res) => {
@@ -127,7 +130,7 @@ const expected = mock.answer.trim();   // the server trims via stripThink()
 let jobId = null, preKillCount = 0;
 const r1 = await sseRequest("/chat", {
   method: "POST",
-  body: { messages: [{ role: "user", content: "durable job test" }], mode: "normal", model: "auto", chatId: "testchat1" },
+  body: { messages: [{ role: "user", content: "durable job test" }], mode: "normal", model: "local", chatId: "testchat1" },
   onEvent: (ev, events) => {
     if (ev.type === "job") jobId = ev.id;
     if (events.filter((e) => e.type === "token").length >= 5) { preKillCount = events.length; return false; }   // die mid-stream
@@ -180,7 +183,7 @@ let jobId2 = null;
 const t0 = Date.now();
 const r5 = await sseRequest("/chat", {
   method: "POST",
-  body: { messages: [{ role: "user", content: "slow one to stop" }], mode: "normal", model: "auto", chatId: "testchat2" },
+  body: { messages: [{ role: "user", content: "slow one to stop" }], mode: "normal", model: "local", chatId: "testchat2" },
   onEvent: (ev) => {
     if (ev.type === "job") { jobId2 = ev.id; setTimeout(() => postJson("/chat/stop", { jobId: ev.id }), 400); }
   },
