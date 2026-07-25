@@ -13,8 +13,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const APP = 8096, OWNER_PORT = 8095, GUEST_PORT = 8094, MOCK = 8097;
-const dataDir = join(HERE, ".devdata");
+// Optional base port as argv[2] so two sessions can run rigs side by side (defaults unchanged:
+// guest 8094, owner 8095, app 8096, mock 8097 — `node devboot.mjs 8190` shifts the whole block).
+const BASE = Number(process.argv[2]) || 8094;
+const GUEST_PORT = BASE, OWNER_PORT = BASE + 1, APP = BASE + 2, MOCK = BASE + 3;
+const dataDir = join(HERE, BASE === 8094 ? ".devdata" : ".devdata-" + BASE);
 mkdirSync(dataDir, { recursive: true });
 
 // mock Ollama so boot + light-model calls are harmless

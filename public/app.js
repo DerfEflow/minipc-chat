@@ -74,7 +74,9 @@ let liveJobs = {};
 // Continue/Regenerate actions all key off the chat on screen, so other chats keep streaming freely.
 const busyFor = (id) => !!liveJobs[id];
 const anyBusy = () => Object.keys(liveJobs).length > 0;
-let settings = { persona: "default", personaCustom: "", temperature: 0.7, confirmTools: false, privacy: "redacted_external" };
+// ctxMem/ctxDocs/ctxChats (Fred, 2026-07-25): the 🧠/📄/💬 context chips are diagnostic clutter to
+// most people, so they are OFF by default and each has its own restore checkbox in System Settings.
+let settings = { persona: "default", personaCustom: "", temperature: 0.7, confirmTools: false, privacy: "redacted_external", ctxMem: false, ctxDocs: false, ctxChats: false };
 let pendingAtt = [];   // attachments staged in the composer for the NEXT send
 
 // Background video: muted+playsinline autoplay is usually allowed, but Android suppresses it under
@@ -281,7 +283,7 @@ function summarizeLeft(id) {
   if (!c || c.messages.length < 4) return;
   fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
 }
-function newChat() { const prev = curId; detachCurrentSession(); const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); }
+function newChat() { const prev = curId; detachCurrentSession(); const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); try { fetchBudget(); } catch {} }
 // Fresh-start ignition: a quick green scan-sweep over the chat surface as the rail closes.
 function igniteChatSurface() {
   const surf = document.getElementById("neural-glass") || document.body;
@@ -292,7 +294,7 @@ function igniteChatSurface() {
 // Switching chats no longer blocks on a running turn: the run keeps generating server-side and its
 // per-chat liveJobs entry persists. We tear down the on-screen streaming session (WITHOUT stopping
 // the server job), render the target chat, then reattach if IT has a live run.
-function switchChat(id) { if (id === curId) { closeSidebar(); return; } const prev = curId; detachCurrentSession(); curId = id; save(); renderAll(); scroll(true); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); }
+function switchChat(id) { if (id === curId) { closeSidebar(); return; } const prev = curId; detachCurrentSession(); curId = id; save(); renderAll(); scroll(true); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); try { fetchBudget(); } catch {} }
 function deleteChat(id) {
   // True forget: also erase the server's transcript copy + any episodic memory distilled from this
   // chat, so cross-chat retrieval can never resurrect it (fire-and-forget; nothing breaks offline).
@@ -414,14 +416,14 @@ function renderMsg(m, i, isLastAi) {
     const bit = (text, title, fn) => { const s = document.createElement("span"); s.textContent = text; if (title) s.title = title; if (fn) { s.style.cursor = "pointer"; s.onclick = fn; } if (mm.childNodes.length) sep(); mm.appendChild(s); return s; };
     if (m.meta.mode && MODE_LABEL[m.meta.mode]) bit(MODE_LABEL[m.meta.mode]);
     if (m.meta.interrupted) { const b = bit("⏸ interrupted", "You stopped this answer before it finished"); b.style.color = "#e8b07c"; }
-    const ctxBits = [];
-    if (m.meta.memory) ctxBits.push("🧠 " + m.meta.memory);
-    if (m.meta.artifacts) ctxBits.push("📄 " + m.meta.artifacts);
-    if (m.meta.chats) ctxBits.push("💬 " + m.meta.chats);
-    if (ctxBits.length) {
-      const ci = m.meta.contextItems;
-      bit(ctxBits.join(" · "), ci ? "Tap to see which items were loaded" : "Context loaded for this answer (per-item detail unavailable for this message)", ci ? () => toggleCtxDetail(turn, mm, ci) : null);
-    }
+    // Context chips are individually gated on settings (all OFF by default — Fred, 2026-07-25;
+    // System Settings has a restore checkbox for each). Split from the old single fused span so
+    // each can be toggled on its own; any of them still taps open the per-item detail.
+    const ci = m.meta.contextItems;
+    const ctxChip = (txt) => bit(txt, ci ? "Tap to see which items were loaded" : "Context loaded for this answer (per-item detail unavailable for this message)", ci ? () => toggleCtxDetail(turn, mm, ci) : null);
+    if (m.meta.memory && settings.ctxMem) ctxChip("🧠 " + m.meta.memory);
+    if (m.meta.artifacts && settings.ctxDocs) ctxChip("📄 " + m.meta.artifacts);
+    if (m.meta.chats && settings.ctxChats) ctxChip("💬 " + m.meta.chats);
     if (m.meta.tools) bit("🔧 " + m.meta.tools, "Tap to show this message's tool log", () => openTools({ runIds: m.meta.runIds, chatId: curId, label: "this message" }));
     // Documents this turn produced stay downloadable after a reload.
     if (Array.isArray(m.meta.files)) for (const f of m.meta.files) turn.appendChild(fileChip(f));
@@ -1193,10 +1195,16 @@ function processEvent(st, ev) {
     if (!stripThink(st.raw)) { clearTimeout(st.warm); live.textContent = "Dominion AI is working — " + (ev.phase || "thinking") + "… " + (ev.elapsed != null ? ev.elapsed + "s" : ""); scroll(); }
   } else if (ev.type === "token") {
     st.raw += ev.delta || ""; const shown = stripThink(st.raw); live.classList.toggle("think", !shown); live.textContent = shown || "Dominion AI is working…"; scroll();
+  } else if (ev.type === "budget") {
+    // Session budget lifecycle (Fred, 2026-07-25). "state" repaints the black budget window;
+    // shortfall/clamped/over raise the big blurred popup with the fully transparent message.
+    if (ev.event === "state") { budgetCur = { budget: ev.budget, spent: ev.spent, remaining: ev.remaining, unit: ev.unit, available: budgetCur && budgetCur.available }; renderBudget(); if (ev.over) openBudgetModal("This session has reached its budget. Raise it to continue exactly where you left off.", { raise: true }); }
+    else if (ev.event === "shortfall" || ev.event === "clamped") { fetchBudget(); openBudgetModal(ev.message || "Session budget adjusted.", { credits: true }); }
   } else if (ev.type === "error") {
     // Gate refusals (access code / credits) carry a human message and send the user to Setup —
     // never swallow them into a generic "server error".
     st.gateCode = (ev.code === "needs_invite" || ev.code === "needs_credits") ? ev.code : "";
+    if (ev.code === "budget_exhausted") { fetchBudget(); openBudgetModal(ev.message || "This session's budget is spent.", { raise: true, credits: ev.balance !== undefined }); }
     st.errMsg = ev.message || (ev.code === "privacy_mode_block"
       ? "Blocked by privacy mode."
       : "Chat failed: " + (ev.error || "server error") + " — tap send to retry.");
@@ -1473,6 +1481,9 @@ function openSettings() {
   tempInput.value = String(settings.temperature); tempVal.textContent = String(settings.temperature);
   if (confirmToolsBox) confirmToolsBox.checked = !!settings.confirmTools;
   if (privacySel) privacySel.value = settings.privacy || "redacted_external";
+  for (const [id, key] of [["show-ctx-mem", "ctxMem"], ["show-ctx-docs", "ctxDocs"], ["show-ctx-chats", "ctxChats"]]) {
+    const el = document.getElementById(id); if (el) el.checked = !!settings[key];
+  }
   smodal.hidden = false;
 }
 const closeSettings = () => { smodal.hidden = true; };
@@ -1481,10 +1492,78 @@ function saveSettingsUI() {
   settings.temperature = parseFloat(tempInput.value);
   if (confirmToolsBox) settings.confirmTools = confirmToolsBox.checked;
   if (privacySel) settings.privacy = privacySel.value;
+  for (const [id, key] of [["show-ctx-mem", "ctxMem"], ["show-ctx-docs", "ctxDocs"], ["show-ctx-chats", "ctxChats"]]) {
+    const el = document.getElementById(id); if (el) settings[key] = el.checked;
+  }
   if (modelSel) try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {}
   updateCloudBadge();
-  saveSettings(); closeSettings();
+  saveSettings(); closeSettings(); renderAll();   // context-chip toggles repaint existing messages
 }
+
+// ---------- session budget window + popup (Fred, 2026-07-25) ----------
+// The black window beside the composer shows spent-of-budget for THIS chat, live off SSE budget
+// events; tapping Set edits it in place. Refusals and shortfalls open the big blurred popup with
+// the server's fully transparent message (who holds what, every number) — wording identical on
+// both sides because the server composes it once.
+let budgetCur = null;
+const fmtBudget = (n, unit) => unit === "usd" ? "$" + (+n).toFixed(2) : Math.floor(n) + " credits";
+function renderBudget() {
+  const box = document.getElementById("budgetbox"); if (!box) return;
+  if (!budgetCur || !curId) { box.hidden = true; return; }
+  box.hidden = false;
+  const el = document.getElementById("bb-nums");
+  if (el) el.textContent = fmtBudget(budgetCur.spent || 0, budgetCur.unit) + " of " + fmtBudget(budgetCur.budget || 0, budgetCur.unit)
+    + (budgetCur.available != null ? " · " + Math.floor(budgetCur.available) + " free" : "");
+}
+async function fetchBudget() {
+  if (!curId) { budgetCur = null; renderBudget(); return; }
+  try {
+    const d = await memApi("/budget?chat=" + encodeURIComponent(curId));
+    if (d && d.session) {
+      budgetCur = { budget: d.session.budget, spent: d.session.spent, remaining: d.session.remaining, unit: d.session.unit, available: d.available };
+      renderBudget();
+      if (d.shortfallMessage && d.session.created) openBudgetModal(d.shortfallMessage, { credits: true });
+    }
+  } catch {}
+}
+function openBudgetModal(message, { raise = false, credits = false } = {}) {
+  const m = document.getElementById("bmodal"); if (!m) return;
+  const msg = document.getElementById("bmsg"); if (msg) msg.textContent = message || "";
+  const br = document.getElementById("braise"); if (br) br.hidden = !raise;
+  const bc = document.getElementById("bcredits"); if (bc) bc.hidden = !credits;
+  m.hidden = false;
+}
+function startBudgetEdit() {
+  const nums = document.getElementById("bb-nums"), edit = document.getElementById("bb-editwrap");
+  if (!nums || !edit) return;
+  nums.hidden = true; edit.hidden = false;
+  const inp = document.getElementById("bb-input");
+  if (inp) { inp.value = budgetCur ? String(budgetCur.unit === "usd" ? budgetCur.budget : Math.floor(budgetCur.budget)) : ""; inp.focus(); inp.select(); }
+}
+function endBudgetEdit() {
+  const nums = document.getElementById("bb-nums"), edit = document.getElementById("bb-editwrap");
+  if (nums) nums.hidden = false; if (edit) edit.hidden = true;
+}
+async function submitBudgetEdit() {
+  const inp = document.getElementById("bb-input"); if (!inp || !curId) return endBudgetEdit();
+  const want = parseFloat(inp.value);
+  if (!Number.isFinite(want) || want < 0) return endBudgetEdit();
+  const cur = chats.find((c) => c.id === curId);
+  const d = await memApi("/budget", { chat: curId, budget: want, title: cur ? cur.title : "" });
+  endBudgetEdit();
+  if (d && d.ok === false && d.message) { openBudgetModal(d.message, { credits: true }); fetchBudget(); return; }
+  if (d && d.ok && d.session) { budgetCur = { budget: d.session.budget, spent: d.session.spent, remaining: d.session.remaining, unit: d.session.unit, available: d.available }; renderBudget(); }
+}
+function wireBudgetUi() {
+  const set = document.getElementById("bb-edit"); if (set) set.addEventListener("click", startBudgetEdit);
+  const ok = document.getElementById("bb-ok"); if (ok) ok.addEventListener("click", submitBudgetEdit);
+  const inp = document.getElementById("bb-input");
+  if (inp) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") submitBudgetEdit(); if (e.key === "Escape") endBudgetEdit(); });
+  const x = document.getElementById("bclose"); if (x) x.addEventListener("click", () => { document.getElementById("bmodal").hidden = true; });
+  const br = document.getElementById("braise"); if (br) br.addEventListener("click", () => { document.getElementById("bmodal").hidden = true; startBudgetEdit(); });
+  const bc = document.getElementById("bcredits"); if (bc) bc.addEventListener("click", () => { location.href = "/setup.html"; });
+}
+try { wireBudgetUi(); fetchBudget(); } catch {}
 
 // ---------- memory panel (Phase 2) ----------
 function badge(text, cls) { const b = document.createElement("span"); b.className = "mbadge" + (cls ? " " + cls : ""); b.textContent = text; return b; }

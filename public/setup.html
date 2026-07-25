@@ -317,6 +317,27 @@
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
     }
+    /*
+     * RETURN TO MAIN rail (Fred, 2026-07-25). Every guest so far has struggled to find the way
+     * back from Setup to the chat (the only path was a small footer link). A fixed rail on the
+     * right edge, vertically centered so it never covers the header or the numbered panels;
+     * on narrow screens it becomes a full-width bottom bar (overlays are bottom-anchored on
+     * mobile in this design language already).
+     */
+    .dt-return{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:900;
+      display:flex;align-items:center;justify-content:center;
+      writing-mode:vertical-rl;text-orientation:mixed;
+      background:#0d1117;color:#e8edf2;border:1px solid rgba(214,150,90,.55);border-right:0;
+      border-radius:10px 0 0 10px;padding:18px 10px;font:600 13px/1 inherit;letter-spacing:.12em;
+      text-transform:uppercase;text-decoration:none;box-shadow:0 4px 18px rgba(0,0,0,.45)}
+    .dt-return:hover{background:#161d26;color:#fff}
+    /* Reserve a right gutter so the rail never sits on top of panel content. */
+    @media (min-width: 721px){ body{padding-right:64px} }
+    @media (max-width: 720px){
+      .dt-return{writing-mode:horizontal-tb;top:auto;bottom:0;right:0;left:0;transform:none;
+        border-radius:0;border:0;border-top:1px solid rgba(214,150,90,.55);padding:14px 10px;text-align:center}
+      body{padding-bottom:52px}
+    }
   </style>
 </head>
 <body>
@@ -459,6 +480,7 @@
     </main>
 
     <footer class="dt-footer"><a href="/">Open Dominion</a></footer>
+    <a class="dt-return" href="/" aria-label="Return to the main chat page">Return to Main</a>
   </div>
   <div class="dt-toast-zone" id="dt-toast-zone" aria-live="polite" aria-atomic="true"></div>
 

@@ -57,7 +57,8 @@ import { createChatSync } from "./chatsync.mjs";
 import { unkeptIntent, intentNudge } from "./intentguard.mjs";
 import { featureIndex, featureHelp } from "./features.mjs";
 import { createGoogleProvider } from "./google.mjs";
-import { createBilling, creditsForUsd } from "./billing.mjs";
+import { createBilling, creditsForUsd, creditsForCostUsd } from "./billing.mjs";
+import { createSessionBudgets } from "./sessionbudget.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore } from "./forge.mjs";
@@ -1182,6 +1183,17 @@ const stripe = createStripe({
   log: (s) => console.log("[dominion-ai] stripe: " + s),
 });
 const billing = createBilling({ dir: dataPath("billing"), users: usersStore, charge: (args) => stripe.charge(args) });
+// Session budgets (Fred, 2026-07-25): the transparent per-conversation spending gate. Guests
+// default to 1000 credits, the owner to $5; running sessions EARMARK their unspent budget so the
+// same credits can never be double-committed. Pure logic + tests live in sessionbudget.mjs.
+// The boot sweep clears running flags left by a crash so no ghost hold ever haunts a balance.
+const sessionBudgets = createSessionBudgets({ dir: dataPath("billing"), defaults: {
+  guestCredits: Number(cfgGet("BUDGET_GUEST_CREDITS", "1000")) || 1000,
+  ownerUsd: Number(cfgGet("BUDGET_OWNER_USD", "5")) || 5,
+} });
+sessionBudgets.sweepRunning();
+// The owner has no email in single-tenant mode; his sessions key under this sentinel.
+const SB_OWNER_KEY = "__owner__";
 // Shared training sink (SOW): with consent, non-owner turns append to one JSONL the owner can mine to
 // improve the shared logic. Owner turns are Fred's own and are not swept here.
 const TRAINING_SINK = join(LOG_DIR, "training-sink.jsonl");
@@ -1190,16 +1202,20 @@ async function trainingSinkRecord(entry) { try { await appendFile(TRAINING_SINK,
 // when low; sponsored users draw against Fred's monthly cap; consented turns feed the shared training
 // sink. Owner turns and single-tenant mode are never metered. Never throws (billing must not break chat).
 async function meterTurn(T, costUsd, promptText, answer) {
-  if (!MULTI_TENANT || !T || T.isOwner) return;
+  if (!MULTI_TENANT || !T || T.isOwner) return null;
   try {
+    let credits = 0;
     if (T.role === "credit") {
       const m = billing.chargeTurn(T.email, costUsd || 0);
+      credits = m.deducted || 0;   // the REAL deduction — session budgets mirror this, never re-estimate
       if (m.low) billing.autoRecharge(T.email).catch(() => {});   // fire-and-forget; locks on repeated failure
     } else if (T.role === "sponsored") {
       usersStore.addSponsoredSpend(T.email, costUsd || 0);              // pauses the account at the cap
+      credits = creditsForCostUsd(costUsd || 0);   // display-equivalent for the session budget window
     }
     if (T.consented) trainingSinkRecord({ ts: new Date().toISOString(), uid: T.uid, role: T.role, prompt: String(promptText || "").slice(0, 4000), answer: String(answer || "").slice(0, 8000) });
-  } catch {}
+    return { credits };
+  } catch { return null; }
 }
 
 // ===================== SaaS endpoints (account / billing / admin / onboarding) =====================
@@ -4469,8 +4485,10 @@ async function handleChat(req, res) {
   const ac = new AbortController();
   job.stop = () => { if (job.done) return; aborted = true; try { ac.abort(); } catch {} };
   // The single teardown for every exit path: heartbeat off, buffer sealed (drains attach
-  // listeners), lane released, socket closed if it's still alive.
-  const endStream = () => { workStop(); finishJob(job); releaseLane(); try { res.end(); } catch {} };
+  // listeners), lane released, socket closed if it's still alive. budgetTurnEnd releases this
+  // turn's session-budget earmark (set once the session is known below; noop until then).
+  let budgetTurnEnd = () => {};
+  const endStream = () => { workStop(); finishJob(job); releaseLane(); try { budgetTurnEnd(); } catch {} try { res.end(); } catch {} };
   sse({ type: "job", id: job.id });
   // SSE working heartbeat: while a slow model call / tool round is in flight, tell the client every
   // ~8s that we're alive ({type:"working", phase, elapsed seconds}) — cleared before tokens stream.
@@ -4564,6 +4582,66 @@ async function handleChat(req, res) {
   if (!T.isOwner && jobStore.runningCountFor(T.email) > CHATJOBS_MAX_RUNNING) {
     sse({ type: "error", code: "too_many_jobs", message: `You already have ${CHATJOBS_MAX_RUNNING} runs in flight — let one finish or stop it before starting another.` });
     sse({ type: "stopped", reason: "too_many_jobs" }); return endStream();
+  }
+
+  /*
+   * SESSION BUDGET GATE (Fred, 2026-07-25). One chat = one session; each carries a visible budget
+   * (owner $5 default in USD; guests 1000 credits). While THIS turn runs, the session's unspent
+   * budget is EARMARKED so a second session can never commit the same credits (sessionbudget.mjs
+   * holds the math and its tests). Everything here is loud and transparent:
+   *   - a new session that can't cover the default clamps to what IS available and says so;
+   *   - a send re-validates the hold against live numbers (holds elsewhere may have grown);
+   *   - a spent-out budget PAUSES the session (error + popup), never a silent truncation;
+   *   - the running flag is released on EVERY exit via endStream (budgetTurnEnd below).
+   * Sponsored users get budget tracking/display but no earmark refusals — their real fence is the
+   * monthly sponsored cap, which pauses the account upstream of this gate.
+   */
+  let SB = null;
+  const sbEmail = T.isOwner ? SB_OWNER_KEY : T.email;
+  const sbCredit = !T.isOwner && T.role === "credit";
+  const sbBalance = sbCredit ? billing.balance(T.email) : Number.MAX_SAFE_INTEGER;
+  if (chatId) {
+    SB = sessionBudgets.ensure(sbEmail, chatId, { isOwner: T.isOwner, kind: "chat",
+      title: typeof input.chatTitle === "string" ? input.chatTitle.slice(0, 120) : "", balance: sbBalance });
+    if (SB && SB.created && SB.shortfall) {
+      // New session, default didn't fit: the budget clamped to available. The client raises the
+      // big blurred popup off this event; the message names the holders and every number.
+      sse({ type: "budget", event: "shortfall", budget: SB.budget, unit: SB.unit,
+            balance: SB.shortfall.balance, available: SB.shortfall.avail, holders: SB.shortfall.holders,
+            message: sessionBudgets.buildOverBudgetMessage({ requested: SB.shortfall.wanted,
+              balance: SB.shortfall.balance, avail: SB.shortfall.avail, holders: SB.shortfall.holders, unit: SB.unit }) });
+    }
+    // Send-time revalidation: an idle session's budget is only a plan; the earmark is re-checked
+    // against ACTUAL current numbers the moment work starts (Fred: "everything is recalculated").
+    if (SB && sbCredit && SB.remaining > 0) {
+      const availNow = sessionBudgets.available(sbEmail, sbBalance, chatId);
+      if (SB.remaining > availNow) {
+        const r = sessionBudgets.setBudget(sbEmail, chatId, SB.spent + availNow, { balance: sbBalance });
+        if (r.ok) {
+          SB = { ...SB, budget: r.budget, remaining: r.remaining };
+          sse({ type: "budget", event: "clamped", budget: r.budget, spent: r.spent, remaining: r.remaining, unit: r.unit,
+                message: "Funds earmarked by another running session shrank this session's budget to " +
+                         (r.unit === "usd" ? "$" + r.budget.toFixed(2) : Math.floor(r.budget) + " credits") + "." });
+        }
+      }
+    }
+    // Cap already reached (or nothing available at all): pause-and-raise, never a silent cut.
+    if (SB && SB.remaining <= 0) {
+      const holders = sessionBudgets.holdsFor(sbEmail, chatId);
+      const availNow = sbCredit ? sessionBudgets.available(sbEmail, sbBalance, chatId) : 0;
+      const msg = SB.spent > 0
+        ? `This session has used its full budget (${SB.unit === "usd" ? "$" + SB.budget.toFixed(2) : Math.floor(SB.budget) + " credits"}). Raise the session budget to continue exactly where you left off.`
+        : sessionBudgets.buildOverBudgetMessage({ requested: SB.budget || 1, balance: sbCredit ? sbBalance : 0, avail: availNow, holders, unit: SB.unit });
+      sse({ type: "error", code: "budget_exhausted", budget: SB.budget, spent: SB.spent, unit: SB.unit,
+            balance: sbCredit ? sbBalance : undefined, available: availNow, holders, message: msg });
+      sse({ type: "stopped", reason: "budget_exhausted" });
+      return endStream();
+    }
+    if (SB) {
+      sessionBudgets.setRunning(sbEmail, chatId, true);
+      budgetTurnEnd = () => { try { sessionBudgets.setRunning(sbEmail, chatId, false); } catch {} };
+      sse({ type: "budget", event: "state", budget: SB.budget, spent: SB.spent, remaining: SB.remaining, unit: SB.unit });
+    }
   }
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
@@ -5226,7 +5304,14 @@ async function handleChat(req, res) {
       console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=${toolCount} rounds=${roundsUsed} conf=${quality.confidence}`);
       await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, images: imagesThisTurn || undefined, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo || undefined, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
       try { T.chatlog.record(chatId, history, answer); } catch {}
-      await meterTurn(T, costUsd, lastUserText, answer);   // SaaS: charge credits / draw cap / training sink (non-owner only)
+      const metered = await meterTurn(T, costUsd, lastUserText, answer);   // SaaS: charge credits / draw cap / training sink (non-owner only)
+      // Session budget: mirror the REAL deduction (guest credits from meterTurn; owner turn cost in
+      // USD). over=true rides the budget event so the UI shows the pause the moment the cap is hit.
+      if (SB && chatId) {
+        const spendAmt = T.isOwner ? (costUsd || 0) : ((metered && metered.credits) || 0);
+        const sbr = sessionBudgets.recordSpend(sbEmail, chatId, spendAmt);
+        if (!sbr.error) sse({ type: "budget", event: "state", budget: SB.budget, spent: sbr.spent, remaining: sbr.remaining, over: sbr.over || undefined, unit: SB.unit });
+      }
       sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
       return endStream();
     }
@@ -5573,6 +5658,36 @@ const server = http.createServer(async (req, res) => {
         "content-length": buf.length, "cache-control": "no-store",
       });
       return res.end(buf);
+    }
+
+    /*
+     * SESSION BUDGET endpoints (Fred, 2026-07-25). The budget window beside the chat reads GET and
+     * writes POST. All math + wording live in sessionbudget.mjs; refusals return the FULL transparent
+     * detail (balance / available / who holds what / max allowable) — never a bare "not enough".
+     */
+    if (path === "/budget" && (req.method === "GET" || req.method === "POST")) {
+      const T = resolveTenant(req);
+      if (T.role === "anon") return sjson(res, 401, { error: "sign in first" });
+      const body = req.method === "POST" ? ((await readJsonBody(req)) || {}) : {};
+      const chat = String((req.method === "GET" ? u.searchParams.get("chat") : body.chat) || "").slice(0, 80);
+      if (!chat) return sjson(res, 400, { error: "chat id required" });
+      const e = T.isOwner ? SB_OWNER_KEY : T.email;
+      const credit = !T.isOwner && T.role === "credit";
+      const bal = credit ? billing.balance(T.email) : Number.MAX_SAFE_INTEGER;
+      if (req.method === "POST") {
+        const st0 = sessionBudgets.ensure(e, chat, { isOwner: T.isOwner, balance: bal, title: String(body.title || "").slice(0, 120) });
+        if (!st0) return sjson(res, 400, { error: "bad session" });
+        const r = sessionBudgets.setBudget(e, chat, body.budget, { balance: bal });
+        if (r.error === "over_available") return sjson(res, 200, { ok: false, ...r, balance: credit ? bal : undefined });
+        if (r.error) return sjson(res, 400, { error: r.error });
+        return sjson(res, 200, { ok: true, session: r, available: credit ? sessionBudgets.available(e, bal, chat) : null, balance: credit ? bal : null });
+      }
+      const st = sessionBudgets.ensure(e, chat, { isOwner: T.isOwner, balance: bal });
+      return sjson(res, 200, { session: st, available: credit ? sessionBudgets.available(e, bal, chat) : null,
+        balance: credit ? bal : null, unit: T.isOwner ? "usd" : "credits",
+        defaults: sessionBudgets.defaults, shortfall: st && st.shortfall || null,
+        shortfallMessage: st && st.shortfall ? sessionBudgets.buildOverBudgetMessage({ requested: st.shortfall.wanted,
+          balance: st.shortfall.balance, avail: st.shortfall.avail, holders: st.shortfall.holders, unit: st.unit }) : null });
     }
 
     // Pre-send cost estimate (§6): deterministic preflight, no model call. The composer chip polls this.
