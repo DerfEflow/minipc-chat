@@ -59,6 +59,14 @@
   }
   /* Composer placeholder (Fred, 2026-07-25): plain wording at 20% transparency. */
   #input::placeholder{opacity:.8}
+  /*
+   * Hamburger fix (Fred, 2026-07-25, pre-existing defect): on the desktop grid the archive rail
+   * sits at z-index 7 while the hamburger's blur overlay sits at 30 — so opening the archive
+   * blurred the rail itself and the user saw only "a blurry layer". The mobile slide-in already
+   * rides at 35, above the blur; this makes the OPEN rail do the same on every layout, so the
+   * conversation list stays crisp and clickable over the blurred page. Overlay click still closes.
+   */
+  #sidebar.open{z-index:35}
 </style>
 </head>
 <body>
