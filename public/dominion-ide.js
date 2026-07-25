@@ -816,6 +816,9 @@
             priceShort: priced ? "$" + inC + "/$" + outC : "",
             priceLong: priced ? "$" + inC + " in / $" + outC + " out per million tokens" : "",
             unavailable: !hasKey(m.provider),
+            // The one slot in the app with a floor (Vibe SOW 5.1). The server computes the rule;
+            // this only carries the verdict to the orchestrator row's picker.
+            orchestratorOk: m.orchestratorOk === true,
           };
         }),
       })).filter((g) => g.models.length);
@@ -1373,6 +1376,15 @@
     if (window.dominionBeginner) {
       if (beginner) window.dominionBeginner.open();
       else window.dominionBeginner.close();
+    }
+    // The Vibe Coder is its own surface too (Fred's drawn layout, docs/VIBE-CODER-SOW.md): slider,
+    // studio, Plan with AI, Agent Army, Begin Building. Same pattern as the beginner: the classic
+    // starter stands down entirely while it is up; the engineer keeps the classic page untouched.
+    const vibe = m === "vibe";
+    if (root) root.classList.toggle("vb-on", vibe);
+    if (window.dominionVibe) {
+      if (vibe) window.dominionVibe.open();
+      else window.dominionVibe.close();
     }
     paintTools();
     paintModelLine();
@@ -2542,6 +2554,29 @@
     follow: (jobId, opts) => { if (window.dominionLenses) window.dominionLenses.follow(jobId, opts); },
     journey: (phase) => setJourneyPhase(phase),
     startFresh,
+    // ---- added for the Vibe surface (docs/VIBE-CODER-SOW.md) --------------------------------
+    // The grouped model catalog, one load for the whole panel (carries orchestratorOk per model).
+    models: () => (state.catalog || []).slice(),
+    /*
+     * The Agent Army writes THROUGH the same assignments contract the AF window uses, so the build
+     * engine sees one shape no matter which surface set it. saveAF replaces the af block wholesale;
+     * clearAF is the Agent-Crew-unchecked rule made real: with no af block, startBuild runs the
+     * default AI over the whole job, autonomously, exactly as before the crew existed.
+     */
+    getAF: () => (state.assignments.af ? JSON.parse(JSON.stringify(state.assignments.af)) : null),
+    saveAF: (af) => { state.assignments.af = af; saveAssignments(); },
+    clearAF: () => { delete state.assignments.af; saveAssignments(); },
+    studioModules: () => [...state.studio.modules],
+    // The vibe surface draws its own Customize Your Workspace panel; the choice still lives HERE,
+    // in the one studio state every gate reads (dominion-studio-changed fires from paintStudio).
+    setStudioModules: (modules) => {
+      const valid = new Set(STUDIO_MODULES.map((m) => m.id));
+      state.studio.modules = new Set((modules || []).filter((id) => valid.has(id)));
+      state.studio.preset = studioPresetFor(state.studio.modules);
+      saveStudio();
+      paintStudio();
+    },
+    studioPresets: () => JSON.parse(JSON.stringify(STUDIO_PRESETS)),
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

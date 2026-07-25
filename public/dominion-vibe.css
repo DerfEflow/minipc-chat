@@ -1,0 +1,340 @@
+/* ============================================================================================
+   The Crucible in Vibe Coder mode: Crucible App Launcher.
+   Fred's hand-drawn layout (docs/VIBE-CODER-SOW.md), 2026-07-25.
+
+   THE COLOUR SYSTEM IS THE POINT. Three planning windows, three tints: Main is the house blue
+   glass, Second is copper, Third is green. A message that crosses windows keeps its SENDER'S
+   tint in the receiving log, so a three-way audit can be followed by eye alone. The tints are
+   deliberately quiet — background washes, not paint — because the conversation still has to
+   read as one surface.
+
+   Scoped under #ide-root / .vb- so nothing leaks into chat, the dial, or the forge.
+   ============================================================================================ */
+
+/* The classic starter stands down while the Vibe surface is up. The lens area (#cru) STAYS: it is
+   the Live Preview / Results / Files-Diffs the studio checkboxes gate, and it keeps its place
+   below the Vibe sections. Same absent-not-disabled discipline as the beginner surface. */
+#ide-root.vb-on #ide-start { display: none !important; }
+#ide-root:not(.vb-on) #vb-shell { display: none; }
+
+.vb-shell {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  /* Domine carries the conversations (Fred's ruling); the machinery stays on the console faces. */
+  --vb-main: 210;    /* hue: house blue   */
+  --vb-second: 28;   /* hue: copper       */
+  --vb-third: 120;   /* hue: energy green */
+}
+.vb-h {
+  margin: 0;
+  font-size: 12px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--copper-hot, #d4823c);
+}
+.vb-note { font-size: 11px; color: var(--muted, #8ba0ae); }
+
+/* ---------- 1. App Project Slider --------------------------------------------------------- */
+.vb-strip { display: grid; gap: 8px; min-width: 0; }
+.vb-slider {
+  display: flex; gap: 10px;
+  overflow-x: auto; overscroll-behavior-x: contain;
+  padding: 4px 2px 10px;
+  scrollbar-width: thin;
+  cursor: grab;
+  touch-action: pan-x;
+}
+.vb-slider:active { cursor: grabbing; }
+.vb-card {
+  flex: 0 0 auto;
+  display: grid; align-content: center; justify-items: center; gap: 4px;
+  width: 118px; min-height: 74px;
+  padding: 8px;
+  font: inherit; cursor: pointer;
+  color: var(--ink, #e8f6ff);
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .18));
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(14, 33, 54, .9), rgba(4, 11, 20, .95));
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .12), 0 6px 16px rgba(0, 0, 0, .4);
+}
+.vb-card small { font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted, #8ba0ae); }
+.vb-card .vb-card-name { font-size: 12.5px; font-weight: 650; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vb-card.on { border-color: rgba(118, 255, 104, .55); box-shadow: inset 0 0 16px rgba(118, 255, 104, .1), 0 6px 16px rgba(0, 0, 0, .4); }
+.vb-card:hover { border-color: rgba(185, 107, 50, .55); }
+.vb-card-future { border-style: dashed; color: var(--copper-hot, #d4823c); background: rgba(4, 11, 20, .5); }
+.vb-card-future span { font-size: 26px; line-height: 1; }
+.vb-card-more { border-style: dashed; opacity: .55; cursor: default; }
+.vb-card-more span { font-size: 18px; }
+
+/* ---------- 2. the small controls --------------------------------------------------------- */
+.vb-controls { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; }
+.vb-square {
+  display: grid; place-content: center; gap: 4px; justify-items: center;
+  width: 74px; height: 74px;
+  font: inherit; font-size: 11px; letter-spacing: .08em;
+  color: var(--ink, #e8f6ff); cursor: pointer;
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .18));
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(14, 33, 54, .9), rgba(4, 11, 20, .95));
+}
+.vb-square svg { width: 22px; height: 22px; fill: none; stroke: var(--copper-hot, #d4823c); stroke-width: 2; stroke-linecap: round; }
+.vb-square:hover { border-color: rgba(185, 107, 50, .55); }
+/* The reserved slot looks reserved: present, inert, honest about it. */
+.vb-tbd { cursor: default; border-style: dashed; opacity: .5; }
+.vb-small {
+  align-self: center;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 9px 12px;
+  font: inherit; font-size: 11.5px; cursor: pointer;
+  color: var(--muted, #8ba0ae);
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .16));
+  border-radius: 6px; background: rgba(3, 10, 18, .6);
+}
+.vb-small:hover { color: var(--ink, #e8f6ff); }
+.vb-saveto { cursor: default; }
+.vb-saveto select { font: inherit; font-size: 11.5px; color: var(--ink, #e8f6ff); background: rgba(3, 10, 18, .8); border: 1px solid var(--glass-line, rgba(150, 200, 230, .2)); border-radius: 4px; padding: 4px 6px; max-width: 180px; }
+
+/* ---------- 3. Customize Your Workspace --------------------------------------------------- */
+.vb-box {
+  display: grid; gap: 12px; min-width: 0;
+  padding: 14px;
+  border: 1px solid rgba(185, 107, 50, .35);
+  border-radius: 10px;
+  background: radial-gradient(80% 60% at 50% 0%, rgba(185, 107, 50, .08), transparent 70%),
+    linear-gradient(180deg, rgba(8, 20, 34, .92), rgba(2, 7, 14, .96));
+}
+.vb-box-head, .vb-box-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.vb-presets { display: flex; gap: 8px; flex-wrap: wrap; }
+.vb-presets button {
+  padding: 9px 16px;
+  font: inherit; font-size: 12px; letter-spacing: .06em; cursor: pointer;
+  color: var(--ink, #e8f6ff);
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .2));
+  border-radius: 6px; background: rgba(3, 10, 18, .6);
+}
+.vb-presets button.on { border-color: rgba(118, 255, 104, .5); color: #d8ffcd; box-shadow: inset 0 0 12px rgba(118, 255, 104, .08); }
+.vb-mods { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.vb-mod { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-soft, #d9c9b8); cursor: pointer; }
+.vb-mod input { cursor: pointer; accent-color: var(--energy, #76ff68); }
+.vb-apply {
+  padding: 9px 22px;
+  font: inherit; font-weight: 700; letter-spacing: .1em; font-size: 12px; cursor: pointer;
+  color: #06180c;
+  border: 1px solid rgba(160, 255, 133, .7); border-radius: 6px;
+  background: linear-gradient(180deg, #b8ff9d, #4fd35f 65%);
+}
+
+/* ---------- 4. Plan with AI --------------------------------------------------------------- */
+.vb-plan { display: grid; gap: 12px; min-width: 0; }
+.vb-plan-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-width: 0; }
+@media (max-width: 760px) { .vb-plan-row { grid-template-columns: 1fr; } }
+
+.vb-win {
+  display: grid; min-width: 0;
+  border-radius: 12px;
+  border: 1px solid hsla(var(--vb-hue), 60%, 60%, .3);
+  background: linear-gradient(180deg, hsla(var(--vb-hue), 45%, 16%, .82), hsla(var(--vb-hue), 50%, 7%, .94));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 10px 26px rgba(0, 0, 0, .45);
+  overflow: hidden;
+}
+.vb-win-main { --vb-hue: var(--vb-main); }
+.vb-win-second { --vb-hue: var(--vb-second); }
+.vb-win-third { --vb-hue: var(--vb-third); }
+
+.vb-win-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid hsla(var(--vb-hue), 60%, 60%, .22);
+}
+.vb-win-head b { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink, #e8f6ff); }
+.vb-win-head em { font-style: normal; font-size: 10px; color: var(--muted, #8ba0ae); text-transform: none; letter-spacing: .04em; }
+/* Upper left is the model selector, per the drawing's margin note. */
+.vb-win-model {
+  max-width: 46%;
+  font: inherit; font-size: 11px;
+  color: var(--ink, #e8f6ff);
+  border: 1px solid hsla(var(--vb-hue), 60%, 60%, .35);
+  border-radius: 5px; padding: 5px 6px;
+  background: rgba(2, 8, 14, .75);
+}
+.vb-win-toggle {
+  margin-left: auto;
+  padding: 5px 12px;
+  font: inherit; font-size: 11px; cursor: pointer;
+  color: var(--muted, #8ba0ae);
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .18));
+  border-radius: 5px; background: transparent;
+}
+.vb-win-body { display: grid; min-width: 0; }
+.vb-win-body[hidden] { display: none; }
+
+.vb-log {
+  height: 240px;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 12px 6px;
+  font-family: "Domine", Georgia, "Times New Roman", serif;
+  font-size: 14.5px; line-height: 1.55;
+}
+.vb-win-main .vb-log { height: 300px; }
+.vpb { max-width: 88%; padding: 10px 13px; border-radius: 12px; min-width: 0; overflow-wrap: anywhere; }
+.vpb p { margin: 0; white-space: pre-wrap; }
+.vpb-user {
+  align-self: flex-end;
+  color: #06180c;
+  background: linear-gradient(180deg, #cdf7c2, #8fe08a);
+  border-bottom-right-radius: 4px;
+}
+.vpb-ai {
+  align-self: flex-start;
+  color: var(--ink, #eaf6ff);
+  border: 1px solid hsla(var(--vb-hue), 60%, 60%, .28);
+  background: hsla(var(--vb-hue), 40%, 14%, .75);
+  border-bottom-left-radius: 4px;
+}
+/* A turn that crossed windows wears its SENDER'S colour here, and says which AI it came from.
+   That one visual rule is what makes the three-way audit followable at a glance. */
+.vpb-from { align-self: flex-start; color: var(--ink, #eaf6ff); border-bottom-left-radius: 4px; border: 1px solid; }
+.vpb-from-main { background: hsla(var(--vb-main), 45%, 16%, .85); border-color: hsla(var(--vb-main), 60%, 60%, .45); }
+.vpb-from-second { background: hsla(var(--vb-second), 45%, 16%, .85); border-color: hsla(var(--vb-second), 60%, 60%, .45); }
+.vpb-from-third { background: hsla(var(--vb-third), 45%, 16%, .85); border-color: hsla(var(--vb-third), 60%, 60%, .45); }
+.vpb-tag { display: block; margin-bottom: 5px; font-family: "Cascadia Mono", Consolas, monospace; font-size: 9px; letter-spacing: .12em; text-transform: uppercase; opacity: .7; }
+.vpb-err { border-color: rgba(255, 120, 96, .5); color: #ffb49a; }
+.vpb-thinking { display: flex; gap: 6px; }
+.vpb-thinking i { width: 8px; height: 8px; border-radius: 50%; background: var(--copper-hot, #d4823c); animation: vb-blink 1.2s infinite; }
+.vpb-thinking i:nth-child(2) { animation-delay: .18s; }
+.vpb-thinking i:nth-child(3) { animation-delay: .36s; }
+@keyframes vb-blink { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .vpb-thinking i { animation-duration: 3s; } }
+.vpb-vision {
+  align-self: stretch; max-width: 100%;
+  border: 1px solid rgba(160, 255, 133, .4);
+  background: linear-gradient(180deg, rgba(24, 60, 30, .55), rgba(6, 20, 10, .8));
+}
+.vpb-vision h4 { margin: 0 0 7px; font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--lime-hot, #b9ff9d); }
+.vpb-vision div { white-space: pre-wrap; }
+
+/* The bottom-edge grab bar: drag it down and the window grows, the page moves down (Fred's
+   customize-what-you-concentrate-on rule). Full width so it can actually be found. */
+.vb-grab {
+  display: grid; place-items: center;
+  height: 14px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.vb-grab i { width: 44px; height: 4px; border-radius: 999px; background: hsla(var(--vb-hue), 60%, 60%, .4); }
+.vb-grab:hover i { background: hsla(var(--vb-hue), 60%, 70%, .7); }
+
+.vb-row { display: flex; align-items: flex-end; gap: 8px; padding: 8px 12px 12px; min-width: 0; }
+.vb-row textarea {
+  flex: 1 1 0; min-width: 0; resize: none;
+  padding: 10px 12px;
+  font-family: "Domine", Georgia, serif; font-size: 13.5px; line-height: 1.4;
+  color: var(--ink, #eaf6ff);
+  border: 1px solid hsla(var(--vb-hue), 60%, 60%, .3);
+  border-radius: 9px;
+  background: rgba(2, 8, 14, .7);
+}
+/* The Send stack: press Send once and the destinations extend DOWNWARD from it, written in words. */
+.vb-sendstack { position: relative; flex: 0 0 auto; }
+.vb-send {
+  min-width: 74px; padding: 10px 16px;
+  font: inherit; font-size: 12px; font-weight: 700; letter-spacing: .08em; cursor: pointer;
+  color: #06180c;
+  border: 1px solid rgba(160, 255, 133, .7); border-radius: 9px;
+  background: linear-gradient(180deg, #b8ff9d, #4fd35f 65%);
+}
+.vb-sendto {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 30;
+  display: grid; gap: 4px;
+  min-width: 150px;
+  padding: 6px;
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .25));
+  border-radius: 8px;
+  background: rgba(3, 9, 17, .98);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .6);
+  animation: vb-drop .14s ease;
+}
+@keyframes vb-drop { from { opacity: 0; transform: translateY(-4px); } }
+.vb-sendto button {
+  padding: 8px 10px; text-align: left;
+  font: inherit; font-size: 12px; cursor: pointer;
+  color: var(--ink, #eaf6ff);
+  border: 1px solid transparent; border-radius: 5px; background: transparent;
+}
+.vb-sendto button:hover { border-color: rgba(185, 107, 50, .5); }
+.vb-sendto .vb-sendto-main:hover { border-color: hsla(var(--vb-main), 60%, 60%, .6); }
+.vb-sendto .vb-sendto-second:hover { border-color: hsla(var(--vb-second), 60%, 60%, .6); }
+.vb-sendto .vb-sendto-third:hover { border-color: hsla(var(--vb-third), 60%, 60%, .6); }
+
+/* ---------- 5. Agent Army ----------------------------------------------------------------- */
+#vb-plan-tasks {
+  padding: 8px 16px;
+  font: inherit; font-size: 12px; cursor: pointer;
+  color: var(--copper-hot, #d4823c);
+  border: 1px solid rgba(185, 107, 50, .45); border-radius: 6px;
+  background: rgba(3, 10, 18, .6);
+}
+#vb-plan-tasks:hover { color: #ffc48a; }
+/* The orchestrator seat: one row, one model, above every task it will divide. */
+.vb-orch {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid rgba(185, 107, 50, .5);
+  border-radius: 8px;
+  background: linear-gradient(90deg, rgba(185, 107, 50, .12), transparent 60%);
+}
+.vb-orch-label { font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--copper-hot, #d4823c); }
+#vb-orch-model { font: inherit; font-size: 12px; color: var(--ink, #e8f6ff); background: rgba(2, 8, 14, .8); border: 1px solid rgba(185, 107, 50, .4); border-radius: 5px; padding: 6px 8px; max-width: 300px; }
+.vb-orch-note { flex: 1 1 220px; font-size: 11px; line-height: 1.45; color: var(--muted, #8ba0ae); }
+/* The fallback notice: the seat changed hands and the row says so until the next plan. */
+.vb-orch-note.is-fallback { color: #ffc48a; }
+
+.vb-army-grid {
+  display: grid;
+  grid-template-columns: minmax(200px, 2.2fr) minmax(150px, 1.4fr) auto auto auto;
+  gap: 6px 12px;
+  align-items: center;
+  min-width: 0;
+  overflow-x: auto;
+}
+.vb-army-head { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted, #8ba0ae); padding-bottom: 2px; border-bottom: 1px solid var(--glass-line, rgba(150, 200, 230, .14)); }
+.vb-army-cell { min-width: 0; font-size: 12.5px; color: var(--ink, #e8f6ff); padding: 4px 0; }
+.vb-c-task b { display: block; font-size: 12.5px; font-weight: 650; }
+.vb-c-task small { display: block; color: var(--muted, #8ba0ae); font-size: 10.5px; overflow-wrap: anywhere; }
+.vb-c-model select { width: 100%; font: inherit; font-size: 11.5px; color: var(--ink, #e8f6ff); background: rgba(2, 8, 14, .8); border: 1px solid var(--glass-line, rgba(150, 200, 230, .2)); border-radius: 4px; padding: 5px 6px; }
+.vb-agents { display: inline-flex; align-items: center; gap: 7px; }
+.vb-agents button {
+  width: 26px; height: 26px; display: grid; place-items: center;
+  font: inherit; font-size: 14px; cursor: pointer;
+  color: var(--ink, #e8f6ff);
+  border: 1px solid var(--glass-line, rgba(150, 200, 230, .25)); border-radius: 5px;
+  background: rgba(3, 10, 18, .7);
+}
+.vb-agents span { min-width: 18px; text-align: center; font-weight: 700; }
+.vb-c-cost, .vb-c-time { font-family: "Cascadia Mono", Consolas, monospace; font-size: 11.5px; color: var(--lime, #8fe08a); white-space: nowrap; }
+.vb-reduce { display: block; margin-top: 3px; font-size: 10.5px; }
+.vb-reduce-irr { color: #ffb49a; }
+.vb-reduce-ok { color: var(--muted, #8ba0ae); }
+.vb-army-total { font-size: 12px; color: var(--ink-soft, #d9c9b8); border-top: 1px solid var(--glass-line, rgba(150, 200, 230, .14)); padding-top: 8px; }
+
+/* ---------- 6. Begin Building ------------------------------------------------------------- */
+.vb-begin {
+  width: 100%;
+  padding: 18px;
+  font: inherit; font-size: 17px; font-weight: 800; letter-spacing: .16em; cursor: pointer;
+  color: #06180c;
+  border: 1px solid rgba(160, 255, 133, .8); border-radius: 12px;
+  background: linear-gradient(180deg, #b8ff9d, #4fd35f 60%, #2ea347);
+  box-shadow: 0 10px 30px rgba(80, 220, 90, .28), inset 0 1px 0 rgba(255, 255, 255, .5);
+}
+.vb-begin:hover { filter: brightness(1.06); }
+.vb-begin:active { transform: translateY(1px); }
+.vb-status { min-height: 18px; font-size: 12px; color: var(--muted, #8ba0ae); }
+.vb-status.is-bad { color: #ffb49a; }
+
+@media (max-width: 620px) {
+  .vb-square { width: 64px; height: 64px; }
+  .vb-log { height: 220px; }
+  .vb-win-main .vb-log { height: 260px; }
+  .vb-army-grid { grid-template-columns: minmax(160px, 2fr) minmax(130px, 1.3fr) auto auto auto; font-size: 11.5px; }
+}

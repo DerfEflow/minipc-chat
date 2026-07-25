@@ -370,6 +370,31 @@ export function fmtPrice(m) {
 }
 
 // Group by category (in CATEGORIES order), sorted most params -> least within each (nulls last).
+/*
+ * The orchestrator slot (Fred's Vibe Coder ruling 2026-07-25, extending the Feedback Wave SOW 2.2).
+ * The ONE place in the whole app where a model pick may be refused: the orchestrator/divider writes
+ * the task roadmap every agent then follows, so a tiny model garbling it poisons the entire build,
+ * not one part of it. Everywhere else stays warn-never-block by design.
+ *
+ * "Above the tiny tier" means: 200B+ total parameters, or undisclosed (the undisclosed models in
+ * this catalog are the frontier-lab lines: GPT, Claude, Grok — none of them small). The threshold
+ * is deliberately a number in one place so raising it is a one-line change.
+ */
+const ORCH_MIN_PARAMS_B = 200;
+export const isOrchestratorApproved = (id) => {
+  const m = modelById(id);
+  if (!m) return false;
+  return m.paramsB === null || m.paramsB >= ORCH_MIN_PARAMS_B;
+};
+
+// The fallback chain when an orchestrator call fails: strongest first, all approved by
+// construction. handleIdeTasks walks it, skipping the model that just failed and any provider
+// without a key, and TELLS THE USER which substitution happened (a silent swap is a lie).
+export const ORCHESTRATOR_FALLBACKS = [
+  "deepseek/deepseek-v4-pro", "anthropic/claude-sonnet-5", "openai/gpt-5.6-terra",
+  "moonshotai/kimi-k2.6", "qwen/qwen3-235b-a22b-2507",
+];
+
 export function catalogByCategory() {
   return CATEGORIES.map((cat) => ({
     category: cat,

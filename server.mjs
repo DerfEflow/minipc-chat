@@ -33,7 +33,7 @@ import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./ro
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
-import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds } from "./models.catalog.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS } from "./models.catalog.mjs";
 
 /*
  * Does this turn actually ask for work ON a machine? Used only to decide whether the "you forgot
@@ -72,7 +72,7 @@ import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } fr
 import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
-import { intakeMessages, parseIntake, hasImages, VISION_MARKER, CHANGE_MARKER } from "./ideintake.mjs";
+import { intakeMessages, parseIntake, hasImages, planchatMessages, PLAN_WINDOWS, VISION_MARKER, CHANGE_MARKER } from "./ideintake.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
 import { sweepFindings, sweepReport, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
 import { helpVoice } from "./idehelp.mjs";
@@ -1512,6 +1512,41 @@ async function handleIde(req, res, u) {
       mockups: parsed.mockups || [], involves, mode, phase, costUsd: r.costUsd } });
   }
 
+  /*
+   * POST /ide/planchat: one turn of one Plan-with-AI window (Vibe Coder SOW 4).
+   *
+   * Three windows share this door the way intake/review/stuck share /ide/intake: same wall, same
+   * metering, same sanitizer. What differs per window is the system prompt (Main interviews and can
+   * declare a vision; Second and Third advise and audit) and the model, which the user picks per
+   * window in its corner. The forwarded-opinion framing happens INSIDE planchatMessages, server-
+   * side, so the only-the-user-commands rule cannot be dropped by a client bug.
+   */
+  if (req.method === "POST" && path === "/ide/planchat") {
+    const blocked = ideFeature.wall(T) || ideFeature.billableWall(T);
+    if (blocked) return send(blocked);
+    const win = PLAN_WINDOWS.includes(body.window) ? body.window : "main";
+    const reg = normalizeRegister(body.register);
+    const mode = normalizeCrucibleMode(body.mode || "vibe");
+    const device = body.device === "mobile" ? "mobile" : "desktop";
+    const messages = planchatMessages({ window: win, register: reg, mode, device, history: body.messages });
+    if (messages.length < 2) return send({ status: 400, body: { error: "Say something first." } });
+    let model = String(body.model || "").trim() && modelById(body.model) ? body.model : defaultModelFor(!!T.isOwner);
+    // A pasted sketch needs a model with eyes, same rule as intake: reroute the one turn or say so.
+    if (hasImages(body.messages) && !isVisionCapable(model)) {
+      const seeing = pickVisionModel();
+      if (seeing) model = seeing;
+      else return send({ status: 200, body: { error: "No picture-reading model is available here, so I cannot look at that. Describe it in words and we keep going." } });
+    }
+    const r = await ideChatOnce(model, messages);
+    if (r.costUsd) { try { await meterTurn(T, r.costUsd, "crucible plan:" + win, ""); } catch {} }
+    if (!r.ok) return send({ status: 200, body: { error: r.error || "That model could not be reached. Try again, or pick another in this window's corner." } });
+    // Only the Main window can end in an agreed vision; the advisers' replies are always prose.
+    const parsed = win === "main" ? parseIntake(r.content, { marker: VISION_MARKER })
+                                  : { reply: String(r.content || "").trim(), vision: null, mockups: [] };
+    return send({ status: 200, body: { ok: true, window: win, reply: parsed.reply, vision: parsed.vision,
+      mockups: parsed.mockups || [], model, costUsd: r.costUsd } });
+  }
+
   if (req.method === "POST" && path === "/ide/job") {
     const ask = !!(body && body.ask);
     return send(ideFeature.startJob(T, body, {
@@ -1876,15 +1911,57 @@ async function handleIdeTasks(req, res, T, body) {
   const reg = normalizeRegister(body.register);
   const persona = personaVoice(normalizeCrucibleMode(body.mode));
   const maxTasks = Math.max(3, Math.min(Number(body.maxTasks) || 12, 20));
-  const model = String(body.model || "").trim() && modelById(body.model) ? body.model : defaultModelFor(!!T.isOwner);
-  try {
+  /*
+   * The orchestrator slot (Vibe Coder SOW 5.1). The ONE model pick in the app that may be refused:
+   * a tiny model garbling the roadmap poisons every task downstream, so the slot is limited to the
+   * approved tier. The UI only offers approved rows; a request that arrives with an unapproved
+   * pick anyway (an old client, a hand-built call) is refused BY NAME rather than silently swapped.
+   */
+  const asked = String(body.model || "").trim();
+  if (asked && !modelById(asked)) return json(400, { error: "Unknown model: " + asked });
+  if (asked && !isOrchestratorApproved(asked)) {
+    const rec = modelById(asked);
+    return json(400, { error: (rec ? rec.name : asked) + " is below the size floor for the orchestrator slot. Every other row is yours to experiment with; this one seat plans the whole build, so it needs a model above the tiny tier." });
+  }
+  const first = asked || defaultModelFor(!!T.isOwner);
+  /*
+   * Automatic fallback (Fred, 2026-07-25): if the orchestrator call FAILS — unreachable, or the
+   * roadmap comes back unparseable — the next approved model with a live key takes the seat, and
+   * the response says so, so the UI can tell the user in the orchestrator row. A silent
+   * substitution would be the same lie as a silent truncation. One substitute attempt, not a
+   * crawl through the whole list: two distinct failures in a row is a real outage to surface.
+   */
+  const keyFor = (id) => { const rec = modelById(id); const cfg = rec && PROVIDER_CFG[rec.provider || "openrouter"]; return !!(cfg && cfg.key()); };
+  const substitute = ORCHESTRATOR_FALLBACKS.find((id) => id !== first && keyFor(id)) || "";
+  const attempt = async (model) => {
     const r = await ideChatOnce(model, taskRoadmapMessages({ goal: prompt, maxTasks, register: reg, persona }), {});
     if (r.costUsd) { try { await meterTurn(T, r.costUsd, prompt, ""); } catch {} }
-    if (!r.ok) return json(502, { error: r.error || "The orchestrator could not be reached." });
+    if (!r.ok) return { ok: false, why: r.error || "unreachable", costUsd: r.costUsd || 0 };
     const parsed = parseTaskRoadmap(r.content, maxTasks);
-    if (!parsed.ok) return json(200, { ok: false, reason: parsed.error, raw: String(r.content || "").slice(0, 2000) });
-    const topo = topoOrder(parsed.tasks);
-    return json(200, { ok: true, tasks: parsed.tasks, schedulable: topo.ok, scheduleError: topo.ok ? "" : topo.error, costUsd: r.costUsd || 0 });
+    if (!parsed.ok) return { ok: false, why: "unusable roadmap: " + parsed.error, raw: String(r.content || "").slice(0, 2000), costUsd: r.costUsd || 0 };
+    return { ok: true, tasks: parsed.tasks, costUsd: r.costUsd || 0 };
+  };
+  try {
+    let usedModel = first;
+    let a = await attempt(first);
+    let fallback = null;
+    if (!a.ok && substitute) {
+      const failedWhy = a.why;
+      usedModel = substitute;
+      a = await attempt(substitute);
+      if (a.ok) {
+        const fromRec = modelById(first), toRec = modelById(substitute);
+        fallback = { from: first, fromName: (fromRec && fromRec.name) || first,
+                     to: substitute, toName: (toRec && toRec.name) || substitute, reason: failedWhy };
+        console.log(`[dominion-ai] orchestrator fallback: ${first} -> ${substitute} (${failedWhy})`);
+      }
+    }
+    if (!a.ok) return a.raw
+      ? json(200, { ok: false, reason: a.why, raw: a.raw })
+      : json(502, { error: "The orchestrator could not be reached" + (substitute ? ", and neither could the backup (" + a.why + ")." : " (" + a.why + ").") });
+    const topo = topoOrder(a.tasks);
+    return json(200, { ok: true, tasks: a.tasks, model: usedModel, fallback,
+      schedulable: topo.ok, scheduleError: topo.ok ? "" : topo.error, costUsd: a.costUsd });
   } catch (e) { return json(502, { error: String((e && e.message) || e) }); }
 }
 
@@ -5421,6 +5498,10 @@ const server = http.createServer(async (req, res) => {
       } else {
         for (const g of payload.groups || []) g.models = (g.models || []).map(({ broadCapable, ...rest }) => rest);
       }
+      // The orchestrator slot is the one place a model may be refused (Vibe Coder SOW 5.1), and the
+      // UI needs to know which rows to offer without re-deriving the rule: the flag rides every
+      // model for every caller. Same copy-then-flag discipline as broadAccess above.
+      for (const g of payload.groups || []) g.models = (g.models || []).map((m) => ({ ...m, orchestratorOk: isOrchestratorApproved(m.id) }));
       payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY };
       // Phase 2: tell the UI the privacy modes + which providers each mode permits, so the picker can
       // filter and the switch can render. The server ALSO enforces (privacy.mjs) — this is display only.

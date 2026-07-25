@@ -131,5 +131,30 @@ t("reduceTaskGoal names the task and its files and asks for a single part when s
   assert.match(g, /return a single part/i);
 });
 
+/* ---------- the orchestrator seat (Vibe Coder SOW 5.1, 2026-07-25) --------------------------- */
+const { isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, MODELS, DEFAULT_MODEL, TENANT_DEFAULT_MODEL } =
+  await import("./models.catalog.mjs");
+
+t("the orchestrator floor: tiny models are refused, frontier and 200B+ pass", () => {
+  // The rule, not a list: every catalog model lands on the right side of the line.
+  for (const m of MODELS) {
+    const expect = m.paramsB === null || m.paramsB >= 200;
+    assert.equal(isOrchestratorApproved(m.id), expect, m.id + " (" + m.paramsB + "B) on the wrong side of the floor");
+  }
+  assert.equal(isOrchestratorApproved("no/such-model"), false, "an unknown id is never approved");
+});
+
+t("the fallback chain can always seat someone", () => {
+  assert.ok(ORCHESTRATOR_FALLBACKS.length >= 3, "a one-deep fallback is not a chain");
+  for (const id of ORCHESTRATOR_FALLBACKS) assert.ok(isOrchestratorApproved(id), id + " in the chain but below the floor");
+  // Both defaults must be approved: they are the seat when the user picks nothing.
+  assert.ok(isOrchestratorApproved(DEFAULT_MODEL), "the owner default must hold the seat");
+  assert.ok(isOrchestratorApproved(TENANT_DEFAULT_MODEL), "the tenant default must hold the seat");
+  // And the chain must offer a substitute DISTINCT from each default, or a default failing
+  // leaves the fallback picking the model that just failed.
+  assert.ok(ORCHESTRATOR_FALLBACKS.some((id) => id !== DEFAULT_MODEL));
+  assert.ok(ORCHESTRATOR_FALLBACKS.some((id) => id !== TENANT_DEFAULT_MODEL));
+});
+
 console.log("\nidetasks: " + passed + " passed, " + failed + " failed");
 if (failed) process.exit(1);
