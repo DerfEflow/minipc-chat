@@ -129,7 +129,10 @@
 @media (max-width: 760px) { .vb-plan-row { grid-template-columns: 1fr; } }
 
 .vb-win {
-  display: grid; min-width: 0;
+  /* minmax(0,1fr): the implicit auto track otherwise grows to the widest child's natural width
+   * (grid children keep min-width:auto), which at phone width pushed the log to 415px inside a
+   * 343px window and clipped it off-screen. The column must be allowed to shrink below content. */
+  display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0;
   border-radius: 12px;
   border: 1px solid hsla(var(--vb-hue), 60%, 60%, .3);
   background: linear-gradient(180deg, hsla(var(--vb-hue), 45%, 16%, .82), hsla(var(--vb-hue), 50%, 7%, .94));
@@ -164,7 +167,8 @@
   border: 1px solid var(--glass-line, rgba(150, 200, 230, .18));
   border-radius: 5px; background: transparent;
 }
-.vb-win-body { display: grid; min-width: 0; }
+.vb-win-body { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.vb-win-body > * { min-width: 0; }
 .vb-win-body[hidden] { display: none; }
 
 .vb-log {
@@ -289,6 +293,9 @@
 /* The fallback notice: the seat changed hands and the row says so until the next plan. */
 .vb-orch-note.is-fallback { color: #ffc48a; }
 
+/* An author display beats the [hidden] attribute (the beginner-views lesson): without this line
+ * the empty header row shows before any plan exists. */
+.vb-army-grid[hidden], .vb-army-total[hidden] { display: none; }
 .vb-army-grid {
   display: grid;
   grid-template-columns: minmax(200px, 2.2fr) minmax(150px, 1.4fr) auto auto auto;

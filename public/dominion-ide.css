@@ -105,6 +105,19 @@ body.ide-open #ide-root { transform: none; }
 .ide-rail-btn svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.9;
   stroke-linecap: round; stroke-linejoin: round; }
 
+/* "Change level": reopens the Welcome Screen from every surface, keeping its promise. */
+.ide-rail-level {
+  flex: 0 0 auto;
+  height: 42px; padding: 0 13px;
+  font: inherit; font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+  cursor: pointer;
+  color: var(--ink-soft);
+  border: 1px solid rgba(185, 107, 50, .3); border-radius: 11px;
+  background: rgba(10, 16, 22, .55);
+}
+.ide-rail-level:hover { color: var(--copper-hot); border-color: rgba(185, 107, 50, .55); }
+.ide-rail-level:active { transform: translateY(1px); }
+
 .ide-rail-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; margin-right: auto; }
 .ide-rail-title .t {
   font-size: 15px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;

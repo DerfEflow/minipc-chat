@@ -126,7 +126,21 @@
     close.setAttribute("aria-label", "Close");
     close.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 
-    rail.append(back, title, close);
+    /*
+     * The Welcome Screen promises "You can change it at any time", and until 2026-07-25 that was
+     * only true for engineers: the mode switch lived inside the classic starter, which the
+     * Beginner and Vibe surfaces hide entirely. This rail button keeps the promise on EVERY
+     * surface by reopening the same Welcome Screen the choice was made on. Words, not an icon.
+     */
+    const level = document.createElement("button");
+    level.type = "button";
+    level.className = "ide-rail-level";
+    level.id = "ide-level";
+    level.title = "Change how you work: Beginner, Vibe Coder, or Engineer";
+    level.textContent = "Change level";
+    level.addEventListener("click", showModePicker);
+
+    rail.append(back, title, level, close);
 
     const stage = document.createElement("div");
     stage.className = "ide-stage";

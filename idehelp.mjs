@@ -27,7 +27,9 @@ export const CRUCIBLE_GUIDE = [
   "  each with one plain sentence under it. Choosing one dismisses the layer. The header then names",
   "  the surface for that mode, and the name is different in each: Crucible App Builder for a",
   "  beginner, Crucible App Launcher for a vibe coder, Crucible Full Stack Platform for an engineer.",
-  "  The way out of the whole surface is the button at the top left that says Return to chat.",
+  "  The way out of the whole surface is the button at the top left that says Return to chat. The",
+  "  header also carries a Change level button on every surface; it reopens the same welcome layer",
+  "  so anyone can switch between Beginner, Vibe Coder and Engineer at any time.",
   "- BEGINNER MODE IS ITS OWN SCREEN, not the expert page with things hidden. It holds exactly four",
   "  things and nothing else: a big friendly chat the width of the screen and half its height (the",
   "  text is a third larger than elsewhere), a row of Saved Projects buttons along the bottom of that",
@@ -166,7 +168,7 @@ export const GUIDE_MUST_MENTION = [
   "journey", "Studio", "preset",
   // The beginner rebuild of 2026-07-24. Every one of these is a control or a beat a user can see,
   // so the guide going quiet about any of them is a guide that has drifted.
-  "Welcome Screen", "Return to chat", "App Launcher", "Full Stack Platform", "Saved Projects",
+  "Welcome Screen", "Return to chat", "Change level", "App Launcher", "Full Stack Platform", "Saved Projects",
   "None Saved", "HELP, I'M STUCK", "BUILD IT", "camera", "paperclip", "Pong", "robot",
   "SEE MY APP", "MAKE THAT CHANGE", "screenshot",
   // The Vibe Coder rebuild of 2026-07-25 (docs/VIBE-CODER-SOW.md).
