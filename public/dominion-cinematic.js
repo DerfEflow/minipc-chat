@@ -225,10 +225,13 @@
   function decorateTool(node) {
     if (!(node instanceof HTMLElement) || !node.matches(".tool") || node.dataset.dominionTool) return;
     node.dataset.dominionTool = "1";
+    // `.cls` was the permission-class badge; it is no longer rendered in the stream (app.js, the
+    // informational-progress ruling of 2026-07-24), and the lock went with it. The guard stays so
+    // an older cached transcript still finds its label span.
     const label = Array.from(node.children).find((child) => child.tagName === "SPAN" && !child.classList.contains("sp") && !child.classList.contains("cls"));
     if (!label) return;
     label.textContent = (label.textContent || "").replace(/^[🔧🔒✓✗⛔⃠]\s*/, "");
-    label.prepend(icon(node.classList.contains("gated") ? "lock" : "tools"));
+    label.prepend(icon("tools"));
   }
 
   function decorate(scope = document) {

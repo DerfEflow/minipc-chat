@@ -644,6 +644,139 @@ if (modelPanel) modelPanel.addEventListener("click", (e) => {
 document.addEventListener("click", (e) => { if (modelPanel && !modelPanel.hidden && !e.target.closest("#model-picker")) closeModelPanel(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modelPanel && !modelPanel.hidden) closeModelPanel(); });
 
+/* ---------- pace warning: say a slow setup is slow BEFORE the wait --------------------------
+ * THE FAILURE THIS PREVENTS (Fred, 2026-07-24, from his brother's pass). A beginner does not know
+ * that a small local model is slower than a data centre, or that Deep Think and Furnace each add
+ * time. They come from ChatGPT, where an answer starts immediately. So they pick the slowest
+ * combination in the app, wait, and conclude the app does not work very well.
+ *
+ * WHAT THIS IS NOT. Not a countdown, and not a made-up estimate. The image forge already taught us
+ * what a wrong number costs: it always ran longer than promised, so the number was worse than
+ * silence. Every reason printed here is a real property of what the user picked (the catalog's own
+ * `reasoning` flag, the mode in the dropdown, the dial position), and the only DURATION ever shown
+ * is one this device actually measured on this same combination. Below three samples it says
+ * nothing about time at all.
+ */
+const paceWarn = $("pace-warn");
+const LS_PACE = "dominion.paceSamples";
+const PACE_MIN_SAMPLES = 3;          // below this, the average is noise and we stay quiet
+let paceSamples = {};
+try { paceSamples = JSON.parse(localStorage.getItem(LS_PACE) || "{}") || {}; } catch {}
+let paceOpen = false;
+
+const paceTier = () => (window.forgeTierValue ? window.forgeTierValue() : "ember");
+const paceSetup = () => ({ model: modelSel ? modelSel.value : "local", mode: modeSel ? modeSel.value : "auto", tier: paceTier() });
+const paceKey = (s) => [s.model || "local", s.mode || "auto", s.tier || "ember"].join("|");
+
+// Modes that add real work, in the user's vocabulary rather than ours. The number is how much
+// weight each one carries toward the "this is slow" threshold.
+const PACE_MODES = {
+  deep_think:   ["Deep Think reasons the whole problem through before it writes anything", 2],
+  long_context: ["Long Context reads a great deal of material before answering", 2],
+  mentor:       ["Mentor answers and then reviews its own answer, so it runs twice", 2],
+  as_fred:      ["As Fred applies the whole voice framework to every line", 1],
+};
+const PACE_TIERS = {
+  flame:   ["The forge dial is on Flame, which thinks harder than Ember", 1],
+  furnace: ["The forge dial is on Furnace, the slowest and most thorough setting", 2],
+};
+
+// Every reason is checked against a real fact about the pick. Score >= 3 is the slow band.
+function paceRead(s) {
+  const why = [];
+  let score = 0;
+  const add = (text, n) => { why.push(text); score += n; };
+  if (!s.model || s.model === "local" || s.model.startsWith("local")) {
+    add("Local Qwen runs on one computer here instead of a data centre, so it writes slowly", 3);
+  } else {
+    const m = findCatalogModel(s.model);
+    if (m && m.reasoning) add((m.name || "This model") + " thinks privately before it answers, which adds to every reply", 2);
+    if (m && m.reasoningEffort === "max") add("Its thinking effort is fixed at maximum and cannot be turned down", 1);
+  }
+  const mode = PACE_MODES[s.mode];
+  if (mode) add(mode[0], mode[1]);
+  const tier = PACE_TIERS[s.tier];
+  if (tier) add(tier[0], tier[1]);
+  return { slow: score >= 3, why };
+}
+
+// The quick picks are DERIVED, never hardcoded: models with no hidden thinking step, that this
+// account has a key for and the current privacy mode allows, cheapest output first (which in this
+// catalog tracks with the light, fast tiers). Naming two real ones beats "choose a faster model".
+function paceQuickPicks() {
+  const mode = privacyModeSel ? privacyModeSel.value : "normal";
+  const direct = new Set(["openai", "anthropic", "deepseek"]);
+  const out = [];
+  for (const g of catalogGroups) {
+    for (const m of g.models || []) {
+      if (m.reasoning) continue;                 // a thinking step is the thing being avoided
+      if (!(m.outCost > 0)) continue;            // the free OpenRouter hosts are the slowest of all
+      const keyed = m.provider === "openrouter" ? availCache.openrouter : m.provider === "openai" ? availCache.openai : m.provider === "deepseek" ? availCache.deepseek : m.provider === "anthropic" ? availCache.anthropic : true;
+      if (keyed === false || !providerAllowedClient(mode, m.provider)) continue;
+      out.push(m);
+    }
+  }
+  // Direct providers first (no middleman hop), then cheapest, which in this catalog tracks with the
+  // light, quick tiers. Returns [] on a box with no keys at all, and the caller has a plain-words
+  // fallback for that rather than a dangling sentence.
+  out.sort((a, b) => (direct.has(a.provider) ? 0 : 1) - (direct.has(b.provider) ? 0 : 1) || (a.outCost || 0) - (b.outCost || 0));
+  return out.slice(0, 2).map((m) => m.name);
+}
+
+function paceMeasured(key) {
+  const s = paceSamples[key];
+  if (!s || !s.n || s.n < PACE_MIN_SAMPLES) return "";
+  const secs = Math.round(s.avgMs / 1000);
+  return "Measured on this device: your last " + s.n + " replies with these exact settings took about "
+       + (secs >= 90 ? Math.round(secs / 60) + " minutes" : secs + " seconds") + " each.";
+}
+
+function renderPace() {
+  if (!paceWarn) return;
+  const s = paceSetup();
+  const read = paceRead(s);
+  if (!read.slow) { paceWarn.hidden = true; paceWarn.innerHTML = ""; paceOpen = false; return; }
+  const fixes = [];
+  if (s.mode !== "fast") fixes.push("choose <b>Fast</b> under Operating mode");
+  const picks = paceQuickPicks();
+  if (picks.length) fixes.push("pick a model that answers straight away, such as <b>" + picks.map(escapeHtml).join("</b> or <b>") + "</b>");
+  else fixes.push("pick a lighter model from the <b>Model</b> list");
+  if (s.tier === "furnace") fixes.push("turn the forge dial down to <b>Ember</b> or <b>Flame</b>");
+  else if (s.tier === "flame") fixes.push("turn the forge dial down to <b>Ember</b>");
+  const measured = paceMeasured(paceKey(s));
+  paceWarn.hidden = false;
+  paceWarn.innerHTML =
+    '<button type="button" class="pace-line" id="pace-toggle" aria-expanded="' + (paceOpen ? "true" : "false") + '">' +
+      '<span>SLOW SETTINGS · this reply will take a while. It is working the whole time.</span>' +
+      '<span class="pace-caret">' + (paceOpen ? "hide" : "why?") + '</span>' +
+    '</button>' +
+    (paceOpen
+      ? '<div class="pace-body">' +
+          '<ul>' + read.why.map((w) => "<li>" + escapeHtml(w) + "</li>").join("") + '</ul>' +
+          (fixes.length ? '<span class="pace-fix">To go faster: ' + fixes.join("; ") + ".</span>" : "") +
+          (measured ? '<span class="pace-measured">' + escapeHtml(measured) + "</span>" : "") +
+        '</div>'
+      : "");
+  const t = document.getElementById("pace-toggle");
+  if (t) t.onclick = () => { paceOpen = !paceOpen; renderPace(); };
+}
+
+// Record what a finished turn actually cost in wall-clock, per exact setup. A rolling mean, capped
+// so one pathological run cannot poison the average forever.
+function paceRecord(key, ms) {
+  if (!key || !(ms > 0) || ms > 30 * 60 * 1000) return;
+  const s = paceSamples[key] || { n: 0, avgMs: 0 };
+  s.avgMs = (s.avgMs * s.n + ms) / (s.n + 1);
+  s.n = Math.min(s.n + 1, 20);
+  paceSamples[key] = s;
+  try { localStorage.setItem(LS_PACE, JSON.stringify(paceSamples)); } catch {}
+}
+
+if (modelSel) modelSel.addEventListener("change", renderPace);
+if (modeSel) modeSel.addEventListener("change", renderPace);
+if (privacyModeSel) privacyModeSel.addEventListener("change", renderPace);
+document.addEventListener("dominion-forge-tier", renderPace);   // the dial fires this on every turn of it
+
 // ---------- attachments (pictures + text files) ----------
 // Staged in pendingAtt, sent as an OPTIONAL `attachments` field on the user message; content stays
 // a plain string so history, search, titles, and every server subsystem keep working unchanged.
@@ -903,7 +1036,10 @@ function newSession(c) {
   inner.append(tools, live); row.appendChild(inner); wrap.appendChild(row); scroll();
   const st = { c, inner, tools, live, chips: [], raw: "", ctxEl: null, ctxItems: null, doneMeta: null,
                mentorCritique: null, done: false, stopped: false, gone: false, errMsg: "", warm: 0,
-               jobId: "", detached: false };
+               jobId: "", detached: false,
+               // Wall-clock for the pace warning: the only duration it will ever quote is one
+               // measured here, on this device, for this exact model/mode/dial combination.
+               startedAt: Date.now(), paceKey: paceKey(paceSetup()) };
   st.warm = setTimeout(() => { if (live.classList.contains("think")) { live.textContent = "Dominion AI is working… (first reply can take ~20s)"; scroll(); } }, 6000);
   return st;
 }
@@ -1017,9 +1153,18 @@ function processEvent(st, ev) {
     inner.insertBefore(note, tools); scroll();
   } else if (ev.type === "tool") {
     if (ev.status === "run") {
-      const chip = document.createElement("div"); chip.className = "tool" + (ev.gated ? " gated" : "");
-      chip.innerHTML = '<span class="sp"></span>'; const lab = document.createElement("span"); lab.textContent = (ev.gated ? "🔒 " : "🔧 ") + ev.name + "…"; chip.appendChild(lab);
-      if (ev.cls) { const cb = document.createElement("span"); cb.className = "cls"; cb.textContent = ev.cls.replace(/_/g, " "); chip.appendChild(cb); }
+      /*
+       * PROGRESS IN CHAT IS INFORMATIONAL ONLY (Fred, 2026-07-24). Every running tool used to
+       * carry its permission class beside it, so a normal turn printed "dangerous" in red next to
+       * the work it was doing and read as an alarm going off. It was never a warning to the user
+       * in the first place: the class drives the server's confirm gate, and the real caution the
+       * user needs is already on the section headers in the model dropdown, which stay. So the
+       * class badge and the padlock are gone from the stream. The confirm prompt still appears
+       * when a tool genuinely needs approval, and the outcome marks (done, failed, blocked,
+       * skipped) stay, because those are facts about what happened.
+       */
+      const chip = document.createElement("div"); chip.className = "tool";
+      chip.innerHTML = '<span class="sp"></span>'; const lab = document.createElement("span"); lab.textContent = "🔧 " + ev.name + "…"; chip.appendChild(lab);
       chip._runId = ev.runId; chip._name = ev.name; chip._lab = lab; tools.appendChild(chip); chips.push(chip); scroll();
     } else {
       const chip = [...chips].reverse().find((x) => (ev.runId ? x._runId === ev.runId : x._name === ev.name) && !x._done);
@@ -1033,7 +1178,9 @@ function processEvent(st, ev) {
     }
   } else if (ev.type === "tool_confirm") {
     const box = document.createElement("div"); box.className = "confirm";
-    const q = document.createElement("div"); q.className = "cq"; q.textContent = "Run " + ev.name + " (" + String(ev.cls || "").replace(/_/g, " ") + ")?" + (ev.preview ? "  " + ev.preview : "");
+    // The question names the tool and shows what it would do. The permission class was internal
+    // vocabulary ("requires_confirmation") that told the user nothing they could act on.
+    const q = document.createElement("div"); q.className = "cq"; q.textContent = "Run " + ev.name + "?" + (ev.preview ? "  " + ev.preview : "");
     const btns = document.createElement("div"); btns.className = "cbtns";
     const yes = document.createElement("button"); yes.className = "yes"; yes.textContent = "Approve";
     const no = document.createElement("button"); no.textContent = "Deny";
@@ -1087,6 +1234,9 @@ function finalizeSession(st) {
   if (reattachTimer) { clearTimeout(reattachTimer); reattachTimer = null; }
   reattachTries = 0;
   const c = st.c, final = stripThink(st.raw);
+  // Only a turn that RAN TO COMPLETION teaches anything about pace. A stop, a network drop or a
+  // reattach after an app reload would each record a duration that means something else.
+  if (st.done && st.startedAt && !st.detached) { paceRecord(st.paceKey, Date.now() - st.startedAt); renderPace(); }
   if (st.done) {
     const msg = { role: "assistant", content: final || "(no response)" };
     if (st.doneMeta) { msg.meta = st.doneMeta; if (st.ctxItems) msg.meta.contextItems = st.ctxItems; if (st.doneMeta.mode) c.lastMode = st.doneMeta.mode; }
@@ -2031,7 +2181,8 @@ tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.valu
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { maybeReattach(); if (Date.now() - lastReconcile > 10000) reconcileJobs(); } });
 window.addEventListener("pageshow", () => { maybeReattach(); reconcileJobs(); });
 
-load(); renderAll(); loadModels(); autosize();
+load(); renderAll(); loadModels().then(renderPace, renderPace); autosize();
+renderPace();   // the saved model/mode/dial can already be a slow combination on the first paint
 maybeReattach();   // an answer may still be generating server-side from before this (re)load
 reconcileJobs();   // adopt/deliver any runs the server knows about that this device doesn't
 // Pull whatever the other device did before this one was opened. A brand-new device (lastRev 0)

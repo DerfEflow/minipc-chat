@@ -49,6 +49,8 @@
     pollTimer: null,
     faultTimer: null,
     progressTimer: null,
+    startedAt: 0,             // wall-clock of the run in flight, for the honest elapsed counter
+    arrowTimer: null,         // the wordless "look down here" hint under the forge button
   };
   try { state.queue = JSON.parse(localStorage.getItem("dfi.queue") || "[]"); } catch {}
   const dismissed = new Set(JSON.parse(localStorage.getItem("dfi.dismissedJobs") || "[]"));
@@ -364,6 +366,67 @@
     mkBtn("UNLINK", () => unlinkFolder());
   }
 
+  /* ---------- keeping the pictures ------------------------------------------------------------
+   * THE PROBLEM (Fred, 2026-07-24). "It is not obvious at all that they have to pick a folder from
+   * their desktop in order to download the pictures", and a beginner does not know the app can be
+   * installed on a computer at all. The folder bar that explains it sits at the bottom of the vault,
+   * which nobody scrolls to. So the first time a picture actually lands, the app says it once,
+   * plainly, and then never again.
+   *
+   * ON THE THREE DAYS. Fred asked for "images are saved for 3 days and then permanently deleted".
+   * Nothing in the code does that, and it is not what happens: single pictures are never stored on
+   * the server at all (images.mjs keeps no copy), they live in THIS browser's storage on THIS
+   * device, and what actually removes them is clearing browsing data, a private window closing,
+   * the device reclaiming space, or Safari's own housekeeping when the app goes about a week
+   * unopened. Printing a three-day countdown the code does not enforce would be the same lie as
+   * the old "sealed to the vault" message that printed when nothing had been written. So the
+   * notice below carries the real reasons, with the same urgency: to keep one, get it off the
+   * browser. If Fred wants a true three-day sweep, that is a deliberate delete to build, not a
+   * sentence to print.
+   */
+  const KEEP_SEEN = "dfi.keepNoticeSeen";
+  function maybeOfferKeeping() {
+    if (folderReady()) return;                                  // already set up: no popup, ever
+    if (localStorage.getItem(KEEP_SEEN) === "1") return;         // said once is enough
+    if ($("#dfi-keep")) return;
+    const scrim = document.createElement("div");
+    scrim.className = "dfi-viewer dfi-keep";
+    scrim.id = "dfi-keep";
+    const how = folderSupported()
+      ? "<p><b>On this computer:</b> choose a folder once and every new picture is written into it automatically. You can also open any picture and press DOWNLOAD.</p>"
+      : (shareSupported()
+        ? "<p><b>On this phone:</b> open a picture and press SAVE TO PHOTOS. It lands in your camera roll, where your usual backup keeps it.</p>" +
+          "<p><b>For automatic folders:</b> phone browsers cannot hold a folder. Open app.dominion.tools on a computer in Chrome or Edge, install it from the address bar, and pictures can be written straight into a folder there.</p>"
+        : "<p>Open any picture and press DOWNLOAD to save it where you want it.</p>");
+    const card = document.createElement("div");
+    card.className = "dfi-viewer-card dfi-keep-card";
+    card.innerHTML = `
+      <div class="dfi-keep-body">
+        <h3>KEEP YOUR PICTURES</h3>
+        <p>Your pictures are saved in this browser, on this device. They are not in the cloud, and Dominion keeps no copy.</p>
+        <p><b>That storage is not permanent.</b> Clearing your browsing history removes them, a private window loses them when it closes, a device short on space can throw them out, and an iPhone or iPad deletes them if you do not open the app for about a week.</p>
+        <p>To keep a picture for good, get it out of the browser.</p>
+        ${how}
+        <div class="dfi-viewer-actions"></div>
+      </div>`;
+    const actions = card.querySelector(".dfi-viewer-actions");
+    const done = () => { localStorage.setItem(KEEP_SEEN, "1"); scrim.remove(); };
+    if (folderSupported()) {
+      const link = document.createElement("button");
+      link.className = "primary";
+      link.textContent = "CHOOSE A FOLDER";
+      link.addEventListener("click", async () => { done(); await linkFolder(); });
+      actions.append(link);
+    }
+    const ok = document.createElement("button");
+    ok.textContent = folderSupported() ? "NOT NOW" : "GOT IT";
+    ok.addEventListener("click", done);
+    actions.append(ok);
+    scrim.append(card);
+    scrim.addEventListener("click", (e) => { if (e.target === scrim) done(); });
+    ($("#dfi-root") || document.body).append(scrim);
+  }
+
   // Phone path: hand the file to the OS share sheet, which is where "Save to Photos" lives.
   async function shareImage(rec) {
     try {
@@ -379,6 +442,9 @@
   }
 
   // ---------- helpers ----------
+  // Which way the gallery sits: beside the deck on a wide screen, under it on a phone (the layout
+  // flips at 620px in dominion-images.css). Copy that says "below" must be true on both.
+  const wide = () => window.matchMedia("(min-width: 621px)").matches;
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => [...(root || document).querySelectorAll(sel)];
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -413,6 +479,32 @@
     $("b", $("#forge-button")).textContent = state.batch ? "ADD TO THE BATCH" : "IGNITE THE FORGE";
   }
 
+  /* ---------- the deck-side working state ----------------------------------------------------
+   * Everything here exists because the vault (and therefore the old progress strip) is BELOW the
+   * fold on a phone. These three live in the control deck, inches under the button that was just
+   * pressed, so "is it doing anything?" is answered without scrolling. */
+  function setDeckWorking(on) {
+    const w = $("#dfi-working");
+    if (w) w.hidden = !on;
+    const secs = $("#dfi-working-secs");
+    if (secs && on) secs.textContent = "0s";
+  }
+  function setDeckNote(text, isFault) {
+    const n = $("#dfi-deck-note");
+    if (!n) return;
+    n.hidden = !text;
+    n.textContent = text || "";
+    n.classList.toggle("is-fault", !!isFault);
+  }
+  // The wordless hint Fred asked for: it blinks, it points down, it leaves after five seconds.
+  function flashArrow() {
+    const p = $("#dfi-point");
+    if (!p) return;
+    p.hidden = false;
+    clearTimeout(state.arrowTimer);
+    state.arrowTimer = setTimeout(() => { p.hidden = true; }, 5000);
+  }
+
   // ---------- fault/status strip ----------
   function strip() { return $("#generation-strip"); }
   function showFault(message) {
@@ -420,11 +512,14 @@
     s.hidden = false;
     s.classList.add("fault");
     $("#generation-status").textContent = message;
-    s.querySelector("b").textContent = "FORGE CHAMBER FAULT";
+    s.querySelector("b").textContent = "SOMETHING WENT WRONG";
     $("#generation-progress").style.width = "100%";
     $("#generation-percent").textContent = "!";
     clearTimeout(state.faultTimer);
-    state.faultTimer = setTimeout(() => { if (!state.generating) s.hidden = true; s.classList.remove("fault"); }, 7000);
+    state.faultTimer = setTimeout(() => { if (!state.generating) s.hidden = true; s.classList.remove("fault"); }, 12000);
+    // A fault message is the one thing that must never be off-screen either.
+    setDeckWorking(false);
+    setDeckNote(message, true);
   }
   function stripBusy(title, status) {
     const s = strip();
@@ -435,9 +530,10 @@
   }
   function stripDone(status) {
     $("#generation-progress").style.width = "100%";
-    $("#generation-percent").textContent = "100%";
+    // The counter has been counting up honestly, so the last thing it says is how long it took.
+    $("#generation-percent").textContent = "done";
     $("#generation-status").textContent = status;
-    setTimeout(() => { if (!state.generating) strip().hidden = true; }, 1600);
+    setTimeout(() => { if (!state.generating) strip().hidden = true; }, 4000);
   }
 
   // ---------- markup ----------
@@ -512,6 +608,23 @@
             <span><small>DOMINION IMAGE ENGINE</small><b>IGNITE THE FORGE</b></span>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M14 7l5 5-5 5"/></svg>
           </button>
+          <!-- Wordless blinking arrow, directly beneath the button, for about five seconds after
+               the forge is lit: it points at where the picture will appear. Phone layout only,
+               where the gallery really is below; on a wide screen the gallery is to the right and
+               a down arrow would be pointing at nothing (CSS hides it there). -->
+          <div class="forge-point" id="dfi-point" hidden aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 3v15M5 12l7 7 7-7"/></svg>
+          </div>
+          <!-- The working state, where the finger just was. The vault's strip is off-screen on a
+               phone, which is the whole reason the app looked frozen while it was busy. -->
+          <div class="forge-working" id="dfi-working" hidden aria-live="polite">
+            <span class="fw-spin" aria-hidden="true"><i></i><i></i></span>
+            <span class="fw-copy">
+              <b>MAKING YOUR PICTURE</b>
+              <small>It appears in the gallery below when it is ready. <span id="dfi-working-secs">0s</span> so far.</small>
+            </span>
+          </div>
+          <p class="forge-deck-note" id="dfi-deck-note" hidden></p>
           <p class="forge-optional-note">Just want a picture? Type it above and forge. The settings below are optional.</p>
           <div class="reference-well" id="dfi-ref-well" tabindex="0" role="button" aria-label="Add reference images">
             <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 15l3-3 3 3 2-2 3 3M15.5 8.5h.01"/></svg>
@@ -568,7 +681,7 @@
           <div>
             <p class="eyebrow"><span class="pulse-dot"></span> LOCAL CREATION VAULT</p>
             <h2>YOUR <span>FORGED VISIONS</span></h2>
-            <p class="vault-note">Images remain on this device. Dominion stores no cloud gallery.</p>
+            <p class="vault-note">Kept in this browser on this device, never in the cloud. Browser storage is not permanent, so download the ones you want to keep.</p>
           </div>
           <div class="vault-actions">
             <label class="search-control"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg><input id="dfi-search" type="search" placeholder="Search this device" aria-label="Search local gallery"></label>
@@ -736,26 +849,59 @@
     });
   }
 
-  // ---------- forging ----------
+  /* ---------- forging ----------------------------------------------------------------------
+   * THE THREE THINGS THAT WERE WRONG (Fred, 2026-07-24, from his brother's pass):
+   *
+   * 1. "The progress indicator is not stable. Sometimes it shows up, sometimes it is not."
+   *    It was never unstable. It lives in the vault panel, and below 620px the layout is ONE
+   *    column with the vault UNDER the control deck, so on a phone the strip appeared entirely
+   *    off-screen, below the fold, while the user stared at a deck that had not visibly changed.
+   *    The fix is to put a working state where the finger just was, under the forge button.
+   *
+   * 2. "There is an indicator of amount of time, but it's always wrong and always takes longer."
+   *    The percentage was theatre: a curve creeping toward 92% on a timer, with no connection to
+   *    the actual request. It promised 92% done while nothing was known. It is gone. What replaces
+   *    it counts UP, which cannot be wrong: seconds elapsed, plus a bar that reads as motion
+   *    rather than as measured completion.
+   *
+   * 3. "You might think that it's hanging."
+   *    So a placeholder card now sits in the gallery, in the exact spot the finished picture will
+   *    occupy, from the moment the forge is lit. The place they look for the picture is the place
+   *    that says it is coming.
+   */
   const STATUS_LINE = [
-    [20, "Interpreting creative directive…"],
-    [42, "Forming spatial composition…"],
-    [64, "Casting luminous materials…"],
-    [84, "Resolving final detail lattice…"],
+    [0, "Sending your description to the engine…"],
+    [8, "Drawing the picture. This is the slow part…"],
+    [30, "Still drawing. Bigger pictures take longer…"],
+    [70, "Still working. Nothing has gone wrong…"],
   ];
-  function startProgress() {
-    let progress = 6, si = 0;
-    $("#generation-progress").style.width = progress + "%";
-    $("#generation-percent").textContent = progress + "%";
-    clearInterval(state.progressTimer);
-    state.progressTimer = setInterval(() => {
-      progress = Math.min(92, progress + Math.max(0.4, (92 - progress) * 0.045));
-      while (STATUS_LINE[si] && progress >= STATUS_LINE[si][0]) { $("#generation-status").textContent = STATUS_LINE[si][1]; si++; }
-      $("#generation-progress").style.width = progress + "%";
-      $("#generation-percent").textContent = Math.round(progress) + "%";
-    }, 300);
+  function elapsedSecs() { return state.startedAt ? Math.round((Date.now() - state.startedAt) / 1000) : 0; }
+  function paintElapsed() {
+    const secs = elapsedSecs();
+    let phase = STATUS_LINE[0][1];
+    for (const [at, text] of STATUS_LINE) if (secs >= at) phase = text;
+    const status = $("#generation-status");
+    if (status) status.textContent = phase;
+    const pct = $("#generation-percent");
+    if (pct) pct.textContent = secs + "s";
+    const deck = $("#dfi-working-secs");
+    if (deck) deck.textContent = secs + "s";
   }
-  function stopProgress() { clearInterval(state.progressTimer); state.progressTimer = null; }
+  function startProgress() {
+    state.startedAt = Date.now();
+    const track = $(".progress-track");
+    if (track) track.classList.add("indeterminate");   // motion, not a claim about how far along
+    paintElapsed();
+    clearInterval(state.progressTimer);
+    state.progressTimer = setInterval(paintElapsed, 1000);
+  }
+  function stopProgress() {
+    clearInterval(state.progressTimer);
+    state.progressTimer = null;
+    state.startedAt = 0;
+    const track = $(".progress-track");
+    if (track) track.classList.remove("indeterminate");
+  }
 
   async function onIgnite() {
     const prompt = $("#prompt").value.trim();
@@ -775,10 +921,14 @@
     btn.disabled = true;
     btn.classList.add("igniting");
     btn.setAttribute("aria-busy", "true");
+    setDeckNote("");
+    setDeckWorking(true);      // "it is working" says so where the button is, not below the fold
+    flashArrow();              // and points at where the picture will land
+    renderGallery();           // puts the waiting tile in the gallery immediately
     // Ask for folder permission NOW, on the warm click, not after the image lands (see armFolder).
     const wantFolder = !!(autoSave && folderHandle);
     const folderArmed = await armFolder();
-    stripBusy("FORGE CHAMBER ACTIVE", "Charging creative lattice…");
+    stripBusy("MAKING YOUR PICTURE", "Sending your description to the engine…");
     startProgress();
     try {
       const r = await apiJson(API.generate, {
@@ -803,7 +953,9 @@
           state.transient.unshift({ b64: img.b64, prompt, quality: r.quality, aspect: r.aspect, ts: Date.now() });
         }
       }
+      const took = elapsedSecs();      // read BEFORE stopProgress clears the clock
       stopProgress();
+      setDeckWorking(false);
       if (unsaved) {
         showFault("Your image was created, but this browser would not save it to the on-device gallery (often private browsing, or storage is full or blocked). It is shown below so you can long-press or use OPEN to keep it. Try a normal browser window to have it saved automatically.");
       }
@@ -811,20 +963,26 @@
       // write was skipped, which is how an image could look saved and be nowhere on disk.
       const where = wrote ? ` · written to ${folderHandle.name}`
         : (wantFolder ? " · NOT written to your folder yet (tap RECONNECT below)" : "");
-      stripDone("Vision sealed to local vault" + where + " · " + (r.usage && r.usage.outputTokens ? r.usage.outputTokens.toLocaleString() + " tokens · " : "") + fmtUsd(r.costUsd || 0));
+      stripDone("Your picture is ready" + (took ? " · took " + took + "s" : "") + where + " · " + (r.usage && r.usage.outputTokens ? r.usage.outputTokens.toLocaleString() + " tokens · " : "") + fmtUsd(r.costUsd || 0));
+      if (!unsaved) setDeckNote("Your picture is ready" + (took ? ", made in " + took + " seconds" : "") + ". It is in the gallery" + (wide() ? " on the right." : " below."));
       if (wantFolder && !wrote) showFault(`The image is safe in the on-device vault, but it was NOT written to ${folderHandle.name}. Your browser drops folder permission when it restarts. Tap RECONNECT in the vault bar, then SAVE ALL to catch up.`);
       renderFolderBar();
       state.refs = [];
       renderRefs();
-      renderGallery();
+      if (made) maybeOfferKeeping();
     } catch (e) {
       stopProgress();
+      setDeckWorking(false);
       showFault(friendly(e));
     } finally {
       state.generating = false;
       btn.disabled = false;
       btn.classList.remove("igniting");
       btn.removeAttribute("aria-busy");
+      // AFTER the flag clears, and on BOTH paths. The waiting tile is drawn from state.generating,
+      // so a redraw inside the failure branch would put it straight back, and a failed run would
+      // sit there promising a picture that is never coming (caught in the browser, 2026-07-24).
+      renderGallery();
     }
   }
 
@@ -981,6 +1139,20 @@
       return true;
     });
 
+    // The picture being made right now holds its own place in the gallery, from the moment the
+    // forge is lit (Fred, 2026-07-24: "you might think that it's hanging"). It sits where the
+    // finished image will sit, so the place a person looks for the picture is the place that says
+    // it is coming. It is never a real record: no vault write, nothing to clean up.
+    if (state.generating) {
+      const waiting = document.createElement("article");
+      waiting.className = "creation-card pending-card";
+      waiting.innerHTML = `
+        <div class="creation-art art-forge"><i></i><i></i><i></i></div>
+        <div class="card-chrome"><span>BEING MADE NOW</span></div>
+        <div class="creation-meta"><div><b>YOUR PICTURE IS ON ITS WAY</b><small>It appears right here when it is done. More detail and bigger shapes take longer.</small></div></div>`;
+      gallery.append(waiting);
+    }
+
     // live foundry jobs surface as cards under ALL and BATCH
     if (state.filter !== "favorite" && !q) {
       for (const j of state.jobs) gallery.append(jobCard(j));
@@ -1039,7 +1211,7 @@
       gallery.append(card);
     });
 
-    if (!shown.length && !state.jobs.length && !(state.transient || []).length) {
+    if (!shown.length && !state.jobs.length && !(state.transient || []).length && !state.generating) {
       const empty = document.createElement("p");
       empty.className = "gallery-empty";
       empty.textContent = q ? "NOTHING IN THE VAULT MATCHES THAT SEARCH." : "THE VAULT AWAITS ITS FIRST FORGED VISION. EVERYTHING YOU CREATE STAYS ON THIS DEVICE.";

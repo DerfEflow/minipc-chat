@@ -11,13 +11,13 @@
 <link rel="manifest" href="/manifest.webmanifest" />
 <link rel="apple-touch-icon" href="/icons/dominion-core-180-v1.png" />
 <link rel="icon" href="/icons/dominion-core-192-v1.png" />
-<link rel="stylesheet" href="/dominion-ui.css?v=39" />
+<link rel="stylesheet" href="/dominion-ui.css?v=40" />
 <link rel="stylesheet" href="/dominion-tenant.css?v=9" />
 <link rel="stylesheet" href="/dominion-vault.css?v=1" />
 <link rel="stylesheet" href="/dominion-forge.css?v=4" />
-<link rel="stylesheet" href="/dominion-images.css?v=6" />
+<link rel="stylesheet" href="/dominion-images.css?v=7" />
 <link rel="stylesheet" href="/dominion-ide.css?v=20" />
-<link rel="stylesheet" href="/dominion-compass.css?v=7" />
+<link rel="stylesheet" href="/dominion-compass.css?v=8" />
 <link rel="stylesheet" href="/dominion-lenses.css?v=7" />
 <link rel="stylesheet" href="/dominion-tour.css?v=3" />
 </head>
@@ -278,6 +278,13 @@
       <div class="cost-row"><span id="cost-chip" class="cost-chip" hidden></span></div>
       <div id="attach-strip" class="attach-strip" hidden></div>
       <div id="attach-warn" class="attach-warn" hidden></div>
+      <!--
+        PACE WARNING (Fred, 2026-07-24). A beginner who picks a small local model on Furnace has
+        chosen the slowest setup in the app without knowing it, waits, and concludes the app is
+        broken, because ChatGPT answers instantly. So the app says it BEFORE the wait, in red,
+        right above where they type, and names the three controls that make it faster.
+      -->
+      <div id="pace-warn" class="pace-warn" hidden></div>
       <div class="bar">
         <div id="bar-left" class="bar-left">
           <button id="attach" class="mic attach" title="Attach a picture or file" aria-label="Attach a picture or file">
@@ -448,14 +455,14 @@
     </div>
   </div>
 
-  <script src="/dominion-forge.js?v=4"></script>
-  <script src="/dominion-images.js?v=10" defer></script>
+  <script src="/dominion-forge.js?v=5"></script>
+  <script src="/dominion-images.js?v=11" defer></script>
   <script src="/dominion-lexicon.js?v=14"></script>
   <script src="/dominion-ide.js?v=24" defer></script>
   <script src="/dominion-tour.js?v=6" defer></script>
-  <script src="/dominion-compass.js?v=7" defer></script>
+  <script src="/dominion-compass.js?v=8" defer></script>
   <script src="/dominion-lenses.js?v=13" defer></script>
-  <script src="/app.js?v=49"></script>
+  <script src="/app.js?v=50"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=4" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>

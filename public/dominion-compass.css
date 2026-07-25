@@ -65,61 +65,116 @@
 /* ---------- the handle -------------------------------------------------------------------- */
 #compass {
   --cx-progress: 0;
-  position: relative;                 /* the navigation fan anchors to the handle */
+  position: relative;                 /* the navigation dial anchors to the handle */
   display: inline-flex; align-items: center; gap: 3px;
   height: 44px;
   touch-action: none;                 /* the drag is ours; the page must not scroll under it */
   user-select: none; -webkit-user-select: none;
 }
 
-/* The navigation fan (Fred, phone pass 07-23): press the handle, get every surface as a big
- * labelled button. Old-world plate over the bar, copper line, glass glow: house aesthetic. */
-#cx-fan {
-  position: absolute;
-  bottom: calc(100% + 10px);
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  gap: 6px;
-  padding: 8px;
-  border-radius: 8px;
-  border: 1px solid rgba(185, 107, 50, .5);
-  background: linear-gradient(180deg, rgba(16, 34, 54, .97), rgba(6, 14, 26, .98));
-  box-shadow: 0 14px 38px rgba(0, 0, 0, .6), inset 0 1px 0 rgba(255, 193, 138, .18);
+/* The navigation dial (Fred, phone pass 07-24): press the handle and the destination NAMES land
+ * over the arrows that go there, on a black disc.
+ *
+ * WHAT WAS WRONG. The previous version was a row of small plates above the bar, and the handle
+ * under it read as a period rather than as a compass, so "press the compass" pointed at nothing a
+ * person could find. Fred's correction, in order: make the icon look like it points somewhere,
+ * put the names above those arrows, put a circular BLACK field behind the whole thing so it is
+ * easy to read and covers what is behind it, and make it purposeful rather than apologetic.
+ *
+ * The disc is a 3x3 grid, so each name sits at its own compass point with its arrow beneath it and
+ * the centre cell stays empty.
+ *
+ * position:FIXED at BODY level, with the coordinates written by placeDial() in the script. It
+ * cannot live under the handle: the <footer> and #neural-glass both carry overflow:hidden and a
+ * clip-path, and #neural-glass also carries a backdrop-filter, which makes it the containing block
+ * for fixed descendants exactly as a transform would. Nested, the disc is clipped either way. That
+ * is not theory: the first build came out as a bottom crescent with every label sliced off. */
+#cx-dial {
+  --cx-dial-size: min(84vw, 268px);
+  --cx-dial-x: 0px;
+  --cx-dial-y: 0px;
+  position: fixed;
+  left: 0;
+  top: 0;
+  transform: translate(var(--cx-dial-x), var(--cx-dial-y));
+  width: var(--cx-dial-size);
+  height: var(--cx-dial-size);
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-rows: 1fr 1fr 1fr;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid rgba(185, 107, 50, .55);
+  /* BLACK and opaque on purpose: Fred asked for a circular black field that covers what is behind
+     it, so the only warmth is a faint brass bloom at the very centre and the copper rim. */
+  background: radial-gradient(circle at 50% 42%, rgba(14, 10, 6, 1), rgba(2, 3, 5, 1) 58%, #000 100%);
+  box-shadow:
+    0 18px 60px rgba(0, 0, 0, .78),
+    0 0 0 1px rgba(0, 0, 0, .9),
+    inset 0 0 34px rgba(212, 130, 60, .13),
+    inset 0 1px 0 rgba(255, 193, 138, .16);
   z-index: 200;                        /* above the bar; the panels' stacking contexts sit apart */
-  animation: cx-fan-in .18s ease;
+  animation: cx-dial-in .16s ease;
 }
-@keyframes cx-fan-in { from { opacity: 0; transform: translateX(-50%) translateY(6px); } }
-#cx-fan button {
+@keyframes cx-dial-in {
+  from { opacity: 0; transform: translate(var(--cx-dial-x), var(--cx-dial-y)) scale(.86); }
+}
+#cx-dial .cx-spoke {
   display: grid;
   justify-items: center;
-  gap: 4px;
-  min-width: 64px;
+  align-content: center;
+  gap: 3px;
+  padding: 6px 4px;
+  min-width: 62px;
   min-height: 56px;
-  padding: 8px 10px;
   font: inherit;
-  font-size: 10.5px;
-  letter-spacing: .04em;
   cursor: pointer;
   color: var(--ink, #e8f6ff);
-  border: 1px solid rgba(150, 200, 230, .16);
-  border-radius: 6px;
-  background: rgba(3, 10, 18, .6);
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  -webkit-tap-highlight-color: transparent;
 }
-#cx-fan button:hover, #cx-fan button:focus-visible {
-  border-color: rgba(118, 255, 104, .45);
-  box-shadow: inset 0 0 14px rgba(118, 255, 104, .08);
+/* Placement: the name sits at its compass point, the arrow under it points that way. */
+#cx-dial .cx-spoke[data-dir="up"]    { grid-area: 1 / 2; }
+#cx-dial .cx-spoke[data-dir="left"]  { grid-area: 2 / 1; }
+#cx-dial .cx-spoke[data-dir="right"] { grid-area: 2 / 3; }
+#cx-dial .cx-spoke[data-dir="down"]  { grid-area: 3 / 2; }
+#cx-dial .cx-spoke-name {
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: .05em;
+  line-height: 1.15;
+  text-align: center;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .9);
 }
-#cx-fan svg { width: 20px; height: 20px; fill: none; stroke: var(--copper-hot, #d4823c); stroke-width: 1.8; }
-@media (prefers-reduced-motion: reduce) { #cx-fan { animation: none; } }
+#cx-dial .cx-spoke-arrow {
+  width: 26px; height: 26px; fill: none;
+  stroke: var(--copper-hot, #d4823c); stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+  filter: drop-shadow(0 0 6px rgba(212, 130, 60, .45));
+}
+#cx-dial .cx-spoke:hover .cx-spoke-arrow,
+#cx-dial .cx-spoke:focus-visible .cx-spoke-arrow { stroke: var(--energy-hot, #9dff92); }
+#cx-dial .cx-spoke:hover .cx-spoke-name,
+#cx-dial .cx-spoke:focus-visible .cx-spoke-name { color: var(--energy-hot, #9dff92); }
+#cx-dial .cx-spoke:focus-visible { outline: 2px solid var(--energy, #76ff68); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { #cx-dial { animation: none; } }
+@media (max-width: 360px) {
+  #cx-dial { --cx-dial-size: 90vw; }
+  #cx-dial .cx-spoke-name { font-size: 11.5px; }
+  #cx-dial .cx-spoke-arrow { width: 22px; height: 22px; }
+}
 #compass .cx-core { display: grid; justify-items: center; gap: 2px; }
 
-/* At rest: a dim copper pinpoint sitting in space that was empty anyway. Nothing pulses, nothing
-   competes with the conversation. */
+/* The core of the compass rose. It used to be the whole icon, which is exactly what went wrong:
+   a 10px dot with its arrows hidden until a hover is a full stop on a phone, where there is no
+   hover to give. It is now the hub the three arrows point away from, and it grows while the dial
+   is open so the thing you pressed is visibly the thing that opened. */
 #compass .cx-dot {
-  width: 10px; height: 10px; border-radius: 50%;
+  width: 11px; height: 11px; border-radius: 50%;
   background: radial-gradient(circle at 38% 34%, #f6c089, #b96b32 60%, #6d3a17);
-  box-shadow: 0 0 0 1px rgba(255, 190, 130, .24), 0 0 8px rgba(185, 107, 50, .35);
+  box-shadow: 0 0 0 1px rgba(255, 190, 130, .3), 0 0 9px rgba(185, 107, 50, .45);
   cursor: grab;
   transition: width .18s ease, height .18s ease, box-shadow .22s ease;
 }
@@ -128,29 +183,37 @@
   width: 13px; height: 13px;
   box-shadow: 0 0 0 1px rgba(255, 208, 158, .42), 0 0 14px rgba(212, 130, 60, .62);
 }
+#compass.cx-open .cx-dot {
+  width: 17px; height: 17px;
+  box-shadow: 0 0 0 1px rgba(255, 214, 168, .6), 0 0 20px rgba(212, 130, 60, .8);
+}
 body.cx-dragging #compass .cx-dot { cursor: grabbing; }
 
-/* Arrows stay out of sight until the handle is touched, hovered, or pressed for a hint. That is
-   what keeps a navigation control from reading as clutter. */
+/* The arrows ARE the icon (Fred, phone pass 07-24). They were opacity:0 until hover, so the whole
+   control collapsed to a dot for every touch user, and the one instruction we give ("press the
+   compass") named something invisible. Now three of them are lit at rest, which is the entire
+   point: a thing with arrows pointing up, left and right reads as directional at a glance. */
 #compass .cx-arm {
   width: 16px; height: 16px; padding: 0; border: 0; background: none;
   display: none; align-items: center; justify-content: center;
   cursor: pointer; opacity: 0;
   transition: opacity .2s ease;
 }
-#compass .cx-arm.on { display: inline-flex; }
+#compass .cx-arm.on { display: inline-flex; opacity: .68; }
 #compass:hover .cx-arm.on,
 #compass.awake .cx-arm.on,
-#compass.hint .cx-arm.on { opacity: .85; }
+#compass.hint .cx-arm.on,
+#compass.cx-open .cx-arm.on { opacity: 1; }
 #compass .cx-arm svg {
-  width: 14px; height: 14px; fill: none;
-  stroke: #d4823c; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
+  width: 15px; height: 15px; fill: none;
+  stroke: #d4823c; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round;
+  filter: drop-shadow(0 0 3px rgba(212, 130, 60, .35));
 }
 #compass .cx-arm:hover svg { stroke: var(--energy-hot, #9dff92); }
 
 /* Inside a panel there is exactly one way out, and it stays visible: the handle doubles as a
    "you are here" marker. */
-#compass:not([data-surface="main"]) .cx-arm.on { opacity: .72; }
+#compass:not([data-surface="main"]) .cx-arm.on { opacity: .78; }
 
 @media (prefers-reduced-motion: reduce) {
   #compass .cx-dot, #compass .cx-arm { transition: none; }

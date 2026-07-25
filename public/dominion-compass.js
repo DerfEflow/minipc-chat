@@ -295,11 +295,11 @@
         }
         endDrag(drag, committed);
       } else if (start && !moved) {
-        // A plain press with no drag opens the navigation fan (Fred, phone pass 07-23: swiping
+        // A plain press with no drag opens the navigation dial (Fred, phone pass 07-23: swiping
         // was unreliable on his phone and the wake-the-arrows hint taught nothing). One tap
         // shows every surface as a big labelled button; one more tap goes there. Dragging
         // still works for anyone who likes it.
-        toggleFan(el);
+        toggleDial(el);
       }
       start = null; decided = null;
     };
@@ -309,7 +309,7 @@
     dot.addEventListener("pointerup", onUp);
     dot.addEventListener("pointercancel", onUp);
     dot.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleFan(el); return; }
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleDial(el); return; }
       const routes = routesFor(current());
       const map = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
       const dir = map[e.key];
@@ -326,12 +326,13 @@
     }
   }
 
-  /* ---------- the navigation fan -------------------------------------------------------------
+  /* ---------- the navigation dial -------------------------------------------------------------
    * The reliable path between surfaces: press the handle, get every destination as a big
-   * labelled button, tap one. Works from ANY surface to ANY surface (the fan closes the panel
+   * labelled button, tap one. Works from ANY surface to ANY surface (the dial closes the panel
    * you are on, waits out the travel, then opens the next), which the one-way arrows never did.
    */
   function goTo(dest) {
+    closeDial();                     // an arrow tap or a keyboard jump also puts the dial away
     const here = current();
     if (dest === here) return;
     if (dest === "crucible" && !armCrucible()) return;
@@ -353,41 +354,135 @@
     setTimeout(paint, 60);
   }
 
-  function toggleFan(el) {
-    const oldFan = $("#cx-fan");
-    if (oldFan) { oldFan.remove(); return; }
-    const here = current();
-    const fan = document.createElement("div");
-    fan.id = "cx-fan";
-    fan.setAttribute("role", "menu");
+  /*
+   * WHY A DIAL AND NOT A ROW OF BUTTONS (Fred, phone pass 07-24). The handle at rest read as a
+   * full stop: "the compass navigation icon looks like a period and not like a compass at all",
+   * so being told to press the compass taught nobody where to press. Two things fix that. The
+   * arrows are now part of the resting icon (CSS: .cx-arm.on is visible rather than waiting for a
+   * hover no phone can give), so the thing at the bottom of the bar looks like it points
+   * somewhere. And pressing it lays the destination NAMES over those same arrows on a black disc,
+   * big enough to read at arm's length and opaque enough to cover the conversation behind it,
+   * which is what makes it read as a deliberate control rather than a floating tooltip.
+   *
+   * The direction each name sits at matches the drag that goes there, so the dial teaches the
+   * gesture: Chat's arrow is always the true way out of the panel you are on. From inside a panel
+   * the OTHER surfaces have no true direction (there is only one way home), so they fill the free
+   * slots; goTo handles any-to-any regardless, and the name is the thing being pressed.
+   */
+  const DIAL_SLOTS = ["up", "right", "left", "down"];
+
+  function dialItems(here) {
+    const routes = routesFor(here);
     const items = [];
-    if (here !== "main") items.push({ id: "main", label: "Chat", icon: "M4 5h16v11H8l-4 4z" });
+    const taken = new Set();
+    // Whatever direction actually leaves this panel is the direction Chat is drawn at.
+    for (const [dir, dest] of Object.entries(routes)) {
+      if (dest !== "main") continue;
+      items.push({ id: "main", label: "Chat", icon: "M4 5h16v11H8l-4 4z", dir });
+      taken.add(dir);
+    }
     for (const [id, p] of Object.entries(PANELS)) {
       if (id === here) continue;
       if (id === "crucible" && !crucibleAllowed()) continue;
-      items.push({ id, label: p.label, icon: p.icon });
+      // A live route keeps its own direction; anything else takes the first free slot.
+      let dir = Object.keys(routes).find((d) => routes[d] === id && !taken.has(d));
+      if (!dir) dir = DIAL_SLOTS.find((d) => !taken.has(d));
+      if (!dir) continue;
+      taken.add(dir);
+      items.push({ id, label: p.label, icon: p.icon, dir });
     }
-    fan.innerHTML = items.map((it) =>
-      '<button type="button" role="menuitem" data-go="' + it.id + '">' +
-        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="' + it.icon + '"/></svg>' +
-        '<span>' + it.label + '</span>' +
+    return items;
+  }
+
+  const ARROW = {
+    up: "M12 4v15M6 10l6-6 6 6",
+    down: "M12 20V5M6 14l6 6 6-6",
+    left: "M4 12h15M10 6l-6 6 6 6",
+    right: "M20 12H5M14 6l6 6-6 6",
+  };
+
+  function closeDial() {
+    const dial = $("#cx-dial");
+    if (dial) dial.remove();
+    const el = $("#compass");
+    if (el) el.classList.remove("cx-open");
+  }
+
+  function toggleDial(el) {
+    if ($("#cx-dial")) { closeDial(); return; }
+    const here = current();
+    const dial = document.createElement("div");
+    dial.id = "cx-dial";
+    dial.setAttribute("role", "menu");
+    dial.innerHTML = dialItems(here).map((it) =>
+      '<button type="button" role="menuitem" class="cx-spoke" data-go="' + it.id + '" data-dir="' + it.dir + '">' +
+        '<span class="cx-spoke-name">' + it.label + '</span>' +
+        '<svg class="cx-spoke-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="' + ARROW[it.dir] + '"/></svg>' +
       '</button>').join("");
-    fan.addEventListener("click", (e) => {
+    dial.addEventListener("click", (e) => {
       const b = e.target.closest("button[data-go]");
       if (!b) return;
-      fan.remove();
+      closeDial();
       goTo(b.dataset.go);
     });
-    el.append(fan);
+    el.classList.add("cx-open");
+    /*
+     * Appended to the BODY, not to the handle. Two ancestors of the composer clip their children
+     * (<footer> and #neural-glass both carry overflow:hidden plus a clip-path), and #neural-glass
+     * additionally carries a backdrop-filter, which makes it the containing block for
+     * position:fixed descendants as surely as a transform would. So a dial nested under the handle
+     * is clipped whether it is absolute OR fixed: the first build of this came out as a bottom
+     * crescent with every label sliced off, and moving it to fixed only shrank the crescent.
+     * At body level, fixed means fixed, and placeDial puts it back over the handle by hand.
+     */
+    document.body.append(dial);
+    placeDial(dial, el);
     // Outside tap or Escape closes it; bind on the next tick so the opening tap does not count.
     setTimeout(() => {
-      const away = (e) => { if (!fan.contains(e.target)) { fan.remove(); cleanup(); } };
-      const key = (e) => { if (e.key === "Escape") { fan.remove(); cleanup(); } };
+      // Pressing the handle again must CLOSE the dial, so the outside-tap guard stands down for
+      // presses on the compass itself and lets toggleDial do it. Without this the capture-phase
+      // close ran first, the handle's own pointerup then reopened it, and the dial looked stuck.
+      const away = (e) => {
+        if (dial.contains(e.target)) return;
+        if (e.target && e.target.closest && e.target.closest("#compass")) { cleanup(); return; }
+        closeDial(); cleanup();
+      };
+      const key = (e) => { if (e.key === "Escape") { closeDial(); cleanup(); } };
       const cleanup = () => { document.removeEventListener("pointerdown", away, true); document.removeEventListener("keydown", key, true); };
       document.addEventListener("pointerdown", away, true);
       document.addEventListener("keydown", key, true);
-      new MutationObserver((m, o) => { if (!document.contains(fan)) { cleanup(); o.disconnect(); } }).observe(el, { childList: true });
+      // Watches BODY, because that is where the dial now lives. Its only job is to unhook these two
+      // document listeners if anything else removes the dial.
+      new MutationObserver((m, o) => { if (!document.contains(dial)) { cleanup(); o.disconnect(); } }).observe(document.body, { childList: true });
     }, 0);
+  }
+
+  /*
+   * Place the disc by hand, in viewport coordinates.
+   *
+   * WHY IT CANNOT BE position:absolute. The handle lives in the composer, and BOTH the <footer> and
+   * #neural-glass above it carry overflow:hidden plus a clip-path. An absolutely positioned child
+   * is clipped by those no matter how high its z-index, so the disc came out as a bottom crescent
+   * with every label cut off (seen in the browser, 2026-07-24). position:fixed escapes the clip;
+   * nothing in the chain sets a transform or filter, so fixed really does resolve against the
+   * viewport here rather than against some ancestor.
+   *
+   * Measured and positioned in the same synchronous block as the append, so there is no paint
+   * between the two and therefore no flash at the origin.
+   */
+  function placeDial(dial, handle) {
+    const size = dial.getBoundingClientRect().width || 268;
+    const h = handle.getBoundingClientRect();
+    const margin = 6;
+    const centre = h.left + h.width / 2;
+    let x = centre - size / 2;
+    x = Math.max(margin, Math.min(x, window.innerWidth - size - margin));
+    // Sits above the handle. Clamped so a short viewport (a phone with its keyboard up) pushes it
+    // down rather than off the top of the screen.
+    let y = h.top - 8 - size;
+    y = Math.max(margin, Math.min(y, window.innerHeight - size - margin));
+    dial.style.setProperty("--cx-dial-x", Math.round(x) + "px");
+    dial.style.setProperty("--cx-dial-y", Math.round(y) + "px");
   }
 
   // Build the divider bar and its label once. #ide-root already spends both ::before and ::after

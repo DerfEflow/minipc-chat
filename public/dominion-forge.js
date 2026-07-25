@@ -109,6 +109,9 @@
     if (!TIERS.includes(t)) t = "ember";
     localStorage.setItem(KEY, t);
     if (triggerEl) triggerEl.setAttribute("data-tier", t);
+    // The composer's pace warning depends on this position (Furnace is the slowest setting in the
+    // app), so it hears about every turn of the dial instead of waiting for a reload.
+    try { document.dispatchEvent(new CustomEvent("dominion-forge-tier", { detail: t })); } catch {}
   }
   const getForgeMode = () => localStorage.getItem(MODE_KEY) === "1";
   function setForgeMode(on) {

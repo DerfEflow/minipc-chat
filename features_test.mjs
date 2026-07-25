@@ -46,9 +46,15 @@ t("an unknown topic says so and lists the real options, never invents one", () =
   if (!/Dominion Forge Images/.test(r)) throw new Error("did not offer the real list");
 });
 
+/*
+ * This check caught real drift and then enforced it for a while: the map kept sending people to
+ * "the picture button in the message bar" long after dominion-compass.css retired that button
+ * (`#dfi-trigger { display: none !important }`), so the one instruction we give named a control
+ * that is not on the screen. It now tracks what a user can actually press.
+ */
 t("the image answer names the control a user can actually find", () => {
   const r = featureHelp("images");
-  if (!/picture button/.test(r) || !/message bar/.test(r)) throw new Error("image location is not concrete: " + r.slice(0, 160));
+  if (!/compass handle/.test(r) || !/message bar/.test(r)) throw new Error("image location is not concrete: " + r.slice(0, 160));
 });
 
 // The anti-drift check: claimed controls must exist in the shipped interface.
@@ -71,6 +77,11 @@ t("the controls the map points at exist in the interface", () => {
   if (!imagesJs.includes('id = "dfi-trigger"')) throw new Error("the image studio trigger is gone");
   if (!imagesJs.includes("IGNITE THE FORGE")) throw new Error("the ignite control the map names is gone");
   if (!imagesJs.includes("MAKE SEVERAL AT ONCE")) throw new Error("the batch control the map names is gone");
+  if (!imagesJs.includes("MAKING YOUR PICTURE")) throw new Error("the working line the map names is gone");
+  // The compass is now the route the map sends people down, so it has to be a real control.
+  const compassJs = readFileSync(join(HERE, "public", "dominion-compass.js"), "utf8");
+  if (!compassJs.includes('el.id = "compass"')) throw new Error("the compass handle the map names is gone");
+  if (!compassJs.includes("toggleDial")) throw new Error("pressing the compass no longer opens a menu");
   if (!forgeJs.includes("Seal Setting")) throw new Error("the dial's close control the map names is gone");
   if (!appJs.includes("downloadArtifact")) throw new Error("artifact download is gone but the map promises it");
 });
