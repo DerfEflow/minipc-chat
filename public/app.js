@@ -541,6 +541,7 @@ async function loadModels() {
       // Owner-only surfaces (the Wildfire switch and the roster star) key off this. The server is
       // the authority: it both sets this flag and refuses a non-owner arming attempt independently.
       window.dominionIsOwner = cat.wildfire === true;
+      try { document.dispatchEvent(new CustomEvent("dominion-owner-known")); } catch {}
       catalogGroups = cat.groups || [];
       // Drop every existing cloud optgroup (keep the local one) before rebuilding.
       Array.from(modelSel.querySelectorAll("optgroup")).forEach((g) => { if (g.id !== "model-local-group") g.remove(); });

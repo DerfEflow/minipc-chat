@@ -136,6 +136,11 @@
    */
   const WILDFIRE_KEY = "dominion.wildfireArmed";
   const isOwner = () => window.dominionIsOwner === true;
+  // When the catalog lands and the owner flag flips, reveal the Wildfire control on any dial
+  // already built (the race fix's second half — see the render-time note below).
+  document.addEventListener("dominion-owner-known", () => {
+    for (const b of document.querySelectorAll(".dial-wildfire")) b.hidden = !isOwner();
+  });
   const getWildfire = () => isOwner() && sessionStorage.getItem(WILDFIRE_KEY) === "1";
   function setWildfire(on) {
     if (!isOwner()) on = false;
@@ -191,7 +196,10 @@
         '<button class="dial-step dial-station dial-station-flame" data-t="flame"><span>Flame</span></button>' +
         '<button class="dial-step dial-station dial-station-furnace" data-t="furnace"><span>Furnace</span></button>' +
         '<button class="dial-forge-mode" type="button" aria-pressed="false"><span>Forge Mode</span><small>Standby</small></button>' +
-        (isOwner() ? '<button class="dial-wildfire" type="button" aria-pressed="false" title="Broad authority across both machines, for a starred model"><span>Wildfire</span><small>Contained</small></button>' : "") +
+        // Always in the markup, visibility gated live (fix 2026-07-26): the owner flag arrives from
+        // /api/models AFTER this dial may already have been built, so a render-time conditional
+        // raced and silently dropped the Wildfire control. Server still refuses non-owner arming.
+        '<button class="dial-wildfire" type="button" aria-pressed="false"' + (isOwner() ? '' : ' hidden') + ' title="Broad authority across both machines, for a starred model"><span>Wildfire</span><small>Contained</small></button>' +
         '<div class="dial-glass-live" aria-hidden="true"></div>' +
         '<div class="dial-spark s1"></div><div class="dial-spark s2"></div><div class="dial-spark s3"></div>' +
       '</div>' +
