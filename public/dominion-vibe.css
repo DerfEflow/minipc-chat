@@ -168,8 +168,9 @@
 /* ---------- 4. Plan with AI --------------------------------------------------------------- */
 .vb-plan { display: grid; gap: 12px; min-width: 0; }
 /* Fred, 2026-07-26: the Plan with AI heading is the section's banner, three times the standard
-   heading size and centered. Only the section title; the window names keep the standard size. */
-.vb-plan > .vb-h { font-size: 36px; text-align: center; }
+   heading size and centered, and the Assign Your Troops banner divides planning from building at
+   the same size. Only these banners; the window names keep their own treatment. */
+.vb-plan > .vb-h, .vb-banner { font-size: 36px; text-align: center; }
 .vb-plan-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-width: 0; }
 @media (max-width: 760px) { .vb-plan-row { grid-template-columns: 1fr; } }
 
@@ -189,12 +190,26 @@
 .vb-win-third { --vb-hue: var(--vb-third); }
 
 .vb-win-head {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 9px 12px;
   border-bottom: 1px solid hsla(var(--vb-hue), 60%, 60%, .22);
 }
-.vb-win-head b { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink, #e8f6ff); }
-.vb-win-head em { font-style: normal; font-size: 10px; color: var(--muted, #8ba0ae); text-transform: none; letter-spacing: .04em; }
+/* Army ranks (Fred, 2026-07-26): the name is the window's badge now. Twice the old size, on a
+   plate in the window's own hue bright enough to contrast with the dark body, with the rank's
+   insignia beside it. The sub-label keeps the plain AI-planner wording so nobody has to decode
+   military shorthand. */
+.vb-win-head b.vb-win-title {
+  display: inline-flex; align-items: center; gap: 9px; min-width: 0;
+  font-size: 24px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink, #e8f6ff);
+  padding: 5px 14px; border-radius: 8px;
+  background: linear-gradient(180deg, hsla(var(--vb-hue), 72%, 42%, .55), hsla(var(--vb-hue), 78%, 28%, .55));
+  border: 1px solid hsla(var(--vb-hue), 80%, 66%, .6);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14);
+}
+.vb-rank { height: 15px; width: auto; flex: none; fill: hsla(var(--vb-hue), 92%, 80%, .95); }
+.vb-win-title .vb-rank-name { white-space: nowrap; }
+.vb-win-title .vb-rank-sub { font-style: normal; font-size: 10.5px; color: var(--ink-soft, #d9c9b8); text-transform: none; letter-spacing: .04em; }
+@media (max-width: 620px) { .vb-win-head b.vb-win-title { font-size: 19px; } }
 /* Upper left is the model selector, per the drawing's margin note. */
 .vb-win-model {
   max-width: 46%;

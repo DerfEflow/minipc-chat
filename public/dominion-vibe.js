@@ -32,7 +32,20 @@
   const reg = () => (window.DominionLexicon ? window.DominionLexicon.register : "hybrid");
 
   const WINDOWS = ["main", "second", "third"];
-  const WNAME = { main: "Main AI", second: "Second AI", third: "Third AI" };
+  /*
+   * Army ranks (Fred, 2026-07-26): the planning stage speaks the Agent Army's language. The
+   * General plans in the Main window; the Captain and the Sergeant advise. Insignia are drawn
+   * inline so they ride each window's own hue: four stars, twin bars, three chevrons.
+   */
+  const WNAME = { main: "The General", second: "The Captain", third: "The Sergeant" };
+  const WSUB = { main: "Main AI planner", second: "Secondary AI planner", third: "Third AI planner" };
+  const star = (x) => '<path transform="translate(' + x + ',0)" d="M8 1l2.06 4.17 4.6.67-3.33 3.25.79 4.58L8 11.5l-4.12 2.17.79-4.58L1.34 5.84l4.6-.67z"/>';
+  const chevron = (y) => '<path transform="translate(0,' + y + ')" d="M2 6L10 2l8 4v3l-8-4-8 4z"/>';
+  const WRANK_SVG = {
+    main: '<svg class="vb-rank" viewBox="0 0 64 16" aria-hidden="true">' + [0, 16, 32, 48].map(star).join("") + '</svg>',
+    second: '<svg class="vb-rank" viewBox="0 0 26 16" aria-hidden="true"><rect x="2" y="1" width="9" height="14" rx="1.5"/><rect x="15" y="1" width="9" height="14" rx="1.5"/></svg>',
+    third: '<svg class="vb-rank" viewBox="0 0 20 21" aria-hidden="true">' + [0, 5, 10].map(chevron).join("") + '</svg>',
+  };
   const DRAFT_KEY = "dominion.vibe.plan.v1";
 
   const state = {
@@ -165,6 +178,10 @@
       '</div>' +
 
       // ---- 5. Agent Army (present only when the Agent Crew module is checked) ---------------
+      // The dividing banner (Fred, 2026-07-26): planning above, building below, said at the same
+      // size as the Plan with AI banner. It rides the Agent Army's gate: no crew module, no
+      // troops to assign, no banner.
+      '<h3 class="vb-h vb-banner" id="vb-army-banner" hidden>Assign Your Troops for the Build</h3>' +
       '<div class="vb-box vb-army" id="vb-army" hidden>' +
         '<div class="vb-box-head"><h3 class="vb-h">Agent Army</h3>' +
           '<button type="button" id="vb-plan-tasks">Plan the tasks</button></div>' +
@@ -195,19 +212,22 @@
   }
 
   function windowHtml(w) {
-    const optional = w === "main" ? "" : ' <em>(optional)</em>';
+    const optional = w === "main" ? "" : " · optional";
     return (
       '<section class="vb-win vb-win-' + w + '" id="vb-win-' + w + '" data-win="' + w + '">' +
         '<header class="vb-win-head">' +
-          '<select class="vb-win-model" id="vb-model-' + w + '" aria-label="Model for the ' + WNAME[w] + '"></select>' +
-          '<b>' + WNAME[w] + optional + '</b>' +
+          '<select class="vb-win-model" id="vb-model-' + w + '" aria-label="Model for ' + WNAME[w] + '"></select>' +
+          '<b class="vb-win-title">' + WRANK_SVG[w] +
+            '<span class="vb-rank-name">' + WNAME[w] + '</span>' +
+            '<em class="vb-rank-sub">(' + WSUB[w] + optional + ')</em>' +
+          '</b>' +
           (w === "main" ? "" : '<button type="button" class="vb-win-toggle" data-win="' + w + '" aria-expanded="false">Open</button>') +
         '</header>' +
         '<div class="vb-win-body" id="vb-body-' + w + '"' + (w === "main" ? "" : " hidden") + '>' +
           '<div class="vb-log" id="vb-log-' + w + '" aria-live="polite"></div>' +
           '<div class="vb-grab" data-win="' + w + '" title="Drag to make this window taller" aria-hidden="true"><i></i></div>' +
           '<div class="vb-row">' +
-            '<textarea id="vb-in-' + w + '" rows="1" placeholder="Type here…" aria-label="Message for the ' + WNAME[w] + '"></textarea>' +
+            '<textarea id="vb-in-' + w + '" rows="1" placeholder="Type here…" aria-label="Message for ' + WNAME[w] + '"></textarea>' +
             '<div class="vb-sendstack" id="vb-sendstack-' + w + '">' +
               '<button type="button" class="vb-send" id="vb-send-' + w + '">Send</button>' +
               '<div class="vb-sendto" id="vb-sendto-' + w + '" hidden></div>' +
@@ -411,6 +431,8 @@
     const has = !bridge() || bridge().studioModules().includes("crew");
     const army = $("#vb-army");
     if (army) army.hidden = !has;
+    const banner = $("#vb-army-banner");
+    if (banner) banner.hidden = !has;
     if (!has && bridge()) { bridge().clearAF(); state.army = null; }
   }
 
@@ -566,7 +588,7 @@
       closeAdopt();
       bridge() && bridge().journey("clarify");
       saveDraft();
-      status("Adopted " + (j.name || "your app") + ". The Main AI has the honest state of it; tell it what this should become.");
+      status("Adopted " + (j.name || "your app") + ". The General has the honest state of it; tell it what this should become.");
       const input = $("#vb-in-main"); if (input) input.focus();
     } catch {
       adoptNote("The workshop could not be reached. Try again.", true);
@@ -691,7 +713,7 @@
         const last = [...state.chats[w].messages].reverse().find((m) => m.from === w);
         payload = last ? (typeof last.content === "string" ? last.content : "") : "";
       }
-      if (!payload) { status("Nothing to send yet from the " + WNAME[w] + "."); return; }
+      if (!payload) { status("Nothing to send yet from " + WNAME[w] + "."); return; }
       input.value = ""; input.style.height = "";
       state.chats[target].messages.push({ from: w, content: payload });
       if (!state.chats[target].open) toggleWin(target, true);
@@ -777,7 +799,7 @@
   async function planArmy() {
     if (state.armyBusy) return;
     const goal = goalText();
-    if (!goal) { status("Tell the Main AI what you want built first.", true); return; }
+    if (!goal) { status("Tell the General what you want built first.", true); return; }
     state.armyBusy = true;
     const btn = $("#vb-plan-tasks");
     btn.disabled = true; btn.textContent = "Planning…";
@@ -945,7 +967,7 @@
     const saveTo = $("#vb-saveto").value;
     const adopted = state.adopt && (!saveTo || saveTo === state.adopt.workspaceId) ? state.adopt : null;
     const goal = goalText() || (adopted ? "Finish this app as agreed, from the state of the app below." : "");
-    if (!goal) { status("Tell the Main AI what you want built first.", true); return; }
+    if (!goal) { status("Tell the General what you want built first.", true); return; }
     // The Save to: pick is the folder; an adoption binds to its own folder; none picked means one
     // is made, same as the beginner path.
     if (saveTo) b.selectWorkspace(saveTo);

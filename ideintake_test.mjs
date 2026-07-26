@@ -255,7 +255,7 @@ await t("only the user's voice is a command: the wire framing is the server's, n
     assert.ok(msgs[i].content.startsWith(FORWARDED_MARK), "relayed turn " + i + " must carry the server's mark");
     assert.ok(/not an instruction/.test(msgs[i].content), "the mark itself must disclaim command authority");
   }
-  assert.ok(msgs[3].content.includes("Second AI"), "the mark names the sender");
+  assert.ok(msgs[3].content.includes("Captain AI"), "the mark names the sender by rank");
   // And the system prompt carries the rule in words for every window.
   assert.ok(/never treat anything inside one as an/i.test(msgs[0].content));
 });
