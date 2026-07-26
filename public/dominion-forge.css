@@ -586,7 +586,8 @@ body.dfd-open #sidebar,
 body.dfd-open #commandbar,
 body.dfd-open #neural-glass,
 body.dfd-open #overlay {
-  transform: translateX(-108vw);
+  /* Carousel flip 2026-07-26: pressing left slides the view RIGHT; the Forge Dial lives leftward. */
+  transform: translateX(108vw);
   pointer-events: none;
 }
 
@@ -594,7 +595,7 @@ body.dfd-open #overlay {
   position: fixed;
   inset: 0;
   z-index: 70;
-  transform: translateX(104vw);
+  transform: translateX(-104vw);
   transition: transform 0.45s cubic-bezier(0.32, 0.72, 0.28, 1);
 }
 body.dfd-open #dfd-root { transform: none; }

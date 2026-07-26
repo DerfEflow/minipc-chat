@@ -44,7 +44,8 @@ body.dfi-open #sidebar,
 body.dfi-open #commandbar,
 body.dfi-open #neural-glass,
 body.dfi-open #overlay {
-  transform: translateX(108vw);
+  /* Carousel flip 2026-07-26: pressing right slides the view LEFT; the Foundry lives rightward. */
+  transform: translateX(-108vw);
   pointer-events: none;
 }
 
@@ -55,7 +56,7 @@ body.dfi-open #overlay {
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
-  transform: translateX(-104vw);
+  transform: translateX(104vw);
   transition: transform var(--dfi-slide-dur) var(--dfi-slide-ease);
 
   /* design tokens (the mockup's :root) */
@@ -179,7 +180,7 @@ body.dfi-door-moving #dfi-root .glass-door-sheen { animation: dfi-door-sheen var
    THE COUNTER-SLIDE is what sells the glide. .scene is a child of the transformed #dfi-root, so
    by default it would slide in WITH the panels and the background would travel with the page,
    which reads as a cut. Translating it by the exact inverse of the parent pins it to the viewport:
-   parent -104vw + child +104vw = a backdrop that never moves while the panels glide across it.
+   parent +104vw + child -104vw = a backdrop that never moves while the panels glide across it.
    Both use the same duration and easing, so they stay locked frame for frame. If you change
    #dfi-root's transform or transition, change this one to match or the background will drift. */
 #dfi-root .scene {
@@ -197,7 +198,7 @@ body.dfi-door-moving #dfi-root .glass-door-sheen { animation: dfi-door-sheen var
     url("/assets/dominion-neural-chassis-desktop-4k-v3.webp") center / contain no-repeat,
     #010407;
   filter: contrast(1.04) saturate(1.08) brightness(1);
-  transform: translateX(104vw);
+  transform: translateX(-104vw);
   transition: transform var(--dfi-slide-dur) var(--dfi-slide-ease), opacity .5s ease, filter .5s ease;
 }
 body.dfi-open #dfi-root .scene { transform: none; }

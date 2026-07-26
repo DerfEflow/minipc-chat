@@ -2689,3 +2689,24 @@ function speakAnswer(text) { voice.speak(text); }
     voice.speak("This is " + sel.value + ", reading a sentence at the pace and register Dominion will use for your answers.");
   });
 })();
+
+/*
+ * Command-bar dropdowns open from ANY click, including the drawn chevron (Fred, 2026-07-26: "the
+ * drop down boxes are non-responsive to clicking the arrow, you have to click the bar"). The
+ * chevron is a decorative ::after on the wrapping <label>, and the native <select> only fills part
+ * of that label, so a click on the arrow landed on the label, which merely FOCUSES a native select
+ * rather than opening it. This delegated handler calls showPicker() for a click anywhere on the
+ * wrapper, which pops the native dropdown reliably. A direct click on the select itself is left to
+ * the browser (it already opens), so nothing double-fires. Scoped away from .model-select, which
+ * is a custom JS panel with its own trigger.
+ */
+(() => {
+  document.addEventListener("click", (e) => {
+    const wrap = e.target.closest && e.target.closest(".command-select:not(.model-select)");
+    if (!wrap) return;
+    const sel = wrap.querySelector("select");
+    if (!sel || e.target === sel) return;                 // native handles a direct hit on the select
+    if (typeof sel.showPicker === "function") { try { sel.showPicker(); return; } catch {} }
+    sel.focus();                                          // older engines: at least focus it
+  });
+})();

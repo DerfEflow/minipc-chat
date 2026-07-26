@@ -141,12 +141,24 @@
 #cx-dial .cx-spoke[data-dir="right"] { grid-area: 2 / 3; }
 #cx-dial .cx-spoke[data-dir="down"]  { grid-area: 3 / 2; }
 #cx-dial .cx-spoke-name {
+  display: grid;
+  gap: 2px;
+  justify-items: center;
   font-size: 12.5px;
   font-weight: 650;
   letter-spacing: .05em;
   line-height: 1.15;
   text-align: center;
   text-shadow: 0 1px 3px rgba(0, 0, 0, .9);
+}
+/* The plain-words job under each name (feedback 2026-07-26: nobody knew what the names meant). */
+#cx-dial .cx-spoke-sub {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: .03em;
+  color: var(--muted, #9fb4c2);
+  max-width: 96px;
+  line-height: 1.25;
 }
 #cx-dial .cx-spoke-arrow {
   width: 26px; height: 26px; fill: none;
@@ -241,8 +253,8 @@ body.cx-dragging::after { right: 0; background: linear-gradient(270deg, rgba(212
  *
  * These restore the slide for the reveal states only. Cursor movement still cannot move it.
  */
-body.dfd-open #neural-glass { transform: translateX(-108vw) !important; }
-body.dfi-open #neural-glass { transform: translateX(108vw) !important; }
+body.dfd-open #neural-glass { transform: translateX(108vw) !important; }
+body.dfi-open #neural-glass { transform: translateX(-108vw) !important; }
 body.ide-open #neural-glass { transform: translateY(-112vh) !important; }
 
 /* ---------- smooth settle on reveal commit --------------------------------------------------

@@ -21,10 +21,16 @@
  * falls back, which doubles as the "changed my mind" gesture. The handle itself barely moves: it
  * is the grab point, and the panels do the travelling.
  *
- * DIRECTION. Your finger moves WITH the panel that is arriving:
- *   drag right -> the image forge slides in from the left
- *   drag left  -> the dial slides in from the right
- *   drag up    -> The Crucible rises from below
+ * DIRECTION (reworked 2026-07-26 from user feedback: "the arrows send the page in the wrong
+ * direction"). Horizontal travel now follows the carousel convention every phone teaches:
+ *   press the RIGHT arrow -> the view slides LEFT and The Foundry arrives FROM the right
+ *   press the LEFT arrow  -> the view slides RIGHT and the Forge Dial arrives FROM the left
+ *   press UP              -> The Crucible rises from below (the swipe-up feed convention,
+ *                            already right, and the forge image Fred approved)
+ * Drags stay finger-native (content follows the finger), which on a carousel means the SWIPE
+ * mirrors the arrow: swipe LEFT for the Foundry on the right, swipe RIGHT for the Forge Dial on
+ * the left, swipe UP for The Crucible. Arrows and dial spokes POINT at destinations; swipes
+ * PULL them in. That split is the same one every photo app trains.
  * Inside any panel, one arrow points home.
  */
 (() => {
@@ -43,16 +49,23 @@
    * numbers mirror the CSS exactly (dominion-forge.css, dominion-images.css, dominion-ide.css);
    * if those change, these must change with them.
    */
+  // Names carry their plain-words job (user feedback 2026-07-26: "no one knows what the names
+  // mean"); the dial renders the sub under the name. The x-axis numbers are the carousel flip:
+  // the Foundry lives to the RIGHT (enters from +104, shell exits -108), the Forge Dial to the
+  // LEFT. sign is the finger direction that OPENS each panel (mirrored from the arrows on x).
   const PANELS = {
-    images:   { axis: "x", sign: +1, root: "#dfi-root", anim: "dfi-anim", open: "dfi-open",
-                shellTo: 108, rootFrom: -104, unit: "vw",
-                label: "Images", icon: "M4 17l5-6 4 5 3-4 4 5H4z", open_: () => window.openForgeImages, close: () => window.closeForgeImages },
-    dial:     { axis: "x", sign: -1, root: "#dfd-root", anim: "dfd-anim", open: "dfd-open",
+    images:   { axis: "x", sign: -1, root: "#dfi-root", anim: "dfi-anim", open: "dfi-open",
                 shellTo: -108, rootFrom: 104, unit: "vw",
-                label: "Forge dial", icon: "M12 4v4M12 16v4M4 12h4M16 12h4", open_: () => window.openForgeDial, close: () => window.closeForgeDial },
+                label: "The Foundry", sub: "Image Generator",
+                icon: "M4 17l5-6 4 5 3-4 4 5H4z", open_: () => window.openForgeImages, close: () => window.closeForgeImages },
+    dial:     { axis: "x", sign: +1, root: "#dfd-root", anim: "dfd-anim", open: "dfd-open",
+                shellTo: 108, rootFrom: -104, unit: "vw",
+                label: "Forge Dial", sub: "Effort level and tool control",
+                icon: "M12 4v4M12 16v4M4 12h4M16 12h4", open_: () => window.openForgeDial, close: () => window.closeForgeDial },
     crucible: { axis: "y", sign: -1, root: "#ide-root", anim: "ide-anim", open: "ide-open",
                 shellTo: -112, rootFrom: 104, unit: "vh",
-                label: "The Crucible", icon: "M9 8l-4 4 4 4M15 8l4 4-4 4", open_: () => window.openIdeMode, close: () => window.closeIdeMode },
+                label: "The Crucible", sub: "App Builder",
+                icon: "M9 8l-4 4 4 4M15 8l4 4-4 4", open_: () => window.openIdeMode, close: () => window.closeIdeMode },
   };
 
   const $ = (s) => document.querySelector(s);
@@ -109,12 +122,23 @@
     return true;
   }
 
+  // POINTING map: which destination each ARROW (and keyboard arrow, and lit arm) points at.
   function routesFor(surface) {
     if (surface === "main") return { left: "dial", right: "images", ...(crucibleAllowed() ? { up: "crucible" } : {}) };
-    if (surface === "images") return { left: "main" };      // it came from the left, so it leaves leftward
+    if (surface === "images") return { left: "main" };      // home is to the left of the Foundry
     if (surface === "dial") return { right: "main" };
     if (surface === "crucible") return { down: "main" };
     return {};
+  }
+
+  // SWIPE map: the finger direction that performs each pointing route. On the x axis the swipe
+  // MIRRORS the arrow (carousel physics: content follows the finger, so the panel on the right
+  // is pulled in by a leftward swipe); the y axis is already finger-native and stays.
+  const MIRROR_X = { left: "right", right: "left", up: "up", down: "down" };
+  function swipeRoutesFor(surface) {
+    const out = {};
+    for (const [dir, dest] of Object.entries(routesFor(surface))) out[MIRROR_X[dir] || dir] = dest;
+    return out;
   }
 
   function paint() {
@@ -131,7 +155,7 @@
     }
     const dot = el.querySelector(".cx-dot");
     dot.setAttribute("aria-label", here === "main"
-      ? "Press for the surface menu. Or drag: left for the dial, right for the image forge, up for The Crucible."
+      ? "Press for the surface menu. Or swipe: right for the Forge Dial, left for The Foundry, up for The Crucible."
       : "Press for the surface menu, or drag to return to the conversation.");
   }
 
@@ -235,7 +259,8 @@
         moved = true;
         const horizontal = Math.abs(dx) > Math.abs(dy);
         const dir = horizontal ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up");
-        const dest = routesFor(current())[dir];
+        // Drags read the SWIPE map (finger-native), arrows read the pointing map; see DIRECTION.
+        const dest = swipeRoutesFor(current())[dir];
         if (!dest) { start = null; return; }             // no route that way: ignore rather than fight
         if (dest === "main") {
           const from = current();
@@ -378,7 +403,7 @@
     // Whatever direction actually leaves this panel is the direction Chat is drawn at.
     for (const [dir, dest] of Object.entries(routes)) {
       if (dest !== "main") continue;
-      items.push({ id: "main", label: "Chat", icon: "M4 5h16v11H8l-4 4z", dir });
+      items.push({ id: "main", label: "Chat", sub: "back to the conversation", icon: "M4 5h16v11H8l-4 4z", dir });
       taken.add(dir);
     }
     for (const [id, p] of Object.entries(PANELS)) {
@@ -389,7 +414,7 @@
       if (!dir) dir = DIAL_SLOTS.find((d) => !taken.has(d));
       if (!dir) continue;
       taken.add(dir);
-      items.push({ id, label: p.label, icon: p.icon, dir });
+      items.push({ id, label: p.label, sub: p.sub || "", icon: p.icon, dir });
     }
     return items;
   }
@@ -414,9 +439,11 @@
     const dial = document.createElement("div");
     dial.id = "cx-dial";
     dial.setAttribute("role", "menu");
+    // The sub-line answers "what does that name mean" right on the dial (feedback 2026-07-26).
     dial.innerHTML = dialItems(here).map((it) =>
       '<button type="button" role="menuitem" class="cx-spoke" data-go="' + it.id + '" data-dir="' + it.dir + '">' +
-        '<span class="cx-spoke-name">' + it.label + '</span>' +
+        '<span class="cx-spoke-name">' + it.label +
+          (it.sub ? '<small class="cx-spoke-sub">(' + it.sub + ')</small>' : '') + '</span>' +
         '<svg class="cx-spoke-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="' + ARROW[it.dir] + '"/></svg>' +
       '</button>').join("");
     dial.addEventListener("click", (e) => {

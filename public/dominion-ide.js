@@ -1564,6 +1564,10 @@
               '<span class="cw-why">' + MODE_WHY[m] + '</span>' +
             '</div>').join("") +
         '</div>' +
+        // The way out (Fred, 2026-07-26): this layer blocks the whole interface, and until now
+        // the only exits were picking a profile or killing the app. Leaving without choosing is
+        // a legitimate answer; the screen simply asks again next time.
+        '<button type="button" class="cw-exit" id="cw-exit">Return to chat</button>' +
       '</div>';
     root.append(el);
     paintLexicon();
@@ -1576,6 +1580,8 @@
         document.dispatchEvent(new CustomEvent("dominion-crucible-open"));
       });
     }
+    const exit = el.querySelector("#cw-exit");
+    if (exit) exit.addEventListener("click", () => { el.remove(); closePanel(); });
   }
 
   // The vibe coder sees one honest sentence instead of a board: who does the work, at what rate.

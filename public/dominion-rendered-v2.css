@@ -612,3 +612,15 @@ body.is-thinking .neural-glass { border-color: rgba(135, 255, 150, .46); box-sha
    styling. This deliberately outranks the decorative layer's stacking contexts. */
 .model-select { clip-path: none; overflow: visible; }
 .model-panel { z-index: 10000; }
+
+/* The chevron must open the picker (Fred, 2026-07-26: "you have to click the bar"). The native
+   selects (mode, privacy) are boxed inside a .control-copy span that did not reach the right edge,
+   so the chevron pixel resolved to the wrapping <label> — and a label-click only FOCUSES a native
+   select, it never pops the picker. The fix makes .control-copy grow and the select fill it, so
+   the SELECT itself sits under the chevron and a click there opens it; the drawn chevron gets
+   pointer-events:none so it never eats the click. Scoped away from .model-select, which is a
+   custom JS panel with its own trigger (its native select is aria-hidden). */
+.command-select:not(.model-select) { padding-right: 0 !important; }
+.command-select:not(.model-select) .control-copy { flex: 1 1 auto; min-width: 0; }
+.command-select:not(.model-select) .control-copy select { width: 100%; padding-right: 31px; }
+.command-select::before, .command-select::after { pointer-events: none; }
