@@ -2,6 +2,10 @@
 
 SOW: docs/ADOPT-EXISTING-SOW.md (c493b63). This pack is the working record for the build.
 
+**SHIPPED 2026-07-26: commit cbc4d44 (13 files), pushed; production rolled to build
+1785075831174 within ~2.5 min (push-linked service; origin tip verified cbc4d44 by ls-remote).
+Full suite 67/67. Rollback: `git revert cbc4d44` and push.**
+
 **Mission line:** A person with a half-finished app points the Crucible at its folder and gets an
 honest state-of-the-app brief, then plans and finishes it through the machinery that already
 exists, from the Vibe Coder and Engineer surfaces only.
@@ -65,6 +69,22 @@ exists, from the Vibe Coder and Engineer surfaces only.
   executes anything, and the brief says so.
 - L-4 OPEN (low): first real adoption on a live guest machine unwatched; unit + endpoint proof
   only until Fred's phone pass.
+- L-5 OPEN (low): the wallet's Railway API tokens no longer list projects through the GraphQL
+  projects/me/workspaces shapes, so the deploy's commit SHA could not be cross-checked at
+  Railway; verified instead by build-id rollover + origin tip + the push-linked service. Check
+  the token at the next weekly health sweep.
+
+## Lessons learned (fed back into FITS, wargame template patched 2026-07-26)
+
+1. A dependency fails in more than one SHAPE: the guest hands hub THROWS on no-machine while the
+   owner hub RETURNS ok:false saying so. The offline flag was wrong live until the real shape was
+   probed on devboot. Handle the shapes you have SEEN, then probe for the ones you have not.
+2. Honesty logic tested only against fakes lies politely. The real-tree probe (this repo)
+   caught three false claims in minutes: underscore-style test suites unrecognized ("no tests"
+   over 67 suites), zero-dep manifests told "dependencies not installed", machinery dirs
+   cluttering the layout line. One real messy target belongs in every truth-teller's test diet.
+3. The furnace roll-call caught a guide phrase split across joined lines ("Adopt existing\n
+   app") — the keep-up rule has teeth precisely because it checks the JOINED text.
 
 ## Success (ship line = grade 4)
 
