@@ -26,7 +26,13 @@ Engineer as Coming Soon for guests server-side; the owner keeps it. Launch = IDE
 - [x] Security pass: VERIFIED 2026-07-25 — ideHandsFor routes every non-owner exclusively to their
       own hands node ("user:<uid>"); guests can never browse Fred's machines. /ide/browse owner
       drive enumeration is owner-gated; per-user Forge remains the guest path by design.
-- [ ] Abuse review: interviewer and plan-chat are open text to models; confirm sanitizer coverage (images, size caps) matches guest exposure.
+- [x] Abuse review DONE 2026-07-25: interviewer/plan-chat were already capped (4000 chars/msg, 40
+      msgs, image size+count caps — ideintake.mjs). Fixed in the same pass: global 32MB JSON body
+      ceiling (readJsonBody destroyed mid-stream past it — was unbounded), /ide/divide + /ide/tasks
+      prompt caps (8000), /ide/reduce task title/files/detail caps, workspace node field (120),
+      assignments/budget serialized-size ceilings (capObj 20k/4k, oversized patches change
+      nothing), /ide/browse path+node caps. Display safety verified: user text renders via
+      textContent everywhere; all innerHTML sites are static scaffolding.
 - [ ] Full-suite green + furnace-doctrine check (idehelp guide matches every shipped control).
 
 ## Phase 2: Private beta

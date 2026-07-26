@@ -1436,8 +1436,8 @@ async function handleIde(req, res, u) {
   if (req.method === "POST" && path === "/ide/browse") {
     const blocked = ideFeature.wall(T);
     if (blocked) return send(blocked);
-    const want = String(body.path || "");
-    const pinned = String(body.node || "");
+    const want = String(body.path || "").slice(0, 500);    // sanitizer: path forwarded to a node
+    const pinned = String(body.node || "").slice(0, 120);
     try {
       // Root listing for the owner: enumerate ALL his machines from the profiles they reported,
       // with no dispatch at all. One machine or a guest falls through to the node's own listing.
@@ -1943,7 +1943,7 @@ async function handleIdeDivide(req, res, T, body) {
   const json = (code, o) => sjson(res, code, o);
   if (!ideGate.allowed(T)) return json(403, { error: "Not available for this account." });
   if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) return json(402, { error: "Building needs credits. Add credits in Setup first.", code: "needs_credits" });
-  const prompt = String(body.prompt || "").trim();
+  const prompt = String(body.prompt || "").trim().slice(0, 8000);   // sanitizer: paid-model input, capped
   if (!prompt) return json(400, { error: "Say what you want built first." });
   const reg = normalizeRegister(body.register);
   const persona = personaVoice(normalizeCrucibleMode(body.mode));
@@ -1968,7 +1968,7 @@ async function handleIdeTasks(req, res, T, body) {
   const json = (code, o) => sjson(res, code, o);
   if (!ideGate.allowed(T)) return json(403, { error: "Not available for this account." });
   if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) return json(402, { error: "Building needs credits. Add credits in Setup first.", code: "needs_credits" });
-  const prompt = String(body.prompt || "").trim();
+  const prompt = String(body.prompt || "").trim().slice(0, 8000);   // sanitizer: paid-model input, capped
   if (!prompt) return json(400, { error: "Say what you want built first." });
   const reg = normalizeRegister(body.register);
   const persona = personaVoice(normalizeCrucibleMode(body.mode));
@@ -2036,6 +2036,11 @@ async function handleIdeReduce(req, res, T, body) {
   const task = body.task || null;
   const agents = Math.max(2, Math.min(Number(body.agents) || 2, 6));
   if (!task || !task.title || !Array.isArray(task.files) || !task.files.length) return json(400, { error: "a task with a title and files is required" });
+  // Sanitizer review 2026-07-25: these strings reach a paid model verbatim — cap title and the
+  // file list (count + per-item) so a hostile payload cannot inflate the prompt.
+  task.title = String(task.title).slice(0, 400);
+  task.files = task.files.slice(0, 40).map((f) => String(f).slice(0, 200));
+  if (typeof task.detail === "string") task.detail = task.detail.slice(0, 2000);
   if (task.files.length < 2) return json(200, { mode: "irreducible", usableAgents: 1, note: "A one-file task cannot be split; one agent will do it." });
   const reg = normalizeRegister(body.register);
   const persona = personaVoice(normalizeCrucibleMode(body.mode));
@@ -3254,9 +3259,17 @@ async function buildContext(lastUserText, chatId, { skipRetrieval = false, mode 
   return { used, artifactsUsed, chatsUsed, block: parts.join("\n\n") };
 }
 
+// Hard body ceiling (sanitizer review, 2026-07-25): 32MB comfortably fits the largest legitimate
+// payload (intake with two full-size image data URLs, or a chat turn with four attachments) while
+// making a multi-gigabyte paste physically impossible instead of merely expensive. Oversized
+// requests are destroyed mid-stream and resolve null, which every caller already treats as a bad body.
+const MAX_JSON_BODY = 32 * 1024 * 1024;
 function readJsonBody(req) {
   return new Promise((resolve) => {
-    let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => { try { resolve(JSON.parse(b || "{}")); } catch { resolve(null); } });
+    let b = "", dead = false;
+    req.on("data", (d) => { if (dead) return; b += d; if (b.length > MAX_JSON_BODY) { dead = true; b = ""; try { req.destroy(); } catch {} resolve(null); } });
+    req.on("end", () => { if (!dead) { try { resolve(JSON.parse(b || "{}")); } catch { resolve(null); } } });
+    req.on("error", () => { if (!dead) { dead = true; resolve(null); } });
   });
 }
 

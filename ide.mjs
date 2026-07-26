@@ -22,6 +22,13 @@ import { normalizeMode } from "./idemodes.mjs";
 
 export const IDE_MODE_DEFAULT = "owner";
 
+// Sanitizer helper (2026-07-25): accept an object only if its serialized size is sane; otherwise
+// drop it (null). Callers keep their old value on a drop, so an oversized patch changes nothing.
+export function capObj(o, maxJson) {
+  if (!o || typeof o !== "object") return null;
+  try { return JSON.stringify(o).length <= maxJson ? o : null; } catch { return null; }
+}
+
 // Ceilings. Generous enough that nobody sane hits them, low enough that a runaway client cannot
 // turn the registry into a landfill.
 export const MAX_WORKSPACES = 24;
@@ -170,7 +177,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
     setPrefs(patch) {
       const s = read();
       if (patch && typeof patch.engaged === "boolean") s.prefs.engaged = patch.engaged;
-      if (patch && patch.assignments && typeof patch.assignments === "object") s.prefs.assignments = patch.assignments;
+      if (patch && patch.assignments && typeof patch.assignments === "object") { const a = capObj(patch.assignments, 20000); if (a) s.prefs.assignments = a; }
       if (patch && typeof patch.language === "string") s.prefs.language = normalizeRegister(patch.language);
       // "" stays "": that is the never-chosen state that makes the picker appear exactly once.
       if (patch && typeof patch.mode === "string") s.prefs.mode = patch.mode === "" ? "" : normalizeMode(patch.mode);
@@ -194,10 +201,12 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
         return { error: "A workspace already points at that folder.", code: "root_duplicate" };
       }
       const at = now();
-      const w = { id: "ws_" + randomUUID().slice(0, 10), name: clean, root: v.root, node: String(node || ""),
+      // Sanitizer review 2026-07-25: node is a machine label (short), and the stored objects get a
+      // serialized-size ceiling so a hostile payload cannot bloat state.json.
+      const w = { id: "ws_" + randomUUID().slice(0, 10), name: clean, root: v.root, node: String(node || "").slice(0, 120),
                   createdAt: at, updatedAt: at, lastMoveAt: 0,
-                  snapshotDir: "", assignments: assignments && typeof assignments === "object" ? assignments : {},
-                  budget: budget && typeof budget === "object" ? budget : null };
+                  snapshotDir: "", assignments: capObj(assignments, 20000) || {},
+                  budget: capObj(budget, 4000) };
       s.workspaces.push(w);
       write(s);
       return { ok: true, workspace: publicShape(w) };
@@ -212,9 +221,9 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
         if (!v.ok) return { error: v.error, code: v.code };
         w.root = v.root;
       }
-      if (typeof patch.node === "string") w.node = patch.node;
-      if (patch.assignments && typeof patch.assignments === "object") w.assignments = patch.assignments;
-      if (patch.budget === null || (patch.budget && typeof patch.budget === "object")) w.budget = patch.budget;
+      if (typeof patch.node === "string") w.node = patch.node.slice(0, 120);
+      if (patch.assignments && typeof patch.assignments === "object") { const a = capObj(patch.assignments, 20000); if (a) w.assignments = a; }
+      if (patch.budget === null || (patch.budget && typeof patch.budget === "object")) w.budget = patch.budget === null ? null : capObj(patch.budget, 4000);
       if (typeof patch.lastMoveAt === "number") w.lastMoveAt = patch.lastMoveAt;
       w.updatedAt = now();
       write(s);
