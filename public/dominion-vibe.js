@@ -135,7 +135,7 @@
         '</div>' +
         '<div class="vb-adopt-tree" id="vb-adopt-tree" hidden></div>' +
         '<div class="vb-box-foot"><span class="vb-note" id="vb-adopt-note">Reading only. Nothing in the folder changes until you say build.</span>' +
-          '<button type="button" class="vb-apply" id="vb-adopt-go">Read my app</button></div>' +
+          '<button type="button" class="vb-apply" id="vb-adopt-go">Analyze my app</button></div>' +
       '</div>' +
 
       // ---- 3. Customize Your Workspace ------------------------------------------------------
@@ -530,7 +530,7 @@
         paintAdoptChoices();
         $("#vb-adopt-ws").value = j.workspace.id;
         tree.hidden = true;
-        adoptNote("Folder saved as a project. Press Read my app.");
+        adoptNote("Folder saved as a project. Press Analyze my app.");
       } catch { adoptNote("The server could not be reached.", true); }
     };
     $("#vb-adopt-browse").addEventListener("click", () => {

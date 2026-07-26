@@ -167,6 +167,9 @@
 
 /* ---------- 4. Plan with AI --------------------------------------------------------------- */
 .vb-plan { display: grid; gap: 12px; min-width: 0; }
+/* Fred, 2026-07-26: the Plan with AI heading is the section's banner, three times the standard
+   heading size and centered. Only the section title; the window names keep the standard size. */
+.vb-plan > .vb-h { font-size: 36px; text-align: center; }
 .vb-plan-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-width: 0; }
 @media (max-width: 760px) { .vb-plan-row { grid-template-columns: 1fr; } }
 
