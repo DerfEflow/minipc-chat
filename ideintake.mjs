@@ -161,6 +161,27 @@ export function stuckSystem(register = "plain", mode = "beginner") {
 }
 
 /*
+ * ADOPTED PROJECT (docs/ADOPT-EXISTING-SOW.md): the person brought an app they already started.
+ * The conversation OPENS with a state-of-the-app brief produced by READING their files (the scan
+ * in ideadopt.mjs; deterministic, never a model's guess). This voice teaches the interviewer to
+ * plan from that reality instead of interviewing for a blank page, and to keep the honesty the
+ * brief established: no invented progress, ever.
+ */
+export function adoptVoice() {
+  return [
+    "ADOPTED PROJECT: this person brought an app they already started, and this conversation",
+    "opened with a STATE OF THE APP brief made by reading their actual files (nothing was run).",
+    "Treat that brief as the ground truth of what exists today. Do not re-interview for a blank",
+    "page: ask what the app should BECOME, then shape the vision against what is already there.",
+    "In the vision bullets, start every line's text with one tag: [finish] for completing",
+    "something started, [fix] for repairing something present, or [new] for building something",
+    "absent. Never claim a feature exists unless the brief shows it, and if the person believes",
+    "something works that the brief does not show, say so kindly and plan to verify it. Honesty",
+    "about the current state is the entire point of adoption.",
+  ].join("\n");
+}
+
+/*
  * PLAN WITH AI (Fred's Vibe Coder ruling 2026-07-25): three chat windows — Main, Second, Third —
  * each with its own model, each able to send a reply into another window for independent audit.
  *
@@ -221,7 +242,7 @@ export function advisorSystem(register = "plain", windowName = "Second") {
  *                           HERE, server-side, whatever the client sent
  * so the model's history can never show another AI's words wearing the user's voice unmarked.
  */
-export function planchatMessages({ window: win = "main", register = "plain", mode = "vibe", device = "", history = [] } = {}) {
+export function planchatMessages({ window: win = "main", register = "plain", mode = "vibe", device = "", history = [], adopt = false } = {}) {
   const w = PLAN_WINDOWS.includes(win) ? win : "main";
   const msgs = [];
   for (const m of Array.isArray(history) ? history.slice(-40) : []) {
@@ -238,12 +259,12 @@ export function planchatMessages({ window: win = "main", register = "plain", mod
     }
   }
   const system = w === "main"
-    ? intakeSystem(register, mode, device) + "\n\n" + crossAIVoice("Main")
+    ? intakeSystem(register, mode, device, { adopt }) + "\n\n" + crossAIVoice("Main")
     : advisorSystem(register, WINDOW_NAMES[w]);
   return [{ role: "system", content: system }, ...msgs];
 }
 
-export function intakeSystem(register = "plain", mode = "beginner", device = "") {
+export function intakeSystem(register = "plain", mode = "beginner", device = "", { adopt = false } = {}) {
   const voice = REGISTER_VOICE[register] || REGISTER_VOICE.plain;
   const aesthetics = aestheticsVoice(mode);
   const isBeginner = mode === "beginner" || (mode && String(mode).toLowerCase() === "beginner");
@@ -282,6 +303,7 @@ export function intakeSystem(register = "plain", mode = "beginner", device = "")
     "VOICE: " + voice,
     "",
     personaVoice(mode),
+    ...(adopt ? ["", adoptVoice()] : []),
     ...(aesthetics ? ["", aesthetics] : []),
     ...(checklist ? ["", checklist] : []),
     ...(buildVoice ? ["", buildVoice] : []),
@@ -320,7 +342,7 @@ export function parseIntake(text, { marker = VISION_MARKER } = {}) {
  * user/assistant, content clamped in size, the whole thing capped. The system prompt is always
  * ours, never the client's.
  */
-export function intakeMessages({ register = "plain", mode = "beginner", history = [], device = "", phase = "intake" } = {}) {
+export function intakeMessages({ register = "plain", mode = "beginner", history = [], device = "", phase = "intake", adopt = false } = {}) {
   const msgs = [];
   for (const m of Array.isArray(history) ? history.slice(-40) : []) {
     const role = m && m.role === "assistant" ? "assistant" : "user";
@@ -329,7 +351,7 @@ export function intakeMessages({ register = "plain", mode = "beginner", history 
   }
   const system = phase === "review" ? reviewSystem(register, mode)
                : phase === "stuck" ? stuckSystem(register, mode)
-               : intakeSystem(register, mode, device);
+               : intakeSystem(register, mode, device, { adopt });
   return [{ role: "system", content: system }, ...msgs];
 }
 

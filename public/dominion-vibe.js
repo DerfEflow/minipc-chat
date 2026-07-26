@@ -48,6 +48,10 @@
     vision: null,
     army: null,          // { tasks, picks[], orchestrator, fallbackNote } once planned
     armyBusy: false,
+    // Adopt Existing Project (docs/ADOPT-EXISTING-SOW.md): { workspaceId, name, brief } once a
+    // scan has landed. The brief seeds the Main window, every Main turn carries adopt on the
+    // wire, and Begin Building bakes the brief into the build prompt for THAT workspace only.
+    adopt: null,
   };
 
   const device = () => (window.matchMedia("(pointer: coarse)").matches || window.innerWidth <= 620 ? "mobile" : "desktop");
@@ -63,7 +67,7 @@
           messages: state.chats[w].messages.map((m) => ({ from: m.from, content: typeof m.content === "string" ? m.content : (m.content.find((p) => p.type === "text") || { text: "(picture)" }).text })).slice(-40),
           model: state.chats[w].model, open: state.chats[w].open,
         }])),
-        vision: state.vision, at: Date.now(),
+        vision: state.vision, adopt: state.adopt, at: Date.now(),
       }));
     } catch {}
   }
@@ -79,6 +83,7 @@
         }
       }
       state.vision = d.vision || null;
+      state.adopt = (d.adopt && d.adopt.workspaceId && d.adopt.brief) ? d.adopt : null;
     } catch {}
   }
 
@@ -104,11 +109,33 @@
         '<button type="button" class="vb-square" id="vb-new" title="Start a new project">' +
           '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>New</span>' +
         '</button>' +
+        // Adopt Existing Project (docs/ADOPT-EXISTING-SOW.md): the prominent door for an app the
+        // person already started. Beside New per the placement ruling; the reserved TBD slot
+        // stays reserved because Fred has not assigned it.
+        '<button type="button" class="vb-square vb-adopt" id="vb-adopt" title="Bring an app you already started">' +
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10M8 9l4 4 4-4M4 15v5h16v-5"/></svg><span>Adopt an App</span>' +
+        '</button>' +
         // Fred: "TBD is just a placeholder for now." A visibly inert reserved slot beats an
         // invented feature; it does nothing and says so on hover.
         '<div class="vb-square vb-tbd" title="Reserved. Fred has not decided what lives here yet." aria-hidden="true"><span>TBD</span></div>' +
         '<button type="button" class="vb-small" id="vb-startover">Start Over</button>' +
         '<label class="vb-small vb-saveto">Save to: <select id="vb-saveto" aria-label="Which project folder the build lands in"></select></label>' +
+      '</div>' +
+
+      // ---- 2b. the Adopt panel (opens from the Adopt an App square) -------------------------
+      // The intro line is the feature's one-sentence introduction (Fred's marketing seed, placed
+      // subtly as body copy rather than shouted as a banner).
+      '<div class="vb-box vb-adopt-panel" id="vb-adopt-panel" hidden>' +
+        '<div class="vb-box-head"><h3 class="vb-h">Adopt an App You Already Started</h3>' +
+          '<button type="button" class="vb-adopt-x" id="vb-adopt-close" aria-label="Close">&times;</button></div>' +
+        '<p class="vb-adopt-intro">Bring your half-finished app. We read what\'s actually there, tell you the truth about it, and finish it.</p>' +
+        '<div class="vb-adopt-pick">' +
+          '<label class="vb-adopt-lab">It lives in: <select id="vb-adopt-ws" aria-label="Which project folder holds the app you already started"></select></label>' +
+          '<button type="button" class="vb-small" id="vb-adopt-browse">Browse this computer</button>' +
+        '</div>' +
+        '<div class="vb-adopt-tree" id="vb-adopt-tree" hidden></div>' +
+        '<div class="vb-box-foot"><span class="vb-note" id="vb-adopt-note">Reading only. Nothing in the folder changes until you say build.</span>' +
+          '<button type="button" class="vb-apply" id="vb-adopt-go">Read my app</button></div>' +
       '</div>' +
 
       // ---- 3. Customize Your Workspace ------------------------------------------------------
@@ -285,6 +312,8 @@
   function startOver() {
     for (const w of WINDOWS) { state.chats[w].messages = []; state.chats[w].busy = false; renderLog(w); }
     state.vision = null;
+    state.adopt = null;
+    closeAdopt();
     state.army = null;
     $("#vb-army-grid").hidden = true;
     $("#vb-army-total").hidden = true;
@@ -385,6 +414,165 @@
     if (!has && bridge()) { bridge().clearAF(); state.army = null; }
   }
 
+  /* ================= 2b. Adopt an App (docs/ADOPT-EXISTING-SOW.md) ========================== */
+
+  const adoptNote = (text, bad) => {
+    const el = $("#vb-adopt-note");
+    if (!el) return;
+    el.textContent = text || "Reading only. Nothing in the folder changes until you say build.";
+    el.classList.toggle("is-bad", !!bad);
+  };
+
+  function paintAdoptChoices() {
+    const sel = $("#vb-adopt-ws");
+    if (!sel || !bridge()) return;
+    const keep = sel.value;
+    sel.textContent = "";
+    sel.append(new Option("Pick the folder that holds it…", ""));
+    for (const ws of bridge().workspaces()) sel.append(new Option(ws.name || ws.id, ws.id));
+    // Follow the Save to: pick when it names a real project; a fresh browse pick wins over both.
+    sel.value = keep || $("#vb-saveto").value || "";
+  }
+
+  function openAdopt() {
+    const p = $("#vb-adopt-panel");
+    if (!p) return;
+    p.hidden = false;
+    paintAdoptChoices();
+    adoptNote("");
+    p.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  function closeAdopt() {
+    const p = $("#vb-adopt-panel");
+    if (p) p.hidden = true;
+    const tree = $("#vb-adopt-tree");
+    if (tree) { tree.hidden = true; tree.textContent = ""; }
+  }
+
+  /*
+   * The folder walk, for an app that is not a workspace yet. Same /ide/browse contract as the
+   * engineer drawer: the node lists its own drives and folders, carve-outs refused at the node,
+   * and the walk stays pinned to one machine (C:\ exists on more than one computer). Picking a
+   * folder creates the workspace pointer; a folder that is already a workspace is reused rather
+   * than duplicated, because the server refuses duplicate pointers by design.
+   */
+  function wireAdoptBrowse() {
+    const tree = $("#vb-adopt-tree");
+    let onMachine = "";
+    const browse = async (path, machine) => {
+      tree.hidden = false;
+      tree.textContent = "Reading folders…";
+      if (machine !== undefined) onMachine = machine || "";
+      let j = null;
+      try {
+        const r = await fetch("/ide/browse", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ path: path || "", node: onMachine }) });
+        j = await r.json();
+      } catch { j = null; }
+      if (!j || j.error) { tree.textContent = (j && j.error) || "The build computer could not be reached."; return; }
+      if (j.node) onMachine = j.node;
+      if (!path) onMachine = "";
+      render(j.path || "", j.dirs || []);
+    };
+    const render = (path, dirs) => {
+      tree.textContent = "";
+      const bar = document.createElement("div");
+      bar.className = "vb-adopt-bar";
+      const where = document.createElement("span");
+      where.textContent = (path || "This computer") + (onMachine ? "  ·  " + onMachine : "");
+      bar.append(where);
+      if (path) {
+        const up = document.createElement("button");
+        up.type = "button"; up.textContent = "Up";
+        up.addEventListener("click", () => {
+          const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+          if (parts.length <= 1) { browse("", ""); return; }
+          browse(parts.length === 2 ? parts[0] + "\\" : parts.slice(0, -1).join("\\"), onMachine);
+        });
+        const use = document.createElement("button");
+        use.type = "button"; use.className = "vb-adopt-use"; use.textContent = "This folder holds it";
+        use.addEventListener("click", () => useFolder(path));
+        bar.append(up, use);
+      }
+      tree.append(bar);
+      for (const d of dirs) {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "vb-adopt-dir";
+        b.textContent = d.name + (!path && d.machine ? "   " + d.machine : "");
+        b.addEventListener("click", () => browse(d.path, d.machine));
+        tree.append(b);
+      }
+      if (!dirs.length && path) {
+        const none = document.createElement("div");
+        none.className = "vb-adopt-empty";
+        none.textContent = "No folders inside this one.";
+        tree.append(none);
+      }
+    };
+    const useFolder = async (path) => {
+      const existing = bridge().workspaces().find((w) => String(w.root || "").toLowerCase() === path.toLowerCase());
+      if (existing) {
+        paintAdoptChoices();
+        $("#vb-adopt-ws").value = existing.id;
+        tree.hidden = true;
+        adoptNote("Using your existing project pointer for that folder.");
+        return;
+      }
+      const name = path.split(/[\\/]/).filter(Boolean).pop() || "Adopted App";
+      try {
+        const r = await fetch("/ide/workspace", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name, root: path, node: onMachine }) });
+        const j = await r.json();
+        if (!r.ok || j.error) { adoptNote(j.error || "That folder could not be added.", true); return; }
+        document.dispatchEvent(new CustomEvent("dominion-ide-workspace"));
+        renderSlider(); renderSaveTo();
+        paintAdoptChoices();
+        $("#vb-adopt-ws").value = j.workspace.id;
+        tree.hidden = true;
+        adoptNote("Folder saved as a project. Press Read my app.");
+      } catch { adoptNote("The server could not be reached.", true); }
+    };
+    $("#vb-adopt-browse").addEventListener("click", () => {
+      if (!tree.hidden) { tree.hidden = true; return; }
+      browse("");
+    });
+  }
+
+  async function runAdopt() {
+    const wsId = $("#vb-adopt-ws").value;
+    if (!wsId) { adoptNote("Pick the folder that holds your app, or browse to it.", true); return; }
+    const go = $("#vb-adopt-go");
+    go.disabled = true;
+    adoptNote("Reading what is actually there…");
+    try {
+      const r = await fetch("/ide/adopt", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: wsId, mode: "vibe" }) });
+      const j = await r.json();
+      if (!r.ok || j.error || !j.ok) {
+        adoptNote((j && j.error) || "The scan could not run.", true);
+        return;
+      }
+      state.adopt = { workspaceId: j.workspaceId, name: j.name || "", brief: j.brief || "" };
+      // The adopted folder becomes the working project everywhere the surface reads one.
+      bridge() && bridge().selectWorkspace(j.workspaceId);
+      const st = $("#vb-saveto"); if (st) st.value = j.workspaceId;
+      renderSlider();
+      // The brief opens the Main conversation as the Main AI's own words, which is exactly what
+      // it is: the ground truth the planning starts from.
+      state.chats.main.messages.push({ from: "main", content: j.brief });
+      renderLog("main");
+      toggleWin("main", true);
+      closeAdopt();
+      bridge() && bridge().journey("clarify");
+      saveDraft();
+      status("Adopted " + (j.name || "your app") + ". The Main AI has the honest state of it; tell it what this should become.");
+      const input = $("#vb-in-main"); if (input) input.focus();
+    } catch {
+      adoptNote("The workshop could not be reached. Try again.", true);
+    } finally { go.disabled = false; }
+  }
+
   /* ================= 4. Plan with AI ========================================================= */
 
   function bubble(w, cls, content, pics) {
@@ -449,7 +637,8 @@
     let j = null;
     try {
       const r = await fetch("/ide/planchat", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ window: w, model: c.model || "", messages: c.messages, register: reg(), mode: "vibe", device: device() }) });
+        body: JSON.stringify({ window: w, model: c.model || "", messages: c.messages, register: reg(), mode: "vibe", device: device(),
+          adopt: !!state.adopt }) });
       j = await r.json();
     } catch { j = { error: "The workshop could not be reached. Try again." }; }
     t.remove();
@@ -751,11 +940,16 @@
   async function beginBuilding() {
     const b = bridge();
     if (!b) return;
-    const goal = goalText();
-    if (!goal) { status("Tell the Main AI what you want built first.", true); return; }
-    // The Save to: pick is the folder; none picked means one is made, same as the beginner path.
+    // An adopted brief describes ONE folder. If Save to: points somewhere else, the brief stands
+    // down for this build rather than describing a folder the build will not touch.
     const saveTo = $("#vb-saveto").value;
+    const adopted = state.adopt && (!saveTo || saveTo === state.adopt.workspaceId) ? state.adopt : null;
+    const goal = goalText() || (adopted ? "Finish this app as agreed, from the state of the app below." : "");
+    if (!goal) { status("Tell the Main AI what you want built first.", true); return; }
+    // The Save to: pick is the folder; an adoption binds to its own folder; none picked means one
+    // is made, same as the beginner path.
     if (saveTo) b.selectWorkspace(saveTo);
+    else if (adopted) { b.selectWorkspace(adopted.workspaceId); renderSaveTo(); }
     if (!b.workspaceId()) {
       const made = await b.autoWorkspace(goal);
       if (!made.ok) {
@@ -766,7 +960,14 @@
       }
       renderSlider(); renderSaveTo();
     }
-    const full = state.vision ? goal + "\n\nAGREED VISION (approved by the user; build exactly this):\n" + state.vision : goal;
+    let full = state.vision ? goal + "\n\nAGREED VISION (approved by the user; build exactly this):\n" + state.vision : goal;
+    if (adopted) {
+      // Brief LAST: the job door caps prompts, and a truncated tail must only ever cost brief
+      // detail, never the agreed vision (see ide.mjs startJob).
+      full = "ADOPTED PROJECT: the workspace folder already holds this app. Work against what exists; " +
+        "[finish]/[fix]/[new] tags in the vision mark work on the existing code.\n\n" + full +
+        "\n\nSTATE OF THE APP (scanned before planning):\n" + adopted.brief;
+    }
     status("Starting…");
     b.startBuild(full, (msg, bad) => status(msg || "", bad));
   }
@@ -776,6 +977,10 @@
   function wire() {
     wireSliderDrag($("#vb-slider"));
     $("#vb-new").addEventListener("click", newProject);
+    $("#vb-adopt").addEventListener("click", openAdopt);
+    $("#vb-adopt-close").addEventListener("click", closeAdopt);
+    $("#vb-adopt-go").addEventListener("click", runAdopt);
+    wireAdoptBrowse();
     $("#vb-startover").addEventListener("click", startOver);
     $("#vb-saveto").addEventListener("change", (e) => { bridge() && bridge().selectWorkspace(e.target.value); renderSlider(); });
     for (const b of document.querySelectorAll("#vb-presets button")) {
@@ -820,7 +1025,8 @@
   }
 
   // Workspaces and the catalog both load after the panel exists; repaint when they land.
-  document.addEventListener("dominion-ide-state", () => { if (state.open) { renderSlider(); renderSaveTo(); paintAllModelSelects(); } });
+  document.addEventListener("dominion-ide-state", () => { if (state.open) { renderSlider(); renderSaveTo(); paintAllModelSelects();
+    if ($("#vb-adopt-panel") && !$("#vb-adopt-panel").hidden) paintAdoptChoices(); } });
   document.addEventListener("dominion-studio-changed", () => { if (state.open) { gateArmy(); paintDesignations(); } });
 
   window.dominionVibe = { open, close };

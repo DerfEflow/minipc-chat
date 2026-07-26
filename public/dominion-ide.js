@@ -886,6 +886,14 @@
           '</div>' +
           '<div class="st-tree" id="st-tree" hidden></div>' +
         '</div>' +
+        // Adopt Existing Project (docs/ADOPT-EXISTING-SOW.md). Engineer placement: the folder
+        // drawer, because the folder IS the input. The classic page only exists in Engineer mode
+        // now (beginner and vibe surfaces stand it down), so this control is engineer-only by
+        // construction, exactly as the placement ruling demands.
+        '<div class="st-adopt-row">' +
+          '<button type="button" id="st-adopt">Adopt existing app</button>' +
+          '<span class="st-adopt-note">Point at a project you already started. Dominion reads what is actually there, briefs you honestly, and plans the finish. Read-only until you say build.</span>' +
+        '</div>' +
       '</details>' +
       '<details class="st-drawer" id="dr-brief" open>' +
         '<summary data-lex="drawer_brief"></summary>' +
@@ -1254,6 +1262,37 @@
         status(L("folder_saved"));
         document.dispatchEvent(new CustomEvent("dominion-ide-workspace"));
       } catch { status("The server could not be reached.", true); }
+    });
+    /*
+     * Adopt Existing Project (Engineer path). The selected workspace IS the app; the scan runs
+     * through the same hands wall as everything else, the honest brief replaces the blank-page
+     * interview opening, and every intake turn from here carries adopt so the interviewer plans
+     * finish/fix/new against reality. Read-only: the button changes nothing on disk.
+     */
+    $("#st-adopt").addEventListener("click", async () => {
+      const workspaceId = $("#st-ws").value;
+      if (!workspaceId) { status(L("pick_folder_first"), true); return; }
+      const btn = $("#st-adopt");
+      btn.disabled = true;
+      window.ideFlame.show();
+      status("Reading what is actually there…");
+      try {
+        const r = await fetch("/ide/adopt", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspaceId, mode: state.mode || "engineer" }) });
+        const j = await r.json();
+        if (!r.ok || j.error) { status((j && j.error) || "The scan could not run.", true); return; }
+        intake.adopt = true;
+        intake.messages = [{ role: "assistant", content: j.brief }];
+        intake.vision = null;
+        const log = $("#st-chat-log"); if (log) log.textContent = "";
+        chatBubble("ai", j.brief);
+        setJourneyPhase("clarify");
+        paintLexicon();
+        saveDraft();
+        status("");
+        const input = $("#st-chat-in"); if (input) input.focus();
+      } catch (e) { status(friendlyError(e), true); }
+      finally { btn.disabled = false; window.ideFlame.hide(); }
     });
     wirePlan(status);
     wireBrowse(status);
@@ -1668,7 +1707,9 @@
    * as bullets. The user approves the bullets; THAT is what gets built. A skip link keeps the
    * old fast path for people who know exactly what they typed.
    */
-  const intake = { messages: [], vision: null, busy: false };
+  // adopt: this interview opened from an Adopt Existing Project brief, so every /ide/intake turn
+  // carries the flag and the interviewer plans what exists toward what it should become.
+  const intake = { messages: [], vision: null, busy: false, adopt: false };
 
   function chatBubble(role, text) {
     const log = $("#st-chat-log");
@@ -1705,7 +1746,7 @@
     try {
       const r = await fetch("/ide/intake", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ messages: intake.messages, workspaceId: $("#st-ws").value || "",
-          mode: state.mode || "beginner",
+          mode: state.mode || "beginner", adopt: !!intake.adopt,
           register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }),
         signal: controller.signal });
       j = await r.json();
@@ -2257,7 +2298,7 @@
   // Draft persistence: save and load from localStorage.
   function saveDraft() {
     const prompt = $("#st-prompt").value.trim();
-    const draft = { prompt, messages: intake.messages, vision: intake.vision, at: Date.now() };
+    const draft = { prompt, messages: intake.messages, vision: intake.vision, adopt: !!intake.adopt, at: Date.now() };
     try { localStorage.setItem("dominion.crucible.draft.v1", JSON.stringify(draft)); } catch {}
   }
   function loadDraft() {
@@ -2287,6 +2328,7 @@
     intake.messages = [];
     intake.vision = null;
     intake.busy = false;
+    intake.adopt = false;
     const log = $("#st-chat-log");
     if (log) log.textContent = "";
     const prompt = $("#st-prompt"); if (prompt) prompt.value = "";
@@ -2332,6 +2374,7 @@
       if (draft.messages && draft.messages.length > 0) {
         intake.messages = draft.messages;
         intake.vision = draft.vision || null;
+        intake.adopt = !!draft.adopt;
         hasConversation = true;
         const log = $("#st-chat-log");
         if (log) {

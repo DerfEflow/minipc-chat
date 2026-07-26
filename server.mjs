@@ -74,6 +74,7 @@ import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } fr
 import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
+import { createAdoptScanner, composeBrief } from "./ideadopt.mjs";
 import { intakeMessages, parseIntake, hasImages, planchatMessages, PLAN_WINDOWS, VISION_MARKER, CHANGE_MARKER } from "./ideintake.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
 import { sweepFindings, sweepReport, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
@@ -1498,7 +1499,9 @@ async function handleIde(req, res, u) {
      */
     const phase = body.phase === "review" ? "review" : body.phase === "stuck" ? "stuck" : "intake";
     const device = body.device === "mobile" ? "mobile" : "desktop";
-    const messages = intakeMessages({ register: reg, mode, history: body.messages, device, phase });
+    // adopt: the conversation opened from a state-of-the-app brief (POST /ide/adopt); the
+    // interviewer plans what exists toward what it should become. Intake phase only.
+    const messages = intakeMessages({ register: reg, mode, history: body.messages, device, phase, adopt: !!body.adopt });
     if (messages.length < 2) return send({ status: 400, body: { error: "Say what you want built first." } });
     // The same brain that will do the engineering conducts the interview: the workspace's
     // build_code assignment, resolved exactly the way the build itself will resolve it.
@@ -1565,7 +1568,7 @@ async function handleIde(req, res, u) {
     const reg = normalizeRegister(body.register);
     const mode = normalizeCrucibleMode(body.mode || "vibe");
     const device = body.device === "mobile" ? "mobile" : "desktop";
-    const messages = planchatMessages({ window: win, register: reg, mode, device, history: body.messages });
+    const messages = planchatMessages({ window: win, register: reg, mode, device, history: body.messages, adopt: !!body.adopt });
     if (messages.length < 2) return send({ status: 400, body: { error: "Say something first." } });
     let model = String(body.model || "").trim() && modelById(body.model) ? body.model : defaultModelFor(!!T.isOwner);
     // A pasted sketch needs a model with eyes, same rule as intake: reroute the one turn or say so.
@@ -1582,6 +1585,43 @@ async function handleIde(req, res, u) {
                                   : { reply: String(r.content || "").trim(), vision: null, mockups: [] };
     return send({ status: 200, body: { ok: true, window: win, reply: parsed.reply, vision: parsed.vision,
       mockups: parsed.mockups || [], model, costUsd: r.costUsd } });
+  }
+
+  /*
+   * POST /ide/adopt {workspaceId, mode}: Adopt Existing Project (docs/ADOPT-EXISTING-SOW.md).
+   * Reads the workspace's tree through the caller's OWN hands node (ideHandsFor binds guests to
+   * user:<uid>, so nobody can scan a machine that is not theirs) and answers with the honest
+   * state-of-the-app brief. Read-only by construction: the scanner holds no write tool at all.
+   * Deterministic (no model call), so nothing is metered; the heavy rate tier still applies
+   * because a scan spends dozens of hands calls. Vibe Coder and Engineer only (Fred's placement
+   * ruling): the beginner surface never shows it, and this door refuses the mode outright, with
+   * unknown modes normalizing to beginner so a garbage value fails closed.
+   */
+  if (req.method === "POST" && path === "/ide/adopt") {
+    const blocked = ideFeature.wall(T);
+    if (blocked) return send(blocked);
+    // Real machine work through the tenant wall: an access code is required, credits are not
+    // (the scan spends none). Mirrors the invite half of billableWall without the credit half.
+    if (MULTI_TENANT && !T.isOwner && !T.invited) {
+      return sjson(res, 403, { error: "You need an access code before Dominion can read an app.", code: "needs_invite" });
+    }
+    const mode = normalizeCrucibleMode(body.mode || ((ideFeature.state(T).body || {}).prefs || {}).mode);
+    if (mode === "beginner") {
+      return sjson(res, 403, { error: "Adopting an app you already started lives in the Vibe Coder and Engineer interfaces.", code: "adopt_not_beginner" });
+    }
+    const ws = (ideFeature.listWorkspaces(T).body.workspaces || []).find((w) => w.id === String(body.workspaceId || ""));
+    if (!ws) return sjson(res, 404, { error: "No such workspace.", code: "not_found" });
+    try {
+      const scanner = createAdoptScanner({ hands: ideHandsFor(T) });
+      const r = await scanner.scan(ws.root);
+      if (!r.ok) return send({ status: 200, body: { error: r.error || "That folder could not be read.", offline: !!r.offline } });
+      const brief = composeBrief(r.facts, { name: ws.name });
+      console.log("[ide] adopt scan " + ws.id + " for " + (T.uid || "owner") + ": " +
+        r.facts.counts.files + " files, " + r.facts.counts.dirs + " dirs" + (r.facts.counts.truncated ? " (truncated)" : ""));
+      return send({ status: 200, body: { ok: true, workspaceId: ws.id, name: ws.name, root: ws.root, brief, facts: r.facts } });
+    } catch (e) {
+      return send({ status: 200, body: { error: String((e && e.message) || e).slice(0, 300) } });
+    }
   }
 
   if (req.method === "POST" && path === "/ide/job") {
@@ -1767,7 +1807,8 @@ function ownerDriveList() {
  */
 const IDE_RL = new Map();
 const IDE_RL_WIN_MS = 60000, IDE_RL_ALL = 120, IDE_RL_HEAVY_N = 20;
-const IDE_RL_HEAVY = /^\/ide\/(intake|plan|tasks|reduce|divide|estimate|job\/start|build)/;
+// adopt is heavy: no model call, but one scan drives dozens of file reads on the user's machine.
+const IDE_RL_HEAVY = /^\/ide\/(intake|plan|tasks|reduce|divide|estimate|job\/start|build|adopt)/;
 function ideRateGate(who, path) {
   const now = Date.now();
   let row = IDE_RL.get(who);
