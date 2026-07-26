@@ -1242,6 +1242,13 @@ async function handleIde(req, res, u) {
   const T = resolveTenant(req);
   const path = u.pathname;
   const send = (r) => sjson(res, r.status || 200, r.body);
+  // Phase 1 hardening (Fred, 2026-07-25): non-owner rate limit across the whole /ide surface.
+  // Sliding 60s window per account: 120 requests overall, 20 on the model-calling endpoints
+  // (each of those spends real money). Owner exempt — the deck orchestrator legitimately bursts.
+  if (!T.isOwner && T.role !== "anon") {
+    const gate = ideRateGate(T.uid || T.email, path);
+    if (gate) return sjson(res, 429, gate);
+  }
 
   // SSE reattach: replay from ?from= then live-tail. This is how a build that kept running while
   // the app was closed comes back on screen with its history intact.
@@ -1752,6 +1759,31 @@ function ownerDriveList() {
 
 // opts is forwarded so a caller can pin the machine (opts.preferred). The folder picker needs that:
 // C:\ exists on both of Fred's machines, so a path alone cannot say which one he is looking at.
+/*
+ * /ide rate limiter (Phase 1 hardening, 2026-07-25). In-memory sliding window, per non-owner
+ * account. Two tiers: HEAVY = endpoints that call a paid model (intake/plan/tasks/reduce/divide/
+ * estimate/job spawning) capped low; everything else capped high enough that no honest user ever
+ * sees it. 429s carry a plain sentence, not a bare code. Memory-bounded: entries prune on touch.
+ */
+const IDE_RL = new Map();
+const IDE_RL_WIN_MS = 60000, IDE_RL_ALL = 120, IDE_RL_HEAVY_N = 20;
+const IDE_RL_HEAVY = /^\/ide\/(intake|plan|tasks|reduce|divide|estimate|job\/start|build)/;
+function ideRateGate(who, path) {
+  const now = Date.now();
+  let row = IDE_RL.get(who);
+  if (!row) { row = { all: [], heavy: [] }; IDE_RL.set(who, row); }
+  row.all = row.all.filter((t) => now - t < IDE_RL_WIN_MS);
+  row.heavy = row.heavy.filter((t) => now - t < IDE_RL_WIN_MS);
+  const heavy = IDE_RL_HEAVY.test(path);
+  if (row.all.length >= IDE_RL_ALL || (heavy && row.heavy.length >= IDE_RL_HEAVY_N)) {
+    return { error: "Slow down a moment — this account sent too many build requests in the last minute. Wait a few seconds and try again.", code: "rate_limited", retryAfterMs: 5000 };
+  }
+  row.all.push(now);
+  if (heavy) row.heavy.push(now);
+  if (IDE_RL.size > 5000) { const first = IDE_RL.keys().next().value; IDE_RL.delete(first); }
+  return null;
+}
+
 function ideHandsFor(T) {
   return T.isOwner
     ? (tool, args, opts = {}) => CTX.hands.dispatch(tool, args, opts)

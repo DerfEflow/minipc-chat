@@ -12,12 +12,20 @@ The release rides the existing Dominion SaaS spine (Wolfe tiers, billing, OTP, p
 - [ ] Decision point: one-click deploy (parked until Fred's MVP line settles; recommendation on file: static-first Cloudflare Pages lane, cost-warned Railway lane, moderation ruling needed before guests can publish).
 
 ## Phase 1: Hardening (before any stranger touches it)
-- [ ] Hide or finish the TBD placeholder square behind an owner flag.
+NOTE 2026-07-25: the Engineer rebuild no longer blocks launch — ENGINEER_PUBLIC (default off) greys
+Engineer as Coming Soon for guests server-side; the owner keeps it. Launch = IDE_MODE=all.
+- [ ] Hide or finish the TBD placeholder square behind an owner flag. (It is visibly inert with an
+      honest hover note; decide whether that stands or it hides for guests.)
 - [ ] Re-pull model prices (catalog snapshot 2026-07-18) and put the weekly re-pull into the health-check sweep alongside the tool-flag audit.
 - [ ] Claude Opus 5 / Claude 5 family catalog upgrade pass.
-- [ ] Cost fuses for tenants: the long-run billing tranche fuse (3e9b5f0) covers builds; confirm plan-chat, estimates, and reduce checks are metered per tenant too.
-- [ ] Rate limits on /ide/* endpoints for non-owner tenants.
-- [ ] Security pass: the folder/workspace browser must stay owner-only or sandboxed per tenant; guests must never browse a host filesystem.
+- [x] Cost fuses for tenants: the long-run billing tranche fuse (3e9b5f0) covers builds; plan-chat,
+      divider, tasks and reduce all route through ideChatOnce -> meterTurn (verified 2026-07-25);
+      session budgets + earmarks (5d5f8f3) now gate chat spend per conversation as well.
+- [x] Rate limits on /ide/* endpoints for non-owner tenants (2026-07-25: sliding 60s window,
+      120/min overall, 20/min on model-calling endpoints, owner exempt, plain-sentence 429).
+- [x] Security pass: VERIFIED 2026-07-25 — ideHandsFor routes every non-owner exclusively to their
+      own hands node ("user:<uid>"); guests can never browse Fred's machines. /ide/browse owner
+      drive enumeration is owner-gated; per-user Forge remains the guest path by design.
 - [ ] Abuse review: interviewer and plan-chat are open text to models; confirm sanitizer coverage (images, size caps) matches guest exposure.
 - [ ] Full-suite green + furnace-doctrine check (idehelp guide matches every shipped control).
 
