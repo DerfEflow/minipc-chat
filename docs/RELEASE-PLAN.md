@@ -14,6 +14,10 @@ The release rides the existing Dominion SaaS spine (Wolfe tiers, billing, OTP, p
 ## Phase 1: Hardening (before any stranger touches it)
 NOTE 2026-07-25: the Engineer rebuild no longer blocks launch — ENGINEER_PUBLIC (default off) greys
 Engineer as Coming Soon for guests server-side; the owner keeps it. Launch = IDE_MODE=all.
+**LAUNCHED: IDE_MODE=all is LIVE (Fred flipped it 2026-07-25 night; confirmed read from the
+Railway production environment 2026-07-26). The Crucible is open to every signed-in user;
+ENGINEER_PUBLIC stays unset, so guests see Engineer as Coming Soon. The unticked items below are
+now post-launch hardening, not launch blockers.**
 - [ ] Hide or finish the TBD placeholder square behind an owner flag. (It is visibly inert with an
       honest hover note; decide whether that stands or it hides for guests.)
 - [ ] Re-pull model prices (catalog snapshot 2026-07-18) and put the weekly re-pull into the health-check sweep alongside the tool-flag audit.

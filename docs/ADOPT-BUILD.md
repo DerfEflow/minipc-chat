@@ -69,10 +69,10 @@ exists, from the Vibe Coder and Engineer surfaces only.
   executes anything, and the brief says so.
 - L-4 OPEN (low): first real adoption on a live guest machine unwatched; unit + endpoint proof
   only until Fred's phone pass.
-- L-5 OPEN (low): the wallet's Railway API tokens no longer list projects through the GraphQL
-  projects/me/workspaces shapes, so the deploy's commit SHA could not be cross-checked at
-  Railway; verified instead by build-id rollover + origin tip + the push-linked service. Check
-  the token at the next weekly health sweep.
+- L-5 CLOSED 2026-07-26: RAILWAY_ACCOUNT_TOKEN works; projects moved under the workspace scope.
+  The working query is `me { workspaces { projects { edges { node ... } } } }` (personal
+  workspaces carry projects directly, no team). RAILWAY_API_TOKEN is dead (Not Authorized).
+  Used live to confirm IDE_MODE=all on the dominion service.
 
 ## Lessons learned (fed back into FITS, wargame template patched 2026-07-26)
 
