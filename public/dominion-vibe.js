@@ -617,9 +617,9 @@
     go.disabled = true;
     adoptNote("Reading what is actually there…");
     try {
-      adoptNote("Reading what is actually there, then the deep read — this can take a minute…");
+      adoptNote("Reading what is actually there, then Claude Opus 4.8 does the deep read — this can take a minute…");
       const r = await fetch("/ide/adopt", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspaceId: wsId, mode: "vibe", model: state.chats.main.model || "" }) });
+        body: JSON.stringify({ workspaceId: wsId, mode: "vibe" }) });
       const j = await r.json();
       if (!r.ok || j.error || !j.ok) {
         adoptNote((j && j.error) || "The scan could not run.", true);
@@ -632,6 +632,14 @@
         + (j.analysis ? "\n\n" + j.analysis : "")
         + (j.analysisError ? "\n\n(" + j.analysisError + ")" : "");
       state.adopt = { workspaceId: j.workspaceId, name: j.name || "", brief: opening };
+      // The General defaults to the analyst that just read the app (Fred, 2026-07-26), so the
+      // conversation continues with the model that holds the deepest grasp. Changeable — and a
+      // switch keeps everything, because every turn resends the full thread.
+      if (j.analysisModel) {
+        state.chats.main.model = j.analysisModel;
+        const sel = $("#vb-model-main");
+        if (sel && [...sel.options].some((o) => o.value === j.analysisModel)) sel.value = j.analysisModel;
+      }
       // The adopted folder becomes the working project everywhere the surface reads one.
       bridge() && bridge().selectWorkspace(j.workspaceId);
       const st = $("#vb-saveto"); if (st) st.value = j.workspaceId;

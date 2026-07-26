@@ -1626,8 +1626,16 @@ async function handleIde(req, res, u) {
        * A model failure degrades honestly: the structural brief still lands, with the reason.
        */
       let analysis = "", analysisError = "";
-      const wantModel = String(body.model || "");
-      const aModel = (wantModel && isCloudModel(wantModel)) ? wantModel : defaultModelFor(!!T.isOwner);
+      /*
+       * FIXED ANALYST (Fred, 2026-07-26): the initial analysis model is PRE-PICKED and
+       * unchangeable — Claude Opus 4.8, chosen as the cost-effective-but-smart reader. The
+       * General's picker sits low on the screen and "pick a model before analyzing" was never an
+       * intuitive requirement; every other AI then plans off this one analysis, so its quality
+       * sets the ceiling. After the scan the client defaults the General to this same model
+       * (changeable — and any later switch inherits the whole thread, because /ide/planchat
+       * resends the full history every turn).
+       */
+      const aModel = "anthropic/claude-opus-4-8";
       if (MULTI_TENANT && !T.isOwner && T.role === "credit" && !billing.canChat(T.email)) {
         analysisError = "The deep read needs credits; the structural brief above is free.";
       } else if ((r.samples || []).length) {
