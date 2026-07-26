@@ -210,6 +210,18 @@
 .vb-win-title .vb-rank-name { white-space: nowrap; }
 .vb-win-title .vb-rank-sub { font-style: normal; font-size: 10.5px; color: var(--ink-soft, #d9c9b8); text-transform: none; letter-spacing: .04em; }
 @media (max-width: 620px) { .vb-win-head b.vb-win-title { font-size: 19px; } }
+/* The Captain and the Sergeant stack rank first, seat under (Fred, 2026-07-26): the header goes
+   column, the top row holds the plate and the Open toggle, the picker sits just below the title. */
+.vb-win-head-col { flex-direction: column; align-items: stretch; gap: 8px; }
+.vb-win-head-col .vb-win-toprow { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.vb-win-head-col .vb-win-model { max-width: 62%; align-self: flex-start; }
+
+/* Silent message selection: the tick boxes exist only while the Send destinations are open, and
+   nothing on screen explains them (the guide does). Copper accent, corner of each bubble. */
+.vpb { position: relative; }
+.vpb-pick { display: none; position: absolute; top: 6px; right: 8px; }
+.vb-log.vb-selecting .vpb-pick { display: inline-flex; }
+.vpb-pick input { width: 15px; height: 15px; accent-color: var(--copper-hot, #d4823c); cursor: pointer; }
 /* Upper left is the model selector, per the drawing's margin note. */
 .vb-win-model {
   max-width: 46%;

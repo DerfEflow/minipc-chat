@@ -213,16 +213,24 @@
 
   function windowHtml(w) {
     const optional = w === "main" ? "" : " · optional";
+    const title =
+      '<b class="vb-win-title">' + WRANK_SVG[w] +
+        '<span class="vb-rank-name">' + WNAME[w] + '</span>' +
+        '<em class="vb-rank-sub">(' + WSUB[w] + optional + ')</em>' +
+      '</b>';
+    const picker = '<select class="vb-win-model" id="vb-model-' + w + '" aria-label="Model for ' + WNAME[w] + '"></select>';
+    // The General keeps the picker beside the title (the drawing's upper-left note). The Captain
+    // and the Sergeant carry theirs just BELOW the title (Fred, 2026-07-26): rank first, seat under.
+    const head = w === "main"
+      ? '<header class="vb-win-head">' + picker + title + '</header>'
+      : '<header class="vb-win-head vb-win-head-col">' +
+          '<div class="vb-win-toprow">' + title +
+            '<button type="button" class="vb-win-toggle" data-win="' + w + '" aria-expanded="false">Open</button>' +
+          '</div>' + picker +
+        '</header>';
     return (
       '<section class="vb-win vb-win-' + w + '" id="vb-win-' + w + '" data-win="' + w + '">' +
-        '<header class="vb-win-head">' +
-          '<select class="vb-win-model" id="vb-model-' + w + '" aria-label="Model for ' + WNAME[w] + '"></select>' +
-          '<b class="vb-win-title">' + WRANK_SVG[w] +
-            '<span class="vb-rank-name">' + WNAME[w] + '</span>' +
-            '<em class="vb-rank-sub">(' + WSUB[w] + optional + ')</em>' +
-          '</b>' +
-          (w === "main" ? "" : '<button type="button" class="vb-win-toggle" data-win="' + w + '" aria-expanded="false">Open</button>') +
-        '</header>' +
+        head +
         '<div class="vb-win-body" id="vb-body-' + w + '"' + (w === "main" ? "" : " hidden") + '>' +
           '<div class="vb-log" id="vb-log-' + w + '" aria-live="polite"></div>' +
           '<div class="vb-grab" data-win="' + w + '" title="Drag to make this window taller" aria-hidden="true"><i></i></div>' +
@@ -615,15 +623,18 @@
 
   // Rebuild one window's log from its message list. The class encodes WHO a turn came from, which
   // is what makes the colour rule work: a turn from another window wears that window's colour.
+  // Every bubble that IS a message carries its index (data-mi), which is what lets the silent
+  // tick boxes map a checkbox back to the exact message it stands for.
   function renderLog(w) {
     const log = $("#vb-log-" + w);
     if (!log) return;
     log.textContent = "";
-    for (const m of state.chats[w].messages) {
+    for (const [i, m] of state.chats[w].messages.entries()) {
       const cls = m.from === "user" ? "vpb-user"
         : m.from === w ? "vpb-ai"
         : "vpb-from vpb-from-" + m.from;
       const b = bubble(w, cls, m.content);
+      if (b) b.dataset.mi = String(i);
       if (b && m.from !== "user" && m.from !== w) {
         const tag = document.createElement("small");
         tag.className = "vpb-tag";
@@ -632,6 +643,43 @@
       }
     }
     if (w === "main" && state.vision) visionCard();
+  }
+
+  /* ---------- silent message selection (Fred, 2026-07-26) -----------------------------------
+   * Opening the Send destinations quietly puts a tick box on every message in that window, with
+   * the last exchange (the user's message and the AI's reply) already ticked. Crossing to
+   * another rank sends exactly the ticked messages. Nothing on screen explains this (clutter);
+   * the user guide carries it. Send-here and Enter ignore the ticks entirely, so talking to one
+   * rank alone, indefinitely, stays the unforced default.
+   */
+  function enterSelect(w) {
+    const log = $("#vb-log-" + w);
+    if (!log) return;
+    const n = state.chats[w].messages.length;
+    for (const b of log.querySelectorAll(".vpb[data-mi]")) {
+      if (b.querySelector(".vpb-pick")) continue;
+      const lab = document.createElement("label");
+      lab.className = "vpb-pick";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = Number(b.dataset.mi) >= n - 2;   // the last exchange rides by default
+      lab.append(box);
+      b.append(lab);
+    }
+    log.classList.add("vb-selecting");
+  }
+  function exitSelect(w) {
+    const log = $("#vb-log-" + w);
+    if (!log) return;
+    log.classList.remove("vb-selecting");
+    for (const p of log.querySelectorAll(".vpb-pick")) p.remove();
+  }
+  function pickedIndexes(w) {
+    const log = $("#vb-log-" + w);
+    if (!log) return [];
+    return [...log.querySelectorAll(".vpb[data-mi] .vpb-pick input:checked")]
+      .map((box) => Number(box.closest(".vpb").dataset.mi))
+      .sort((a, b) => a - b);
   }
 
   function visionCard() {
@@ -667,7 +715,7 @@
     c.busy = false;
     if (!j || j.error) { bubble(w, "vpb-ai vpb-err", (j && j.error) || "Something went wrong."); return; }
     c.messages.push({ from: w, content: (j.reply || "") + (j.vision ? "\nVISION READY\n" + j.vision : "") });
-    if (j.reply) bubble(w, "vpb-ai", j.reply);
+    if (j.reply) { const b = bubble(w, "vpb-ai", j.reply); if (b) b.dataset.mi = String(c.messages.length - 1); }
     if (w === "main" && j.vision) {
       state.vision = j.vision;
       visionCard();
@@ -693,29 +741,44 @@
     const send = $("#vb-send-" + w);
     const menu = $("#vb-sendto-" + w);
 
-    const closeMenu = () => { menu.hidden = true; menu.textContent = ""; };
+    const closeMenu = () => { menu.hidden = true; menu.textContent = ""; exitSelect(w); };
+
+    // What a forwarded message reads as: its speaker's rank, then its words. Pictures collapse to
+    // their text the same way drafts do; pixels never cross windows.
+    const textOf = (c) => (typeof c === "string" ? c : ((c.find((p) => p.type === "text") || {}).text || "(picture)"));
+    const speaker = (from) => (from === "user" ? "User" : WNAME[from] || from);
 
     const deliver = (target) => {
       const text = (input.value || "").trim();
-      closeMenu();
       if (target === w) {
+        // Send here: the ordinary conversation with THIS rank alone. Ticks are ignored and
+        // cleared; pressing Send twice (or Enter) never crosses a window. Not required to ever
+        // pick a destination: this path is the whole conversation for as long as the user wants.
+        closeMenu();
         if (!text || state.chats[w].busy) return;
         input.value = ""; input.style.height = "";
         state.chats[w].messages.push({ from: "user", content: text });
-        bubble(w, "vpb-user", text);
+        const b = bubble(w, "vpb-user", text);
+        if (b) b.dataset.mi = String(state.chats[w].messages.length - 1);
         saveDraft();
         askWindow(w);
         return;
       }
-      // Crossing windows: the typed text if there is one, else this window's last AI reply.
-      let payload = text;
-      if (!payload) {
-        const last = [...state.chats[w].messages].reverse().find((m) => m.from === w);
-        payload = last ? (typeof last.content === "string" ? last.content : "") : "";
-      }
-      if (!payload) { status("Nothing to send yet from " + WNAME[w] + "."); return; }
+      /*
+       * Crossing ranks: exactly the TICKED messages travel (default: the last exchange), joined
+       * as a labelled transcript in one forwarded turn, which the server stamps as opinion. Text
+       * in the composer rides separately AS THE USER, never inside the forwarded block, so the
+       * user's own words can never be mistaken for an AI's opinion.
+       */
+      const picks = pickedIndexes(w);
+      closeMenu();
+      const msgs = state.chats[w].messages;
+      let joined = picks.map((i) => msgs[i] ? "[" + speaker(msgs[i].from) + "] " + textOf(msgs[i].content) : "").filter(Boolean).join("\n\n");
+      if (joined.length > 3800) joined = "(earlier ticked messages trimmed)\n\n" + joined.slice(-3800);
+      if (!joined && !text) { status("Nothing selected to send to " + WNAME[target] + "."); return; }
       input.value = ""; input.style.height = "";
-      state.chats[target].messages.push({ from: w, content: payload });
+      if (joined) state.chats[target].messages.push({ from: w, content: joined });
+      if (text) state.chats[target].messages.push({ from: "user", content: text });
       if (!state.chats[target].open) toggleWin(target, true);
       renderLog(target);
       saveDraft();
@@ -723,7 +786,7 @@
     };
 
     send.addEventListener("click", () => {
-      if (!menu.hidden) { deliver(w); return; }   // second press = send here
+      if (!menu.hidden) { deliver(w); return; }   // second press = send here, ranks stay separate
       menu.textContent = "";
       const here = document.createElement("button");
       here.type = "button";
@@ -739,9 +802,16 @@
         menu.append(b);
       }
       menu.hidden = false;
-      // Anywhere else closes the stack; capture so a tap on another window's send does not stack two.
+      // The silent part: destinations open, tick boxes appear, nothing announces them.
+      enterSelect(w);
+      // Anywhere else closes the stack; capture so a tap on another window's send does not stack
+      // two. Taps on the tick boxes themselves must NOT close it, or nothing could be ticked.
       setTimeout(() => {
-        const away = (e) => { if (!menu.contains(e.target) && e.target !== send) { closeMenu(); document.removeEventListener("pointerdown", away, true); } };
+        const away = (e) => {
+          if (menu.contains(e.target) || e.target === send || e.target.closest(".vpb-pick")) return;
+          closeMenu();
+          document.removeEventListener("pointerdown", away, true);
+        };
         document.addEventListener("pointerdown", away, true);
       }, 0);
     });
