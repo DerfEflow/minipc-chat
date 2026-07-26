@@ -71,8 +71,9 @@ exists, from the Vibe Coder and Engineer surfaces only.
   only until Fred's phone pass.
 - L-5 CLOSED 2026-07-26: RAILWAY_ACCOUNT_TOKEN works; projects moved under the workspace scope.
   The working query is `me { workspaces { projects { edges { node ... } } } }` (personal
-  workspaces carry projects directly, no team). RAILWAY_API_TOKEN is dead (Not Authorized).
-  Used live to confirm IDE_MODE=all on the dominion service.
+  workspaces carry projects directly, no team). RAILWAY_API_TOKEN is not dead: it is
+  PROJECT-scoped to valiant-generosity (TruAgent) and uses the Project-Access-Token header, so
+  Bearer "Not Authorized" is its normal answer. Used live to confirm IDE_MODE=all on dominion.
 
 ## Lessons learned (fed back into FITS, wargame template patched 2026-07-26)
 
