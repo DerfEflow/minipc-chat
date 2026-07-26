@@ -171,6 +171,17 @@ export function createAdoptScanner({ hands } = {}) {
     if (w.error || w.offline) return { ok: false, error: w.error, offline: !!w.offline, refused: !!w.refused };
 
     const budget = { spent: 0 };
+    // DEEP ANALYSIS material (Fred, 2026-07-26: the first brief "just said the files existed").
+    // Every file text the scanner reads is now RETAINED, capped per-file and in total, so a model
+    // can read the actual code and say what the app DOES — not merely that it exists.
+    const samples = [];
+    let sampleChars = 0;
+    const keep = (rel, text) => {
+      if (!text || sampleChars >= 90000) return;
+      const t = String(text).slice(0, 6000);
+      samples.push({ path: rel, text: t });
+      sampleChars += t.length;
+    };
     const has = (name) => w.files.some((f) => f.depth === 0 && lower(f.name) === lower(name));
     const fileAt = (rel) => w.files.find((f) => lower(f.rel) === lower(rel));
 
@@ -185,6 +196,7 @@ export function createAdoptScanner({ hands } = {}) {
         pkgText = text;
         try { pkg = JSON.parse(text); } catch { pkg = null; }
       }
+      keep(name, text);
       if (name === "requirements.txt" || name === "pyproject.toml") manifests[manifests.length - 1].text = text.slice(0, 4000);
     }
 
@@ -234,7 +246,7 @@ export function createAdoptScanner({ hands } = {}) {
       const f = fileAt(rel);
       if (!f) continue;
       const text = await readCapped(w.root + "/" + rel, budget);
-      if (text) { entries.push({ path: rel, bytes: f.size }); noteSignals(rel, text); }
+      if (text) { entries.push({ path: rel, bytes: f.size }); noteSignals(rel, text); keep(rel, text); }
     }
 
     // Sample the smallest source files first: stubs and abandoned starts live there, and small
@@ -247,6 +259,7 @@ export function createAdoptScanner({ hands } = {}) {
     for (const f of candidates) {
       const text = await readCapped(w.root + "/" + f.rel, budget);
       noteSignals(f.rel, text);
+      keep(f.rel, text);
       if (f.size === 0) stubs.push({ path: f.rel, reason: "empty file" });
     }
     for (const f of w.files) {
@@ -289,10 +302,33 @@ export function createAdoptScanner({ hands } = {}) {
       stubs: stubs.slice(0, 8),
       languages,
     };
-    return { ok: true, facts };
+    return { ok: true, facts, samples };
   }
 
   return { scan };
+}
+
+/* ============================================================================================
+   The deep-analysis prompt (Fred, 2026-07-26). The deterministic brief inventories; THIS is the
+   comprehension pass: a model reads the retained samples and produces the rundown Fred specified —
+   what the app does, its state, dependencies, features, what is left to build, obvious gaps —
+   and then asks where to go from there. Grounding rule is explicit: only claim what the samples
+   show; name the file when claiming.
+   ============================================================================================ */
+export function analysisPrompt({ name = "", facts = {}, samples = [] } = {}) {
+  const body = samples.map((s) => "=== " + s.path + " ===\n" + s.text).join("\n\n").slice(0, 100000);
+  return "You are analyzing a partially completed app called " + (name || "this app") + " that the user wants finished. " +
+    "Below are REAL file contents read from their machine, plus a structural inventory. Write an APP ANALYSIS with exactly these sections, in this order, markdown headed:\n" +
+    "1. WHAT IT DOES — the app's purpose and how it works, from the actual code.\n" +
+    "2. CURRENT STATE — what genuinely works vs half-built vs broken. Cite file names.\n" +
+    "3. DEPENDENCIES — what it relies on (frameworks, services, packages) and whether they are installed/configured.\n" +
+    "4. FEATURES PRESENT — a plain list of features that exist in the code.\n" +
+    "5. LEFT TO BUILD — what the code clearly intends but has not finished.\n" +
+    "6. OBVIOUS GAPS — missing essentials (auth, error handling, tests, deployment, data persistence, whatever applies).\n" +
+    "Ground every claim in the files shown; name the file. If the samples do not show something, say so plainly rather than guessing. " +
+    "END by asking the user where to go from here, offering 2-3 concrete directions based on what you found.\n\n" +
+    "STRUCTURAL INVENTORY:\n" + JSON.stringify({ counts: facts.counts, topDirs: facts.topDirs, frameworks: facts.frameworks, manifests: facts.manifests, entries: facts.entries, runs: facts.runs, tests: facts.tests, todos: facts.todos, stubs: facts.stubs, languages: facts.languages }).slice(0, 4000) +
+    "\n\nFILE CONTENTS:\n" + body;
 }
 
 /* ============================================================================================

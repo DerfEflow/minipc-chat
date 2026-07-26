@@ -74,7 +74,7 @@ import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } fr
 import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
-import { createAdoptScanner, composeBrief } from "./ideadopt.mjs";
+import { createAdoptScanner, composeBrief, analysisPrompt } from "./ideadopt.mjs";
 import { intakeMessages, parseIntake, hasImages, planchatMessages, PLAN_WINDOWS, VISION_MARKER, CHANGE_MARKER } from "./ideintake.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
 import { sweepFindings, sweepReport, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
@@ -1618,7 +1618,28 @@ async function handleIde(req, res, u) {
       const brief = composeBrief(r.facts, { name: ws.name });
       console.log("[ide] adopt scan " + ws.id + " for " + (T.uid || "owner") + ": " +
         r.facts.counts.files + " files, " + r.facts.counts.dirs + " dirs" + (r.facts.counts.truncated ? " (truncated)" : ""));
-      return send({ status: 200, body: { ok: true, workspaceId: ws.id, name: ws.name, root: ws.root, brief, facts: r.facts } });
+      /*
+       * DEEP ANALYSIS (Fred, 2026-07-26: "the first analysis just said the files existed").
+       * The Main window's own model reads the retained samples and produces the real rundown:
+       * what it does, state, dependencies, features, left-to-build, gaps, then asks where to go.
+       * Metered like any planning turn (it spends real tokens); credit users need credits for it.
+       * A model failure degrades honestly: the structural brief still lands, with the reason.
+       */
+      let analysis = "", analysisError = "";
+      const wantModel = String(body.model || "");
+      const aModel = (wantModel && isCloudModel(wantModel)) ? wantModel : defaultModelFor(!!T.isOwner);
+      if (MULTI_TENANT && !T.isOwner && T.role === "credit" && !billing.canChat(T.email)) {
+        analysisError = "The deep read needs credits; the structural brief above is free.";
+      } else if ((r.samples || []).length) {
+        try {
+          const ar = await ideChatOnce(aModel, [{ role: "user", content: analysisPrompt({ name: ws.name, facts: r.facts, samples: r.samples }) }]);
+          if (ar.costUsd) { try { await meterTurn(T, ar.costUsd, "adopt analysis " + ws.name, ""); } catch {} }
+          if (ar.ok && ar.content) analysis = String(ar.content).slice(0, 11000);
+          else analysisError = "The deep read could not run (" + String(ar.error || "model unreachable").slice(0, 120) + ").";
+        } catch (e) { analysisError = "The deep read could not run (" + String((e && e.message) || e).slice(0, 120) + ")."; }
+      } else analysisError = "No readable source files were found to analyze.";
+      return send({ status: 200, body: { ok: true, workspaceId: ws.id, name: ws.name, root: ws.root, brief, facts: r.facts,
+        analysis: analysis || undefined, analysisModel: analysis ? aModel : undefined, analysisError: analysisError || undefined } });
     } catch (e) {
       return send({ status: 200, body: { error: String((e && e.message) || e).slice(0, 300) } });
     }

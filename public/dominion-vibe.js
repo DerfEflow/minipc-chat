@@ -225,6 +225,9 @@
       ? '<header class="vb-win-head">' + picker + title + '</header>'
       : '<header class="vb-win-head vb-win-head-col">' +
           '<div class="vb-win-toprow">' + title +
+            // Fresh start (Fred, 2026-07-26): wipe THIS advisor's conversation mid-planning for an
+            // unbiased second opinion. Main never carries it — the General's thread is the plan.
+            '<button type="button" class="vb-win-fresh" data-win="' + w + '" title="Clear this conversation and start ' + WNAME[w] + ' from scratch">Fresh start</button>' +
             '<button type="button" class="vb-win-toggle" data-win="' + w + '" aria-expanded="false">Open</button>' +
           '</div>' + picker +
         '</header>';
@@ -614,21 +617,28 @@
     go.disabled = true;
     adoptNote("Reading what is actually there…");
     try {
+      adoptNote("Reading what is actually there, then the deep read — this can take a minute…");
       const r = await fetch("/ide/adopt", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspaceId: wsId, mode: "vibe" }) });
+        body: JSON.stringify({ workspaceId: wsId, mode: "vibe", model: state.chats.main.model || "" }) });
       const j = await r.json();
       if (!r.ok || j.error || !j.ok) {
         adoptNote((j && j.error) || "The scan could not run.", true);
         return;
       }
-      state.adopt = { workspaceId: j.workspaceId, name: j.name || "", brief: j.brief || "" };
+      // The full opening = structural brief + the model's deep analysis (what it does, state,
+      // dependencies, features, left-to-build, gaps, and the where-do-we-go question). A failed
+      // deep read degrades honestly: the brief lands with the stated reason, never silence.
+      const opening = j.brief
+        + (j.analysis ? "\n\n" + j.analysis : "")
+        + (j.analysisError ? "\n\n(" + j.analysisError + ")" : "");
+      state.adopt = { workspaceId: j.workspaceId, name: j.name || "", brief: opening };
       // The adopted folder becomes the working project everywhere the surface reads one.
       bridge() && bridge().selectWorkspace(j.workspaceId);
       const st = $("#vb-saveto"); if (st) st.value = j.workspaceId;
       renderSlider();
       // The brief opens the Main conversation as the Main AI's own words, which is exactly what
       // it is: the ground truth the planning starts from.
-      state.chats.main.messages.push({ from: "main", content: j.brief });
+      state.chats.main.messages.push({ from: "main", content: opening });
       renderLog("main");
       toggleWin("main", true);
       closeAdopt();
@@ -839,8 +849,13 @@
         b.addEventListener("click", () => deliver(other));
         menu.append(b);
       }
+      // Discoverability (Fred, 2026-07-26: "no obvious way to send chat between AIs"): the menu
+      // now says out loud what the tick boxes are for, instead of appearing silently.
+      const hint = document.createElement("div");
+      hint.className = "vb-dest-hint";
+      hint.textContent = "Tick any messages above to include them, then pick where this goes. Ticked messages travel as a labelled transcript.";
+      menu.append(hint);
       menu.hidden = false;
-      // The silent part: destinations open, tick boxes appear, nothing announces them.
       enterSelect(w);
       // Anywhere else closes the stack; capture so a tap on another window's send does not stack
       // two. Taps on the tick boxes themselves must NOT close it, or nothing could be ticked.
@@ -1126,6 +1141,15 @@
       sel.addEventListener("change", () => { state.chats[w].model = sel.value; saveDraft(); });
     }
     for (const t of document.querySelectorAll(".vb-win-toggle")) t.addEventListener("click", () => toggleWin(t.dataset.win));
+    // Fresh start (Fred, 2026-07-26): wipe an advisor window mid-planning for an unbiased opinion.
+    for (const f of document.querySelectorAll(".vb-win-fresh")) f.addEventListener("click", () => {
+      const w = f.dataset.win;
+      if (!state.chats[w] || !state.chats[w].messages.length) { status(WNAME[w] + " is already a blank slate."); return; }
+      state.chats[w].messages = [];
+      renderLog(w);
+      saveDraft();
+      status(WNAME[w] + " has a clean slate — ask for a fresh opinion.");
+    });
     for (const g of document.querySelectorAll(".vb-grab")) wireGrab(g);
     $("#vb-orch-model").addEventListener("change", (e) => { if (state.army) { state.army.orchestrator = e.target.value; persistArmy(); } orchNote(""); });
     $("#vb-plan-tasks").addEventListener("click", planArmy);
