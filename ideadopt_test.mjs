@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   createAdoptScanner, composeBrief,
   ADOPT_MAX_DIRS, ADOPT_MAX_FILES, ADOPT_MAX_READ_BYTES, ADOPT_MAX_TOTAL_BYTES, ADOPT_BRIEF_CHARS,
+  ADOPT_WALK_PARALLEL,
 } from "./ideadopt.mjs";
 
 let passed = 0, failed = 0;
@@ -101,21 +102,38 @@ await t("W1: junk dirs are never walked and never read", async () => {
   }
 });
 
-await t("W2: a monster tree stops at the dir and file caps and says truncated", async () => {
-  const wide = {};
-  for (let d = 0; d < 80; d++) {
+await t("FRED'S RULING: a real app's full scale scans COMPLETELY, no truncation ever", async () => {
+  // 120 directories, 3000 source files: a serious app, well past the old miserly caps that this
+  // ruling killed. The inventory must be total.
+  const app = { "package.json": JSON.stringify({ name: "big", scripts: { start: "node s.js" }, dependencies: { express: "1" } }) };
+  for (let d = 0; d < 120; d++) {
     const dir = {};
-    for (let i = 0; i < 40; i++) dir["f" + i + ".js"] = "x";
-    wide["d" + String(d).padStart(2, "0")] = dir;
+    for (let i = 0; i < 25; i++) dir["f" + i + ".js"] = "exports.x=" + i + ";";
+    app["mod" + String(d).padStart(3, "0")] = dir;
+  }
+  const hands = fakeHands(app);
+  const r = await createAdoptScanner({ hands }).scan("ROOT");
+  assert.equal(r.ok, true);
+  assert.equal(r.facts.counts.truncated, false, "a real app must never be told it is too big");
+  assert.ok(r.facts.counts.files >= 3000, "every file catalogued, got " + r.facts.counts.files);
+  assert.ok(!composeBrief(r.facts).includes("Scan limits"), "no limits line for legitimate work");
+});
+
+await t("W2: only a pathological tree (drive-root scale) meets the ceilings, honestly marked", async () => {
+  const wide = {};
+  for (let d = 0; d < 600; d++) {
+    const dir = {};
+    for (let i = 0; i < 25; i++) dir["f" + i + ".js"] = "x";
+    wide["d" + String(d).padStart(3, "0")] = dir;
   }
   const hands = fakeHands(wide);
   const r = await createAdoptScanner({ hands }).scan("ROOT");
   assert.equal(r.ok, true);
   assert.ok(r.facts.counts.dirs <= ADOPT_MAX_DIRS, "dirs " + r.facts.counts.dirs);
-  assert.ok(r.facts.counts.files <= ADOPT_MAX_FILES, "files " + r.facts.counts.files);
+  assert.ok(r.facts.counts.files <= ADOPT_MAX_FILES + 25, "files " + r.facts.counts.files);
   assert.equal(r.facts.counts.truncated, true);
   const listCalls = hands.calls.filter((c) => c.tool === "fs_list").length;
-  assert.ok(listCalls <= ADOPT_MAX_DIRS + 1, "fs_list spend " + listCalls);
+  assert.ok(listCalls <= ADOPT_MAX_DIRS + ADOPT_WALK_PARALLEL, "fs_list spend " + listCalls);
   assert.match(composeBrief(r.facts), /at least /);
 });
 

@@ -32,9 +32,13 @@ exists, from the Vibe Coder and Engineer surfaces only.
 4. **Gates on /ide/adopt:** ide wall + invite required (multi-tenant non-owners) + heavy-tier
    rate limit (added to IDE_RL_HEAVY: it drives ~50 hands calls per scan) + mode must be vibe or
    engineer — beginner is refused server-side, matching the placement ruling.
-5. **Scan caps (constants in ideadopt.mjs):** depth 4, 28 directories, 800 files catalogued,
-   14 manifest/entry reads at 24KB each, 10 source samples, ~400KB total bytes, junk dirs
-   (node_modules, .git, dist, build, .next, vendor, __pycache__, coverage, .cache) skipped.
+5. **Scan ceilings (REVISED by Fred's ruling 2026-07-26: "never limit an app build").** The first
+   numbers (28 dirs / 800 files) were sized like sanitizer limits and this very repo tripped
+   them, which the ruling forbids: a legitimate app scans COMPLETELY. Ceilings are now disaster
+   protection only, sized so no honest app meets them: depth 8, 500 directories, 12000 files,
+   24KB per read, 1.2MB total reads, 24 source samples; junk dirs skipped as before. The walk
+   runs six fs_list calls in parallel (hands correlation ids; reads only) so big apps scan in
+   seconds. Only a drive-root-scale pick ever sees the "Scan limits" line, still honestly marked.
 6. **Seeded planning:** the brief lands in the Vibe Main plan window as the Main AI's opening
    turn (from:"main") and in the Engineer intake chat as the assistant's opening turn; both
    surfaces then send adopt:true so intakeSystem/planchatMessages append the adopt voice: plan

@@ -16,17 +16,23 @@
 import { runPlanFor } from "./idesee.mjs";
 
 /*
- * The caps (sanitizer doctrine). Generous for a real half-finished app, hard against a hostile or
- * accidental monster tree. Every cap that trips is REPORTED in the facts, so the brief can say
- * "at least" instead of pretending the tally is complete.
+ * The ceilings (Fred's ruling 2026-07-26: "never limit an app build"). These are NOT sanitizer
+ * limits on legitimate work: they are sized so no honest app ever meets them, including big
+ * monorepos. This repo itself tripped the first, miserly numbers during verification, which is
+ * exactly the failure the ruling forbids. What remains is disaster protection only: a workspace
+ * pointed at a whole drive, or a truly pathological tree, stops at these ceilings instead of
+ * grinding the user's machine and timing the request out. A ceiling that trips is still REPORTED
+ * in the facts, so the brief says "at least" instead of pretending the tally is complete.
  */
-export const ADOPT_MAX_DEPTH = 4;        // levels below the root the walk descends
-export const ADOPT_MAX_DIRS = 28;        // fs_list calls the walk may spend
-export const ADOPT_MAX_FILES = 800;      // files catalogued before the walk stops
-export const ADOPT_MAX_READ_BYTES = 24_000;   // per file read
-export const ADOPT_MAX_TOTAL_BYTES = 400_000; // across every read of the scan
-export const ADOPT_MAX_SAMPLES = 10;     // source files sampled for TODO/stub signals
-export const ADOPT_BRIEF_CHARS = 3600;   // rides the 4000-char chat sanitizer with room to spare
+export const ADOPT_MAX_DEPTH = 8;         // levels below the root the walk descends
+export const ADOPT_MAX_DIRS = 500;        // directories listed (junk dirs excluded from the count)
+export const ADOPT_MAX_FILES = 12_000;    // files catalogued before the walk stops
+export const ADOPT_MAX_READ_BYTES = 24_000;     // per file read
+export const ADOPT_MAX_TOTAL_BYTES = 1_200_000; // across every read of the scan
+export const ADOPT_MAX_SAMPLES = 24;      // source files sampled for TODO/stub signals
+export const ADOPT_WALK_PARALLEL = 6;     // fs_list calls in flight (hands correlation ids make
+                                          // parallel READ dispatch safe; writes are another story)
+export const ADOPT_BRIEF_CHARS = 3600;    // rides the 4000-char chat sanitizer with room to spare
 
 // Folders that are machinery, caches or third-party code: walking them would burn the whole
 // dir budget saying nothing about the user's own work.
@@ -90,48 +96,58 @@ export function createAdoptScanner({ hands } = {}) {
     const topDirs = [];     // first-level folder names, for the layout line
     let dirsVisited = 0, truncated = false, aborted = "";
 
-    const queue = [{ path: cleanRoot, rel: "", depth: 0 }];
-    while (queue.length) {
+    /*
+     * Breadth-first in PARALLEL BATCHES (Fred's ruling: a real app scans completely, so the
+     * ceilings are high and the walk must stay fast under them). Each fs_list is a round trip
+     * over the hands tunnel; sequentially, five hundred directories would take the better part
+     * of a minute on a slow link. Six in flight cuts that to seconds. Reads are safe to
+     * parallelise on the hub (correlation ids); nothing here writes.
+     */
+    let queue = [{ path: cleanRoot, rel: "", depth: 0 }];
+    while (queue.length && !aborted) {
       if (dirsVisited >= ADOPT_MAX_DIRS) { truncated = true; break; }
-      const cur = queue.shift();
-      let r = null;
-      try {
-        r = await hands("fs_list", { path: cur.path });
-      } catch (e) {
-        if (dirsVisited === 0) return { offline: true, error: "The computer that holds this app is not reachable right now." };
-        aborted = "the connection to the computer dropped mid-scan";
-        break;
-      }
-      if (!r || r.ok === false) {
-        // The node refused (outside its roots, or a carve-out) or errored. On the root that is
-        // the whole answer; deeper in, note it and keep walking what we may see. Some dispatchers
-        // THROW when no machine is connected (the guest hub) and some RETURN an ok:false result
-        // saying so (the owner hub, seen live on devboot), so connectivity-shaped messages map to
-        // offline here too; the caller's wording depends on that flag being honest.
-        if (dirsVisited === 0) {
-          const msg = (r && (r.reason || r.error)) || "That folder could not be read.";
-          const refused = !!(r && r.refused);
-          const offline = !refused && /no machine|not connected|not reachable|offline|hands node/i.test(msg);
-          return { error: msg, refused, offline };
+      const batch = queue.splice(0, Math.min(ADOPT_WALK_PARALLEL, ADOPT_MAX_DIRS - dirsVisited));
+      const results = await Promise.all(batch.map(async (cur) => {
+        try { return { cur, r: await hands("fs_list", { path: cur.path }) }; }
+        catch { return { cur, threw: true }; }
+      }));
+      for (const { cur, r, threw } of results) {
+        if (threw) {
+          if (dirsVisited === 0) return { offline: true, error: "The computer that holds this app is not reachable right now." };
+          aborted = "the connection to the computer dropped mid-scan";
+          break;
+        }
+        if (!r || r.ok === false) {
+          // The node refused (outside its roots, or a carve-out) or errored. On the root that is
+          // the whole answer; deeper in, note it and keep walking what we may see. Some
+          // dispatchers THROW when no machine is connected (the guest hub) and some RETURN an
+          // ok:false result saying so (the owner hub, seen live on devboot), so connectivity-
+          // shaped messages map to offline too; the caller's wording depends on that flag.
+          if (dirsVisited === 0) {
+            const msg = (r && (r.reason || r.error)) || "That folder could not be read.";
+            const refused = !!(r && r.refused);
+            const offline = !refused && /no machine|not connected|not reachable|offline|hands node/i.test(msg);
+            return { error: msg, refused, offline };
+          }
+          dirsVisited++;
+          continue;
         }
         dirsVisited++;
-        continue;
-      }
-      dirsVisited++;
-      for (const e of Array.isArray(r.entries) ? r.entries : []) {
-        const name = typeof e === "string" ? e : e && e.name;
-        if (!name) continue;
-        const type = typeof e === "string" ? "file" : e.type;
-        const rel = cur.rel ? cur.rel + "/" + name : name;
-        if (type === "dir") {
-          // The layout line shows the person's OWN folders; machinery and hidden dirs are noise.
-          if (cur.depth === 0 && !ADOPT_SKIP_DIRS.has(lower(name)) && !name.startsWith(".")) topDirs.push(name);
-          if (ADOPT_SKIP_DIRS.has(lower(name))) { if (!skipped.includes(name)) skipped.push(name); continue; }
-          if (cur.depth + 1 < ADOPT_MAX_DEPTH) queue.push({ path: cur.path + "/" + name, rel, depth: cur.depth + 1 });
-          else truncated = true;
-        } else {
-          if (files.length >= ADOPT_MAX_FILES) { truncated = true; continue; }
-          files.push({ rel, name, size: (e && typeof e.size === "number") ? e.size : 0, depth: cur.depth });
+        for (const e of Array.isArray(r.entries) ? r.entries : []) {
+          const name = typeof e === "string" ? e : e && e.name;
+          if (!name) continue;
+          const type = typeof e === "string" ? "file" : e.type;
+          const rel = cur.rel ? cur.rel + "/" + name : name;
+          if (type === "dir") {
+            // The layout line shows the person's OWN folders; machinery and hidden dirs are noise.
+            if (cur.depth === 0 && !ADOPT_SKIP_DIRS.has(lower(name)) && !name.startsWith(".")) topDirs.push(name);
+            if (ADOPT_SKIP_DIRS.has(lower(name))) { if (!skipped.includes(name)) skipped.push(name); continue; }
+            if (cur.depth + 1 < ADOPT_MAX_DEPTH) queue.push({ path: cur.path + "/" + name, rel, depth: cur.depth + 1 });
+            else truncated = true;
+          } else {
+            if (files.length >= ADOPT_MAX_FILES) { truncated = true; continue; }
+            files.push({ rel, name, size: (e && typeof e.size === "number") ? e.size : 0, depth: cur.depth });
+          }
         }
       }
     }
