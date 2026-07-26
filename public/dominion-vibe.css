@@ -125,8 +125,27 @@
 }
 .vb-adopt-bar .vb-adopt-use { border-color: rgba(118, 255, 104, .45); color: #d8ffcd; }
 .vb-adopt-dir:hover, .vb-adopt-bar button:hover { border-color: rgba(185, 107, 50, .55); }
+/* Both gestures per row (Fred, 2026-07-26): the name steps inside; This one chooses directly. */
+.vb-adopt-dirrow { display: flex; align-items: stretch; gap: 6px; min-width: 0; }
+.vb-adopt-dirrow .vb-adopt-dir { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vb-adopt-pickone {
+  flex: none; font: inherit; font-size: 11px; cursor: pointer;
+  color: #d8ffcd; border: 1px solid rgba(118, 255, 104, .4);
+  border-radius: 5px; background: rgba(3, 10, 18, .6);
+  padding: 6px 10px;
+}
+.vb-adopt-pickone:hover { border-color: rgba(118, 255, 104, .7); }
 .vb-adopt-empty { font-size: 11.5px; color: var(--muted, #8ba0ae); padding: 4px 2px; }
-#vb-adopt-note.is-bad { color: #ff9d8a; }
+/* The note is the panel's voice; failure and success both speak up (quiet success was the bug). */
+#vb-adopt-note { font-size: 12px; }
+#vb-adopt-note.is-bad { color: #ff9d8a; font-size: 12.5px; font-weight: 650; }
+#vb-adopt-note.is-good { color: #a9f29b; font-size: 12.5px; font-weight: 650; }
+/* Three slow copper pulses on Analyze once a folder is chosen: the next press, made unmissable. */
+.vb-pulse { animation: vb-pulse 1.1s ease-in-out 3; }
+@keyframes vb-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(212, 130, 60, 0); }
+  50% { box-shadow: 0 0 0 7px rgba(212, 130, 60, .35); }
+}
 
 /* ---------- 3. Customize Your Workspace --------------------------------------------------- */
 .vb-box {

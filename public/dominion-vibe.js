@@ -446,12 +446,24 @@
 
   /* ================= 2b. Adopt an App (docs/ADOPT-EXISTING-SOW.md) ========================== */
 
-  const adoptNote = (text, bad) => {
+  const adoptNote = (text, bad, good) => {
     const el = $("#vb-adopt-note");
     if (!el) return;
     el.textContent = text || "Reading only. Nothing in the folder changes until you say build.";
     el.classList.toggle("is-bad", !!bad);
+    el.classList.toggle("is-good", !!good);
   };
+
+  // A chosen folder announces itself: green confirmation naming the project, and the Analyze
+  // button pulses so the next press is unmissable. Quiet success was the bug (Fred, 2026-07-26:
+  // "neither of which did anything I could see").
+  function adoptChosen(name) {
+    adoptNote("“" + (name || "That folder") + "” is chosen. Press Analyze my app.", false, true);
+    const st = $("#vb-saveto");
+    const go = $("#vb-adopt-go");
+    if (go) { go.classList.remove("vb-pulse"); void go.offsetWidth; go.classList.add("vb-pulse"); }
+    return st;
+  }
 
   function paintAdoptChoices() {
     const sel = $("#vb-adopt-ws");
@@ -526,12 +538,29 @@
         bar.append(up, use);
       }
       tree.append(bar);
+      /*
+       * Every row offers BOTH gestures (Fred, 2026-07-26: "it would not let me pick a parent
+       * folder, it would only click past it"): the name steps INSIDE the folder; the This one
+       * button CHOOSES that folder directly, no descent required. Choosing at the drive list
+       * pins the machine first, same rule as walking.
+       */
       for (const d of dirs) {
+        const row = document.createElement("div");
+        row.className = "vb-adopt-dirrow";
         const b = document.createElement("button");
         b.type = "button"; b.className = "vb-adopt-dir";
         b.textContent = d.name + (!path && d.machine ? "   " + d.machine : "");
         b.addEventListener("click", () => browse(d.path, d.machine));
-        tree.append(b);
+        const pick = document.createElement("button");
+        pick.type = "button"; pick.className = "vb-adopt-pickone";
+        pick.textContent = "This one";
+        pick.title = "Choose this folder without opening it";
+        pick.addEventListener("click", () => {
+          if (!path && d.machine) onMachine = d.machine;
+          useFolder(d.path);
+        });
+        row.append(b, pick);
+        tree.append(row);
       }
       if (!dirs.length && path) {
         const none = document.createElement("div");
@@ -543,10 +572,12 @@
     const useFolder = async (path) => {
       const existing = bridge().workspaces().find((w) => String(w.root || "").toLowerCase() === path.toLowerCase());
       if (existing) {
+        bridge().selectWorkspace(existing.id);
+        renderSlider(); renderSaveTo();
         paintAdoptChoices();
         $("#vb-adopt-ws").value = existing.id;
+        const st = adoptChosen(existing.name); if (st) st.value = existing.id;
         tree.hidden = true;
-        adoptNote("Using your existing project pointer for that folder.");
         return;
       }
       const name = path.split(/[\\/]/).filter(Boolean).pop() || "Adopted App";
@@ -555,12 +586,19 @@
           body: JSON.stringify({ name, root: path, node: onMachine }) });
         const j = await r.json();
         if (!r.ok || j.error) { adoptNote(j.error || "That folder could not be added.", true); return; }
+        /*
+         * The order is the fix (Fred's report 2026-07-26): the bridge learns the new workspace
+         * FIRST, so every list painted below actually contains it and the select can hold it.
+         * Before this, the option did not exist, the set silently failed, and Analyze refused
+         * with a note too quiet to notice.
+         */
+        if (bridge() && bridge().addWorkspace) bridge().addWorkspace(j.workspace);
         document.dispatchEvent(new CustomEvent("dominion-ide-workspace"));
         renderSlider(); renderSaveTo();
         paintAdoptChoices();
         $("#vb-adopt-ws").value = j.workspace.id;
+        const st = adoptChosen(j.workspace.name); if (st) st.value = j.workspace.id;
         tree.hidden = true;
-        adoptNote("Folder saved as a project. Press Analyze my app.");
       } catch { adoptNote("The server could not be reached.", true); }
     };
     $("#vb-adopt-browse").addEventListener("click", () => {

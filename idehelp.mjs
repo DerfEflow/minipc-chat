@@ -51,8 +51,11 @@ export const CRUCIBLE_GUIDE = [
   "  bottom.",
   "- ADOPT AN APP (vibe coders and engineers only; the beginner surface never shows it): for an",
   "  app the person already started, even half-finished, in a folder on their computer. In Vibe,",
-  "  the Adopt an App square opens a panel: pick the project that holds it (or Browse this",
-  "  computer to point at the folder), then press Analyze my app. In Engineer, the Workspace drawer",
+  "  the Adopt an App square opens a panel: pick the project that holds it, or Browse this",
+  "  computer, where every folder row has a This one button that chooses the folder directly, the",
+  "  folder's name steps inside it, and This folder holds it picks the folder currently open.",
+  "  A chosen folder is confirmed in green and the Analyze my app button pulses; pressing it runs",
+  "  the read. In Engineer, the Workspace drawer",
   "  carries an Adopt existing app button that reads the selected folder. Either way Dominion",
   "  READS the actual files through their own build machine (nothing is run and nothing is",
   "  changed) and answers with an honest STATE OF THE APP brief: what is built, what is",
@@ -215,4 +218,5 @@ export const GUIDE_MUST_MENTION = [
   "Agent Army", "Orchestrator", "Est Cost", "Est Time", "irreducible", "BEGIN BUILDING",
   // Adopt Existing Project (docs/ADOPT-EXISTING-SOW.md), 2026-07-26.
   "Adopt an App", "Adopt existing app", "Analyze my app", "STATE OF THE APP", "half-built",
+  "This one", "This folder holds it",
 ];

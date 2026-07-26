@@ -2666,6 +2666,18 @@
       }
       return j || {};
     },
+    /*
+     * Register a workspace the CALLER already created on the server (the Vibe adopt browse does
+     * this via POST /ide/workspace). Without it the new project exists server-side while every
+     * picker painted from workspaces() lacks it, so selecting it was silently impossible: the
+     * exact bug Fred hit picking an F:\ folder on 2026-07-26.
+     */
+    addWorkspace: (ws) => {
+      if (!ws || !ws.id) return;
+      if (!state.workspaces.some((w) => w.id === ws.id)) state.workspaces.push(ws);
+      state.workspaceId = ws.id;
+      renderStarter();
+    },
     startBuild: (prompt, status) => startBuild(prompt, status || (() => {})),
     jobs: () => (state.jobs || []).slice(),
     refreshJobs,
