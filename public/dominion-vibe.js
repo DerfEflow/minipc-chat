@@ -123,6 +123,13 @@
         '<div class="vb-box-foot"><span class="vb-note">Custom picks make it yours; Apply makes it so.</span><button type="button" class="vb-apply" id="vb-apply">Apply</button></div>' +
       '</div>' +
 
+      // ---- 3b. Active module designations (Fred, 2026-07-25) --------------------------------
+      // Every PICKED module shows a tile here the moment Apply lands. Fix for "Apply does
+      // nothing": most modules' real surfaces (Live Preview, Files/Diffs, Results, History)
+      // only exist once a build runs, so applying them changed nothing visible. The tiles are
+      // normal document flow — they wrap on mobile, never overlap, and are never pinned.
+      '<div class="vb-desig" id="vb-desig" aria-live="polite"></div>' +
+
       // ---- 4. Plan with AI ------------------------------------------------------------------
       '<div class="vb-plan">' +
         '<h3 class="vb-h">Plan with AI</h3>' +
@@ -315,6 +322,7 @@
       box.append(lab);
     }
     paintPresetButtons();
+    paintDesignations();   // the applied set's tiles stay in step with every repaint
   }
 
   function paintPresetButtons() {
@@ -327,11 +335,41 @@
     }
   }
 
+  // Where each module's REAL surface lives, told honestly on its tile.
+  const MOD_HOMES = {
+    workspace: "folder drawer, below the build area",
+    brief: "brief drawer, below the build area",
+    crew: "Agent Army section, right on this page",
+    cost: "cost meter, below the build area",
+    preview: "appears in the build windows once a build runs",
+    checks: "appears in the build windows once a build runs",
+    code: "appears in the build windows once a build runs",
+    history: "log button, below the build area",
+  };
+  function paintDesignations() {
+    const box = $("#vb-desig");
+    if (!box || !bridge()) return;
+    const active = bridge().studioModules();
+    box.textContent = "";
+    for (const id of active) {
+      if (!MOD_LABELS[id]) continue;
+      const t = document.createElement("div");
+      t.className = "vb-desig-tile";
+      t.innerHTML = "<b></b><span></span>";
+      t.querySelector("b").textContent = MOD_LABELS[id];
+      t.querySelector("span").textContent = MOD_HOMES[id] || "";
+      box.append(t);
+    }
+    box.hidden = !box.childNodes.length;
+  }
+
   function applyStudio() {
     if (!bridge()) return;
     bridge().setStudioModules(pendingModules || bridge().studioModules());
     pendingModules = null;
-    status("Workspace applied.");
+    paintDesignations();
+    const names = bridge().studioModules().map((id) => MOD_LABELS[id] || id);
+    status("Workspace applied: " + (names.length ? names.join(", ") : "minimal — no extra modules") + ".");
   }
 
   /*
@@ -783,7 +821,7 @@
 
   // Workspaces and the catalog both load after the panel exists; repaint when they land.
   document.addEventListener("dominion-ide-state", () => { if (state.open) { renderSlider(); renderSaveTo(); paintAllModelSelects(); } });
-  document.addEventListener("dominion-studio-changed", () => { if (state.open) gateArmy(); });
+  document.addEventListener("dominion-studio-changed", () => { if (state.open) { gateArmy(); paintDesignations(); } });
 
   window.dominionVibe = { open, close };
 })();
