@@ -5750,7 +5750,7 @@ async function handleChat(req, res) {
         const sbr = sessionBudgets.recordSpend(sbEmail, chatId, spendAmt);
         if (!sbr.error) sse({ type: "budget", event: "state", budget: SB.budget, spent: sbr.spent, remaining: sbr.remaining, over: sbr.over || undefined, unit: SB.unit });
       }
-      sse({ type: "done", meta: { mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
+      sse({ type: "done", meta: { model: cloudModel, mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
       return endStream();
     }
 
@@ -6001,7 +6001,7 @@ async function handleChat(req, res) {
       try { T.chatlog.record(chatId, history, answer); } catch {}
       // F1 (audit item 26): runIds travel with the message meta so "show tool log" can filter the
       // tool panel to exactly this answer's runs (older messages fall back to chatId).
-      sse({ type: "done", meta: { mode, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: toolRunIds, outputTokens: norm.usage.outputTokens, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview }, warnings: norm.warnings } });
+      sse({ type: "done", meta: { model, mode, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: toolRunIds, outputTokens: norm.usage.outputTokens, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: quality.needsReview }, warnings: norm.warnings } });
       return endStream();
     }
     workStop();   // stopped mid-tool-round / max_rounds — never leave the heartbeat ticking

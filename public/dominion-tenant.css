@@ -592,3 +592,56 @@
 @media (prefers-reduced-motion: reduce) {
   .model-current.has-machine-grant.name-flare { animation: none; }
 }
+
+/* ---- model eras: the transcript remembers which engine spoke where ---------------------------
+   Each picker snapshot starts a new scroll segment. The zero-height sticky marker stays behind
+   that segment while it is on screen, then yields to the next model marker. It never intercepts a
+   click or changes the message text; 25% opacity keeps the chassis and conversation readable. */
+.model-era {
+  --model-hue: 132;
+  position: relative;
+  isolation: isolate;
+  min-width: 0;
+}
+.model-era-marker {
+  position: sticky;
+  top: 18px;
+  height: 0;
+  z-index: 0;
+  pointer-events: none;
+  user-select: none;
+}
+.model-era-name {
+  position: absolute;
+  left: 0;
+  top: min(690px, calc(100dvh - 218px));
+  width: min(690px, calc(100dvh - 218px));
+  overflow: hidden;
+  white-space: nowrap;
+  transform: rotate(-90deg);
+  transform-origin: 0 0;
+  color: hsl(var(--model-hue) 88% 70%);
+  opacity: .25;
+  font: 950 clamp(32px, 5.4vw, 72px)/.88 "Domine", Georgia, serif;
+  letter-spacing: .035em;
+  text-align: center;
+  text-transform: uppercase;
+  text-shadow: 0 0 20px hsl(var(--model-hue) 90% 55% / .45);
+}
+.model-era-turns {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  padding-left: clamp(42px, 7vw, 86px);
+}
+.model-era-turns > .turn:last-child { margin-bottom: 18px; }
+
+@media (max-width: 700px) {
+  .model-era-marker { top: 10px; }
+  .model-era-name {
+    top: min(570px, calc(100dvh - 205px));
+    width: min(570px, calc(100dvh - 205px));
+    font-size: clamp(25px, 8.5vw, 43px);
+  }
+  .model-era-turns { padding-left: 34px; }
+}

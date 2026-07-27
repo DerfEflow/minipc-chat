@@ -132,6 +132,18 @@ function load() {
     if (typeof c.model !== "string" || !c.model) { c.model = legacyModel; migratedSessionState = true; }
     if (typeof c.draft !== "string") { c.draft = ""; migratedSessionState = true; }
     if (!Number.isFinite(c.activityAt)) { c.activityAt = c.updatedAt || 0; migratedSessionState = true; }
+    // Old messages predate model history, so their exact picker state cannot be reconstructed.
+    // Freeze the session's migrated model onto that legacy transcript once. Every new user message
+    // gets an exact picker snapshot, making future model changes durable and scrollable.
+    if (c.modelHistoryVersion !== 1) {
+      let inheritedModel = c.model;
+      for (const m of c.messages || []) {
+        if (m.role === "user") inheritedModel = m.modelId || inheritedModel;
+        if (!m.modelId) m.modelId = inheritedModel;
+      }
+      c.modelHistoryVersion = 1;
+      migratedSessionState = true;
+    }
   }
   if (migratedSessionState) {
     try { localStorage.setItem(LS_CHATS, JSON.stringify(chats.slice(0, 100))); } catch {}
@@ -421,7 +433,7 @@ function fileChip(f) {
 // The user prompt that preceded message i (feeds hallucination check / save lesson / convert-to-eval).
 function precedingUser(c, i) { for (let k = i - 1; k >= 0; k--) if (c.messages[k].role === "user") return c.messages[k].content; return ""; }
 async function copyText(t) { try { await navigator.clipboard.writeText(t); } catch { const a = document.createElement("textarea"); a.value = t; document.body.appendChild(a); a.select(); try { document.execCommand("copy"); } catch {} a.remove(); } }
-function renderMsg(m, i, isLastAi) {
+function renderMsg(m, i, isLastAi, mount = wrap) {
   const turn = document.createElement("div"); turn.className = "turn";
   const row = document.createElement("div"); row.className = "msg " + (m.role === "user" ? "me" : "ai");
   const b = document.createElement("div"); b.className = "bubble"; b.textContent = m.content; row.appendChild(b); turn.appendChild(row);
@@ -500,7 +512,7 @@ function renderMsg(m, i, isLastAi) {
     acts.appendChild(mkAct("🧪", () => convertToEval(i), "Convert to eval"));
     if (isLastAi && !busyFor(curId)) { acts.appendChild(mkAct("Continue", () => continueLast())); acts.appendChild(mkAct("Regenerate", () => regenerate())); }
   }
-  turn.appendChild(acts); wrap.appendChild(turn);
+  turn.appendChild(acts); mount.appendChild(turn);
 }
 // F4: expandable context detail — lists the actual memory/artifact/chat items the server loaded.
 function toggleCtxDetail(turn, anchor, ci) {
@@ -542,7 +554,7 @@ async function convertToEval(i) {
   alert(r.item ? "Eval case saved — run it from Mentor & Improvement." : "Eval: " + (r.error || "failed"));
 }
 function renderAll() {
-  wrap.querySelectorAll(".turn, .err").forEach((n) => n.remove());
+  wrap.querySelectorAll(".model-era, .turn, .err").forEach((n) => n.remove());
   const c = cur();
   restoreChatDraft();
   restoreChatModel();
@@ -550,7 +562,24 @@ function renderAll() {
   updateFocusMode();   // Chat Focus Mode follows the open chat: first sent message folds the chrome
   if (c) {
     let lastAi = -1; for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { lastAi = i; break; }
-    c.messages.forEach((m, i) => renderMsg(m, i, i === lastAi));
+    let era = null, eraModel = "";
+    const openEra = (modelId) => {
+      const id = modelId || c.model || "local";
+      const section = document.createElement("section"); section.className = "model-era"; section.dataset.model = id;
+      section.style.setProperty("--model-hue", String(modelHue(id)));
+      const marker = document.createElement("div"); marker.className = "model-era-marker"; marker.setAttribute("aria-hidden", "true");
+      const name = document.createElement("span"); name.className = "model-era-name"; name.textContent = modelDisplayName(id);
+      marker.appendChild(name);
+      const turns = document.createElement("div"); turns.className = "model-era-turns";
+      section.append(marker, turns); wrap.appendChild(section);
+      eraModel = id; era = turns;
+    };
+    if (!c.messages.length) openEra(c.model);
+    c.messages.forEach((m, i) => {
+      const messageModel = m.modelId || eraModel || c.model || "local";
+      if (!era || messageModel !== eraModel) openEra(messageModel);
+      renderMsg(m, i, i === lastAi, era);
+    });
   }
   renderSidebar(); renderBudget(); syncComposer(); scroll();
 }
@@ -640,6 +669,18 @@ async function loadModels() {
 const modelTrigger = $("model-trigger"), modelPanel = $("model-panel"), modelCurrent = $("model-current");
 const provLabel = (p) => ({ openrouter: "OpenRouter", openai: "OpenAI", deepseek: "DeepSeek", anthropic: "Anthropic", local: "Local" }[p] || p);
 const findCatalogModel = (id) => { for (const g of catalogGroups) { const m = (g.models || []).find((x) => x.id === id); if (m) return m; } return null; };
+function modelDisplayName(id) {
+  if (!id || id === "local" || id === "auto") return "Local Qwen";
+  const m = findCatalogModel(id);
+  if (m && m.name) return m.name;
+  const o = modelSel && Array.from(modelSel.options).find((x) => x.value === id);
+  return o ? o.textContent.replace(/\s*\(local\)$/, "").replace(/^[🔧💬👁]\s*/u, "") : id;
+}
+function modelHue(id) {
+  let h = 0;
+  for (const ch of String(id || "local")) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}
 
 function updateModelTrigger() {
   if (!modelCurrent || !modelSel) return;
@@ -1100,10 +1141,12 @@ function newSession(c) {
   const inner = document.createElement("div"); inner.className = "msg ai";
   const tools = document.createElement("div"); tools.className = "tools";
   const live = document.createElement("div"); live.className = "bubble think cursor"; live.textContent = "Dominion AI is working…";
-  inner.append(tools, live); row.appendChild(inner); wrap.appendChild(row); scroll();
+  inner.append(tools, live); row.appendChild(inner);
+  const eraTurns = wrap.querySelector(".model-era:last-of-type .model-era-turns");
+  (eraTurns || wrap).appendChild(row); scroll();
   const st = { c, inner, tools, live, chips: [], raw: "", ctxEl: null, ctxItems: null, doneMeta: null,
                mentorCritique: null, done: false, stopped: false, gone: false, errMsg: "", warm: 0,
-               jobId: "", detached: false,
+               jobId: "", detached: false, modelId: modelSel ? modelSel.value : (c.model || "local"),
                // Wall-clock for the pace warning: the only duration it will ever quote is one
                // measured here, on this device, for this exact model/mode/dial combination.
                startedAt: Date.now(), paceKey: paceKey(paceSetup()) };
@@ -1118,7 +1161,7 @@ function processEvent(st, ev) {
   const { inner, tools, live, chips } = st;
   if (ev.type === "job") {
     st.jobId = ev.id;
-    liveJobs[st.c.id] = liveJob = { jobId: ev.id, eventIndex: 0 }; persistLiveJobs();
+    liveJobs[st.c.id] = liveJob = { jobId: ev.id, eventIndex: 0, modelId: st.modelId }; persistLiveJobs();
     renderSidebar();   // show the running dot the moment the job id lands
   } else if (ev.type === "reset") {
     // Server is about to re-send this turn from scratch (the resume cursor fell off its RAM tail, or
@@ -1324,14 +1367,14 @@ function finalizeSession(st) {
   // reattach after an app reload would each record a duration that means something else.
   if (st.done && st.startedAt && !st.detached) { paceRecord(st.paceKey, Date.now() - st.startedAt); renderPace(); }
   if (st.done) {
-    const msg = { role: "assistant", content: final || "(no response)" };
+    const msg = { role: "assistant", content: final || "(no response)", modelId: st.modelId || c.model || "local" };
     if (st.doneMeta) { msg.meta = st.doneMeta; if (st.ctxItems) msg.meta.contextItems = st.ctxItems; if (st.doneMeta.mode) c.lastMode = st.doneMeta.mode; }
     // Produced documents belong to the message, so the download survives a reload and a device hop.
     if (st.files && st.files.length) { msg.meta = msg.meta || {}; msg.meta.files = st.files; }
     c.messages.push(msg); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save();
     if (speakOn && final) speakAnswer(final);   // voice: read the finished answer aloud (toggle)
   } else if (final) {
-    c.messages.push({ role: "assistant", content: final, meta: { interrupted: true } }); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save();
+    c.messages.push({ role: "assistant", content: final, modelId: st.modelId || c.model || "local", meta: { interrupted: true } }); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save();
   } else if (st.errMsg) {
     // Nothing ever came back (e.g. "Failed to fetch") — the composer was already cleared when the
     // turn was sent, so "tap send to retry" would otherwise hit an empty box and do nothing. Pull
@@ -1361,7 +1404,7 @@ async function streamReply(c) {
   const wildfireForTurn = !!(window.wildfireValue && window.wildfireValue());
   // Provisional entry so THIS chat reads as busy the instant we send, before the job id arrives
   // (the real jobId fills in on the {type:"job"} event). Keeps a double-tap from firing two turns.
-  liveJobs[c.id] = liveJob = { jobId: "", eventIndex: 0 }; persistLiveJobs();
+  liveJobs[c.id] = liveJob = { jobId: "", eventIndex: 0, modelId: st.modelId }; persistLiveJobs();
   syncComposer(); aborter = new AbortController();
   let netErr = "";
   readerActive = true;
@@ -1373,7 +1416,7 @@ async function streamReply(c) {
           ? { role: m.role, content: m.content, attachments: m.attachments }
           : { role: m.role, content: m.content })),
         mode: modeSel ? modeSel.value : "auto",
-        model: forcedModel() || "auto",
+        model: (st.modelId && st.modelId !== "local" && st.modelId !== "auto") ? st.modelId : "auto",
         privacyMode: privacyModeSel ? privacyModeSel.value : "normal",
         persona: resolvePersona(),
         temperature: settings.temperature,
@@ -1440,6 +1483,7 @@ async function attemptReattach() {
     const c = cur(); if (!c) return;
     st = liveSession = newSession(c);
     st.jobId = liveJob.jobId;
+    st.modelId = liveJob.modelId || st.modelId;
     liveJob.eventIndex = 0;
   }
   syncComposer();
@@ -1491,7 +1535,7 @@ async function reconcileJobs() {
         changed = true;
       }
       if (j.status === "running") {
-        if (!liveJobs[j.chatId]) { liveJobs[j.chatId] = { jobId: j.id, eventIndex: 0 }; changed = true; }
+        if (!liveJobs[j.chatId]) { liveJobs[j.chatId] = { jobId: j.id, eventIndex: 0, modelId: j.model || (jobChat && jobChat.model) || "local" }; changed = true; }
       } else if (!j.collected) {
         const c = chats.find((x) => x.id === j.chatId);
         if (c) { if (await deliverResult(j.id, c)) changed = true; }
@@ -1512,7 +1556,8 @@ async function deliverResult(jobId, c) {
   const text = stripThink(r.text || "");
   if (text) {
     const interrupted = r.status === "stopped" || r.status === "orphaned" || r.status === "error";
-    const msg = { role: "assistant", content: text };
+    const ranModel = (liveJobs[c.id] && liveJobs[c.id].modelId) || (r.meta && r.meta.model) || c.model || "local";
+    const msg = { role: "assistant", content: text, modelId: ranModel };
     if (r.meta && typeof r.meta === "object") { msg.meta = { ...r.meta }; if (r.meta.mode) c.lastMode = r.meta.mode; }
     if (interrupted) { msg.meta = msg.meta || {}; msg.meta.interrupted = true; }
     c.messages.push(msg); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save();
@@ -1538,7 +1583,7 @@ function send() {
   const c = cur(); if (!c) return;
   input.value = ""; c.draft = ""; autosize(); hideCostChip();
   scroll(true);   // a fresh send always re-engages the follow so the reply starts in view
-  const msg = { role: "user", content: text || "" };
+  const msg = { role: "user", content: text || "", modelId: modelSel ? modelSel.value : (c.model || "local") };
   if (pendingAtt.length) { msg.attachments = pendingAtt; pendingAtt = []; renderAttachStrip(); }
   c.messages.push(msg);
   if (c.title === "New chat") c.title = titleFrom(c.messages);
@@ -1553,7 +1598,7 @@ function regenerate() {
 // Pick up where a (possibly stopped) answer left off (spec: offer continuation after stop).
 function continueLast() {
   if (busyFor(curId)) return; const c = cur(); if (!c) return;
-  c.messages.push({ role: "user", content: "Continue exactly where you left off." });
+  c.messages.push({ role: "user", content: "Continue exactly where you left off.", modelId: modelSel ? modelSel.value : (c.model || "local") });
   c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save(); renderAll(); streamReply(c);
 }
 function editUser(i) {
@@ -2339,6 +2384,7 @@ if (modelSel) modelSel.addEventListener("change", () => {
     c.model = modelSel.value;
     c.updatedAt = Date.now();
     save();
+    if (!c.messages.length) renderAll();
   }
   updateModelTrigger(); updateCloudBadge(); updateEstimate(); updateAttachGate(); modelLaser();
 });
