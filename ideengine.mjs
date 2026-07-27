@@ -358,22 +358,24 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
 
   async function writeFiles(job, workspace, files) {
     const root = workspace.root.replace(/[\\/]+$/, "");
-    const written = [], failed = [];
+    const written = [], unchanged = [], failed = [];
     for (const f of files) {
       try {
         const r = await hands("fs_write", { path: root + "/" + f.path, content: f.content });
         if (r && r.ok === false) failed.push({ path: f.path, reason: r.error || "the node refused the write" });
+        else if (r && r.changed === false) unchanged.push(f.path);
         else { written.push(f.path); jobs.emit(job.id, { type: "file", path: f.path, bytes: f.content.length }); }
       } catch (e) { failed.push({ path: f.path, reason: String(e && e.message || e) }); }
     }
-    return { written, failed };
+    return { written, unchanged, failed };
   }
 
   // Diff every written file against the manifest's pre-move contents, so the Workshop lens shows
   // what actually changed rather than an empty panel. New files diff against nothing.
-  function emitDiffs(job, manifest, files) {
+  function emitDiffs(job, manifest, files, changedPaths = null) {
     const before = new Map((manifest || []).map((f) => [f.path, f.missing ? "" : (f.content || "")]));
     for (const f of files || []) {
+      if (changedPaths && !changedPaths.has(f.path)) continue;
       try {
         const d = lineDiff(before.get(f.path) || "", f.content || "");
         jobs.emit(job.id, { type: "diff", path: f.path, added: d.added, removed: d.removed, diff: d.diff });
@@ -484,9 +486,15 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         return { ok: false, costUsd };
       }
 
-      const { written, failed } = await writeFiles(job, workspace, parsed.files);
+      const { written, unchanged, failed } = await writeFiles(job, workspace, parsed.files);
       for (const f of failed) jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "warned", message: f.path + ": " + f.reason });
-      emitDiffs(job, manifest, parsed.files);
+      emitDiffs(job, manifest, parsed.files, new Set(written));
+      if (!written.length && !failed.length) {
+        jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
+          message: "The model returned files, but every write was byte-for-byte unchanged. Nothing was implemented. Reread the current files and retry with a specific change.",
+          unchanged, nextAction: "retry_or_simplify" });
+        return { ok: false, costUsd, unchanged };
+      }
 
       const v = await verify(job, workspace);
       if (v.ran && !v.ok) {
@@ -513,8 +521,13 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
               message: "The check failed and the repair attempt returned nothing usable. The output is above." });
             return { ok: false, costUsd, wroteAnyway: true };
           }
-          await writeFiles(job, workspace, again.files);
-          emitDiffs(job, manifest, again.files);
+          const repairWrite = await writeFiles(job, workspace, again.files);
+          emitDiffs(job, manifest, again.files, new Set(repairWrite.written));
+          if (!repairWrite.written.length && !repairWrite.failed.length) {
+            jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
+              message: "The check failed and the repair attempt changed no bytes. Nothing further was tried automatically." });
+            return { ok: false, costUsd, wroteAnyway: true };
+          }
           const v2 = await verify(job, workspace);
           if (!v2.ok) {
             jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",

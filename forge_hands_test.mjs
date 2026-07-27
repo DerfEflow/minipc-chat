@@ -1,6 +1,6 @@
 /*
  * Forge-over-hands self-test — run: node forge_hands_test.mjs
- * Proves forge_read/forge_write/forge_run now reach the machine through the hands NODE (not the
+ * Proves forge_read/forge_write/forge_edit/forge_run now reach the machine through the hands NODE (not the
  * retired bridge), and the node's carve-outs still hold. ctx.hands.dispatch is wired straight to the
  * node executor (the same code the real hub dispatches to).
  */
@@ -22,13 +22,36 @@ const t = async (n, f) => { try { await f(); passed++; console.log("  ok  " + n)
 await t("forge_write creates a file on the machine", async () => {
   const p = join(WORK, "hello.txt");
   const out = await runTool("forge_write", { path: p, content: "forge-was-here" }, ctx);
-  assert.match(out, /Wrote 14 bytes/);
+  assert.match(out, /CHANGED: wrote 14 bytes/);
   assert.equal(readFileSync(p, "utf8"), "forge-was-here");
+});
+
+await t("forge_write identifies an identical retry as NO CHANGE", async () => {
+  const p = join(WORK, "hello.txt");
+  const out = await runTool("forge_write", { path: p, content: "forge-was-here" }, ctx);
+  assert.match(out, /NO CHANGE/);
+});
+
+await t("forge_edit makes a bounded CRLF-safe change", async () => {
+  const p = join(WORK, "hello.txt");
+  const out = await runTool("forge_edit", { path: p, oldText: "forge-was-here", newText: "forge-is-here" }, ctx);
+  assert.match(out, /CHANGED: replaced 1 match/);
+  assert.equal(readFileSync(p, "utf8"), "forge-is-here");
+});
+
+await t("forge_edit falls back safely while an older hands node reconnects", async () => {
+  const p = join(WORK, "legacy.txt");
+  await executeJob("fs_write", { path: p, content: "old\r\nvalue\r\n" });
+  const legacyCtx = { hands: { dispatch: (tool, args) =>
+    tool === "fs_edit" ? Promise.resolve({ ok: false, error: "unknown tool: fs_edit" }) : executeJob(tool, args) } };
+  const out = await runTool("forge_edit", { path: p, oldText: "old\nvalue", newText: "new\nvalue" }, legacyCtx);
+  assert.match(out, /CHANGED/);
+  assert.equal(readFileSync(p, "utf8"), "new\r\nvalue\r\n");
 });
 
 await t("forge_read reads it back", async () => {
   const out = await runTool("forge_read", { op: "read", path: join(WORK, "hello.txt") }, ctx);
-  assert.equal(out, "forge-was-here");
+  assert.equal(out, "forge-is-here");
 });
 
 await t("forge_read op:list shows the folder", async () => {

@@ -49,7 +49,7 @@ export const SAFE_TOOLS = new Set([
 // machines is a liability decision Fred has not made. Adding them here is the only switch needed.
 // forge_rollback rides along deliberately: anyone who can make a change on their own machine must
 // be able to undo it without asking Fred. It only ever restores from snapshots this node took.
-export const FORGE_TOOLS = new Set(["forge_read", "forge_write", "forge_run", "scaffold_project", "forge_rollback"]);
+export const FORGE_TOOLS = new Set(["forge_read", "forge_write", "forge_edit", "forge_run", "scaffold_project", "forge_rollback"]);
 
 // Owner = all tools (null sentinel = no filter). Non-owner = SAFE_TOOLS (+ FORGE_TOOLS when engaged).
 export function allowedToolNames(role) { return role === "owner" ? null : SAFE_TOOLS; }

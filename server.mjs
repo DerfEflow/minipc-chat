@@ -34,7 +34,7 @@ import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
 import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL } from "./models.catalog.mjs";
-import { createLoopWatch, contextExceeded, supervisorPrompt, parseVerdict, pauseInstruction, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
+import { createLoopWatch, contextExceeded, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
 
 /*
  * Does this turn actually ask for work ON a machine? Used only to decide whether the "you forgot
@@ -43,6 +43,22 @@ import { createLoopWatch, contextExceeded, supervisorPrompt, parseVerdict, pause
  * day. Better to miss a few than to cry wolf.
  */
 const MACHINE_INTENT_RE = /\b(build|deploy|install|refactor|migrate|fix|debug|run|execute|script|commit|push|repo|repository|codebase|server|database|file|folder|directory|terminal|shell|command|laptop|mini-?pc|machine|my computer)\b/i;
+const BUILD_TOOL_NAMES = new Set([
+  "forge_read", "forge_edit", "forge_write", "forge_run", "forge_rollback", "scaffold_project",
+  "recall_memory", "search_artifacts", "read_artifact", "search_chats", "retrieve_context_pack",
+  "web_search", "web_read", "github_list_repos", "github_read", "github_search", "request_review",
+]);
+const isFocusedBuildTurn = (text) =>
+  MACHINE_INTENT_RE.test(String(text || "")) &&
+  /\b(build|implement|fix|edit|modify|refactor|test|commit|push|deploy|roadmap|source file|worktree|repo(?:sitory)?)\b/i.test(String(text || ""));
+const scopeBuildTools = (defs, text) => {
+  if (!Array.isArray(defs) || !isFocusedBuildTurn(text)) return defs;
+  const wantsGithub = /\b(github|pull request|pr\b|issue)\b/i.test(String(text || ""));
+  return defs.filter((d) => {
+    const name = d && d.function && d.function.name || "";
+    return BUILD_TOOL_NAMES.has(name) || (wantsGithub && name.startsWith("cx_github__"));
+  });
+};
 import { screenContent } from "./safety.mjs";
 import { wolfeLogic, tierFor, normalizeTier } from "./wolfe-logic.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
@@ -1172,7 +1188,7 @@ const SERVICE_OWNER_CNS = String(cfgGet("SERVICE_OWNER_CNS", "")).split(",").map
 // tools itself — real building leaves as a work order to Claude (deck bridge) or to this box
 // (dominion_work_order). Internal work-order turns (source "internal") get the inverse cut: full
 // hands, but no ability to spawn further work orders (no recursion).
-const DECK_ORCHESTRATOR_BLOCKED = new Set(["forge_write", "forge_run", "forge_send", "scaffold_project", "sandbox_write", "sandbox_append", "run_python_sandbox", "desktop_control", "browser_control", "create_artifact", "revise_artifact", "export_artifact", "scrape_to_persona"]);
+const DECK_ORCHESTRATOR_BLOCKED = new Set(["forge_write", "forge_edit", "forge_run", "forge_send", "scaffold_project", "sandbox_write", "sandbox_append", "run_python_sandbox", "desktop_control", "browser_control", "create_artifact", "revise_artifact", "export_artifact", "scrape_to_persona"]);
 const WORK_ORDER_TOOLS = new Set(["dominion_work_order", "claude_work_order"]);
 const toolWallFor = (source) => (source === "service-owner" ? DECK_ORCHESTRATOR_BLOCKED : source === "internal" ? WORK_ORDER_TOOLS : null);
 // Connectors (Fred's "complete access" wave): outside services as MCP tools, per-account. The
@@ -3248,7 +3264,7 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
     "don't just describe what could be done; do it. Prefer reading current state (e.g. deck_list_projects,",
     "forge_read) before acting so you work from facts, not guesses.",
     "Be accurate and honest. Don't fabricate file contents, project ids, or results — read them.",
-    "Real code/file changes go through forge_send. The sandbox is your private scratch space for drafts/notes.",
+    "Real code/file changes use forge_edit for bounded edits, forge_write for complete files, and forge_run for commands. The sandbox is your private scratch space for drafts/notes.",
     "When you finish a tool action, briefly confirm what you actually did.",
   ].join(" ") : [
     "You are Dominion AI, Frederick (Fred) Wolfe's personal assistant. Today is " + new Date().toISOString().slice(0, 10) + ".",
@@ -3317,7 +3333,8 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", { withTools = true
   s += "\n\nCREATING FILES & PROJECTS:\n" + [
     "• Documents: to deliver a report, letter, doc, or data as a real file, WRITE THE FULL CONTENT first (never truncate — finish the whole thing), then call create_docx (Word), create_pdf, or create_spreadsheet (Excel/CSV). For plain formats use export_artifact with format txt/md/json. Structure the content in markdown so it lays out professionally: a clear # title, ## section headings, - bullet or 1. numbered lists, and | pipe | tables | for any tabular data (tables become real Word/PDF grids and real Excel rows with a bold header). After exporting, give Fred the Download link from the tool result verbatim.",
     "• Length: never stop a document early to save space — produce the complete piece in the format requested. The system continues past output limits automatically, so write it in full.",
-    "• Apps / code: when asked to build an app or project, lay out the WHOLE structure at once with scaffold_project — pass a root folder and a files array (each { path relative to root, content }). It creates every folder and file and returns the file tree. Show Fred the tree. Use forge_run to install/build/test and forge_read to inspect. For single-file edits use forge_write.",
+    "• Apps / code: when asked to build an app or project, lay out the WHOLE structure at once with scaffold_project — pass a root folder and a files array (each { path relative to root, content }). It creates every folder and file and returns the file tree. Show Fred the tree. Use forge_run to install/build/test and forge_read to inspect. For a bounded edit to an existing file use forge_edit; use forge_write only for a new file or a complete replacement after reading it.",
+    "• Edit evidence: exit code 0 proves only that a command ran. Treat CHANGED or CHANGE as proof of an edit. If a result says NO CHANGE, NO TRACKED CHANGE, or EDIT REFUSED, reread the exact lines and change method. Never repeat shell string replacement against the same file after a no-change result.",
   ].join("\n");
   }
   // Versioned prompt overlays (spec PromptVersion): active global + mode-scope prompts append here.
@@ -5276,6 +5293,15 @@ async function handleChat(req, res) {
         }
         catch (e) { console.log("[connectors] tool defs failed:", String(e && e.message || e).slice(0, 150)); }
       }
+      // A build turn gets a focused engineering bench instead of the entire app catalog. This
+      // keeps the model's choice legible and prevents unrelated connector/document tools from
+      // crowding out the file, shell, source-context, and review tools needed for the job.
+      if (cloudTools && isFocusedBuildTurn(lastUserText)) {
+        const beforeScope = cloudTools.length;
+        cloudTools = scopeBuildTools(cloudTools, lastUserText);
+        console.log(`[dominion-ai] build tool scope: ${cloudTools.length} of ${beforeScope} tools offered to ${cloudModel}`);
+        sse({ type: "tools_scoped", scope: "build", offered: cloudTools.length, omitted: beforeScope - cloudTools.length });
+      }
       // Orchestrator wall (see DECK_ORCHESTRATOR_BLOCKED): deck sessions lose the heavy write
       // tools; internal work-order turns lose the work-order spawners. Def-level cut here, plus a
       // runtime gate below for a hallucinated name that was never offered.
@@ -5388,8 +5414,23 @@ async function handleChat(req, res) {
           sse({ type: "supervisor", monitored: cloudModel, supervisor: UTILITY_MODEL, paused: true, reason: pauseReason || "conclusion" });
         }
         working(round === 0 ? "thinking" : "writing");
-        let streamed = false;
-        const onDelta = (delta) => { if (aborted) return; if (!streamed) { streamed = true; workStop(); } streamedAny = true; sse({ type: "token", delta }); };
+        let streamed = false, roundVisible = "", outputLoop = null;
+        const onDelta = (delta) => {
+          if (aborted || outputLoop) return;
+          const candidate = roundVisible + String(delta || "");
+          const loop = textLoopEvidence(candidate);
+          if (loop.looping) {
+            outputLoop = loop;
+            const allowed = candidate.slice(roundVisible.length, Math.max(roundVisible.length, loop.cutAt));
+            if (allowed) {
+              if (!streamed) { streamed = true; workStop(); }
+              streamedAny = true; roundVisible += allowed; sse({ type: "token", delta: allowed });
+            }
+            return;
+          }
+          if (!streamed) { streamed = true; workStop(); }
+          streamedAny = true; roundVisible = candidate; sse({ type: "token", delta });
+        };
         let or = await cloudChatStream(cloudModel, messages,
           { temperature: opts.temperature, num_predict: outCap, signal: ac.signal,
             tools: concludePhase ? cloudTools : toolsThisRound, toolChoice: concludePhase ? "none" : undefined },
@@ -5418,6 +5459,22 @@ async function handleChat(req, res) {
           return endStream();
         }
         bumpUsage(or.usage);
+
+        // A provider can loop inside a single completion, never returning control to the round
+        // supervisor. Stop forwarding repeated text, save only what was actually shown, and end
+        // with an explicit pause instead of hundreds of duplicate lines.
+        outputLoop = outputLoop || textLoopEvidence(or.content || "");
+        if (outputLoop.looping) {
+          const kept = streamed ? roundVisible : String(or.content || "").slice(0, outputLoop.cutAt);
+          if (!streamed && kept) { streamedAny = true; sse({ type: "token", delta: kept }); }
+          const notice = "\n\n[Dominion supervisor] Paused because the model repeated the same sentence inside one answer (" +
+            outputLoop.repeats + "+ times): \"" + outputLoop.phrase + "\". No further repeated output was accepted. Retry the task or choose another coding model.";
+          sse({ type: "token", delta: notice });
+          sse({ type: "supervisor", monitored: cloudModel, supervisor: "deterministic text-loop fuse", paused: true,
+                reason: "repeated output inside one completion" });
+          answer = promisePrefix + kept + notice;
+          break;
+        }
 
         const calls = Array.isArray(or.toolCalls) ? or.toolCalls : [];
         if (calls.length && toolsThisRound) {
@@ -5537,7 +5594,13 @@ async function handleChat(req, res) {
             emitFileIfAny(result, sse);   // a produced document becomes a real download button
             await logToolRun({ ts: callStartedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", states: life.states, confirmedByUser: gate.confirmedByUser, autoApproved: gate.autoApproved || undefined, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model: cloudModel });
             toolMsg(String(result).slice(0, 8000));
-            toolSummaries.push(name + " · " + (failed ? "failed" : "succeeded"));
+            const evidence = summarizeToolOutcome({ name, args, result, failed });
+            toolSummaries.push(evidence.summary);
+            const semanticLoop = loopWatch.outcome({ name, args, result, failed });
+            if (semanticLoop.looping && concludeAt === Infinity) {
+              concludeAt = round + 1;
+              pauseReason = "the model kept attempting edits without changing the target (" + semanticLoop.sig + ")";
+            }
           }
           continue;   // feed the tool results back for the next round
         }
@@ -5555,12 +5618,38 @@ async function handleChat(req, res) {
             working("writing");
             messages.push({ role: "assistant", content: answer.slice(-6000) });   // running tail = continuity anchor (kept bounded)
             messages.push({ role: "user", content: CONTINUE_NUDGE });
+            let contVisible = "", contOutputLoop = null;
             const cont = await cloudChatStream(cloudModel, messages,
               { temperature: opts.temperature, num_predict: outCap, signal: ac.signal, tools: null, toolChoice: "none" },
-              (delta) => { if (aborted) return; streamedAny = true; sse({ type: "token", delta }); });
+              (delta) => {
+                if (aborted || contOutputLoop) return;
+                const candidate = answer + contVisible + String(delta || "");
+                const loop = textLoopEvidence(candidate);
+                if (loop.looping) {
+                  contOutputLoop = loop;
+                  const allowedEnd = Math.max(answer.length + contVisible.length, loop.cutAt);
+                  const allowed = candidate.slice(answer.length + contVisible.length, allowedEnd);
+                  if (allowed) { streamedAny = true; contVisible += allowed; sse({ type: "token", delta: allowed }); }
+                  return;
+                }
+                streamedAny = true; contVisible += String(delta || ""); sse({ type: "token", delta });
+              });
             workStop();
             if (!cont.ok) break;
             bumpUsage(cont.usage);
+            contOutputLoop = contOutputLoop || textLoopEvidence(answer + (cont.content || ""));
+            if (contOutputLoop.looping) {
+              const kept = contVisible || String(cont.content || "").slice(0, Math.max(0, contOutputLoop.cutAt - answer.length));
+              const notice = "\n\n[Dominion supervisor] Paused because the model repeated the same sentence while continuing its answer (" +
+                contOutputLoop.repeats + "+ times): \"" + contOutputLoop.phrase + "\". No further repeated output was accepted. Retry the task or choose another coding model.";
+              if (!contVisible && kept) { streamedAny = true; sse({ type: "token", delta: kept }); }
+              sse({ type: "token", delta: notice });
+              sse({ type: "supervisor", monitored: cloudModel, supervisor: "deterministic text-loop fuse", paused: true,
+                    reason: "repeated output during automatic continuation" });
+              answer += kept + notice;
+              fr = "stop";
+              break;
+            }
             answer += (cont.content || "");
             if (cont.reasoning) lastReasoning = cont.reasoning;
             fr = cont.finishReason;
@@ -5657,12 +5746,13 @@ async function handleChat(req, res) {
       if (w.waitedMs > 1500) console.log(`[dominion-ai] heavy GPU warmed in ${Math.round(w.waitedMs / 1000)}s`);
     }
 
-    let last = null, intentNudgedLocal = false, localPromisePrefix = "";
+    let last = null, intentNudgedLocal = false, localPromisePrefix = "", localConclude = false;
+    const localLoopWatch = createLoopWatch();
     for (let round = 0; round < MAX_ROUNDS && !aborted; round++) {
       roundsUsed = round + 1;
       // heartbeat phase: think-less runs (and post-tool rounds) go straight to writing
       working(opts.think === false ? "writing" : round === 0 ? "thinking" : "writing");
-      let d = await ollamaChat(model, messages, opts);
+      let d = await ollamaChat(model, messages, localConclude ? { ...opts, noTools: true } : opts);
       // the heavier 30B can return null on a cold load / transient blip — retry once on the first round
       if (!d && round === 0 && !aborted) { await sleep(1500); d = await ollamaChat(model, messages, opts); }
       last = d;
@@ -5673,6 +5763,8 @@ async function handleChat(req, res) {
 
       const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
       if (calls.length && round < MAX_ROUNDS - 1) {
+        const exactLoop = localLoopWatch.note(calls);
+        if (exactLoop.looping) localConclude = true;
         working("running tools");   // round 2+ visibility: tools now, then "writing" on the next model call
         // record the assistant's tool-call turn (thinking stripped — hygiene), then run each tool and feed results back
         messages.push({ role: "assistant", content: stripThink(msg.content), tool_calls: calls });
@@ -5767,7 +5859,16 @@ async function handleChat(req, res) {
           emitFileIfAny(result, sse);   // a produced document becomes a real download button
           await logToolRun({ ts: startedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: failed ? "failed" : "succeeded", states: life.states, confirmedByUser: gate.confirmedByUser, autoApproved: gate.autoApproved || undefined, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model });
           messages.push({ role: "tool", tool_name: name, content: String(result).slice(0, 8000) });
-          toolSummaries.push(name + " · " + (failed ? "failed" : "succeeded"));
+          const evidence = summarizeToolOutcome({ name, args, result, failed });
+          toolSummaries.push(evidence.summary);
+          const semanticLoop = localLoopWatch.outcome({ name, args, result, failed });
+          if (semanticLoop.looping) localConclude = true;
+        }
+        if (localConclude) {
+          messages.push({ role: "user", content: pauseInstruction({
+            reason: "repeated actions produced no observable progress",
+            model,
+          }) });
         }
         continue;
       }
@@ -5775,7 +5876,18 @@ async function handleChat(req, res) {
       // THE KEPT-PROMISE GUARD on the local path (same rule as the cloud loop above): a turn may
       // not end on "let me go look at that" with nothing done. One nudge per turn, and only while
       // a round remains to actually keep the promise in.
-      const localText = stripThink(msg.content);
+      const localRaw = stripThink(msg.content);
+      const localOutputLoop = textLoopEvidence(localRaw);
+      const localText = localOutputLoop.looping
+        ? localRaw.slice(0, localOutputLoop.cutAt) +
+          "\n\n[Dominion supervisor] Paused because the model repeated the same sentence inside one answer (" +
+          localOutputLoop.repeats + "+ times): \"" + localOutputLoop.phrase +
+          "\". No further repeated output was accepted. Retry the task or choose another coding model."
+        : localRaw;
+      if (localOutputLoop.looping) {
+        sse({ type: "supervisor", monitored: model, supervisor: "deterministic text-loop fuse", paused: true,
+              reason: "repeated output inside one completion" });
+      }
       if (!intentNudgedLocal && localText && round + 1 < MAX_ROUNDS && !opts.noTools) {
         const intent = unkeptIntent(localText, { toolsAvailable: true });
         if (intent.unkept) {

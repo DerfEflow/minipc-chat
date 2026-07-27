@@ -184,6 +184,27 @@ await t("a successful move snapshots BEFORE writing, then verifies", async () =>
   assert.ok(r.types().includes("move:done"));
 });
 
+await t("an unchanged write fails honestly without a fake file or diff event", async () => {
+  const r = rig({
+    chatReplies: [{ ok: true, content: "```path=src/a.ts\nexisting contents\n```", costUsd: 0.01 }],
+    handsImpl: async (tool, args) => {
+      if (tool === "fs_read" && String(args.path).endsWith("package.json")) return { content: "{}" };
+      if (tool === "fs_read") return { content: "existing contents" };
+      if (tool === "shell_run" && /rev-parse/.test(args.command)) return { stdout: "true" };
+      if (tool === "shell_run") return { code: 0 };
+      if (tool === "fs_write") return { ok: true, changed: false };
+      return {};
+    },
+  });
+  const out = await r.engine.runMove(JOB, { move: MOVE, workspace: WS, assignments: {}, goal: "g" });
+  assert.equal(out.ok, false);
+  assert.ok(!r.types().includes("file"), "unchanged bytes are not a written-file event");
+  assert.ok(!r.types().includes("diff"), "unchanged bytes are not a diff");
+  const failure = r.events.find((e) => e.state === "failed");
+  assert.match(failure.message, /byte-for-byte unchanged/i);
+  assert.match(failure.message, /Nothing was implemented/i);
+});
+
 await t("NO SNAPSHOT means NO WRITE: without a restore point the move refuses", async () => {
   const r = rig({
     chatReplies: [{ ok: true, content: "```path=src/a.ts\nx\n```", costUsd: 0.01 }],

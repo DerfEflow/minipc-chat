@@ -36,7 +36,7 @@ const server = readFileSync("./server.mjs", "utf8");
 
 // 3. owner-only tools are refused for every non-owner role
 {
-  const ownerOnly = ["forge_run", "forge_write", "desktop_control", "browser_control", "deck_capture",
+  const ownerOnly = ["forge_run", "forge_write", "forge_edit", "desktop_control", "browser_control", "deck_capture",
                      "github_read", "search_persona", "scrape_to_persona", "claude_work_order"];
   for (const role of ["credit", "invited", "anon", "guest"]) {
     for (const t of ownerOnly) {

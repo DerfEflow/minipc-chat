@@ -33,6 +33,21 @@ await t("push assigns revisions; pull(0) returns everything", async () => {
   if (p.chats[0].rev !== 1 || p.chats[1].rev !== 2) throw new Error("revs not assigned in order");
 });
 
+await t("the selected model is part of the chat and survives cross-device sync", async () => {
+  store.push([{ ...chat("model-chat", 1150, [msg("user", "keep my coder")]), model: "anthropic/claude-opus-4-8", draft: "unfinished thought" }]);
+  const got = store.pull(0).chats.find((c) => c.id === "model-chat");
+  if (got.model !== "anthropic/claude-opus-4-8") throw new Error("model was not preserved with the session");
+  if (got.draft !== "unfinished thought") throw new Error("draft text was not preserved with the session");
+});
+
+await t("an older client cannot erase a session's model or draft by omitting new fields", async () => {
+  store.push([chat("model-chat", 1160, [msg("user", "older browser added a message")])]);
+  const got = store.pull(0).chats.find((c) => c.id === "model-chat");
+  if (got.model !== "anthropic/claude-opus-4-8" || got.draft !== "unfinished thought") {
+    throw new Error("rolling deployment erased session state: " + JSON.stringify(got));
+  }
+});
+
 await t("the revision cursor is incremental (a device only gets what it lacks)", async () => {
   const before = store.pull(0).rev;
   store.push([chat("c", 1200, [msg("user", "third")])]);

@@ -7,7 +7,7 @@
  * than synced). This store is the faithful one.
  *
  * SHAPE. One JSON file per user (atomic tmp+rename, same discipline as chatlog.mjs):
- *   { rev, chats: { <id>: {id, title, updatedAt, rev, lastMode, messages[], prev?} },
+ *   { rev, chats: { <id>: {id, title, updatedAt, rev, model, lastMode, messages[], prev?} },
  *     tombstones: { <id>: {deletedAt, rev} } }
  * `rev` is a per-user monotonic counter. Every accepted write stamps the chat with the next rev,
  * which is what makes an incremental pull possible: a device asks "everything after rev N".
@@ -68,6 +68,8 @@ function normalizeChat(raw) {
     id,
     title: typeof raw.title === "string" ? raw.title.slice(0, 300) : "New chat",
     updatedAt,
+    model: typeof raw.model === "string" ? raw.model.slice(0, 160) : undefined,
+    draft: typeof raw.draft === "string" ? raw.draft.slice(0, 50_000) : undefined,
     lastMode: typeof raw.lastMode === "string" ? raw.lastMode.slice(0, 40) : undefined,
     messages,
   };
@@ -154,6 +156,10 @@ export function createChatSync({ dir }) {
 
       const stored = state.chats[c.id];
       if (stored && (stored.updatedAt || 0) > c.updatedAt) { rejected.push({ id: c.id, reason: "stale" }); continue; }
+      // Rolling deployment compatibility: an older browser does not know these fields yet. A
+      // newer message from that browser must not erase the model or draft saved by another device.
+      if (stored && c.model === undefined) c.model = stored.model;
+      if (stored && c.draft === undefined) c.draft = stored.draft;
 
       state.rev += 1;
       c.rev = state.rev;

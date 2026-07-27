@@ -7,7 +7,7 @@
  *
  * WHAT THIS GUARANTEES, precisely, because a vague promise here is worse than none:
  *
- *   fs_write / fs_append(truncate)  EXACT. The prior bytes of the target file are
+ *   fs_write / fs_edit / fs_append(truncate)  EXACT. The prior bytes of the target file are
  *                                   copied aside before the write. Full auto-restore.
  *   shell_run                       BEST EFFORT. runShell() spawns without a cwd, so
  *                                   there is no single directory to capture. We extract
@@ -68,6 +68,15 @@ function git(repo, args, timeoutMs = 8000) {
   return execFileSync("git", ["-C", repo, ...args], { timeout: timeoutMs, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
 }
 
+function repoState(repo) {
+  try {
+    const head = git(repo, ["rev-parse", "HEAD"]);
+    const status = git(repo, ["status", "--porcelain=v1", "--untracked-files=all"], 15000);
+    const diff = git(repo, ["diff", "--binary", "HEAD"], 30000);
+    return crypto.createHash("sha256").update(head + "\n" + status + "\n" + diff).digest("hex");
+  } catch { return null; }
+}
+
 function findRepoRoot(startPath) {
   try {
     let dir = statSync(startPath).isDirectory() ? resolve(startPath) : dirname(resolve(startPath));
@@ -109,7 +118,7 @@ function gitAnchorsFor(paths) {
       let stash = "";
       try { stash = git(repo, ["stash", "create"]); } catch { /* clean tree returns empty */ }
       const dirty = (() => { try { return git(repo, ["status", "--porcelain"]).split("\n").filter(Boolean).length; } catch { return -1; } })();
-      anchors.push({ repo, head, stash: stash || null, dirtyFiles: dirty });
+      anchors.push({ repo, head, stash: stash || null, dirtyFiles: dirty, beforeState: repoState(repo) });
     } catch { /* not a usable repo, skip quietly */ }
     if (anchors.length >= 5) break;
   }
@@ -130,9 +139,9 @@ export function beforeMutation(tool, args = {}, meta = {}) {
   const manifest = { id, at: nowIso(), tool, node: meta.node || null, jobId: meta.jobId || null, method: "none", entries: [], anchors: [], notes: [] };
 
   try {
-    if (tool === "fs_write" || tool === "fs_append") {
+    if (tool === "fs_write" || tool === "fs_edit" || tool === "fs_append") {
       const target = String(args.path || "");
-      const truncating = tool === "fs_write" || args.truncate === true;
+      const truncating = tool === "fs_write" || tool === "fs_edit" || args.truncate === true;
       if (!target) {
         manifest.notes.push("no path given");
       } else if (!existsSync(target)) {
@@ -181,6 +190,20 @@ export function beforeMutation(tool, args = {}, meta = {}) {
   journal({ kind: "mutation", id, tool, method: manifest.method, node: meta.node || null, target: args.path || undefined, notes: manifest.notes });
   try { prune(); } catch { /* pruning must never break a job */ }
   return manifest;
+}
+
+// Compare a shell mutation's anchored repositories after it finishes. `changed:null` is honest:
+// an opaque command outside git cannot be measured, and must never be called either progress or a
+// no-op. This signal feeds the chat supervisor; rollback still uses the original anchor data.
+export function mutationProgress(manifest) {
+  const anchors = Array.isArray(manifest && manifest.anchors) ? manifest.anchors : [];
+  if (!anchors.length) return { changed: null, changedRepos: [], measuredRepos: 0 };
+  const changedRepos = [];
+  for (const a of anchors) {
+    const after = repoState(a.repo);
+    if (!a.beforeState || !after || after !== a.beforeState) changedRepos.push(a.repo);
+  }
+  return { changed: changedRepos.length > 0, changedRepos, measuredRepos: anchors.length };
 }
 
 // ---- listing and restore -----------------------------------------------------------------------

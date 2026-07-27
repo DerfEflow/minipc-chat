@@ -27,12 +27,71 @@ export const SUP_CHECK_EVERY = 8;     // supervisor verdict cadence (rounds)
 export const SUP_HARD_CAP = 64;       // runaway insurance, not a work limit
 export const SUP_CTX_FRACTION = 0.75; // pause when the assembled prompt passes 75% of the window
 const SIG_LIMIT = 3;                  // identical tool call this many times = loop
+const NO_PROGRESS_LIMIT = 2;          // two mutation attempts on one target with no byte delta = stall
 
 const estTok = (chars) => Math.ceil(chars / 4);
 
-// Deterministic loop detector: counts exact tool-call signatures across the whole turn.
+// Detect a model looping inside ONE answer. Tool/round supervision cannot see this shape because
+// the provider is still producing a single completion. Six consecutive copies is far beyond
+// legitimate rhetorical repetition; cut at the third copy so the user gets enough context to
+// recognize what happened without receiving pages of it.
+export function textLoopEvidence(text, minRepeats = 6) {
+  const rows = [];
+  const re = /[^\r\n]+/g;
+  let m;
+  while ((m = re.exec(String(text || "")))) {
+    const normalized = m[0].trim().replace(/\s+/g, " ").toLowerCase();
+    if (normalized.length >= 16) rows.push({ normalized, at: m.index, raw: m[0].trim() });
+  }
+  let prior = "", run = 0, thirdAt = 0;
+  for (const row of rows) {
+    if (row.normalized === prior) run++;
+    else { prior = row.normalized; run = 1; thirdAt = 0; }
+    if (run === 3) thirdAt = row.at;
+    if (run >= minRepeats) return { looping: true, phrase: row.raw.slice(0, 160), repeats: run, cutAt: thirdAt || row.at };
+  }
+  return { looping: false };
+}
+
+const normalizedTarget = (name, args = {}) => {
+  if (args.path) return String(args.path).replace(/\\/g, "/").toLowerCase();
+  if (name !== "forge_run") return "";
+  const command = String(args.command || "");
+  const quoted = [...command.matchAll(/["']([^"']+\.[a-z0-9_-]{1,12})["']/ig)].map((m) => m[1]);
+  const bare = command.match(/(?:[a-z]:[\\/]|\.{0,2}[\\/])[^;\r\n|]+?\.[a-z0-9_-]{1,12}\b/i);
+  return String(quoted[0] || (bare && bare[0]) || "").trim().replace(/\\/g, "/").toLowerCase();
+};
+const isMutationAttempt = (name, args = {}) => {
+  if (name === "forge_write" || name === "forge_edit") return true;
+  if (name !== "forge_run") return false;
+  return /\b(set-content|out-file|add-content|copy-item|move-item|rename-item|remove-item|new-item|sed\s+-i|perl\s+-pi|python(?:3)?\s+-c)\b|(?:^|\s)(?:>>?|2>)\s*\S/i.test(String(args.command || ""));
+};
+
+// Exit zero is execution success, not mutation success: only the explicit change marker proves
+// that bytes moved.
+export function summarizeToolOutcome({ name = "?", args = {}, result = "", failed = false } = {}) {
+  const text = String(result || "");
+  const target = normalizedTarget(name, args);
+  const mutation = isMutationAttempt(name, args);
+  const changed = mutation
+    ? (/^(?:CHANGED:)|\nCHANGE:/m.test(text) ? true
+      : /^(?:NO CHANGE:|EDIT REFUSED)|\nNO TRACKED CHANGE:/m.test(text) || failed ? false : null)
+    : null;
+  const outcome = failed ? "failed"
+    : changed === true ? "changed bytes"
+    : changed === false ? "no byte change"
+    : "completed";
+  return {
+    summary: `${name} · ${outcome}${target ? ` · ${target}` : ""}`,
+    mutation, changed, target,
+  };
+}
+
+// Deterministic loop detector: catches both identical calls and semantically equivalent mutation
+// attempts whose arguments vary but whose target never changes.
 export function createLoopWatch() {
   const counts = new Map();
+  const stalledTargets = new Map();
   return {
     note(calls) {
       for (const c of Array.isArray(calls) ? calls : []) {
@@ -43,6 +102,22 @@ export function createLoopWatch() {
         if (n >= SIG_LIMIT) return { looping: true, sig: (fn.name || "?") + " with identical arguments" };
       }
       return { looping: false };
+    },
+    outcome(event) {
+      const evidence = summarizeToolOutcome(event);
+      if (!evidence.mutation || !evidence.target) return { looping: false, ...evidence };
+      if (evidence.changed === true) {
+        stalledTargets.delete(evidence.target);
+        return { looping: false, ...evidence };
+      }
+      if (evidence.changed !== false) return { looping: false, ...evidence };
+      const n = (stalledTargets.get(evidence.target) || 0) + 1;
+      stalledTargets.set(evidence.target, n);
+      return {
+        looping: n >= NO_PROGRESS_LIMIT,
+        sig: `${n} mutation attempts changed no bytes in ${evidence.target}`,
+        ...evidence,
+      };
     },
   };
 }
@@ -60,8 +135,10 @@ export function supervisorPrompt({ goal = "", rounds = 0, toolSummaries = [] } =
   return "You are the work supervisor for an AI agent session. Judge PROGRESS ONLY — not quality, " +
     "not correctness. The agent has run " + rounds + " work rounds toward this goal:\n\n" +
     String(goal).slice(0, 600) + "\n\nIts tool activity so far (name · outcome), most recent last:\n" +
-    trail + "\n\nIs it genuinely advancing (new files read, new actions succeeding, visible movement " +
-    "toward the goal), or is it stuck (repeating itself, failing the same way, wandering)? " +
+    trail + "\n\nOnly observable evidence counts: changed bytes, newly learned file contents, passing " +
+    "checks, or completed deliverables. A command exiting successfully without a file delta is NOT " +
+    "progress, and action volume is not progress. Is it genuinely advancing, or is it stuck " +
+    "(repeating itself, failing the same way, wandering)? " +
     'Reply with ONLY JSON: {"progressing": true|false, "reason": "<one short sentence>"}';
 }
 

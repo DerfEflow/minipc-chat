@@ -63,6 +63,34 @@ await t("node executor reads what it wrote inside the roots", async () => {
   const r = await executeJob("fs_read", { path: p });
   assert.equal(r.ok, true); assert.equal(r.text, "unit-proof");
 });
+await t("fs_write reports an identical whole-file write as no change", async () => {
+  const p = join(WORK, "identical.txt");
+  await executeJob("fs_write", { path: p, content: "same bytes\r\n" });
+  const w = await executeJob("fs_write", { path: p, content: "same bytes\r\n" });
+  assert.equal(w.ok, true);
+  assert.equal(w.changed, false);
+  assert.equal(w.beforeHash, w.afterHash);
+});
+await t("fs_edit matches LF input against a CRLF file and preserves CRLF", async () => {
+  const p = join(WORK, "crlf.md");
+  writeFileSync(p, "alpha\r\nold line\r\nomega\r\n", "utf8");
+  const e = await executeJob("fs_edit", {
+    path: p, oldText: "alpha\nold line\nomega", newText: "alpha\nnew line\nomega",
+  });
+  assert.equal(e.ok, true, JSON.stringify(e));
+  assert.equal(e.changed, true);
+  assert.equal(e.lineEnding, "CRLF");
+  assert.equal(readFileSync(p, "utf8"), "alpha\r\nnew line\r\nomega\r\n");
+});
+await t("fs_edit refuses an ambiguous replacement instead of guessing", async () => {
+  const p = join(WORK, "ambiguous.txt");
+  writeFileSync(p, "same\nsame\n", "utf8");
+  const e = await executeJob("fs_edit", { path: p, oldText: "same", newText: "new" });
+  assert.equal(e.ok, false);
+  assert.equal(e.code, "match_count");
+  assert.equal(e.matches, 2);
+  assert.equal(readFileSync(p, "utf8"), "same\nsame\n");
+});
 
 // ---- 1b. MAX ACCESS: whole machine as roots, but carve-outs still hard-block ----
 await t("max-access node still refuses D:\\ (carve-out survives max access)", async () => {

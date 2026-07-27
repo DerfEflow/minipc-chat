@@ -158,7 +158,7 @@ function chatForPush(c) {
     if (!m.attachments || !m.attachments.length) return m;
     return { ...m, attachments: m.attachments.map((a) => (a.kind === "image" && a.dataUrl ? { kind: "image_ref", name: a.name } : a)) };
   });
-  return { id: c.id, title: c.title, updatedAt: c.updatedAt || 0, lastMode: c.lastMode, messages };
+  return { id: c.id, title: c.title, updatedAt: c.updatedAt || 0, model: c.model, draft: c.draft || "", lastMode: c.lastMode, messages };
 }
 
 // Fold the server's changes into the local array. Returns what moved so the caller can decide
@@ -170,12 +170,14 @@ function mergeIncoming(incoming, deleted) {
     if (syncState.deletes.some((d) => d.id === inc.id && (d.deletedAt || 0) >= (inc.updatedAt || 0))) continue;  // deleted here, not yet pushed
     const local = chats.find((c) => c.id === inc.id);
     if (!local) {
-      chats.unshift({ id: inc.id, title: inc.title || "New chat", messages: inc.messages || [], updatedAt: inc.updatedAt || 0, lastMode: inc.lastMode });
+      chats.unshift({ id: inc.id, title: inc.title || "New chat", messages: inc.messages || [], updatedAt: inc.updatedAt || 0, model: inc.model, draft: inc.draft || "", lastMode: inc.lastMode });
       changedAny = true;
     } else if ((inc.updatedAt || 0) > (local.updatedAt || 0)) {
       local.title = inc.title || local.title;
       local.messages = inc.messages || [];
       local.updatedAt = inc.updatedAt || 0;
+      if (inc.model !== undefined) local.model = inc.model;
+      if (inc.draft !== undefined) local.draft = inc.draft;
       local.lastMode = inc.lastMode;
       changedAny = true;
       if (local.id === curId) changedCur = true;
@@ -274,6 +276,39 @@ const cur = () => chats.find((c) => c.id === curId);
 const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); const base = u ? (u.content || (Array.isArray(u.attachments) && u.attachments[0] && ("📎 " + u.attachments[0].name)) || "") : "New chat"; return String(base).replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
 const resolvePersona = () => settings.persona === "custom" ? (settings.personaCustom || "") : (PRESETS[settings.persona] || "");
 const forcedModel = () => { const v = modelSel ? modelSel.value : "local"; return (v && v !== "auto" && v !== "local") ? v : ""; };
+let draftSaveTimer = null;
+function captureChatDraft() {
+  const c = cur();
+  if (!c) return false;
+  const next = input.value || "";
+  if ((c.draft || "") === next) return false;
+  c.draft = next;
+  c.updatedAt = Date.now();
+  return true;
+}
+function persistChatDraft() {
+  clearTimeout(draftSaveTimer);
+  if (captureChatDraft()) save();
+  else save(); // switching must persist an earlier in-memory keystroke even if the text is unchanged
+}
+function restoreChatDraft() {
+  if (input.dataset.chatId === (curId || "")) return;
+  const c = cur();
+  input.value = (c && c.draft) || "";
+  input.dataset.chatId = curId || "";
+  autosize();
+}
+function restoreChatModel() {
+  if (!modelSel) return;
+  const c = cur();
+  const desired = (c && c.model) || localStorage.getItem(LS_MODEL) || "local";
+  const opt = Array.from(modelSel.options).find((o) => o.value === desired);
+  modelSel.value = opt ? desired : "local";
+  updateModelTrigger();
+  updateCloudBadge();
+  renderModelPanel();
+  updateAttachGate();
+}
 
 // ---------- chats ----------
 // Leaving a substantial chat triggers a server-side episodic summary (fire-and-forget; the server
@@ -283,7 +318,7 @@ function summarizeLeft(id) {
   if (!c || c.messages.length < 4) return;
   fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
 }
-function newChat() { const prev = curId; detachCurrentSession(); const c = { id: uid(), title: "New chat", messages: [], updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); try { fetchBudget(); } catch {} }
+function newChat() { const prev = curId; if (prev) persistChatDraft(); detachCurrentSession(); const c = { id: uid(), title: "New chat", messages: [], model: modelSel ? modelSel.value : (localStorage.getItem(LS_MODEL) || "local"), draft: "", updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); try { fetchBudget(); } catch {} }
 // Fresh-start ignition: a quick green scan-sweep over the chat surface as the rail closes.
 function igniteChatSurface() {
   const surf = document.getElementById("neural-glass") || document.body;
@@ -294,7 +329,7 @@ function igniteChatSurface() {
 // Switching chats no longer blocks on a running turn: the run keeps generating server-side and its
 // per-chat liveJobs entry persists. We tear down the on-screen streaming session (WITHOUT stopping
 // the server job), render the target chat, then reattach if IT has a live run.
-function switchChat(id) { if (id === curId) { closeSidebar(); return; } const prev = curId; detachCurrentSession(); curId = id; save(); renderAll(); scroll(true); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); try { fetchBudget(); } catch {} }
+function switchChat(id) { if (id === curId) { closeSidebar(); return; } const prev = curId; persistChatDraft(); detachCurrentSession(); curId = id; save(); renderAll(); scroll(true); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); try { fetchBudget(); } catch {} }
 function deleteChat(id) {
   // True forget: also erase the server's transcript copy + any episodic memory distilled from this
   // chat, so cross-chat retrieval can never resurrect it (fire-and-forget; nothing breaks offline).
@@ -494,13 +529,15 @@ async function convertToEval(i) {
 function renderAll() {
   wrap.querySelectorAll(".turn, .err").forEach((n) => n.remove());
   const c = cur();
+  restoreChatDraft();
+  restoreChatModel();
   empty.style.display = (c && c.messages.length) ? "none" : "";
   updateFocusMode();   // Chat Focus Mode follows the open chat: first sent message folds the chrome
   if (c) {
     let lastAi = -1; for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { lastAi = i; break; }
     c.messages.forEach((m, i) => renderMsg(m, i, i === lastAi));
   }
-  renderSidebar(); syncComposer(); scroll();
+  renderSidebar(); renderBudget(); syncComposer(); scroll();
 }
 function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px"; }
 function showErr(t) { document.querySelector(".err")?.remove(); const e = document.createElement("div"); e.className = "err"; e.textContent = t; wrap.appendChild(e); scroll(); }
@@ -515,7 +552,7 @@ function fmtPriceShort(m) { return (!m.inCost && !m.outCost) ? "Free" : `$${m.in
 let catalogGroups = [];   // live /api/models groups — the source for the custom model panel
 async function loadModels() {
   if (!modelSel) return;
-  const saved = localStorage.getItem(LS_MODEL);
+  const saved = (cur() && cur().model) || localStorage.getItem(LS_MODEL);
   const localGroup = document.getElementById("model-local-group");
   try {
     const r = await fetch("/ollama/v1/models", { cache: "no-store" });
@@ -573,9 +610,10 @@ async function loadModels() {
       applyPrivacyFilter();   // annotate/disable per current privacy mode + key availability
     }
   } catch {}
-  // Restore the saved pick if it's still a valid, enabled option; else Local.
+  // Restore this chat's pick if it exists in the live catalog. Privacy may disable it, but does
+  // not silently change it: the user must explicitly pick a different model.
   const opt = saved && Array.from(modelSel.options).find((o) => o.value === saved);
-  modelSel.value = (saved === "auto" || !opt || opt.disabled) ? "local" : saved;
+  modelSel.value = (saved === "auto" || !opt) ? "local" : saved;
   updateCloudBadge();
   updateModelTrigger();
   renderModelPanel();
@@ -1210,13 +1248,26 @@ function processEvent(st, ev) {
   } else if (ev.type === "budget") {
     // Session budget lifecycle (Fred, 2026-07-25). "state" repaints the black budget window;
     // shortfall/clamped/over raise the big blurred popup with the fully transparent message.
-    if (ev.event === "state") { budgetCur = { budget: ev.budget, spent: ev.spent, remaining: ev.remaining, unit: ev.unit, available: budgetCur && budgetCur.available }; renderBudget(); if (ev.over) openBudgetModal("This session has reached its budget. Raise it to continue exactly where you left off.", { raise: true }); }
-    else if (ev.event === "shortfall" || ev.event === "clamped") { fetchBudget(); openBudgetModal(ev.message || "Session budget adjusted.", { credits: true }); }
+    if (ev.event === "state") {
+      const old = budgetByChat[st.c.id];
+      budgetByChat[st.c.id] = { budget: ev.budget, spent: ev.spent, remaining: ev.remaining, unit: ev.unit, available: old && old.available };
+      if (st.c.id === curId) {
+        renderBudget();
+        if (ev.over) openBudgetModal("This session has reached its budget. Raise it to continue exactly where you left off.", { raise: true });
+      }
+    }
+    else if (ev.event === "shortfall" || ev.event === "clamped") {
+      fetchBudget(st.c.id);
+      if (st.c.id === curId) openBudgetModal(ev.message || "Session budget adjusted.", { credits: true });
+    }
   } else if (ev.type === "error") {
     // Gate refusals (access code / credits) carry a human message and send the user to Setup —
     // never swallow them into a generic "server error".
     st.gateCode = (ev.code === "needs_invite" || ev.code === "needs_credits") ? ev.code : "";
-    if (ev.code === "budget_exhausted") { fetchBudget(); openBudgetModal(ev.message || "This session's budget is spent.", { raise: true, credits: ev.balance !== undefined }); }
+    if (ev.code === "budget_exhausted") {
+      fetchBudget(st.c.id);
+      if (st.c.id === curId) openBudgetModal(ev.message || "This session's budget is spent.", { raise: true, credits: ev.balance !== undefined });
+    }
     st.errMsg = ev.message || (ev.code === "privacy_mode_block"
       ? "Blocked by privacy mode."
       : "Chat failed: " + (ev.error || "server error") + " — tap send to retry.");
@@ -1271,7 +1322,7 @@ function finalizeSession(st) {
     // turn was sent, so "tap send to retry" would otherwise hit an empty box and do nothing. Pull
     // the unanswered question back out of history and into the composer so retry actually works.
     const last = c.messages[c.messages.length - 1];
-    if (last && last.role === "user") { c.messages.pop(); input.value = last.content; autosize(); }
+    if (last && last.role === "user") { c.messages.pop(); input.value = last.content; c.draft = last.content; autosize(); }
   }
   // Clear this chat's live-job entry and tell the server we've merged the result (starts the
   // collected-retention clock; also the idempotency guard against a reconcile re-delivering it).
@@ -1410,6 +1461,15 @@ async function reconcileJobs() {
     let changed = false;
     for (const j of jobs) {
       if (!j.chatId) continue;
+      // One-time migration for chats created before model-per-session existed. The durable job
+      // ledger already knows which model actually ran that chat, including a paused background
+      // coding job, so recover it instead of assigning whichever model another chat last used.
+      const jobChat = chats.find((x) => x.id === j.chatId);
+      if (jobChat && !jobChat.model && j.model) {
+        jobChat.model = j.model;
+        jobChat.updatedAt = Math.max(jobChat.updatedAt || 0, Number(j.startedAt) || 0, Date.now());
+        changed = true;
+      }
       if (j.status === "running") {
         if (!liveJobs[j.chatId]) { liveJobs[j.chatId] = { jobId: j.id, eventIndex: 0 }; changed = true; }
       } else if (!j.collected) {
@@ -1456,7 +1516,7 @@ function send() {
   const text = input.value.trim(); if (!text && !pendingAtt.length) return;
   if (attachSendBlocked()) { updateAttachGate(); attachWarn.classList.remove("shake"); void attachWarn.offsetWidth; attachWarn.classList.add("shake"); return; }
   const c = cur(); if (!c) return;
-  input.value = ""; autosize(); hideCostChip();
+  input.value = ""; c.draft = ""; autosize(); hideCostChip();
   scroll(true);   // a fresh send always re-engages the follow so the reply starts in view
   const msg = { role: "user", content: text || "" };
   if (pendingAtt.length) { msg.attachments = pendingAtt; pendingAtt = []; renderAttachStrip(); }
@@ -1479,6 +1539,7 @@ function continueLast() {
 function editUser(i) {
   if (busyFor(curId)) return; const c = cur(); if (!c) return;
   input.value = c.messages[i].content;
+  c.draft = input.value;
   // Attachments come back to the staging strip with the text, so an edited resend keeps them.
   const att = c.messages[i].attachments;
   pendingAtt = Array.isArray(att) ? att.filter((a) => a.kind === "image" ? a.dataUrl : a.kind === "text") : [];
@@ -1517,24 +1578,29 @@ function saveSettingsUI() {
 // events; tapping Set edits it in place. Refusals and shortfalls open the big blurred popup with
 // the server's fully transparent message (who holds what, every number) — wording identical on
 // both sides because the server composes it once.
-let budgetCur = null;
+const budgetByChat = Object.create(null);
+const currentBudget = () => curId ? budgetByChat[curId] || null : null;
 const fmtBudget = (n, unit) => unit === "usd" ? "$" + (+n).toFixed(2) : Math.floor(n) + " credits";
 function renderBudget() {
   const box = document.getElementById("budgetbox"); if (!box) return;
+  const budgetCur = currentBudget();
   if (!budgetCur || !curId) { box.hidden = true; return; }
   box.hidden = false;
   const el = document.getElementById("bb-nums");
   if (el) el.textContent = fmtBudget(budgetCur.spent || 0, budgetCur.unit) + " of " + fmtBudget(budgetCur.budget || 0, budgetCur.unit)
     + (budgetCur.available != null ? " · " + Math.floor(budgetCur.available) + " free" : "");
 }
-async function fetchBudget() {
-  if (!curId) { budgetCur = null; renderBudget(); return; }
+async function fetchBudget(chatId = curId) {
+  if (!chatId) { renderBudget(); return; }
+  const requestedChat = chatId;
   try {
-    const d = await memApi("/budget?chat=" + encodeURIComponent(curId));
+    const d = await memApi("/budget?chat=" + encodeURIComponent(requestedChat));
     if (d && d.session) {
-      budgetCur = { budget: d.session.budget, spent: d.session.spent, remaining: d.session.remaining, unit: d.session.unit, available: d.available };
-      renderBudget();
-      if (d.shortfallMessage && d.session.created) openBudgetModal(d.shortfallMessage, { credits: true });
+      budgetByChat[requestedChat] = { budget: d.session.budget, spent: d.session.spent, remaining: d.session.remaining, unit: d.session.unit, available: d.available };
+      if (requestedChat === curId) {
+        renderBudget();
+        if (d.shortfallMessage && d.session.created) openBudgetModal(d.shortfallMessage, { credits: true });
+      }
     }
   } catch {}
 }
@@ -1550,6 +1616,7 @@ function startBudgetEdit() {
   if (!nums || !edit) return;
   nums.hidden = true; edit.hidden = false;
   const inp = document.getElementById("bb-input");
+  const budgetCur = currentBudget();
   if (inp) { inp.value = budgetCur ? String(budgetCur.unit === "usd" ? budgetCur.budget : Math.floor(budgetCur.budget)) : ""; inp.focus(); inp.select(); }
 }
 function endBudgetEdit() {
@@ -1558,13 +1625,21 @@ function endBudgetEdit() {
 }
 async function submitBudgetEdit() {
   const inp = document.getElementById("bb-input"); if (!inp || !curId) return endBudgetEdit();
+  const requestedChat = curId;
   const want = parseFloat(inp.value);
   if (!Number.isFinite(want) || want < 0) return endBudgetEdit();
-  const cur = chats.find((c) => c.id === curId);
-  const d = await memApi("/budget", { chat: curId, budget: want, title: cur ? cur.title : "" });
+  const requested = chats.find((c) => c.id === requestedChat);
+  const d = await memApi("/budget", { chat: requestedChat, budget: want, title: requested ? requested.title : "" });
   endBudgetEdit();
-  if (d && d.ok === false && d.message) { openBudgetModal(d.message, { credits: true }); fetchBudget(); return; }
-  if (d && d.ok && d.session) { budgetCur = { budget: d.session.budget, spent: d.session.spent, remaining: d.session.remaining, unit: d.session.unit, available: d.available }; renderBudget(); }
+  if (d && d.ok === false && d.message) {
+    if (requestedChat === curId) openBudgetModal(d.message, { credits: true });
+    fetchBudget(requestedChat);
+    return;
+  }
+  if (d && d.ok && d.session) {
+    budgetByChat[requestedChat] = { budget: d.session.budget, spent: d.session.spent, remaining: d.session.remaining, unit: d.session.unit, available: d.available };
+    if (requestedChat === curId) renderBudget();
+  }
 }
 function wireBudgetUi() {
   const set = document.getElementById("bb-edit"); if (set) set.addEventListener("click", startBudgetEdit);
@@ -2173,7 +2248,12 @@ function renderCostChip(est) {
 }
 
 // ---------- wire up ----------
-input.addEventListener("input", autosize);
+input.addEventListener("input", () => {
+  autosize();
+  captureChatDraft();
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(() => persistChatDraft(), 350);
+});
 input.addEventListener("input", scheduleEstimate);
 // Desktop (mouse) sends on Enter; phone/touch lets Enter insert a newline (use the send button).
 const enterSends = !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
@@ -2230,8 +2310,19 @@ function explainPrivacy(mode) {
 if (privacyModeSel) privacyModeSel.addEventListener("pointerdown", () => {
   if (!explainPrivacy._seen) { explainPrivacy._seen = true; explainPrivacy(privacyModeSel.value); }
 }, { passive: true });
-// Model pick persists immediately (matches Mode) and flips the "via OpenRouter" spend indicator live.
-if (modelSel) modelSel.addEventListener("change", () => { try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {} updateModelTrigger(); updateCloudBadge(); updateEstimate(); updateAttachGate(); modelLaser(); });
+// The pick belongs to the open chat. LS_MODEL remains only the default inherited by a NEW chat;
+// switching an existing chat restores its own model and never borrows the last chat's selection.
+if (modelSel) modelSel.addEventListener("change", () => {
+  try { localStorage.setItem(LS_MODEL, modelSel.value); } catch {}
+  const c = cur();
+  if (c && c.model !== modelSel.value) {
+    c.model = modelSel.value;
+    c.updatedAt = Date.now();
+    save();
+    renderSidebar();
+  }
+  updateModelTrigger(); updateCloudBadge(); updateEstimate(); updateAttachGate(); modelLaser();
+});
 // Selection ceremony: a green laser races the trigger's border, then the model name flares and
 // settles. Pure class choreography; the CSS lives in dominion-tenant.css.
 function modelLaser() {
@@ -2295,7 +2386,7 @@ tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.valu
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { maybeReattach(); if (Date.now() - lastReconcile > 10000) reconcileJobs(); } });
 window.addEventListener("pageshow", () => { maybeReattach(); reconcileJobs(); });
 
-load(); renderAll(); loadModels().then(renderPace, renderPace); autosize();
+load(); renderAll(); fetchBudget(); loadModels().then(renderPace, renderPace); autosize();
 renderPace();   // the saved model/mode/dial can already be a slow combination on the first paint
 maybeReattach();   // an answer may still be generating server-side from before this (re)load
 reconcileJobs();   // adopt/deliver any runs the server knows about that this device doesn't
@@ -2406,7 +2497,7 @@ async function micTap() {
       const r = await fetch("/api/voice/transcribe", { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob });
       const j = await r.json().catch(() => null);
       if (!r.ok || !j || !j.text) { showErr((j && j.error) || "Transcription failed — try again."); return; }
-      input.value = j.text; autosize();
+      input.value = j.text; captureChatDraft(); autosize();
       if (!busyFor(curId)) send();   // straight through the normal flow: picked model, tools, the works
     } finally { micBtn.classList.remove("busy"); micStatus(""); rec = null; input.placeholder = oldPlaceholder; }
   };

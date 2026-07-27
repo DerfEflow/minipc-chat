@@ -116,6 +116,46 @@ function fmtHands(r, okFmt) {
   if (!r.ok) return "Couldn't do that on the machine: " + (r.error || "unknown error");
   return okFmt(r);
 }
+
+// Compatibility path for hands/1 and hands/2 nodes while they reconnect and update. The server
+// performs the same bounded, line-ending-tolerant edit, then hands the complete result to fs_write,
+// which preserves the node's existing snapshot/rollback guarantee.
+function boundedTextEdit(source, oldText, newText, expectedMatches = 1, normalizeLineEndings = true) {
+  source = String(source ?? "");
+  oldText = String(oldText ?? "");
+  newText = String(newText ?? "");
+  if (!oldText) return { ok: false, code: "empty_match", error: "oldText must not be empty", matches: 0 };
+  const norm = (s) => normalizeLineEndings === false ? s : s.replace(/\r\n?/g, "\n");
+  const hay = norm(source), needle = norm(oldText);
+  const indexes = [];
+  for (let at = 0; (at = hay.indexOf(needle, at)) >= 0; at += Math.max(needle.length, 1)) indexes.push(at);
+  const expected = Math.max(1, Math.min(Number(expectedMatches) || 1, 1000));
+  if (indexes.length !== expected) return {
+    ok: false, code: indexes.length ? "match_count" : "no_match", matches: indexes.length, expectedMatches: expected,
+    error: indexes.length ? `expected ${expected} match(es), found ${indexes.length}; edit refused as ambiguous`
+      : "expected text was not found, even after line-ending normalization; reread the exact lines",
+  };
+  const eol = /\r\n/.test(source) ? "\r\n" : /\r/.test(source) ? "\r" : "\n";
+  const replacement = normalizeLineEndings === false ? newText : norm(newText).replace(/\n/g, eol);
+  // Map normalized character offsets back to the untouched original so surrounding bytes and line
+  // endings are preserved. Each CRLF pair contributes one normalized character.
+  const offsets = [0];
+  if (normalizeLineEndings !== false) {
+    for (let i = 0; i < source.length;) {
+      if (source[i] === "\r" && source[i + 1] === "\n") i += 2;
+      else i++;
+      offsets.push(i);
+    }
+  } else {
+    for (let i = 1; i <= source.length; i++) offsets.push(i);
+  }
+  let content = source;
+  for (let i = indexes.length - 1; i >= 0; i--) {
+    const start = offsets[indexes[i]], end = offsets[indexes[i] + needle.length];
+    content = content.slice(0, start) + replacement + content.slice(end);
+  }
+  return { ok: true, content, changed: content !== source, matches: indexes.length, lineEnding: eol === "\r\n" ? "CRLF" : eol === "\r" ? "CR" : "LF" };
+}
 // Render a list of relative paths as an ASCII file tree (dirs before files, alphabetical) — the way
 // Claude Code shows a scaffold. Used by scaffold_project's report.
 function renderTree(root, relPaths) {
@@ -325,7 +365,8 @@ export const TOOLS = [
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_set_next_proof", description: "Set a project's Next Proof — the single riskiest thing it must prove next.", parameters: { type: "object", properties: { project_id: { type: "string" }, proof: { type: "string" } }, required: ["project_id", "proof"] } } } },
   { category: "system", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "deck_create_project", description: "Create a new Command Deck project. discipline: Apps|Writing|Business|Product Development|Saints Dominion. status: Idea|Building|Live|Paused|Done.", parameters: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, discipline: { type: "string" }, status: { type: "string" }, priority: { type: "string" } }, required: ["name"] } } } },
   { category: "file", permissionClass: "read_only", logsInputs: true, def: { type: "function", function: { name: "forge_read", description: "Read files on the connected machine (READ-ONLY). op: 'read' a file, 'list' a folder, 'tree' a folder tree, 'grep' (search hint). Large files return in pages: each page says exactly which characters it shows and the offset to pass for the next page, so ANY size file can be read fully by calling again with offset. Reaches the machine through its Dominion hands node; the node enforces allowed folders + carve-outs.", parameters: { type: "object", properties: { op: { type: "string", enum: ["read", "list", "tree", "grep"] }, path: { type: "string" }, query: { type: "string" }, offset: { type: "integer", description: "op:read only. Character position to start from; use the offset the previous page told you. Default 0." }, limit: { type: "integer", description: "op:read only. Max characters per page, 1000 to 48000. Default 16000." }, depth: { type: "integer", description: "op:tree only. Folder depth 1 to 6. Default 3." } }, required: ["op"] } } } },
-  { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_write", description: "Write (create or overwrite) a file on the connected machine, in a folder the machine allows. Reaches it through the Dominion hands node (carve-outs + allowed-folders enforced). Use for real file changes as you build.", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path on that machine." }, content: { type: "string" } }, required: ["path", "content"] } } } },
+  { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_write", description: "Create or overwrite a COMPLETE file on the connected machine. Reports whether bytes actually changed and takes a rollback snapshot first. Prefer forge_edit for a bounded change to an existing text file; use forge_write when creating a file or when you have read and can safely supply the whole corrected file.", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path on that machine." }, content: { type: "string" } }, required: ["path", "content"] } } } },
+  { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_edit", description: "Atomically replace exact text in an existing file, with rollback and proof of change. This is the DEFAULT for small or surgical edits. Matching is CRLF/LF tolerant by default while preserving the file's existing line endings and encoding. The edit refuses missing or ambiguous matches instead of silently succeeding. After a refusal, reread the exact lines; do not repeat the same guessed replacement through forge_run.", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path on the connected machine." }, oldText: { type: "string", description: "Exact current text to replace. Include enough surrounding text to make it unique." }, newText: { type: "string", description: "Replacement text." }, expectedMatches: { type: "integer", description: "Required number of matches. Default 1; the edit refuses any other count." }, normalizeLineEndings: { type: "boolean", description: "Treat CRLF, LF, and CR as equivalent while matching. Default true." } }, required: ["path", "oldText", "newText"] } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "forge_run", description: "Run a shell command on the connected machine and return its output (PowerShell on Windows, sh on Linux). Reaches it through the Dominion hands node; the node enforces carve-outs and refuses destructive commands against protected dirs. Use to build, test, and inspect as you work.", parameters: { type: "object", properties: { command: { type: "string" }, timeoutMs: { type: "number", description: "Optional, default 60000, max 600000." } }, required: ["command"] } } } },
   { category: "code", permissionClass: "requires_confirmation", logsInputs: true, def: { type: "function", function: { name: "forge_rollback", description: "Undo a change you made on the machine. Call with no id to LIST recent snapshots (every forge_write and forge_run takes one automatically), then call again with an id to restore it. File overwrites restore exactly; files you created are deleted; a shell command that touched a git repo returns the exact git commands to revert it. Use this the moment you realize a change was wrong, instead of asking Fred to fix it.", parameters: { type: "object", properties: { id: { type: "string", description: "Snapshot id from the list. Omit to list." }, limit: { type: "number", description: "How many recent snapshots to list, default 15." } } } } } },
   { category: "code", permissionClass: "dangerous", logsInputs: true, def: { type: "function", function: { name: "scaffold_project", description: "Create a whole project/app as a file TREE on the connected machine in one call. Give `root` (an absolute base folder on that machine) and `files` (each { path relative to root, content }). Creates all folders and files, then returns the rendered tree. Use this when the user asks you to build an app or project — lay out the full structure at once. Reaches the machine through its Dominion hands node (allowed folders + carve-outs enforced per file).", parameters: { type: "object", properties: { root: { type: "string", description: "Absolute base folder on the machine, e.g. C:/Users/Fred/projects/my-app." }, files: { type: "array", description: "Files to create.", items: { type: "object", properties: { path: { type: "string", description: "Path relative to root (e.g. src/index.js). Absolute paths allowed but discouraged." }, content: { type: "string" } }, required: ["path", "content"] } } }, required: ["root", "files"] } } } },
@@ -448,7 +489,7 @@ const PROTECTED_RE = [
   /\bdb[-_ ]?backups?\b/i,
   /pg_dump|pg_restore/i,         // dumping/restoring a (prod) DB
 ];
-const REACHES_OUT = new Set(["forge_read", "forge_write", "forge_run", "forge_rollback", "scaffold_project", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox",
+const REACHES_OUT = new Set(["forge_read", "forge_write", "forge_edit", "forge_run", "forge_rollback", "scaffold_project", "forge_send", "sandbox_write", "sandbox_read", "sandbox_list", "sandbox_append", "run_python_sandbox",
   "browser_control", "desktop_control"]);
 export function assertNotProtected(name, args) {
   if (!REACHES_OUT.has(name)) return { ok: true };
@@ -604,14 +645,47 @@ export async function runTool(name, args, ctx, signal = null) {
         return await forgeRead(ctx, args.op, args.path || "", args.query || "", signal, { offset: args.offset, limit: args.limit });
       case "forge_write": {
         if (!ctx.hands) return "Writing to a machine needs a connected Dominion hands node. Start it on the computer you want to reach.";
-        return fmtHands(await ctx.hands.dispatch("fs_write", { path: args.path, content: args.content ?? "" }), (r) => `Wrote ${r.bytes} bytes to ${r.path} on ${r.node || "the machine"}.${r.snapshot ? ` Snapshot ${r.snapshot} taken first, so forge_rollback can undo this.` : ""}`);
+        return fmtHands(await ctx.hands.dispatch("fs_write", { path: args.path, content: args.content ?? "" }), (r) =>
+          r.changed === false
+            ? `NO CHANGE: ${r.path} already contains those exact bytes (${r.bytes} bytes). Do not repeat this write.`
+            : `CHANGED: wrote ${r.bytes} bytes to ${r.path} on ${r.node || "the machine"}.${r.beforeHash && r.afterHash ? ` Hash ${r.beforeHash.slice(0, 12)} -> ${r.afterHash.slice(0, 12)}.` : ""}${r.snapshot ? ` Snapshot ${r.snapshot} taken first, so forge_rollback can undo this.` : ""}`);
+      }
+      case "forge_edit": {
+        if (!ctx.hands) return "Editing a machine file needs a connected Dominion hands node. Start it on the computer you want to reach.";
+        let r = await ctx.hands.dispatch("fs_edit", { path: args.path, oldText: args.oldText, newText: args.newText,
+          expectedMatches: args.expectedMatches, normalizeLineEndings: args.normalizeLineEndings });
+        if (r && !r.ok && /unknown tool:\s*fs_edit/i.test(String(r.error || ""))) {
+          const current = await ctx.hands.dispatch("fs_read", { path: args.path, maxBytes: 20_000_000 });
+          if (!current || !current.ok) return "EDIT REFUSED (read_failed): " + ((current && current.error) || "could not read the current file") + ".";
+          const edit = boundedTextEdit(current.text, args.oldText, args.newText, args.expectedMatches, args.normalizeLineEndings);
+          if (!edit.ok) {
+            return `EDIT REFUSED (${edit.code}): ${edit.error}. Matches: ${edit.matches}; expected: ${edit.expectedMatches || Number(args.expectedMatches) || 1}. Reread the exact lines and change method; do not repeat the same replacement.`;
+          }
+          if (!edit.changed) return `NO CHANGE: the requested edit produced identical bytes in ${args.path}. Do not repeat it.`;
+          r = await ctx.hands.dispatch("fs_write", { path: args.path, content: edit.content });
+          if (r && r.ok) r = { ...r, changed: r.changed !== false, replacements: edit.matches, lineEnding: edit.lineEnding };
+        }
+        if (r && !r.ok && !r.refused && !r.offline) {
+          return `EDIT REFUSED (${r.code || "failed"}): ${r.error || "the requested text could not be replaced"}. Matches: ${Number(r.matches) || 0}; expected: ${Number(r.expectedMatches) || Number(args.expectedMatches) || 1}. Reread the exact lines and change method; do not repeat the same replacement.`;
+        }
+        return fmtHands(r, (x) =>
+          x.changed === false
+            ? `NO CHANGE: the requested edit produced identical bytes in ${x.path}. Do not repeat it.`
+            : `CHANGED: replaced ${x.replacements} match(es) in ${x.path}; preserved ${x.lineEnding || "existing"} line endings.${x.beforeHash && x.afterHash ? ` Hash ${x.beforeHash.slice(0, 12)} -> ${x.afterHash.slice(0, 12)}.` : ""}${x.snapshot ? ` Snapshot ${x.snapshot} taken first, so forge_rollback can undo this.` : ""}`);
       }
       case "scaffold_project":
         return await scaffoldProject(ctx, args);
       case "forge_run": {
         if (!ctx.hands) return "Running commands on a machine needs a connected Dominion hands node. Start it on the computer you want to reach.";
         const r = await ctx.hands.dispatch("shell_run", { command: args.command, timeoutMs: args.timeoutMs });
-        return fmtHands(r, (x) => `exit ${x.code}${x.snapshot && x.snapshotMethod === "git-anchor" ? ` (repo anchored, snapshot ${x.snapshot})` : ""}${x.stdout ? "\n" + x.stdout.slice(0, 7000) : ""}${x.stderr ? "\nstderr:\n" + x.stderr.slice(0, 2000) : ""}`);
+        if (!r) return "No response from the machine.";
+        if (r.refused) return "Refused (carve-out): " + (r.reason || "protected resource — never touched.");
+        if (r.offline) return r.error || "That machine is offline. Start its Dominion hands node, then retry.";
+        if (r.code == null) return "Couldn't run that on the machine: " + (r.error || "unknown error");
+        const change = r.changed === true ? `\nCHANGE: ${r.changedRepos && r.changedRepos.length ? r.changedRepos.length + " tracked repo(s) changed." : "tracked files changed."}`
+          : r.changed === false ? "\nNO TRACKED CHANGE: the command ran but left every measured repository byte-for-byte equivalent. For an intended edit, switch to forge_edit or reread the exact text; do not repeat shell replacements."
+          : "\nCHANGE UNKNOWN: the command did not expose a measurable repository delta.";
+        return `exit ${r.code}${r.snapshot && r.snapshotMethod === "git-anchor" ? ` (repo anchored, snapshot ${r.snapshot})` : ""}${change}${r.stdout ? "\n" + r.stdout.slice(0, 7000) : ""}${r.stderr ? "\nstderr:\n" + r.stderr.slice(0, 2000) : ""}`;
       }
       case "forge_rollback": {
         // Undo. Fred's standing rule is that nothing changes without a rollback path, so the models

@@ -36,8 +36,8 @@ import { resolve, join, sep, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
-import { initSnapshots, beforeMutation, listSnapshots, restoreSnapshot, journal } from "./snapshot.mjs";
+import { randomUUID, createHash } from "node:crypto";
+import { initSnapshots, beforeMutation, mutationProgress, listSnapshots, restoreSnapshot, journal } from "./snapshot.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const IS_WIN = process.platform === "win32";
@@ -45,7 +45,7 @@ const IS_WIN = process.platform === "win32";
 const HANDS_URL = String(process.env.HANDS_URL || "").replace(/\/$/, "");
 const HANDS_TOKEN = process.env.HANDS_TOKEN || "";
 const NODE_NAME = (process.env.HANDS_NODE || hostname() || "unnamed").toLowerCase();
-const VERSION = "hands/2";   // hands/2: preview_fetch (the Crucible's live-preview relay)
+const VERSION = "hands/3";   // hands/3: byte-aware writes, CRLF-safe fs_edit, mutation progress
 // Optional Cloudflare Access service token — when the orchestrator sits behind Access, the node
 // presents these so its dial-out passes the Access layer; HANDS_TOKEN still authorizes at the app.
 const CF_ID = process.env.HANDS_CF_CLIENT_ID || "";
@@ -133,6 +133,36 @@ initSnapshots({ dir: SNAP_DIR });
 function ensureDir(p) {
   const dir = dirname(resolve(String(p || "")));
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+}
+
+const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+function normalizedTextMap(text) {
+  let normalized = "";
+  const offsets = [];
+  for (let i = 0; i < text.length;) {
+    offsets.push(i);
+    if (text[i] === "\r") {
+      if (text[i + 1] === "\n") i++;
+      normalized += "\n";
+      i++;
+    } else {
+      normalized += text[i++];
+    }
+  }
+  offsets.push(text.length);
+  return { normalized, offsets };
+}
+function allIndexes(text, needle) {
+  const out = [];
+  if (!needle) return out;
+  for (let at = 0; (at = text.indexOf(needle, at)) !== -1; at += Math.max(needle.length, 1)) out.push(at);
+  return out;
+}
+function dominantEol(text) {
+  const crlf = (text.match(/\r\n/g) || []).length;
+  const lf = (text.match(/(?<!\r)\n/g) || []).length;
+  const cr = (text.match(/\r(?!\n)/g) || []).length;
+  return crlf >= lf && crlf >= cr && crlf ? "\r\n" : cr > lf && cr ? "\r" : "\n";
 }
 
 function norm(p) { const r = resolve(String(p || "")); return IS_WIN ? r.toLowerCase() : r; }
@@ -303,10 +333,61 @@ export async function executeJob(tool, args = {}, meta = {}) {
         const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
         if (underAny(args.path, SELF_PROTECT)) return refuse("write under a self-protected dir (the live app / this node) — the box is the mission's fallback");
         const buf = args.base64 ? Buffer.from(String(args.content || ""), "base64") : Buffer.from(String(args.content ?? ""), "utf8");
+        let before = null;
+        try { if (existsSync(args.path)) before = readFileSync(args.path); } catch {}
+        const beforeHash = before ? sha256(before) : null;
+        const afterHash = sha256(buf);
+        if (before && before.equals(buf)) {
+          return { ok: true, path: args.path, bytes: buf.length, changed: false, beforeHash, afterHash,
+                   reason: "the requested content already matches the file; zero bytes changed" };
+        }
         const snap = beforeMutation("fs_write", args, { node: NODE_NAME });
         ensureDir(args.path);
         writeFileSync(args.path, buf);
-        return { ok: true, path: args.path, bytes: buf.length, snapshot: snap.id, snapshotMethod: snap.method };
+        return { ok: true, path: args.path, bytes: buf.length, changed: true, beforeHash, afterHash,
+                 snapshot: snap.id, snapshotMethod: snap.method };
+      }
+      case "fs_edit": {
+        const w = withinRoots(args.path); if (!w.ok) return refuse(w.reason);
+        if (underAny(args.path, SELF_PROTECT)) return refuse("edit under a self-protected dir (the live app / this node)");
+        if (!existsSync(args.path)) return { ok: false, error: "not found: " + args.path, code: "not_found", changed: false };
+        const before = readFileSync(args.path);
+        const hadBom = before.length >= 3 && before[0] === 0xef && before[1] === 0xbb && before[2] === 0xbf;
+        const source = before.subarray(hadBom ? 3 : 0).toString("utf8");
+        const oldText = String(args.oldText ?? "");
+        const newText = String(args.newText ?? "");
+        if (!oldText) return { ok: false, error: "oldText must not be empty", code: "empty_match", changed: false };
+        const expected = Math.max(1, Math.min(Number(args.expectedMatches) || 1, 1000));
+        const tolerant = args.normalizeLineEndings !== false;
+        const mapped = tolerant ? normalizedTextMap(source) : { normalized: source, offsets: Array.from({ length: source.length + 1 }, (_, i) => i) };
+        const needle = tolerant ? normalizedTextMap(oldText).normalized : oldText;
+        const matches = allIndexes(mapped.normalized, needle);
+        if (matches.length !== expected) {
+          return { ok: false, error: matches.length
+            ? `expected ${expected} match(es), found ${matches.length}; edit refused as ambiguous`
+            : "expected text was not found, even after line-ending normalization; reread the exact lines",
+            code: matches.length ? "match_count" : "no_match", changed: false, matches: matches.length, expectedMatches: expected };
+        }
+        const eol = dominantEol(source);
+        const replacement = tolerant ? normalizedTextMap(newText).normalized.replace(/\n/g, eol) : newText;
+        let next = source;
+        for (let i = matches.length - 1; i >= 0; i--) {
+          const start = mapped.offsets[matches[i]];
+          const end = mapped.offsets[matches[i] + needle.length];
+          next = next.slice(0, start) + replacement + next.slice(end);
+        }
+        const prefix = hadBom ? Buffer.from([0xef, 0xbb, 0xbf]) : Buffer.alloc(0);
+        const after = Buffer.concat([prefix, Buffer.from(next, "utf8")]);
+        const beforeHash = sha256(before), afterHash = sha256(after);
+        if (before.equals(after)) {
+          return { ok: true, path: args.path, bytes: before.length, changed: false, replacements: matches.length,
+                   beforeHash, afterHash, reason: "the replacement produces identical bytes; zero bytes changed" };
+        }
+        const snap = beforeMutation("fs_edit", args, { node: NODE_NAME });
+        writeFileSync(args.path, after);
+        return { ok: true, path: args.path, bytes: after.length, changed: true, replacements: matches.length,
+                 beforeHash, afterHash, lineEnding: eol === "\r\n" ? "CRLF" : eol === "\r" ? "CR" : "LF",
+                 snapshot: snap.id, snapshotMethod: snap.method };
       }
       case "fs_append": {
         // Chunked transfer: append a base64 chunk to a file. truncate:true starts a fresh file
@@ -357,7 +438,10 @@ export async function executeJob(tool, args = {}, meta = {}) {
         // a repo gets a real rollback point, anything else gets a journal line and nothing more.
         const snap = beforeMutation("shell_run", args, { node: NODE_NAME, jobId: meta.jobId });
         const out = await runShell(cmdText, args.timeoutMs, meta.jobId);
-        return { ...out, snapshot: snap.id, snapshotMethod: snap.method, snapshotAnchors: (snap.anchors || []).length || undefined };
+        const progress = mutationProgress(snap);
+        return { ...out, changed: progress.changed, changedRepos: progress.changedRepos,
+                 measuredRepos: progress.measuredRepos, snapshot: snap.id, snapshotMethod: snap.method,
+                 snapshotAnchors: (snap.anchors || []).length || undefined };
       }
 
       // ---- reversibility surface: inspect and undo what this node changed --------------------

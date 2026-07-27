@@ -109,7 +109,20 @@ const ok = (name) => { console.log("  PASS  " + name); passed++; };
   ok("retention prunes by age and spares fresh snapshots");
 }
 
-// 8. path extraction heuristic behaves on the shapes models actually emit
+// 8. a bounded edit is snapshotted and restores the original exact bytes
+{
+  const f = join(root, "bounded-edit.txt");
+  writeFileSync(f, "before\r\n");
+  const snap = beforeMutation("fs_edit", { path: f, oldText: "before", newText: "after" }, { node: "test" });
+  assert.equal(snap.method, "file-copy");
+  writeFileSync(f, "after\r\n");
+  const r = restoreSnapshot(snap.id);
+  assert.equal(r.ok, true);
+  assert.equal(readFileSync(f, "utf8"), "before\r\n");
+  ok("bounded edit restores the original exact bytes");
+}
+
+// 9. path extraction heuristic behaves on the shapes models actually emit
 {
   assert.ok(extractPaths("cd C:\\work\\proj && npm test").some((p) => /work/i.test(p)));
   assert.ok(extractPaths("Set-Location 'C:/a/b'; ls").length > 0);
@@ -118,4 +131,4 @@ const ok = (name) => { console.log("  PASS  " + name); passed++; };
 }
 
 rmSync(root, { recursive: true, force: true });
-console.log(`\n${passed}/8 checks passed - snapshot spine verified`);
+console.log(`\n${passed}/9 checks passed - snapshot spine verified`);
