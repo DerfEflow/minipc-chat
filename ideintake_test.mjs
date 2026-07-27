@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import { intakeSystem, reviewSystem, stuckSystem, advisorSystem, parseIntake, intakeMessages,
          planchatMessages, sanitizeContent, hasImages,
-         VISION_MARKER, CHANGE_MARKER, FORWARDED_MARK } from "./ideintake.mjs";
+         VISION_MARKER, CHANGE_MARKER, FORWARDED_MARK, ADOPTION_CONTEXT_CHARS } from "./ideintake.mjs";
 
 let passed = 0, failed = 0;
 function t(name, fn) {
@@ -132,6 +132,25 @@ await t("history is sanitized: roles clamped, sizes capped, and the system promp
   assert.equal(msgs[3].content.length, 4000, "content capped at 4000 chars");
   const cap = intakeMessages({ history: Array.from({ length: 100 }, (_, i) => ({ role: "user", content: "m" + i })) });
   assert.equal(cap.length, 41, "history capped at the last 40 turns");
+});
+
+await t("an adoption report survives the 4000-char history clamp as bounded reference evidence", () => {
+  const report = "R".repeat(ADOPTION_CONTEXT_CHARS + 4000);
+  const intake = intakeMessages({ adopt: true, adoptionContext: report,
+    history: [{ role: "assistant", content: report }] });
+  assert.equal(intake[1].role, "user");
+  assert.match(intake[1].content, /^ADOPTION REPORT \(reference evidence/);
+  assert.ok(intake[1].content.endsWith("R".repeat(ADOPTION_CONTEXT_CHARS)));
+  assert.equal(intake[2].content.length, 4000, "ordinary transcript history remains safely clamped");
+
+  const plan = planchatMessages({ window: "second", adopt: true, adoptionContext: report,
+    history: [{ from: "user", content: "audit it" }] });
+  assert.match(plan[1].content, /^ADOPTION REPORT \(reference evidence/);
+  assert.equal(plan[2].content, "audit it");
+
+  const review = intakeMessages({ phase: "review", adoptionContext: report,
+    history: [{ role: "user", content: "change this" }] });
+  assert.equal(review.length, 2, "post-build review does not inherit stale adoption evidence");
 });
 
 /* ---------- Fred's beginner rules, 2026-07-24 ---------------------------------------------- */

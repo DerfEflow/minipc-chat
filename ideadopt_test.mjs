@@ -10,9 +10,9 @@
  */
 import assert from "node:assert/strict";
 import {
-  createAdoptScanner, composeBrief,
+  createAdoptScanner, composeBrief, analysisPrompt,
   ADOPT_MAX_DIRS, ADOPT_MAX_FILES, ADOPT_MAX_READ_BYTES, ADOPT_MAX_TOTAL_BYTES, ADOPT_BRIEF_CHARS,
-  ADOPT_WALK_PARALLEL,
+  ADOPT_WALK_PARALLEL, ADOPT_MAX_SAMPLES,
 } from "./ideadopt.mjs";
 
 let passed = 0, failed = 0;
@@ -37,7 +37,7 @@ function fakeHands(tree, { failOnCall = 0, refusePaths = [] } = {}) {
     return cur;
   };
   const hands = async (tool, args) => {
-    calls.push({ tool, path: args.path });
+    calls.push({ tool, ...args });
     if (failOnCall && calls.length >= failOnCall) throw new Error("socket hung up");
     if (refusePaths.some((p) => args.path === p)) return { ok: false, refused: true, reason: "outside this node's allowed folders" };
     const node = nodeAt(args.path);
@@ -50,8 +50,13 @@ function fakeHands(tree, { failOnCall = 0, refusePaths = [] } = {}) {
     }
     if (tool === "fs_read") {
       if (typeof node !== "string") return { ok: false, error: "not found: " + args.path };
-      if (node.length > (args.maxBytes || Infinity)) return { ok: false, error: "file too big" };
-      return { ok: true, path: args.path, bytes: node.length, text: node };
+      const max = args.maxBytes || Infinity;
+      if (node.length > max && !args.partial && args.offset == null) return { ok: false, error: "file too big" };
+      const offset = Math.max(0, Number(args.offset) || 0);
+      const text = (args.partial || args.offset != null) ? node.slice(offset, offset + max) : node;
+      return { ok: true, path: args.path, bytes: text.length, offset,
+        nextOffset: offset + text.length, totalBytes: node.length,
+        eof: offset + text.length >= node.length, text };
     }
     return { ok: false, error: "unknown tool " + tool };
   };
@@ -91,6 +96,7 @@ await t("happy path: a half-finished Express app is inventoried truthfully", asy
   assert.ok(f.todos.count >= 2, "TODO + FIXME counted, got " + f.todos.count);
   assert.ok(f.stubs.some((s) => s.path === "src/stub.js"), "empty file surfaced as a stub");
   assert.ok(f.entries.some((e) => e.path === "server.js"), "entry point read");
+  assert.ok(r.samples.some((s) => s.path === "README.md"), "README content is retained");
 });
 
 await t("W1: junk dirs are never walked and never read", async () => {
@@ -220,12 +226,60 @@ await t("python app: requirements.txt names Flask", async () => {
   assert.ok(r.facts.frameworks.includes("Flask"), JSON.stringify(r.facts.frameworks));
 });
 
-await t("W3: the brief admits it read files without running them, and invites the plan", async () => {
+await t("large entry points are range-read instead of silently excluded", async () => {
+  const large = "export const architecture = 'core';\n" + "x".repeat(ADOPT_MAX_READ_BYTES * 2);
+  const hands = fakeHands({
+    "package.json": JSON.stringify({ main: "server.mjs", scripts: { start: "node server.mjs" } }),
+    "server.mjs": large,
+  });
+  const r = await createAdoptScanner({ hands }).scan("ROOT");
+  assert.ok(r.facts.entries.some((e) => e.path === "server.mjs" && e.bytes > ADOPT_MAX_READ_BYTES));
+  assert.ok(r.samples.some((s) => s.path === "server.mjs" && s.text.includes("architecture")));
+  const read = hands.calls.find((c) => c.tool === "fs_read" && c.path === "ROOT/server.mjs");
+  assert.equal(read.partial, true);
+  assert.equal(read.offset, 0);
+});
+
+await t("snapshot and dev-data trees are excluded from the walk", async () => {
+  const hands = fakeHands({
+    "server.mjs": "export const live = true;",
+    ".snapshots": { "old.js": "TODO fake" },
+    ".devdata-owner": { "copy.js": "TODO fake" },
+  });
+  const r = await createAdoptScanner({ hands }).scan("ROOT");
+  assert.equal(r.facts.todos.count, 0);
+  assert.ok(hands.calls.every((c) => !/\.snapshots|\.devdata-owner/.test(c.path)));
+});
+
+await t("architecture ranking beats a swarm of tiny tests and fixtures", async () => {
+  const tests = {};
+  for (let i = 0; i < ADOPT_MAX_SAMPLES + 20; i++) tests["tiny_" + i + "_test.js"] = "// TODO fixture\n";
+  const hands = fakeHands({
+    "package.json": JSON.stringify({ scripts: { start: "node server.mjs" } }),
+    "server.mjs": "import './src/services/billing.js';",
+    src: { services: { "billing.js": "export function charge() { return 'real architecture'; }\n" } },
+    tests,
+  });
+  const r = await createAdoptScanner({ hands }).scan("ROOT");
+  assert.ok(r.samples.some((s) => s.path === "src/services/billing.js"), "core service must survive ranking");
+  assert.equal(r.facts.todos.count, 0, "fixture TODOs are not product debt");
+});
+
+await t("deep analysis must finish with a production roadmap, not another question", () => {
+  const prompt = analysisPrompt({ name: "Half App", facts: { counts: {}, entries: [] },
+    samples: [{ path: "server.js", text: "app.listen(3000)" }] });
+  assert.match(prompt, /7\. PRODUCTION ROADMAP/);
+  assert.match(prompt, /Do not ask what to do next/);
+  assert.doesNotMatch(prompt, /END by asking|where to go from here/);
+});
+
+await t("W3: the brief admits it read files without running them and hands off to the full report", async () => {
   const hands = fakeHands(NODE_APP);
   const r = await createAdoptScanner({ hands }).scan("ROOT");
   const brief = composeBrief(r.facts, { name: "Half App" });
   assert.match(brief, /reading the files, not from running/);
-  assert.match(brief, /What should it become\?/);
+  assert.match(brief, /detailed analysis and production roadmap follow/);
+  assert.doesNotMatch(brief, /\?/);
   assert.match(brief, /Half-built:/);
   assert.match(brief, /Missing:/);
 });
@@ -257,6 +311,11 @@ import { readFileSync } from "node:fs";
 import { intakeSystem, intakeMessages, planchatMessages, adoptVoice } from "./ideintake.mjs";
 
 const server = readFileSync(new URL("./server.mjs", import.meta.url), "utf8");
+const vibeClient = readFileSync(new URL("./public/dominion-vibe.js", import.meta.url), "utf8");
+const engineerClient = readFileSync(new URL("./public/dominion-ide.js", import.meta.url), "utf8");
+const vibeCss = readFileSync(new URL("./public/dominion-vibe.css", import.meta.url), "utf8");
+const ideJobsSource = readFileSync(new URL("./ide.mjs", import.meta.url), "utf8");
+const handsSource = readFileSync(new URL("./hands/hands.mjs", import.meta.url), "utf8");
 
 await t("W4 source: server.mjs wires /ide/adopt behind the wall, the invite check, and the beginner refusal", () => {
   assert.match(server, /import\s*\{[^}]*createAdoptScanner[^}]*\}\s*from\s*["']\.\/ideadopt\.mjs["']/,
@@ -276,6 +335,35 @@ await t("source: the heavy rate tier covers adopt (a scan spends dozens of hands
 await t("source: both conversation doors forward the adopt flag to the message builders", () => {
   assert.match(server, /intakeMessages\(\{[^}]*adopt: !!body\.adopt/, "/ide/intake forwards adopt");
   assert.match(server, /planchatMessages\(\{[^}]*adopt: !!body\.adopt/, "/ide/planchat forwards adopt");
+  assert.match(server, /intakeMessages\(\{[^}]*adoptionContext: body\.adoptionContext/, "/ide/intake forwards the report");
+  assert.match(server, /planchatMessages\(\{[^}]*adoptionContext: body\.adoptionContext/, "/ide/planchat forwards the report");
+});
+
+await t("source: both clients retain the deep analysis and resend the adoption report", () => {
+  assert.match(vibeClient, /j\.brief[\s\S]{0,180}j\.analysis/);
+  assert.match(vibeClient, /adoptionContext: state\.adopt \? state\.adopt\.brief/);
+  assert.match(vibeClient, /adoptionWorkspaceId: state\.adopt \? state\.adopt\.workspaceId/);
+  assert.match(engineerClient, /j\.brief[\s\S]{0,180}j\.analysis/);
+  assert.match(engineerClient, /adoptionContext: intake\.adoptionContext/);
+  assert.match(engineerClient, /withAdoptionReport/);
+});
+
+await t("source: Vibe hidden panels stay hidden and adopted jobs retain the roadmap", () => {
+  assert.match(vibeCss, /\.vb-shell \[hidden\]\s*\{\s*display:\s*none\s*!important/);
+  assert.match(ideJobsSource, /\.slice\(0,\s*40000\)/);
+  assert.match(handsSource, /args\.partial === true \|\| args\.offset != null/);
+});
+
+await t("source: adoption and later planning turns have bounded live read-only workspace tools", () => {
+  assert.match(server, /const IDE_WORKSPACE_READ_TOOLS =/);
+  assert.match(server, /name: "workspace_list"/);
+  assert.match(server, /name: "workspace_read"/);
+  assert.match(server, /new Set\(\["web_search", "web_read"\]\)/);
+  assert.match(server, /parts\.some\(\(p\) => p === "\.\."\)/, "traversal must be refused before hands dispatch");
+  assert.match(server, /ideChatWithWorkspaceTools\(aModel[\s\S]{0,900}forceInspection: true/);
+  assert.match(server, /const adoptedWorkspace = body\.adopt[\s\S]{0,500}ideChatWithWorkspaceTools/);
+  const defs = server.slice(server.indexOf("const IDE_WORKSPACE_READ_TOOLS ="), server.indexOf("function ideWorkspaceRelative"));
+  assert.doesNotMatch(defs, /write|shell|exec/i, "the adoption tool set must stay read-only");
 });
 
 await t("the adopt voice reaches the interviewer and the Main plan window only", () => {

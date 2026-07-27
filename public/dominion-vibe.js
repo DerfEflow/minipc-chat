@@ -626,7 +626,7 @@
         return;
       }
       // The full opening = structural brief + the model's deep analysis (what it does, state,
-      // dependencies, features, left-to-build, gaps, and the where-do-we-go question). A failed
+      // dependencies, features, left-to-build, gaps, and the production roadmap). A failed
       // deep read degrades honestly: the brief lands with the stated reason, never silence.
       const opening = j.brief
         + (j.analysis ? "\n\n" + j.analysis : "")
@@ -764,7 +764,8 @@
     try {
       const r = await fetch("/ide/planchat", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ window: w, model: c.model || "", messages: c.messages, register: reg(), mode: "vibe", device: device(),
-          adopt: !!state.adopt }) });
+          adopt: !!state.adopt, adoptionContext: state.adopt ? state.adopt.brief : "",
+          adoptionWorkspaceId: state.adopt ? state.adopt.workspaceId : "" }) });
       j = await r.json();
     } catch { j = { error: "The workshop could not be reached. Try again." }; }
     t.remove();

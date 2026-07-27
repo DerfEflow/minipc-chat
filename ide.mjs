@@ -476,11 +476,10 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       const workspace = workspaceId ? storeFor(T).get(workspaceId) : null;
       if (workspaceId && !workspace) return err(404, "not_found", "No such workspace.");
 
-      // 12000, raised from 4000 for Adopt Existing Project: an adopted build legitimately carries
-      // goal + agreed vision + the state-of-the-app brief (<=3600 chars by construction). Still a
-      // hard cap (sanitizer doctrine); clients order the brief LAST so truncation can only ever
-      // eat the brief's tail, never the agreed vision.
-      const prompt = String((body && body.prompt) || "").trim().slice(0, 12000);
+      // Adopted builds legitimately carry the goal, agreed vision, structural brief, and deep
+      // production analysis. Keep a hard sanitizer cap, but make it large enough that the roadmap
+      // at the report's tail is not silently removed before the engineering job starts.
+      const prompt = String((body && body.prompt) || "").trim().slice(0, 40000);
       if (kind === "build") {
         // A build writes real files on a real machine, so it needs to know WHERE before it starts.
         if (!workspace) return err(400, "workspace_required", "Pick a workspace folder before starting a build.");

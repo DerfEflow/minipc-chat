@@ -28,7 +28,10 @@
  *                 fs tools refuse until roots are set deliberately)
  *   HANDS_PROTECT extra comma-separated paths to refuse writes under (adds to the built-ins)
  */
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, statSync, readdirSync } from "node:fs";
+import {
+  readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, statSync, readdirSync,
+  openSync, readSync, closeSync,
+} from "node:fs";
 import { resolve, join, sep, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
@@ -265,6 +268,32 @@ export async function executeJob(tool, args = {}, meta = {}) {
         if (!existsSync(args.path)) return { ok: false, error: "not found: " + args.path };
         const st = statSync(args.path);
         if (st.isDirectory()) return { ok: false, error: "that is a directory — use fs_list" };
+        /*
+         * Bounded range reads for repository analysis. Historically maxBytes meant "refuse the
+         * whole file when it is larger than this number." That made the Crucible unable to read
+         * the exact files that explain a real application: server entry points, bundled clients,
+         * schemas and generated route maps are commonly larger than 24KB. `partial:true` keeps
+         * the old default contract intact while allowing a caller to page through ANY file.
+         */
+        if (args.partial === true || args.offset != null) {
+          const offset = Math.max(0, Math.min(Math.floor(Number(args.offset) || 0), st.size));
+          const want = Math.max(0, Math.min(max, st.size - offset));
+          const buf = Buffer.alloc(want);
+          let fd = null, bytes = 0;
+          try {
+            fd = openSync(args.path, "r");
+            bytes = want ? readSync(fd, buf, 0, want, offset) : 0;
+          } finally {
+            if (fd != null) try { closeSync(fd); } catch {}
+          }
+          const page = buf.subarray(0, bytes);
+          const nextOffset = offset + bytes;
+          return args.base64
+            ? { ok: true, path: args.path, bytes, offset, nextOffset, totalBytes: st.size,
+                eof: nextOffset >= st.size, base64: page.toString("base64") }
+            : { ok: true, path: args.path, bytes, offset, nextOffset, totalBytes: st.size,
+                eof: nextOffset >= st.size, text: page.toString("utf8") };
+        }
         if (st.size > max) return { ok: false, error: `file is ${st.size} bytes (> ${max} cap)` };
         const buf = readFileSync(args.path);
         return args.base64 ? { ok: true, path: args.path, bytes: buf.length, base64: buf.toString("base64") }

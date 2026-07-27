@@ -61,6 +61,7 @@
     workspaceId: "",      // assignments belong to a workspace once one exists
     jobs: [],             // every job on this ACCOUNT, not just the one on screen
     workspaces: [],       // the account's workspace pointers, for the front door
+    engineerComingSoon: false, // server launch gate: every Engineer choice stays inert for guests
     pushKey: "",          // VAPID applicationServerKey, "" when push is not configured
     askedPush: false,     // permission is requested at the first real build, never on load
   };
@@ -167,6 +168,7 @@
     wireStudio();
     paintJourney();
     wireProbe();
+    paintEngineerLaunchGate(root);
     const all = $("#ide-allinone");
     if (all) all.addEventListener("change", () => {
       state.allInOne = all.value;
@@ -1159,6 +1161,7 @@
     const sel = $("#st-ws");
     if (!sel) return;
     paintLexicon();
+    paintEngineerLaunchGate();
     sel.textContent = "";
     if (!state.workspaces.length) {
       const o = document.createElement("option");
@@ -1281,11 +1284,15 @@
           body: JSON.stringify({ workspaceId, mode: state.mode || "engineer" }) });
         const j = await r.json();
         if (!r.ok || j.error) { status((j && j.error) || "The scan could not run.", true); return; }
+        const opening = j.brief
+          + (j.analysis ? "\n\n" + j.analysis : "")
+          + (j.analysisError ? "\n\n(" + j.analysisError + ")" : "");
         intake.adopt = true;
-        intake.messages = [{ role: "assistant", content: j.brief }];
+        intake.adoptionContext = opening;
+        intake.messages = [{ role: "assistant", content: opening }];
         intake.vision = null;
         const log = $("#st-chat-log"); if (log) log.textContent = "";
-        chatBubble("ai", j.brief);
+        chatBubble("ai", opening);
         setJourneyPhase("clarify");
         paintLexicon();
         saveDraft();
@@ -1399,6 +1406,24 @@
   const readMode = () => { try { const v = localStorage.getItem(MODE_KEY); return MODES.includes(v) ? v : ""; } catch { return ""; } };
 
   /*
+   * The guest Engineer launch gate must survive every way those controls are created: the
+   * persistent switch, the first-session Welcome Screen, and Change level. A central painter
+   * prevents a later DOM rebuild from accidentally restoring a live-looking button.
+   */
+  function paintEngineerLaunchGate(scope = document) {
+    const locked = state.engineerComingSoon === true;
+    for (const b of scope.querySelectorAll('[data-mode="engineer"]')) {
+      b.disabled = locked;
+      b.setAttribute("aria-disabled", locked ? "true" : "false");
+      b.classList.toggle("ide-engineer-locked", locked);
+      if (locked) {
+        b.title = "Engineer — coming soon";
+        if (!/coming soon/i.test(b.textContent)) b.textContent = (b.textContent || "Engineer").trim() + " · Coming soon";
+      }
+    }
+  }
+
+  /*
    * THE ENGINEER GATE, client half (Fred, 2026-07-25). Entering Engineer asks the server first;
    * a 403 means Automatic Top-Off is not armed, and the one-click enable panel appears instead.
    * The server is the wall (it refuses the pref and downgrades served prefs when top-off lapses);
@@ -1407,6 +1432,7 @@
    */
   async function requestMode(m) {
     if (m !== "engineer") return applyMode(m);
+    if (state.engineerComingSoon) return;
     try {
       const r = await fetch("/ide/prefs", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ engaged: state.engaged, mode: "engineer", language: MODE_REG.engineer }) });
@@ -1444,6 +1470,7 @@
   }
   function applyMode(m, { save = true } = {}) {
     if (!MODES.includes(m)) return;
+    if (m === "engineer" && state.engineerComingSoon) return;
     state.mode = m;
     try { localStorage.setItem(MODE_KEY, m); } catch {}
     const root = $("#ide-root");
@@ -1497,6 +1524,7 @@
     for (const b of document.querySelectorAll("#st-mode-switch button")) {
       b.classList.toggle("on", b.dataset.mode === state.mode);
     }
+    paintEngineerLaunchGate();
   }
 
   /*
@@ -1571,6 +1599,7 @@
       '</div>';
     root.append(el);
     paintLexicon();
+    paintEngineerLaunchGate(el);
     for (const b of el.querySelectorAll(".cw-btn")) {
       b.addEventListener("click", () => {
         markWelcomed();
@@ -1715,7 +1744,7 @@
    */
   // adopt: this interview opened from an Adopt Existing Project brief, so every /ide/intake turn
   // carries the flag and the interviewer plans what exists toward what it should become.
-  const intake = { messages: [], vision: null, busy: false, adopt: false };
+  const intake = { messages: [], vision: null, busy: false, adopt: false, adoptionContext: "" };
 
   function chatBubble(role, text) {
     const log = $("#st-chat-log");
@@ -1753,6 +1782,7 @@
       const r = await fetch("/ide/intake", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ messages: intake.messages, workspaceId: $("#st-ws").value || "",
           mode: state.mode || "beginner", adopt: !!intake.adopt,
+          adoptionContext: intake.adoptionContext || "",
           register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }),
         signal: controller.signal });
       j = await r.json();
@@ -1968,6 +1998,11 @@
   }
 
   let draftSaveTimer = 0;
+  const withAdoptionReport = (prompt) => !intake.adopt ? prompt :
+    "ADOPTED PROJECT: the selected workspace already holds this app. Work against what exists; " +
+    "preserve working behavior and implement the agreed finish/fix/new scope.\n\n" + prompt +
+    "\n\nSTATE OF THE APP (scanned before planning):\n" + (intake.adoptionContext || "");
+
   function wireIntake(status) {
     const input = $("#st-chat-in");
     // Readiness detection was exact-match, so "ok go ahead" or "yes, build it!" fell through and
@@ -2027,14 +2062,16 @@
       input.focus();
     });
     $("#st-chat-build").addEventListener("click", () => {
-      const goal = intake.messages[0] ? intake.messages[0].content : $("#st-prompt").value.trim();
+      const goal = intake.adopt ? "Finish the adopted app according to the agreed vision."
+        : (intake.messages[0] ? intake.messages[0].content : $("#st-prompt").value.trim());
       const full = intake.vision ? goal + "\n\nAGREED VISION (approved by the user; build exactly this):\n" + intake.vision : goal;
-      startBuild(full, status);
+      startBuild(withAdoptionReport(full), status);
     });
     $("#st-chat-skip").addEventListener("click", () => {
-      const goal = intake.messages[0] ? intake.messages[0].content : $("#st-prompt").value.trim();
+      const goal = intake.adopt ? "Assess and finish the adopted app for production using the report below."
+        : (intake.messages[0] ? intake.messages[0].content : $("#st-prompt").value.trim());
       if (!goal) { status("Say what you want built.", true); return; }
-      startBuild(goal, status);
+      startBuild(withAdoptionReport(goal), status);
     });
     // An abandoned interview must never strand the start button: touching the brief re-arms it.
     const prompt = $("#st-prompt");
@@ -2304,7 +2341,8 @@
   // Draft persistence: save and load from localStorage.
   function saveDraft() {
     const prompt = $("#st-prompt").value.trim();
-    const draft = { prompt, messages: intake.messages, vision: intake.vision, adopt: !!intake.adopt, at: Date.now() };
+    const draft = { prompt, messages: intake.messages, vision: intake.vision, adopt: !!intake.adopt,
+      adoptionContext: intake.adoptionContext || "", at: Date.now() };
     try { localStorage.setItem("dominion.crucible.draft.v1", JSON.stringify(draft)); } catch {}
   }
   function loadDraft() {
@@ -2335,6 +2373,7 @@
     intake.vision = null;
     intake.busy = false;
     intake.adopt = false;
+    intake.adoptionContext = "";
     const log = $("#st-chat-log");
     if (log) log.textContent = "";
     const prompt = $("#st-prompt"); if (prompt) prompt.value = "";
@@ -2381,6 +2420,7 @@
         intake.messages = draft.messages;
         intake.vision = draft.vision || null;
         intake.adopt = !!draft.adopt;
+        intake.adoptionContext = String(draft.adoptionContext || "");
         hasConversation = true;
         const log = $("#st-chat-log");
         if (log) {
@@ -2561,11 +2601,11 @@
       // rebuild ships. The grey is honesty; the server 403 is the actual wall.
       if (s.engineerComingSoon) {
         state.engineerComingSoon = true;
-        for (const b of document.querySelectorAll('[data-mode="engineer"]')) {
-          b.disabled = true; b.style.opacity = "0.45"; b.style.cursor = "not-allowed";
-          b.title = "Engineer — coming soon";
-          if (!/coming soon/i.test(b.textContent)) b.textContent = (b.textContent || "Engineer").trim() + " · Coming soon";
+        if (readMode() === "engineer" || state.mode === "engineer") {
+          state.mode = "vibe";
+          try { localStorage.setItem(MODE_KEY, "vibe"); } catch {}
         }
+        paintEngineerLaunchGate();
       }
       if (state.open && (state.mode || readMode())) applyMode(state.mode || readMode(), { save: false });
       announceIdeState();

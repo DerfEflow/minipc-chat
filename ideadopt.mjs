@@ -29,7 +29,7 @@ export const ADOPT_MAX_DIRS = 500;        // directories listed (junk dirs exclu
 export const ADOPT_MAX_FILES = 12_000;    // files catalogued before the walk stops
 export const ADOPT_MAX_READ_BYTES = 24_000;     // per file read
 export const ADOPT_MAX_TOTAL_BYTES = 1_200_000; // across every read of the scan
-export const ADOPT_MAX_SAMPLES = 24;      // source files sampled for TODO/stub signals
+export const ADOPT_MAX_SAMPLES = 48;      // architecture-ranked source files retained for analysis
 export const ADOPT_WALK_PARALLEL = 6;     // fs_list calls in flight (hands correlation ids make
                                           // parallel READ dispatch safe; writes are another story)
 export const ADOPT_BRIEF_CHARS = 3600;    // rides the 4000-char chat sanitizer with room to spare
@@ -39,7 +39,7 @@ export const ADOPT_BRIEF_CHARS = 3600;    // rides the 4000-char chat sanitizer 
 export const ADOPT_SKIP_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", "out", ".output", ".vercel", ".turbo",
   "vendor", "__pycache__", ".venv", "venv", "coverage", ".cache", ".svelte-kit", ".idea",
-  ".vscode", "target", "bin", "obj", ".dominion-snapshots",
+  ".vscode", "target", "bin", "obj", ".dominion-snapshots", ".snapshots", ".devdata",
 ]);
 
 // Extensions that count as source for the sample reads.
@@ -53,8 +53,9 @@ const MANIFESTS = [
   "composer.json", "Gemfile",
 ];
 
-// Unfinished-work signals, counted per sampled file. Word-bounded so "hacksaw" stays innocent.
-const TODO_RE = /\b(TODO|FIXME|HACK|XXX|PLACEHOLDER)\b|not (yet )?implemented|coming soon/gi;
+// Explicit engineering markers, counted per sampled file. Requiring the conventional trailing
+// colon avoids counting code that implements a TODO detector or prose that merely discusses one.
+const TODO_RE = /(?:^|\n)\s*(?:(?:\/\/|#|\/\*+|\*|<!--|--)\s*)?\b(TODO|FIXME|HACK|XXX|PLACEHOLDER)\b(?:\([^)]*\))?\s*:/gim;
 
 // What a dependency name reveals about the stack. First match per manifest wins the headline;
 // all matches are reported.
@@ -75,6 +76,12 @@ const PY_RULES = [
 ];
 
 const lower = (s) => String(s || "").toLowerCase();
+const shouldSkipDir = (name) => {
+  const n = lower(name);
+  return ADOPT_SKIP_DIRS.has(n) || /^\.devdata(?:-|$)/.test(n) || /^\.snapshots?(?:-|$)/.test(n);
+};
+const isTestPath = (rel) => /(^|\/)(tests?|__tests__|spec|fixtures?|mocks?)(\/|$)/i.test(rel) ||
+  /(\.|_)(test|spec)\.[a-z0-9]+$/i.test(rel) || /(^|\/)test_[^/]+$/i.test(rel);
 const extOf = (name) => {
   const i = String(name).lastIndexOf(".");
   return i > 0 ? lower(String(name).slice(i + 1)) : "";
@@ -140,8 +147,8 @@ export function createAdoptScanner({ hands } = {}) {
           const rel = cur.rel ? cur.rel + "/" + name : name;
           if (type === "dir") {
             // The layout line shows the person's OWN folders; machinery and hidden dirs are noise.
-            if (cur.depth === 0 && !ADOPT_SKIP_DIRS.has(lower(name)) && !name.startsWith(".")) topDirs.push(name);
-            if (ADOPT_SKIP_DIRS.has(lower(name))) { if (!skipped.includes(name)) skipped.push(name); continue; }
+            if (cur.depth === 0 && !shouldSkipDir(name) && !name.startsWith(".")) topDirs.push(name);
+            if (shouldSkipDir(name)) { if (!skipped.includes(name)) skipped.push(name); continue; }
             if (cur.depth + 1 < ADOPT_MAX_DEPTH) queue.push({ path: cur.path + "/" + name, rel, depth: cur.depth + 1 });
             else truncated = true;
           } else {
@@ -159,7 +166,8 @@ export function createAdoptScanner({ hands } = {}) {
   async function readCapped(path, budget) {
     if (budget.spent >= ADOPT_MAX_TOTAL_BYTES) return "";
     try {
-      const r = await hands("fs_read", { path, maxBytes: ADOPT_MAX_READ_BYTES });
+      // partial:true asks hands/2+ for a bounded page instead of refusing a large source file.
+      const r = await hands("fs_read", { path, maxBytes: ADOPT_MAX_READ_BYTES, offset: 0, partial: true });
       const text = (r && r.ok !== false && (r.text || r.content)) || "";
       budget.spent += text.length;
       return String(text);
@@ -177,8 +185,8 @@ export function createAdoptScanner({ hands } = {}) {
     const samples = [];
     let sampleChars = 0;
     const keep = (rel, text) => {
-      if (!text || sampleChars >= 90000) return;
-      const t = String(text).slice(0, 6000);
+      if (!text || sampleChars >= 180000 || samples.some((s) => lower(s.path) === lower(rel))) return;
+      const t = String(text).slice(0, 12000);
       samples.push({ path: rel, text: t });
       sampleChars += t.length;
     };
@@ -199,6 +207,8 @@ export function createAdoptScanner({ hands } = {}) {
       keep(name, text);
       if (name === "requirements.txt" || name === "pyproject.toml") manifests[manifests.length - 1].text = text.slice(0, 4000);
     }
+    const rootReadme = w.files.find((f) => f.depth === 0 && /^readme([.]|$)/i.test(f.name));
+    if (rootReadme) keep(rootReadme.rel, await readCapped(w.root + "/" + rootReadme.rel, budget));
 
     // Stack detection from what the manifests actually declare.
     const frameworks = [];
@@ -224,12 +234,24 @@ export function createAdoptScanner({ hands } = {}) {
     // What runs: the same verdict the live preview uses, so adoption and preview never disagree.
     const runs = runPlanFor(pkgText, { hasIndexHtml: has("index.html") });
 
-    // Entry points worth reading: what package.json names, else the classic suspects.
+    // Entry points worth reading: what package.json names and invokes, then the classic suspects.
     const entryCandidates = [];
     if (pkg && typeof pkg.main === "string") entryCandidates.push(pkg.main.replace(/^[.][/]/, ""));
-    for (const cand of ["server.js", "server.mjs", "app.js", "index.js", "src/index.js", "src/main.js",
-                        "src/App.jsx", "src/App.tsx", "main.py", "app.py", "src/main.py", "index.html"]) {
-      if (entryCandidates.length >= 6) break;
+    if (pkg && pkg.scripts && typeof pkg.scripts === "object") {
+      // Runtime scripts reveal entry points; test/lint/format scripts reveal tooling, not the app.
+      const runtimeKeys = /^(start|dev|serve|preview|build|prod|production)$/i;
+      const scriptText = Object.entries(pkg.scripts).filter(([k, v]) => runtimeKeys.test(k) && typeof v === "string")
+        .map(([, v]) => v).join("\n").replaceAll("\\", "/");
+      for (const f of w.files) {
+        if (f.depth <= 3 && CODE_EXT.has(extOf(f.name)) && scriptText.includes(f.rel.replaceAll("\\", "/")) &&
+            !entryCandidates.some((p) => lower(p) === lower(f.rel))) entryCandidates.push(f.rel);
+      }
+    }
+    for (const cand of ["server.js", "server.mjs", "app.js", "app.mjs", "index.js", "index.mjs",
+                        "src/index.js", "src/index.ts", "src/main.js", "src/main.ts",
+                        "src/App.jsx", "src/App.tsx", "public/index.html", "public/app.js",
+                        "main.py", "app.py", "src/main.py", "index.html"]) {
+      if (entryCandidates.length >= 12) break;
       if (fileAt(cand) && !entryCandidates.includes(cand)) entryCandidates.push(cand);
     }
     const entries = [];
@@ -237,7 +259,9 @@ export function createAdoptScanner({ hands } = {}) {
     const stubs = [];
     let todoTotal = 0;
     const noteSignals = (rel, text) => {
-      if (!text) return;
+      // Test fixtures routinely contain the literal strings TODO, "not implemented", and
+      // placeholders to verify detectors. They are evidence about tests, not unfinished product.
+      if (!text || isTestPath(rel)) return;
       const hits = text.match(TODO_RE);
       if (hits && hits.length) { todoTotal += hits.length; todoFiles.push({ path: rel, count: hits.length }); }
       if (/not (yet )?implemented|coming soon/i.test(text)) stubs.push({ path: rel, reason: "says it is not implemented yet" });
@@ -249,12 +273,30 @@ export function createAdoptScanner({ hands } = {}) {
       if (text) { entries.push({ path: rel, bytes: f.size }); noteSignals(rel, text); keep(rel, text); }
     }
 
-    // Sample the smallest source files first: stubs and abandoned starts live there, and small
-    // files spend the read budget slowest.
+    // Rank by architectural value. The previous smallest-file-first rule filled the context with
+    // test fixtures and loaders while excluding large server/client entry points — exactly the
+    // opposite of what an adoption analyst needs.
     const sampled = new Set(entryCandidates.map(lower));
+    const architectureScore = (f) => {
+      const rel = lower(f.rel);
+      const name = lower(f.name);
+      const ext = extOf(name);
+      let score = Math.max(0, 30 - (f.depth * 4));
+      if (/^(js|mjs|cjs|jsx|ts|tsx|py|go|rs|java|kt|rb|php|cs)$/.test(ext)) score += 25;
+      if (/^(css|scss|sass|less)$/.test(ext)) score -= 15;
+      if (/^(server|app|main|index|router|routes?|schema|database|db|auth|config)\./.test(name)) score += 55;
+      if (/^(ide|hands|memory|connectors?|billing|router|engine|models?)/.test(name)) score += 25;
+      if (/(^|\/)(src|server|api|routes?|controllers?|services?|models?|database|db|auth|connectors?|tools?|public)(\/|$)/.test(rel)) score += 30;
+      if (/(route|schema|migration|auth|connector|provider|tool|workspace|billing|deploy|preview)/.test(rel)) score += 22;
+      if (/^(package\.json|dockerfile|compose\.ya?ml)$/.test(name)) score += 18;
+      if (isTestPath(rel)) score -= 90;
+      if (/(^|\/)(examples?|docs?|assets?|generated)(\/|$)/.test(rel)) score -= 20;
+      if (/(^|\/)\./.test(rel)) score -= 40;
+      return score;
+    };
     const candidates = w.files
-      .filter((f) => CODE_EXT.has(extOf(f.name)) && !sampled.has(lower(f.rel)) && f.size > 0 && f.size <= ADOPT_MAX_READ_BYTES)
-      .sort((a, b) => a.size - b.size)
+      .filter((f) => CODE_EXT.has(extOf(f.name)) && !sampled.has(lower(f.rel)) && f.size > 0)
+      .sort((a, b) => architectureScore(b) - architectureScore(a) || a.size - b.size || a.rel.localeCompare(b.rel))
       .slice(0, ADOPT_MAX_SAMPLES);
     for (const f of candidates) {
       const text = await readCapped(w.root + "/" + f.rel, budget);
@@ -302,7 +344,10 @@ export function createAdoptScanner({ hands } = {}) {
       stubs: stubs.slice(0, 8),
       languages,
     };
-    return { ok: true, facts, samples };
+    // The catalog lets the analysis agent request additional files by name without another full
+    // tree walk. Contents are still read lazily through bounded, read-only workspace tools.
+    const catalog = w.files.map((f) => ({ path: f.rel, bytes: f.size }));
+    return { ok: true, facts, samples, catalog };
   }
 
   return { scan };
@@ -312,10 +357,10 @@ export function createAdoptScanner({ hands } = {}) {
    The deep-analysis prompt (Fred, 2026-07-26). The deterministic brief inventories; THIS is the
    comprehension pass: a model reads the retained samples and produces the rundown Fred specified —
    what the app does, its state, dependencies, features, what is left to build, obvious gaps —
-   and then asks where to go from there. Grounding rule is explicit: only claim what the samples
+   and provides a production roadmap. Grounding rule is explicit: only claim what the samples
    show; name the file when claiming.
    ============================================================================================ */
-export function analysisPrompt({ name = "", facts = {}, samples = [] } = {}) {
+export function analysisPrompt({ name = "", facts = {}, samples = [], catalog = [] } = {}) {
   const body = samples.map((s) => "=== " + s.path + " ===\n" + s.text).join("\n\n").slice(0, 100000);
   return "You are analyzing a partially completed app called " + (name || "this app") + " that the user wants finished. " +
     "Below are REAL file contents read from their machine, plus a structural inventory. Write an APP ANALYSIS with exactly these sections, in this order, markdown headed:\n" +
@@ -325,9 +370,12 @@ export function analysisPrompt({ name = "", facts = {}, samples = [] } = {}) {
     "4. FEATURES PRESENT — a plain list of features that exist in the code.\n" +
     "5. LEFT TO BUILD — what the code clearly intends but has not finished.\n" +
     "6. OBVIOUS GAPS — missing essentials (auth, error handling, tests, deployment, data persistence, whatever applies).\n" +
+    "7. PRODUCTION ROADMAP — an ordered, concrete plan from the present state to production. Include priorities, dependencies, acceptance checks, and release risks.\n" +
     "Ground every claim in the files shown; name the file. If the samples do not show something, say so plainly rather than guessing. " +
-    "END by asking the user where to go from here, offering 2-3 concrete directions based on what you found.\n\n" +
+    "Do not ask what to do next. Deliver the complete analysis and roadmap in this response.\n\n" +
     "STRUCTURAL INVENTORY:\n" + JSON.stringify({ counts: facts.counts, topDirs: facts.topDirs, frameworks: facts.frameworks, manifests: facts.manifests, entries: facts.entries, runs: facts.runs, tests: facts.tests, todos: facts.todos, stubs: facts.stubs, languages: facts.languages }).slice(0, 4000) +
+    "\n\nFULL FILE CATALOG (path and byte size; use the workspace tools to inspect relevant files not already shown):\n" +
+    JSON.stringify(catalog).slice(0, 30000) +
     "\n\nFILE CONTENTS:\n" + body;
 }
 
@@ -397,7 +445,7 @@ export function composeBrief(facts, { name = "" } = {}) {
   }
   out.push("");
   out.push("This comes from reading the files, not from running anything, so behavior and breakage are still unproven.");
-  out.push("Here is what you have. What should it become?");
+  out.push("The detailed analysis and production roadmap follow.");
 
   let text = out.join("\n");
   if (text.length > ADOPT_BRIEF_CHARS) {

@@ -6,6 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { createIdeFeature, createIdeGate } from "./ide.mjs";
 
 function rig({ autorecharge = false, hasCard = false, engineerPublic = true } = {}) {
@@ -105,4 +106,18 @@ test("non-engineer modes pass through untouched (the gate guards one door only)"
     const r = feature.setPrefs(CREDIT, { mode: m });
     assert.equal(r.status, 200, "mode " + JSON.stringify(m) + " must not be gated");
   }
+});
+
+test("guest UI keeps every Engineer choice greyed, native-disabled, and click-guarded", () => {
+  const client = readFileSync(new URL("./public/dominion-ide.js", import.meta.url), "utf8");
+  const css = readFileSync(new URL("./public/dominion-ide.css", import.meta.url), "utf8");
+  assert.match(client, /function paintEngineerLaunchGate/);
+  assert.match(client, /b\.disabled = locked/);
+  assert.match(client, /b\.setAttribute\("aria-disabled", locked \? "true" : "false"\)/);
+  assert.match(client, /if \(state\.engineerComingSoon\) return;/, "requestMode must stop before the fetch/click path");
+  assert.match(client, /if \(m === "engineer" && state\.engineerComingSoon\) return;/,
+    "applyMode must reject programmatic or stale-localStorage entry");
+  assert.match(client, /paintEngineerLaunchGate\(el\)/, "the dynamically-created Welcome Screen must be locked too");
+  assert.match(css, /button\[data-mode="engineer"\]:disabled[\s\S]*opacity:\s*\.45/);
+  assert.match(css, /cursor:\s*not-allowed/);
 });

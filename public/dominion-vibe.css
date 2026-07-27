@@ -16,6 +16,8 @@
    below the Vibe sections. Same absent-not-disabled discipline as the beginner surface. */
 #ide-root.vb-on #ide-start { display: none !important; }
 #ide-root:not(.vb-on) #vb-shell { display: none; }
+/* Grid declarations on Vibe panels must never override the browser's native hidden state. */
+#ide-root .vb-shell [hidden] { display: none !important; }
 
 .vb-shell {
   display: grid;
