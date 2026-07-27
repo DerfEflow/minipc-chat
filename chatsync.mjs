@@ -68,6 +68,7 @@ function normalizeChat(raw) {
     id,
     title: typeof raw.title === "string" ? raw.title.slice(0, 300) : "New chat",
     updatedAt,
+    activityAt: raw.activityAt == null ? undefined : Math.max(0, Number(raw.activityAt) || 0),
     model: typeof raw.model === "string" ? raw.model.slice(0, 160) : undefined,
     draft: typeof raw.draft === "string" ? raw.draft.slice(0, 50_000) : undefined,
     lastMode: typeof raw.lastMode === "string" ? raw.lastMode.slice(0, 40) : undefined,
@@ -160,6 +161,8 @@ export function createChatSync({ dir }) {
       // newer message from that browser must not erase the model or draft saved by another device.
       if (stored && c.model === undefined) c.model = stored.model;
       if (stored && c.draft === undefined) c.draft = stored.draft;
+      if (stored && c.activityAt === undefined) c.activityAt = stored.activityAt || stored.updatedAt;
+      if (c.activityAt === undefined) c.activityAt = c.updatedAt;
 
       state.rev += 1;
       c.rev = state.rev;

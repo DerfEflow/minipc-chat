@@ -22,6 +22,7 @@ import { join } from "node:path";
 // documents, formatting, review, retrieval, and READ-only persona. Deliberately ABSENT: forge_read,
 // forge_send, deck_* (Fred's machines + command deck), add_to_persona, scrape_to_persona (corpus write).
 export const SAFE_TOOLS = new Set([
+  "toolbox_open",
   "web_search", "web_read",
   "format_as_markdown", "format_as_json", "format_as_checklist", "format_as_table", "format_as_report", "format_as_scope",
   "create_artifact", "revise_artifact", "list_artifacts", "read_artifact", "export_artifact", "save_plan",

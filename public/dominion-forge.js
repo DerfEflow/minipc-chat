@@ -124,15 +124,15 @@
    * of the two above.
    *
    * The dial is reasoning effort. Forge Mode is machine reach, and it stays exactly as it was for
-   * everyone, including guests and Fred's small-model experiments. Wildfire is broad authority: the
-   * full tool surface, both machines, auto-approved, for a model on the roster.
+   * everyone, including guests and Fred's small-model experiments. Ordinary turns now start with a
+   * focused bench and can pull a missing capability through toolbox_open. Wildfire is the optional
+   * one-turn override that loads the full tool surface up front for a model on the roster.
    *
    * It is owner-only and the server enforces that independently (a guest posting the flag is
    * refused and logged). This only decides whether the switch is drawn at all.
    *
-   * It does NOT persist across sessions. Broad authority should be a thing you turn on for a job,
-   * not a thing you left on three weeks ago and forgot. Session storage, so a reload keeps it and
-   * a new tab does not.
+   * It is consumed by the next sent turn and immediately disarms. Broad authority should be a thing
+   * you turn on for one job, not ambient state that leaks into later work.
    */
   const WILDFIRE_KEY = "dominion.wildfireArmed";
   const isOwner = () => window.dominionIsOwner === true;
@@ -199,7 +199,7 @@
         // Always in the markup, visibility gated live (fix 2026-07-26): the owner flag arrives from
         // /api/models AFTER this dial may already have been built, so a render-time conditional
         // raced and silently dropped the Wildfire control. Server still refuses non-owner arming.
-        '<button class="dial-wildfire" type="button" aria-pressed="false"' + (isOwner() ? '' : ' hidden') + ' title="Broad authority across both machines, for a starred model"><span>Wildfire</span><small>Contained</small></button>' +
+        '<button class="dial-wildfire" type="button" aria-pressed="false"' + (isOwner() ? '' : ' hidden') + ' title="Load the full toolbox up front for the next turn only"><span>Wildfire</span><small>One turn</small></button>' +
         '<div class="dial-glass-live" aria-hidden="true"></div>' +
         '<div class="dial-spark s1"></div><div class="dial-spark s2"></div><div class="dial-spark s3"></div>' +
       '</div>' +
@@ -249,8 +249,8 @@
       wildfireButton.setAttribute("aria-pressed", wildOn ? "true" : "false");
       wildfireButton.classList.toggle("dial-wildfire-mismatch", wildOn && !starred);
       wildfireButton.querySelector("small").textContent =
-        !wildOn ? "Contained"
-        : starred ? "ARMED"
+        !wildOn ? "One turn"
+        : starred ? "NEXT TURN"
         : "Armed, but this model is not starred";
     }
     function apply(t, persist) { live = t; paint(t); if (persist !== false) setTier(t); }

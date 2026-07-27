@@ -103,7 +103,7 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "c" + Date.now() + 
 // silently losing the whole history write.
 const ATT_KEEP_CHATS = 12;
 function serializeChats(stripAll) {
-  const byRecency = [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const byRecency = [...chats].sort((a, b) => (b.activityAt || b.updatedAt || 0) - (a.activityAt || a.updatedAt || 0));
   const keep = new Set(byRecency.slice(0, ATT_KEEP_CHATS).map((c) => c.id));
   return JSON.stringify(chats.slice(0, 100).map((c) => {
     if (!c.messages.some((m) => m.attachments && m.attachments.length)) return c;
@@ -124,6 +124,18 @@ const saveSettings = () => { try { localStorage.setItem(LS_SET, JSON.stringify(s
 function load() {
   try { const r = localStorage.getItem(LS_CHATS); const a = r && JSON.parse(r); if (Array.isArray(a)) chats = a; } catch {}
   if (!chats.length) { try { const old = JSON.parse(localStorage.getItem(OLD_MSGS) || "null"); if (Array.isArray(old) && old.length) chats = [{ id: uid(), title: titleFrom(old), messages: old, updatedAt: Date.now() }]; } catch {} }
+  // Chats created before model/draft became session state must stop borrowing whichever model was
+  // changed most recently. activityAt keeps preference-sync revisions from reordering the sidebar.
+  let migratedSessionState = false;
+  const legacyModel = localStorage.getItem(LS_MODEL) || "local";
+  for (const c of chats) {
+    if (typeof c.model !== "string" || !c.model) { c.model = legacyModel; migratedSessionState = true; }
+    if (typeof c.draft !== "string") { c.draft = ""; migratedSessionState = true; }
+    if (!Number.isFinite(c.activityAt)) { c.activityAt = c.updatedAt || 0; migratedSessionState = true; }
+  }
+  if (migratedSessionState) {
+    try { localStorage.setItem(LS_CHATS, JSON.stringify(chats.slice(0, 100))); } catch {}
+  }
   curId = localStorage.getItem(LS_CUR) || (chats[0] && chats[0].id) || null;
   if (!curId) newChat();
   try { const s = JSON.parse(localStorage.getItem(LS_SET) || "null"); if (s && typeof s === "object") settings = { ...settings, ...s }; } catch {}
@@ -158,7 +170,7 @@ function chatForPush(c) {
     if (!m.attachments || !m.attachments.length) return m;
     return { ...m, attachments: m.attachments.map((a) => (a.kind === "image" && a.dataUrl ? { kind: "image_ref", name: a.name } : a)) };
   });
-  return { id: c.id, title: c.title, updatedAt: c.updatedAt || 0, model: c.model, draft: c.draft || "", lastMode: c.lastMode, messages };
+  return { id: c.id, title: c.title, updatedAt: c.updatedAt || 0, activityAt: c.activityAt || c.updatedAt || 0, model: c.model, draft: c.draft || "", lastMode: c.lastMode, messages };
 }
 
 // Fold the server's changes into the local array. Returns what moved so the caller can decide
@@ -170,12 +182,13 @@ function mergeIncoming(incoming, deleted) {
     if (syncState.deletes.some((d) => d.id === inc.id && (d.deletedAt || 0) >= (inc.updatedAt || 0))) continue;  // deleted here, not yet pushed
     const local = chats.find((c) => c.id === inc.id);
     if (!local) {
-      chats.unshift({ id: inc.id, title: inc.title || "New chat", messages: inc.messages || [], updatedAt: inc.updatedAt || 0, model: inc.model, draft: inc.draft || "", lastMode: inc.lastMode });
+      chats.unshift({ id: inc.id, title: inc.title || "New chat", messages: inc.messages || [], updatedAt: inc.updatedAt || 0, activityAt: inc.activityAt || inc.updatedAt || 0, model: inc.model, draft: inc.draft || "", lastMode: inc.lastMode });
       changedAny = true;
     } else if ((inc.updatedAt || 0) > (local.updatedAt || 0)) {
       local.title = inc.title || local.title;
       local.messages = inc.messages || [];
       local.updatedAt = inc.updatedAt || 0;
+      local.activityAt = inc.activityAt || local.activityAt || inc.updatedAt || 0;
       if (inc.model !== undefined) local.model = inc.model;
       if (inc.draft !== undefined) local.draft = inc.draft;
       local.lastMode = inc.lastMode;
@@ -284,6 +297,7 @@ function captureChatDraft() {
   if ((c.draft || "") === next) return false;
   c.draft = next;
   c.updatedAt = Date.now();
+  c.activityAt = c.updatedAt;
   return true;
 }
 function persistChatDraft() {
@@ -318,7 +332,7 @@ function summarizeLeft(id) {
   if (!c || c.messages.length < 4) return;
   fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
 }
-function newChat() { const prev = curId; if (prev) persistChatDraft(); detachCurrentSession(); const c = { id: uid(), title: "New chat", messages: [], model: modelSel ? modelSel.value : (localStorage.getItem(LS_MODEL) || "local"), draft: "", updatedAt: Date.now() }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); try { fetchBudget(); } catch {} }
+function newChat() { const prev = curId; if (prev) persistChatDraft(); detachCurrentSession(); const now = Date.now(); const c = { id: uid(), title: "New chat", messages: [], model: modelSel ? modelSel.value : (localStorage.getItem(LS_MODEL) || "local"), draft: "", updatedAt: now, activityAt: now }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); try { fetchBudget(); } catch {} }
 // Fresh-start ignition: a quick green scan-sweep over the chat surface as the rail closes.
 function igniteChatSurface() {
   const surf = document.getElementById("neural-glass") || document.body;
@@ -365,13 +379,14 @@ const relTime = (ts) => { const d = Date.now() - (ts || 0); const m = Math.round
 function renderSidebar() {
   chatlist.innerHTML = "";
   const q = chatQuery.trim().toLowerCase();
-  for (const c of [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) {
+  for (const c of [...chats].sort((a, b) => (b.activityAt || b.updatedAt || 0) - (a.activityAt || a.updatedAt || 0))) {
     if (q && !(c.title || "").toLowerCase().includes(q) && !c.messages.some((m) => (m.content || "").toLowerCase().includes(q))) continue;
     const row = document.createElement("div"); row.className = "ci" + (c.id === curId ? " active" : "") + (busyFor(c.id) ? " running" : "");
     const ttl = document.createElement("div"); ttl.className = "ttl"; ttl.textContent = c.title || "New chat"; ttl.onclick = () => switchChat(c.id);
     if (busyFor(c.id)) { const dot = document.createElement("span"); dot.className = "runrun"; dot.title = "A run is generating in this chat"; ttl.prepend(dot); }
     const meta = document.createElement("span"); meta.className = "meta";
-    meta.textContent = (c.lastMode && MODE_LABEL[c.lastMode] ? MODE_LABEL[c.lastMode] + " · " : "") + (c.updatedAt ? relTime(c.updatedAt) : "");
+    const activeAt = c.activityAt || c.updatedAt;
+    meta.textContent = (c.lastMode && MODE_LABEL[c.lastMode] ? MODE_LABEL[c.lastMode] + " · " : "") + (activeAt ? relTime(activeAt) : "");
     const ren = document.createElement("span"); ren.className = "x"; ren.textContent = "✎"; ren.title = "Rename"; ren.onclick = (e) => { e.stopPropagation(); renameChat(c.id); };
     const del = document.createElement("span"); del.className = "x"; del.textContent = "×"; del.title = "Delete"; del.onclick = (e) => { e.stopPropagation(); if (confirm("Delete this chat?")) deleteChat(c.id); };
     row.append(ttl, meta, ren, del); chatlist.appendChild(row);
@@ -1313,10 +1328,10 @@ function finalizeSession(st) {
     if (st.doneMeta) { msg.meta = st.doneMeta; if (st.ctxItems) msg.meta.contextItems = st.ctxItems; if (st.doneMeta.mode) c.lastMode = st.doneMeta.mode; }
     // Produced documents belong to the message, so the download survives a reload and a device hop.
     if (st.files && st.files.length) { msg.meta = msg.meta || {}; msg.meta.files = st.files; }
-    c.messages.push(msg); c.updatedAt = Date.now(); save();
+    c.messages.push(msg); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save();
     if (speakOn && final) speakAnswer(final);   // voice: read the finished answer aloud (toggle)
   } else if (final) {
-    c.messages.push({ role: "assistant", content: final, meta: { interrupted: true } }); c.updatedAt = Date.now(); save();
+    c.messages.push({ role: "assistant", content: final, meta: { interrupted: true } }); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save();
   } else if (st.errMsg) {
     // Nothing ever came back (e.g. "Failed to fetch") — the composer was already cleared when the
     // turn was sent, so "tap send to retry" would otherwise hit an empty box and do nothing. Pull
@@ -1343,6 +1358,7 @@ function finalizeSession(st) {
 
 async function streamReply(c) {
   const st = liveSession = newSession(c);
+  const wildfireForTurn = !!(window.wildfireValue && window.wildfireValue());
   // Provisional entry so THIS chat reads as busy the instant we send, before the job id arrives
   // (the real jobId fills in on the {type:"job"} event). Keeps a double-tap from firing two turns.
   liveJobs[c.id] = liveJob = { jobId: "", eventIndex: 0 }; persistLiveJobs();
@@ -1373,9 +1389,12 @@ async function streamReply(c) {
         ...(window.forgeModeValue && window.forgeModeValue() ? { forgeMode: true } : {}),
         // Wildfire: broad authority for this turn. Sent only when actually armed, so an unarmed
         // turn stays byte-identical to before (same reasoning as wolfeTier omitting "ember").
-        ...(window.wildfireValue && window.wildfireValue() ? { wildfire: true } : {}),
+        ...(wildfireForTurn ? { wildfire: true } : {}),
       }),
     });
+    // Wildfire is a one-turn override. The ordinary toolbox now expands only as needed and closes
+    // automatically; broad up-front authority must never leak into the next unrelated message.
+    if (wildfireForTurn && window.setWildfire) window.setWildfire(false);
     if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
     await readSse(res, st);
   } catch (e) {
@@ -1468,6 +1487,7 @@ async function reconcileJobs() {
       if (jobChat && !jobChat.model && j.model) {
         jobChat.model = j.model;
         jobChat.updatedAt = Math.max(jobChat.updatedAt || 0, Number(j.startedAt) || 0, Date.now());
+        jobChat.activityAt = jobChat.updatedAt;
         changed = true;
       }
       if (j.status === "running") {
@@ -1495,7 +1515,7 @@ async function deliverResult(jobId, c) {
     const msg = { role: "assistant", content: text };
     if (r.meta && typeof r.meta === "object") { msg.meta = { ...r.meta }; if (r.meta.mode) c.lastMode = r.meta.mode; }
     if (interrupted) { msg.meta = msg.meta || {}; msg.meta.interrupted = true; }
-    c.messages.push(msg); c.updatedAt = Date.now(); save();
+    c.messages.push(msg); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save();
   }
   if (liveJobs[c.id] && liveJobs[c.id].jobId === jobId) { delete liveJobs[c.id]; }
   collectJob(jobId);
@@ -1522,7 +1542,7 @@ function send() {
   if (pendingAtt.length) { msg.attachments = pendingAtt; pendingAtt = []; renderAttachStrip(); }
   c.messages.push(msg);
   if (c.title === "New chat") c.title = titleFrom(c.messages);
-  c.updatedAt = Date.now(); save(); renderAll();
+  c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save(); renderAll();
   streamReply(c);
 }
 function regenerate() {
@@ -1534,7 +1554,7 @@ function regenerate() {
 function continueLast() {
   if (busyFor(curId)) return; const c = cur(); if (!c) return;
   c.messages.push({ role: "user", content: "Continue exactly where you left off." });
-  c.updatedAt = Date.now(); save(); renderAll(); streamReply(c);
+  c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save(); renderAll(); streamReply(c);
 }
 function editUser(i) {
   if (busyFor(curId)) return; const c = cur(); if (!c) return;
@@ -1544,7 +1564,7 @@ function editUser(i) {
   const att = c.messages[i].attachments;
   pendingAtt = Array.isArray(att) ? att.filter((a) => a.kind === "image" ? a.dataUrl : a.kind === "text") : [];
   renderAttachStrip();
-  c.messages = c.messages.slice(0, i); c.updatedAt = Date.now(); save(); renderAll(); autosize(); input.focus();
+  c.messages = c.messages.slice(0, i); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save(); renderAll(); autosize(); input.focus();
 }
 
 // ---------- settings ----------
@@ -2084,7 +2104,7 @@ function renderCritiqueCard(card, c, orig, answer, ids = {}) {
         const d = await aApi("/mentor/revise", { content: answer, originalRequest: orig, critique: c });
         if (d.revised) {
           const ch = cur();
-          if (ch) { ch.messages.push({ role: "assistant", content: d.revised, meta: { revised: true } }); ch.updatedAt = Date.now(); save(); renderAll(); }
+          if (ch) { ch.messages.push({ role: "assistant", content: d.revised, meta: { revised: true } }); ch.updatedAt = Date.now(); ch.activityAt = ch.updatedAt; save(); renderAll(); }
           b.textContent = "applied ✓";
         } else { b.textContent = "failed"; b.disabled = false; }
       } catch { b.textContent = "failed"; b.disabled = false; }
@@ -2319,7 +2339,6 @@ if (modelSel) modelSel.addEventListener("change", () => {
     c.model = modelSel.value;
     c.updatedAt = Date.now();
     save();
-    renderSidebar();
   }
   updateModelTrigger(); updateCloudBadge(); updateEstimate(); updateAttachGate(); modelLaser();
 });

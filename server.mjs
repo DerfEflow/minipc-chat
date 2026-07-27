@@ -35,12 +35,11 @@ import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
 import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL } from "./models.catalog.mjs";
 import { createLoopWatch, contextExceeded, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
+import { TOOLBOX_OPEN_NAME, withToolbox, openToolbox } from "./toolbox.mjs";
 
 /*
- * Does this turn actually ask for work ON a machine? Used only to decide whether the "you forgot
- * Wildfire" nudge is worth saying. Deliberately narrower than the tool-intent heuristic elsewhere:
- * a nudge that fires during ordinary conversation is noise, and Fred would switch it off within a
- * day. Better to miss a few than to cry wolf.
+ * Does this turn actually ask for work ON a machine? Deliberately narrower than the broader
+ * tool-intent heuristic; it also anchors focused build-tool selection and the silent-disarm guard.
  */
 const MACHINE_INTENT_RE = /\b(build|deploy|install|refactor|migrate|fix|debug|run|execute|script|commit|push|repo|repository|codebase|server|database|file|folder|directory|terminal|shell|command|laptop|mini-?pc|machine|my computer)\b/i;
 const BUILD_TOOL_NAMES = new Set([
@@ -5076,11 +5075,11 @@ async function handleChat(req, res) {
    * every model, because Fred uses it to experiment with small models and it is a major part of the
    * guest product. Wildfire is his alone: it arms the full surface for a model on the roster.
    *
-   * Three outcomes, all of them loud rather than silent, because silent tool-stripping is the exact
+   * Two explicit outcomes remain loud rather than silent, because silent tool-stripping is the exact
    * failure that made him think the app was never wired up:
    *   armed + rostered model  -> tools forced ON even in fast mode
    *   armed + wrong model     -> refuse to arm, and name the models that qualify
-   *   not armed + rostered    -> a nudge, only when he actually asked for machine work
+   * Unarmed work uses the normal focused/on-demand toolbox and does not need a Wildfire warning.
    */
   const wildfireAsked = input.wildfire === true;
   const wildfireEligible = !!cloudModel && isBroadCapable(cloudModel);
@@ -5098,8 +5097,6 @@ async function handleChat(req, res) {
       wildfireOn = true;
       attachTools = true;   // armed means armed, even on a fast turn
     }
-  } else if (T.isOwner && wildfireEligible && !wildfireAsked && MACHINE_INTENT_RE.test(lastUserText)) {
-    wildfireNotice = { kind: "nudge", text: "You forgot to turn on Wildfire, dummy. That model can do this job, but it is not armed for broad machine work this turn." };
   }
   opts.wildfire = wildfireOn;
 
@@ -5293,12 +5290,18 @@ async function handleChat(req, res) {
         }
         catch (e) { console.log("[connectors] tool defs failed:", String(e && e.message || e).slice(0, 150)); }
       }
+      // Keep the complete allowed catalog off-prompt. toolbox_open can pull matching schemas from
+      // it for a later round, while the initial prompt stays focused and cheap.
+      let fullCloudTools = cloudTools ? withToolbox(cloudTools) : null;
+      cloudTools = fullCloudTools;
       // A build turn gets a focused engineering bench instead of the entire app catalog. This
       // keeps the model's choice legible and prevents unrelated connector/document tools from
-      // crowding out the file, shell, source-context, and review tools needed for the job.
-      if (cloudTools && isFocusedBuildTurn(lastUserText)) {
+      // crowding out the file, shell, source-context, and review tools needed for the job. Wildfire
+      // remains the explicit "open everything up front" override; ordinary work can expand through
+      // toolbox_open without requiring Wildfire.
+      if (cloudTools && !wildfireOn && isFocusedBuildTurn(lastUserText)) {
         const beforeScope = cloudTools.length;
-        cloudTools = scopeBuildTools(cloudTools, lastUserText);
+        cloudTools = withToolbox(scopeBuildTools(cloudTools, lastUserText));
         console.log(`[dominion-ai] build tool scope: ${cloudTools.length} of ${beforeScope} tools offered to ${cloudModel}`);
         sse({ type: "tools_scoped", scope: "build", offered: cloudTools.length, omitted: beforeScope - cloudTools.length });
       }
@@ -5306,7 +5309,10 @@ async function handleChat(req, res) {
       // tools; internal work-order turns lose the work-order spawners. Def-level cut here, plus a
       // runtime gate below for a hallucinated name that was never offered.
       const idWall = toolWallFor(req.dominionIdentity && req.dominionIdentity.source);
-      if (cloudTools && idWall) cloudTools = cloudTools.filter((d) => !idWall.has(d && d.function && d.function.name));
+      if (cloudTools && idWall) {
+        cloudTools = cloudTools.filter((d) => !idWall.has(d && d.function && d.function.name));
+        fullCloudTools = fullCloudTools.filter((d) => !idWall.has(d && d.function && d.function.name));
+      }
       // Provider function-tool ceiling (OpenAI enforces exactly 128; nobody sensible needs more).
       // Box tools sit first and connector tools follow in stable sorted order, so the cap sheds
       // the alphabetical tail of connector tools and NEVER core capability. Logged out loud —
@@ -5577,7 +5583,18 @@ async function handleChat(req, res) {
             // 3) Run + report honestly. The abort signal reaches the tool (C5).
             life.push("executing");
             sse({ type: "tool", name, runId, cls, gated: WRITE_TOOLS.has(name), status: "run" });
-            const result = isConnectorTool(name) ? String(await connectors.run(T, name, args, ac.signal)) : await runTool(name, args, reqCtx, ac.signal);
+            let result;
+            if (name === TOOLBOX_OPEN_NAME) {
+              const room = Math.max(0, TOOL_CAP - cloudTools.length);
+              const opened = openToolbox(fullCloudTools, cloudTools, args, Math.min(12, room));
+              if (opened.defs.length) cloudTools = cloudTools.concat(opened.defs);
+              result = opened.names.length
+                ? `Loaded for this turn: ${opened.names.join(", ")}. Call the needed tool now. These extra tools will close when this turn ends.`
+                : `No additional matching tools were found${room ? "" : ` because this model's ${TOOL_CAP}-tool limit is full`}. Try toolbox_open again with an exact tool name or a more specific capability.`;
+              sse({ type: "tools_scoped", scope: "toolbox", offered: cloudTools.length, loaded: opened.names });
+            } else {
+              result = isConnectorTool(name) ? String(await connectors.run(T, name, args, ac.signal)) : await runTool(name, args, reqCtx, ac.signal);
+            }
             if (aborted) {
               life.push("cancelled", { discarded: true, reason: String(result).startsWith("CANCELLED") ? "aborted in flight" : "finished but discarded (client stopped)" });
               await logToolRun({ ts: callStartedAt, endedAt: new Date().toISOString(), runId, name, category: meta.category, cls, status: "cancelled", states: life.states, discarded: true, confirmedByUser: gate.confirmedByUser, input: inPrev, output: String(result).replace(/\s+/g, " ").slice(0, 200), chatId, model: cloudModel });

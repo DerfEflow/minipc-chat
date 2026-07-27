@@ -163,16 +163,16 @@ const TERMINAL = (evs) => evs.some((e) => e === "done" || e === "stopped" || e =
   ok("Wildfire refuses to arm on a non-rostered model, and says which ones qualify");
 }
 
-// 4. The nudge: rostered model, machine work asked for, Wildfire left off.
+// 4. Wildfire is optional: ordinary machine work uses the focused/on-demand toolbox without a
+//    nag. Wildfire remains the explicit full-catalog-up-front override.
 {
   const t = await turn({ messages: [{ role: "user", content: "go fix the build on my laptop" }],
                          model: "anthropic/claude-opus-4-8" }, { email: OWNER });
-  assert.ok(t.events.includes("wildfire"), "expected the nudge, got: " + t.events.join(","));
-  assert.equal(t.detail.wildfire.kind, "nudge");
-  ok("Wildfire nudges when a starred model is asked for machine work unarmed");
+  assert.ok(!t.events.includes("wildfire"), "Wildfire must not nag when the on-demand toolbox can handle the job");
+  ok("machine work can proceed through the on-demand toolbox without Wildfire");
 }
 
-// 5. Ordinary conversation stays quiet. A nudge that cries wolf gets switched off in a day.
+// 5. Ordinary conversation stays quiet.
 {
   const t = await turn({ messages: [{ role: "user", content: "what is a good name for a cat" }],
                          model: "anthropic/claude-opus-4-8" }, { email: OWNER });

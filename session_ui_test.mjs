@@ -12,6 +12,9 @@ const sync = readFileSync(new URL("./chatsync.mjs", import.meta.url), "utf8");
 assert.match(app, /model:\s*c\.model/, "cross-device chat payload must carry the selected model");
 assert.match(app, /local\.model\s*=\s*inc\.model/, "incoming chat state must restore its model");
 assert.match(app, /c\.model\s*=\s*modelSel\.value/, "a user model change must update the open chat");
+assert.match(app, /const legacyModel[\s\S]*c\.model\s*=\s*legacyModel/, "legacy sessions must receive an explicit model before switching");
+assert.match(app, /b\.activityAt\s*\|\|\s*b\.updatedAt/, "preference changes must not reorder the sidebar");
+assert.doesNotMatch(app, /c\.model\s*=\s*modelSel\.value[\s\S]{0,180}renderSidebar\(\)/, "changing a model must not rebuild and reorder the sidebar under the pointer");
 assert.match(app, /function restoreChatModel\(\)/, "sidebar switches need an explicit model restore");
 assert.match(app, /!jobChat\.model && j\.model/, "legacy and paused chats must recover their model from the durable job ledger");
 assert.match(app, /const budgetByChat\s*=\s*Object\.create\(null\)/, "budget state must be keyed by chat");
@@ -23,5 +26,6 @@ assert.match(app, /draft:\s*c\.draft/, "draft text must travel with cross-device
 assert.match(app, /c\.draft\s*=\s*""/, "sending must clear only that chat's draft");
 assert.match(sync, /model:\s*typeof raw\.model/, "the sync store must preserve model identity");
 assert.match(sync, /draft:\s*typeof raw\.draft/, "the sync store must preserve unfinished typing");
+assert.match(sync, /activityAt:/, "cross-device state must preserve conversation recency separately from preference revisions");
 
 console.log("session_ui_test: per-chat model, budget, and draft state are pinned");
