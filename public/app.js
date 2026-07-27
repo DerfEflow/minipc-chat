@@ -674,7 +674,9 @@ function modelDisplayName(id) {
   const m = findCatalogModel(id);
   if (m && m.name) return m.name;
   const o = modelSel && Array.from(modelSel.options).find((x) => x.value === id);
-  return o ? o.textContent.replace(/\s*\(local\)$/, "").replace(/^[🔧💬👁]\s*/u, "") : id;
+  if (o) return o.textContent.replace(/\s*\(local\)$/, "").replace(/^[🔧💬👁]\s*/u, "");
+  if (MODEL_TIER_LABEL[id]) return MODEL_TIER_LABEL[id];
+  return String(id).split("/").pop().replace(/[-_]+/g, " ").replace(/\b[a-z]/g, (ch) => ch.toUpperCase());
 }
 function modelHue(id) {
   let h = 0;
@@ -2451,7 +2453,7 @@ tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.valu
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { maybeReattach(); if (Date.now() - lastReconcile > 10000) reconcileJobs(); } });
 window.addEventListener("pageshow", () => { maybeReattach(); reconcileJobs(); });
 
-load(); renderAll(); fetchBudget(); loadModels().then(renderPace, renderPace); autosize();
+load(); renderAll(); fetchBudget(); loadModels().then(() => { renderPace(); renderAll(); }, renderPace); autosize();
 renderPace();   // the saved model/mode/dial can already be a slow combination on the first paint
 maybeReattach();   // an answer may still be generating server-side from before this (re)load
 reconcileJobs();   // adopt/deliver any runs the server knows about that this device doesn't

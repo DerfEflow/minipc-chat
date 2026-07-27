@@ -20,6 +20,7 @@ assert.match(app, /modelId:\s*modelSel\s*\?\s*modelSel\.value/, "every sent user
 assert.match(app, /modelHistoryVersion\s*!==\s*1/, "legacy transcripts need a one-time model-history migration");
 assert.match(app, /className\s*=\s*"model-era"/, "the transcript must render model change segments");
 assert.match(app, /messageModel\s*!==\s*eraModel/, "a changed message model must start a new visual era");
+assert.match(app, /loadModels\(\)\.then\(\(\)\s*=>\s*\{[\s\S]*renderAll\(\)/, "catalog arrival must replace raw provider ids with human model names");
 assert.match(app, /!jobChat\.model && j\.model/, "legacy and paused chats must recover their model from the durable job ledger");
 assert.match(app, /const budgetByChat\s*=\s*Object\.create\(null\)/, "budget state must be keyed by chat");
 assert.match(app, /budgetByChat\[st\.c\.id\]/, "background SSE budget events must update their source chat");
