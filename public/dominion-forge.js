@@ -267,6 +267,7 @@
       });
     }
 
+    // The pointer itself remains a convenient one-tap "next setting" control.
     knob.addEventListener("click", (e) => { e.stopPropagation(); apply(TIERS[(TIERS.indexOf(live) + 1) % TIERS.length]); });
     stage.addEventListener("wheel", (e) => {
       e.preventDefault();
@@ -278,24 +279,62 @@
       else if (e.key === "ArrowDown" || e.key === "ArrowLeft") { e.preventDefault(); apply(TIERS[Math.max(0, TIERS.indexOf(live) - 1)]); }
     });
 
-    // drag to rotate -> nearest detent (top = flame, right = furnace, left = ember)
+    // Pressing the dial chooses the nearest engraved station; dragging still follows the pointer
+    // and settles on the nearest detent. Keep explicit controls out of pointer capture so a normal
+    // tap on Wildfire/Forge Mode is never mistaken for the start of a drag.
     let dragging = false;
+    let pointerStart = null;
     const center = () => { const r = stage.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height * .56 }; };
     const angleToTier = (deg) => (deg <= -26 ? "ember" : deg >= 26 ? "furnace" : "flame");
+    const tierAtPoint = (x, y) => {
+      const r = stage.getBoundingClientRect();
+      const stations = [
+        { tier: "ember",   x: r.left + r.width * .173, y: r.top + r.height * .298 },
+        { tier: "flame",   x: r.left + r.width * .500, y: r.top + r.height * .113 },
+        { tier: "furnace", x: r.left + r.width * .844, y: r.top + r.height * .298 },
+      ];
+      return stations.reduce((best, station) => {
+        const distance = Math.hypot(x - station.x, y - station.y);
+        return !best || distance < best.distance ? { tier: station.tier, distance } : best;
+      }, null).tier;
+    };
+    const isDialControl = (target) =>
+      target.closest(".dial-step, .dial-forge-mode, .dial-wildfire, .dial-done");
     stage.addEventListener("pointerdown", (e) => {
-      if (e.target.closest(".dial-step") || e.target.closest(".dial-forge-mode") || e.target.closest(".dial-done")) return;
-      dragging = true; try { stage.setPointerCapture(e.pointerId); } catch (er) {}
+      if (isDialControl(e.target)) return;
+      pointerStart = { x: e.clientX, y: e.clientY, id: e.pointerId };
     });
     stage.addEventListener("pointermove", (e) => {
-      if (!dragging) return;
+      if (!pointerStart || pointerStart.id !== e.pointerId) return;
+      if (!dragging && Math.hypot(e.clientX - pointerStart.x, e.clientY - pointerStart.y) < 7) return;
+      if (!dragging) {
+        dragging = true;
+        stage.classList.add("dial-adjusting");
+        try { stage.setPointerCapture(e.pointerId); } catch (er) {}
+      }
       const c = center();
       let deg = Math.atan2(e.clientY - c.y, e.clientX - c.x) * 180 / Math.PI + 90;
       if (deg > 180) deg -= 360;
       apply(angleToTier(deg), false);
     });
-    const endDrag = () => { if (dragging) { dragging = false; setTier(live); } };
+    const endDrag = (e) => {
+      if (!pointerStart || (e && pointerStart.id !== e.pointerId)) return;
+      if (dragging) {
+        dragging = false;
+        stage.classList.remove("dial-adjusting");
+        setTier(live);
+      } else if (e && !isDialControl(e.target)) {
+        apply(tierAtPoint(e.clientX, e.clientY));
+      }
+      pointerStart = null;
+    };
     stage.addEventListener("pointerup", endDrag);
-    stage.addEventListener("pointercancel", endDrag);
+    stage.addEventListener("pointercancel", () => {
+      dragging = false;
+      pointerStart = null;
+      stage.classList.remove("dial-adjusting");
+      apply(getTier(), false);
+    });
 
     steps.forEach((s) => s.addEventListener("click", (e) => { e.stopPropagation(); apply(s.dataset.t); }));
     forgeButton.addEventListener("click", (e) => {

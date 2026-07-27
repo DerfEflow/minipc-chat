@@ -195,6 +195,7 @@
   transition: transform .32s cubic-bezier(.18, .9, .2, 1.08);
 }
 .dial-knob:active { cursor: grabbing; }
+.dial-stage.dial-adjusting .dial-knob { transition: filter .18s ease; }
 /* the pointer notch machined into the knob rim */
 .dial-knob::after {
   content: ""; position: absolute; left: 50%; top: 9px; transform: translateX(-50%);
