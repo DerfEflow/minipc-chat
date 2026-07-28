@@ -593,17 +593,11 @@
   .model-current.has-machine-grant.name-flare { animation: none; }
 }
 
-/* ---- model eras: the transcript remembers which engine spoke where ---------------------------
-   Each picker snapshot starts a new scroll segment. The zero-height sticky marker stays behind
-   that segment while it is on screen, then yields to the next model marker. It never intercepts a
-   click or changes the message text; 25% opacity keeps the chassis and conversation readable. */
-.model-era {
-  --model-hue: 132;
-  position: relative;
-  isolation: isolate;
-  min-width: 0;
-}
-.model-era-marker {
+/* ---- model eras: numbered engine ledger + transcript boundaries ------------------------------
+   Up to three model choices sit side-by-side in a sticky vertical ledger. Names are measured in
+   app.js against the available screen height, so even long catalog names remain fully visible.
+   Bright green rules pin the exact transcript boundary where model 2 or 3 begins. */
+.model-ledger {
   position: sticky;
   top: 18px;
   height: 0;
@@ -611,37 +605,104 @@
   pointer-events: none;
   user-select: none;
 }
-.model-era-name {
+.model-ledger-list {
   position: absolute;
-  left: 0;
-  top: min(690px, calc(100dvh - 218px));
-  width: min(690px, calc(100dvh - 218px));
-  overflow: hidden;
+  inset: 0 auto auto 0;
+  display: flex;
+  align-items: flex-start;
+  height: var(--model-span);
+}
+.model-ledger-entry {
+  --model-hue: 132;
+  position: relative;
+  flex: 0 0 auto;
+  height: var(--model-span);
+}
+.model-ledger-index {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  z-index: 1;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 4px;
+  transform: translateX(-50%);
+  border: 1px solid #35ff88;
+  border-radius: 999px;
+  background: rgba(0, 18, 10, .88);
+  color: #72ffac;
+  box-shadow: 0 0 12px rgba(53, 255, 136, .55);
+  font: 850 11px/17px ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: center;
+}
+.model-ledger-name {
+  position: absolute;
+  left: 50%;
+  top: var(--model-span);
+  width: var(--model-span);
+  overflow: visible;
   white-space: nowrap;
-  transform: rotate(-90deg);
+  transform: rotate(-90deg) translateY(-50%);
   transform-origin: 0 0;
   color: hsl(var(--model-hue) 88% 70%);
   opacity: .25;
-  font: 950 clamp(32px, 5.4vw, 72px)/.88 "Domine", Georgia, serif;
-  letter-spacing: .035em;
+  font-family: "Domine", Georgia, serif;
+  font-weight: 950;
+  line-height: .9;
+  letter-spacing: .025em;
   text-align: center;
   text-transform: uppercase;
   text-shadow: 0 0 20px hsl(var(--model-hue) 90% 55% / .45);
+}
+.model-ledger-entry.pending .model-ledger-index {
+  border-style: dashed;
+  opacity: .72;
+}
+.model-era {
+  position: relative;
+  isolation: isolate;
+  min-width: 0;
 }
 .model-era-turns {
   position: relative;
   z-index: 1;
   min-width: 0;
-  padding-left: clamp(42px, 7vw, 86px);
+  padding-left: var(--model-rail-width, 54px);
 }
 .model-era-turns > .turn:last-child { margin-bottom: 18px; }
+.model-era-divider {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  margin: 8px 12px 20px var(--model-rail-width, 54px);
+  color: #78ffad;
+  filter: drop-shadow(0 0 7px rgba(36, 255, 124, .8));
+}
+.model-era-divider::before,
+.model-era-divider::after {
+  content: "";
+  height: 3px;
+  flex: 1 1 auto;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, #20ff79 18%, #7dffb1 50%, #20ff79 82%, transparent);
+  box-shadow: 0 0 10px #20ff79, 0 0 22px rgba(32, 255, 121, .75);
+}
+.model-era-divider span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: 0 9px;
+  border: 2px solid #4dff95;
+  border-radius: 50%;
+  background: #001b0c;
+  color: #caffdc;
+  font: 900 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 
 @media (max-width: 700px) {
-  .model-era-marker { top: 10px; }
-  .model-era-name {
-    top: min(570px, calc(100dvh - 205px));
-    width: min(570px, calc(100dvh - 205px));
-    font-size: clamp(25px, 8.5vw, 43px);
-  }
-  .model-era-turns { padding-left: 34px; }
+  .model-ledger { top: 10px; }
+  .model-ledger-index { min-width: 17px; height: 17px; font-size: 10px; line-height: 15px; }
+  .model-era-divider { margin-right: 5px; margin-bottom: 14px; }
 }

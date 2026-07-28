@@ -344,7 +344,7 @@ function summarizeLeft(id) {
   if (!c || c.messages.length < 4) return;
   fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
 }
-function newChat() { const prev = curId; if (prev) persistChatDraft(); detachCurrentSession(); const now = Date.now(); const c = { id: uid(), title: "New chat", messages: [], model: modelSel ? modelSel.value : (localStorage.getItem(LS_MODEL) || "local"), draft: "", updatedAt: now, activityAt: now }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); try { fetchBudget(); } catch {} }
+function newChat() { const prev = curId; if (prev) persistChatDraft(); detachCurrentSession(); const now = Date.now(); const defaultModel = localStorage.getItem(LS_MODEL) || (modelSel ? modelSel.value : "local"); const c = { id: uid(), title: "New chat", messages: [], model: defaultModel, draft: "", updatedAt: now, activityAt: now }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); try { fetchBudget(); } catch {} }
 // Fresh-start ignition: a quick green scan-sweep over the chat surface as the rail closes.
 function igniteChatSurface() {
   const surf = document.getElementById("neural-glass") || document.body;
@@ -553,34 +553,98 @@ async function convertToEval(i) {
   const r = await aApi("/evals", { title: orig.replace(/\s+/g, " ").slice(0, 80), input: orig.slice(0, 4000), expectedBehavior: exp, source: "manual" });
   alert(r.item ? "Eval case saved — run it from Mentor & Improvement." : "Eval: " + (r.error || "failed"));
 }
-function renderAll() {
-  wrap.querySelectorAll(".model-era, .turn, .err").forEach((n) => n.remove());
+function transcriptModelPlan(c) {
+  const entries = [], slots = [];
+  let actualModel = "", slot = -1;
+  for (const m of c.messages || []) {
+    const id = m.modelId || actualModel || c.model || "local";
+    if (!actualModel || id !== actualModel) {
+      actualModel = id;
+      if (entries.length < 3) {
+        entries.push({ id, pending: false });
+        slot = entries.length - 1;
+      }
+    }
+    slots.push(Math.max(0, slot));
+  }
+  if (!entries.length) {
+    entries.push({ id: c.model || "local", pending: true });
+  } else if (c.model && c.model !== actualModel && entries.length < 3) {
+    entries.push({ id: c.model, pending: true });
+  }
+  return { entries, slots };
+}
+function renderTranscript() {
+  wrap.querySelectorAll(".model-ledger, .model-era, .turn, .err").forEach((n) => n.remove());
   const c = cur();
-  restoreChatDraft();
-  restoreChatModel();
   empty.style.display = (c && c.messages.length) ? "none" : "";
-  updateFocusMode();   // Chat Focus Mode follows the open chat: first sent message folds the chrome
   if (c) {
+    const plan = transcriptModelPlan(c);
+    const mobile = window.innerWidth <= 700;
+    const ledger = document.createElement("div"); ledger.className = "model-ledger"; ledger.setAttribute("aria-hidden", "true");
+    const list = document.createElement("div"); list.className = "model-ledger-list";
+    ledger.appendChild(list); wrap.insertBefore(ledger, wrap.firstChild);
+    // Size against the actual scroll field, not the whole window: header/footer height varies with
+    // device and focus mode, and using 100vh is what let long names run past both field edges. The
+    // ledger is in-flow before this measurement so the top padding of the real field is included.
+    const fieldBox = main && main.getBoundingClientRect();
+    const ledgerBox = ledger.getBoundingClientRect();
+    const available = fieldBox ? fieldBox.bottom - Math.max(fieldBox.top, ledgerBox.top) - 8 : window.innerHeight - 80;
+    const span = Math.max(100, Math.min(mobile ? 570 : 690, available));
+    const sizeCap = plan.entries.length === 1 ? (mobile ? 43 : 62)
+      : plan.entries.length === 2 ? (mobile ? 31 : 46) : (mobile ? 24 : 36);
+    ledger.style.setProperty("--model-span", span + "px");
+    let railWidth = 0;
+    plan.entries.forEach((entry, i) => {
+      const display = modelDisplayName(entry.id);
+      let fit = Math.max(mobile ? 12 : 14, Math.min(sizeCap, Math.floor(span / Math.max(7, display.length * .82))));
+      const item = document.createElement("div"); item.className = "model-ledger-entry" + (entry.pending ? " pending" : "");
+      item.style.setProperty("--model-hue", String(modelHue(entry.id)));
+      const index = document.createElement("span"); index.className = "model-ledger-index"; index.textContent = String(i + 1);
+      const name = document.createElement("span"); name.className = "model-ledger-name"; name.textContent = display;
+      name.style.fontSize = fit + "px";
+      item.append(index, name); list.appendChild(item);
+      // Font metrics vary by platform. Measure the real rendered label and trim once more if its
+      // glyphs exceed the vertical track; this is the mechanical guarantee that the full name fits.
+      if (name.scrollWidth > name.clientWidth) {
+        fit = Math.max(mobile ? 12 : 14, Math.floor(fit * (name.clientWidth / name.scrollWidth) * .96));
+        name.style.fontSize = fit + "px";
+      }
+      item.style.width = (fit + (mobile ? 6 : 9)) + "px";
+      railWidth += fit + (mobile ? 6 : 9);
+    });
+    wrap.style.setProperty("--model-rail-width", Math.max(mobile ? 34 : 46, railWidth + (mobile ? 7 : 12)) + "px");
+
     let lastAi = -1; for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { lastAi = i; break; }
-    let era = null, eraModel = "";
-    const openEra = (modelId) => {
-      const id = modelId || c.model || "local";
-      const section = document.createElement("section"); section.className = "model-era"; section.dataset.model = id;
-      section.style.setProperty("--model-hue", String(modelHue(id)));
-      const marker = document.createElement("div"); marker.className = "model-era-marker"; marker.setAttribute("aria-hidden", "true");
-      const name = document.createElement("span"); name.className = "model-era-name"; name.textContent = modelDisplayName(id);
-      marker.appendChild(name);
+    let era = null, eraIndex = -1;
+    const openEra = (index) => {
+      const entry = plan.entries[index] || plan.entries[plan.entries.length - 1];
+      const section = document.createElement("section"); section.className = "model-era" + (entry.pending ? " pending" : "");
+      section.dataset.model = entry.id; section.dataset.era = String(index + 1);
+      if (index > 0) {
+        const divider = document.createElement("div"); divider.className = "model-era-divider"; divider.setAttribute("aria-label", "Model " + (index + 1) + " begins");
+        const badge = document.createElement("span"); badge.textContent = String(index + 1);
+        divider.appendChild(badge); section.appendChild(divider);
+      }
       const turns = document.createElement("div"); turns.className = "model-era-turns";
-      section.append(marker, turns); wrap.appendChild(section);
-      eraModel = id; era = turns;
+      section.appendChild(turns); wrap.appendChild(section);
+      eraIndex = index; era = turns;
     };
-    if (!c.messages.length) openEra(c.model);
     c.messages.forEach((m, i) => {
-      const messageModel = m.modelId || eraModel || c.model || "local";
-      if (!era || messageModel !== eraModel) openEra(messageModel);
+      const messageEra = Math.min(plan.slots[i] || 0, plan.entries.length - 1);
+      if (!era || messageEra !== eraIndex) openEra(messageEra);
       renderMsg(m, i, i === lastAi, era);
     });
+    if (!era || (plan.entries[plan.entries.length - 1].pending && eraIndex !== plan.entries.length - 1)) {
+      openEra(plan.entries.length - 1);
+    }
   }
+}
+function renderAll() {
+  restoreChatDraft();
+  restoreChatModel();
+  updateFocusMode();   // Chat Focus Mode follows the open chat: first sent message folds the chrome
+  renderTranscript();  // measure after focus mode settles so names fit the field's real height
   renderSidebar(); renderBudget(); syncComposer(); scroll();
 }
 function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px"; }
@@ -2386,7 +2450,7 @@ if (modelSel) modelSel.addEventListener("change", () => {
     c.model = modelSel.value;
     c.updatedAt = Date.now();
     save();
-    if (!c.messages.length) renderAll();
+    if (!busyFor(c.id)) { renderTranscript(); scroll(); }
   }
   updateModelTrigger(); updateCloudBadge(); updateEstimate(); updateAttachGate(); modelLaser();
 });
@@ -2454,6 +2518,14 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) { ma
 window.addEventListener("pageshow", () => { maybeReattach(); reconcileJobs(); });
 
 load(); renderAll(); fetchBudget(); loadModels().then(() => { renderPace(); renderAll(); }, renderPace); autosize();
+// Re-measure the vertical tracks after the real typeface arrives and whenever the chat field
+// changes height. Skip active streams so a resize never removes their in-progress bubble.
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (!busyFor(curId)) renderTranscript(); });
+let modelLedgerResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(modelLedgerResizeTimer);
+  modelLedgerResizeTimer = setTimeout(() => { if (!busyFor(curId)) renderTranscript(); }, 120);
+});
 renderPace();   // the saved model/mode/dial can already be a slow combination on the first paint
 maybeReattach();   // an answer may still be generating server-side from before this (re)load
 reconcileJobs();   // adopt/deliver any runs the server knows about that this device doesn't
