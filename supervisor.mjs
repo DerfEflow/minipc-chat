@@ -31,6 +31,49 @@ const NO_PROGRESS_LIMIT = 2;          // two mutation attempts on one target wit
 
 const estTok = (chars) => Math.ceil(chars / 4);
 
+// A short continuation message is control input, not a new goal. Recover the most recent
+// substantive user instruction so routing, tool selection, retrieval, and the supervisor all keep
+// seeing the unfinished job after a budget top-up or manual pause.
+const CONTINUATION_ONLY_RE = /^\s*(?:(?:please\s+)?(?:continue|resume|proceed|keep\s+going|carry\s+on)|(?:continue|resume)\s+(?:the|this|that|from\s+where\s+you\s+left\s+off|exactly\s+where\s+you\s+left\s+off)|continue\s+the\s+unfinished\s+work\s+from\s+the\s+prior\s+run\s+now\..*|finish(?:\s+(?:it|this|that|the\s+(?:task|job|work)))?)\s*[.!]*\s*$/i;
+export function continuationContext(messages = [], lastUserText = "") {
+  const current = String(lastUserText || "").trim();
+  if (!CONTINUATION_ONLY_RE.test(current)) {
+    return { requested: false, goal: current, intentText: current };
+  }
+  const prior = [...messages].reverse().find((m) =>
+    m && m.role === "user" &&
+    String(m.content || "").trim() &&
+    String(m.content || "").trim() !== current &&
+    !CONTINUATION_ONLY_RE.test(String(m.content || "").trim()));
+  const goal = prior ? String(prior.content || "").trim() : current;
+  return {
+    requested: true,
+    goal,
+    intentText: goal === current ? current : `${goal}\n\nContinuation instruction: ${current}`,
+  };
+}
+
+export function emptyResponseInstruction({ toolsAvailable = false, concludePhase = false, attempt = 1 } = {}) {
+  if (toolsAvailable && !concludePhase) {
+    return "[Dominion supervisor notice — not Fred] Your last response contained internal reasoning " +
+      "but no visible answer and no tool call. Resume the unfinished work NOW. If work remains, call " +
+      "the appropriate tool immediately; do not describe your plan or repeat what remains. If the " +
+      "task is complete, provide the final answer with verified results. Recovery attempt " + attempt + ".";
+  }
+  return "[Dominion supervisor notice — not Fred] Your last response contained no visible answer. " +
+    "Tool work is paused. Write the required visible user report now as plain text: what was " +
+    "accomplished, what remains, and why the run paused. Do not output internal reasoning. " +
+    "Recovery attempt " + attempt + ".";
+}
+
+export function reasoningOnlyPause({ model = "", attempts = 0, hadReasoning = false } = {}) {
+  return "[Dominion supervisor] Paused because " + (model || "the selected model") +
+    (hadReasoning ? " returned internal reasoning" : " returned no visible response") +
+    " without a visible answer or tool action after " + attempts + " recovery attempts. " +
+    "No additional work was verified in this continuation. Earlier progress is saved; continue " +
+    "again or choose another coding model.";
+}
+
 // Detect a model looping inside ONE answer. Tool/round supervision cannot see this shape because
 // the provider is still producing a single completion. Six consecutive copies is far beyond
 // legitimate rhetorical repetition; cut at the third copy so the user gets enough context to

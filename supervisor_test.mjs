@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createLoopWatch, contextExceeded, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence,
+import { continuationContext, createLoopWatch, contextExceeded, emptyResponseInstruction, reasoningOnlyPause, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence,
          SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
 
 const call = (name, args) => ({ function: { name, arguments: JSON.stringify(args) } });
@@ -91,6 +91,41 @@ test("pause instruction: demands the summary, the why, and names the monitored m
   assert.match(p, /why work paused/);
   assert.match(p, /deepseek\/deepseek-v4-pro/);
   assert.match(p, /budget is spent/);
+});
+
+test("continuation recovers the prior substantive goal for routing and supervision", () => {
+  const messages = [
+    { role: "user", content: "Fix the TypeScript errors, run tests, and commit the changes." },
+    { role: "assistant", content: "Paused because the session budget is spent." },
+  ];
+  for (const command of [
+    "continue",
+    "Resume.",
+    "Keep going",
+    "Finish the task",
+    "Continue the unfinished work from the prior run now. Resume with the next concrete tool action.",
+  ]) {
+    const c = continuationContext(messages, command);
+    assert.equal(c.requested, true);
+    assert.match(c.goal, /TypeScript errors/);
+    assert.match(c.intentText, /commit the changes/);
+    assert.match(c.intentText, /Continuation instruction/);
+  }
+  const fresh = continuationContext(messages, "Explain what TypeScript is.");
+  assert.equal(fresh.requested, false);
+  assert.equal(fresh.goal, "Explain what TypeScript is.");
+});
+
+test("empty response recovery resumes tool work and never exposes reasoning", () => {
+  const active = emptyResponseInstruction({ toolsAvailable: true, concludePhase: false, attempt: 1 });
+  assert.match(active, /call the appropriate tool immediately/i);
+  assert.match(active, /do not describe your plan/i);
+  const concluding = emptyResponseInstruction({ toolsAvailable: true, concludePhase: true, attempt: 2 });
+  assert.match(concluding, /what was accomplished/i);
+  const pause = reasoningOnlyPause({ model: "deepseek/deepseek-v4-pro", attempts: 2, hadReasoning: true });
+  assert.match(pause, /deepseek\/deepseek-v4-pro/);
+  assert.match(pause, /No additional work was verified/);
+  assert.doesNotMatch(pause, /Let me analyze|tail of its reasoning/i);
 });
 
 test("supervisor prompt: digest only — bounded goal, capped trail, progress-not-quality framing", () => {

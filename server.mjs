@@ -34,7 +34,7 @@ import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
 import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL } from "./models.catalog.mjs";
-import { createLoopWatch, contextExceeded, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
+import { continuationContext, createLoopWatch, contextExceeded, emptyResponseInstruction, reasoningOnlyPause, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
 import { TOOLBOX_OPEN_NAME, withToolbox, openToolbox } from "./toolbox.mjs";
 
 /*
@@ -4983,6 +4983,10 @@ async function handleChat(req, res) {
   // routeConfidence seeds the response quality block; needs.mentorReview is the spec's pre-answer
   // mentor signal (explicit ask / high-stakes topic) and forces the post-answer review path.
   const lastUserText = lastUser ? String(lastUser.content) : "";
+  const lastUserAt = lastUser ? history.lastIndexOf(lastUser) : history.length;
+  const continuation = continuationContext(history.slice(0, Math.max(0, lastUserAt)), lastUserText);
+  const workGoalText = continuation.goal || lastUserText;
+  const workIntentText = continuation.intentText || lastUserText;
   // Hardcoded content wall (safety.mjs): refuse prohibited requests before any model runs or any
   // token is billed. ABSOLUTE tier (minors / mass-harm how-to) applies to everyone incl. the owner;
   // RESTRICTED tier (explicit sexual / illicit) applies to non-owners only. Owner exempt from RESTRICTED.
@@ -4994,10 +4998,10 @@ async function handleChat(req, res) {
     sse({ type: "stopped", reason: "content_blocked" });
     return endStream();
   }
-  let mode, tier, reason, privacyRisk = privacyRiskOf(lastUserText);
+  let mode, tier, reason, privacyRisk = privacyRiskOf(workIntentText);
   let routeConfidence = 0.95;
   // D1/D3: the needs_* block, produced for BOTH the auto route and explicit mode picks.
-  let needs = { tools: true, memory: true, retrieval: true, mentorReview: wantsReview(lastUserText) };
+  let needs = { tools: true, memory: true, retrieval: true, mentorReview: wantsReview(workIntentText) };
   if (cloudModel) {
     // Cloud turn: never run the local light classifier (it picks a LOCAL tier and burns a warm-up).
     // Honor an explicitly chosen mode for its prompt fragment/temperature; otherwise "normal".
@@ -5012,10 +5016,10 @@ async function handleChat(req, res) {
   } else if (reqMode !== "auto" && MODES[reqMode]) {
     mode = reqMode; tier = MODES[mode].tier; reason = "you chose " + mode.replace("_", " ");
     needs.retrieval = mode !== "fast";
-    needs.tools = mode !== "fast" || /\b(deck|forge|file|sandbox|remember|artifact|project|capture|run|search|export|save|write|python|scrape)\b/i.test(lastUserText);
+    needs.tools = mode !== "fast" || /\b(deck|forge|file|sandbox|remember|artifact|project|capture|run|search|export|save|write|python|scrape)\b/i.test(workIntentText);
   } else {
     working("thinking");   // the ambiguous-case classifier can stall on a cold light model
-    const c = await routeDecision(lastUserText, totalInputChars);
+    const c = await routeDecision(workIntentText, totalInputChars);
     mode = c.mode; tier = c.tier; reason = c.reason; privacyRisk = c.privacyRisk; routeConfidence = c.confidence;
     needs = { tools: c.needsTools, memory: c.needsMemory, retrieval: c.needsRetrieval, mentorReview: c.needsMentorReview };
   }
@@ -5033,7 +5037,7 @@ async function handleChat(req, res) {
   } else if (md.num_ctx) opts.num_ctx = md.num_ctx;
   // D3: consume needs_retrieval / needs_tools. Chat-only turns drop the tool defs from the prompt
   // (token savings); conservative bias — only fast-mode turns with no tool language skip them.
-  let { skipRetrieval, attachTools } = consumeNeeds({ mode, needsTools: needs.tools, needsRetrieval: needs.retrieval, lastUserText });
+  let { skipRetrieval, attachTools } = consumeNeeds({ mode, needsTools: needs.tools, needsRetrieval: needs.retrieval, lastUserText: workIntentText });
   // As-Fred latency fix: voice writing needs no deck/forge tools (exemplars are injected) and CoT
   // adds minutes of invisible prefill+thinking for zero voice fidelity — one round, no think,
   // tokens start right after a single prefill.
@@ -5058,7 +5062,7 @@ async function handleChat(req, res) {
    * Any state that silently removes the app's hands has to announce itself the moment the user asks
    * for hands. Same doctrine as the Wildfire notices: loud beats silent, always.
    */
-  if (!attachTools && MACHINE_INTENT_RE.test(lastUserText)) {
+  if (!attachTools && MACHINE_INTENT_RE.test(workIntentText)) {
     const why = mode === "as_fred"
       ? 'the Operating mode is set to "As Fred", which runs without tools on purpose so the voice stays pure. Switch Operating mode to Auto (or anything except As Fred) and ask again.'
       : (cloudModel && !isToolCapable(cloudModel))
@@ -5153,7 +5157,7 @@ async function handleChat(req, res) {
   if (reqCtx.hands === (T.ctxBase || CTX).hands && reqCtx.hands) {
     try {
       const registered = handsHub.nodeNames().filter((n) => !n.startsWith("user:"));
-      const lower = String(lastUserText || "").toLowerCase();
+      const lower = String(workIntentText || "").toLowerCase();
       for (const name of registered) {
         if (new RegExp("\\b" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b").test(lower)) { preferredNode = name; break; }
       }
@@ -5169,7 +5173,7 @@ async function handleChat(req, res) {
   // Degrade, don't die: this runs BEFORE the try below, and with disconnect decoupled from abort
   // an uncaught throw here would leak the lane + leave the job unsealed. Empty context is honest.
   let ctxInfo;
-  try { ctxInfo = await buildContext(lastUserText, chatId, { skipRetrieval, mode, model }, T); }
+  try { ctxInfo = await buildContext(workIntentText, chatId, { skipRetrieval, mode, model }, T); }
   catch { ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" }; }
   const messages = [{ role: "system", content: systemPrompt(personaStyle, md.frag, wolfeTier, { withTools: attachTools, machines: attachTools ? machinesBlock(T) : "", mode }) }];
   // Off-but-available connectors, by NAME only (Fred, 2026-07-19). Without this, a disabled
@@ -5206,7 +5210,7 @@ async function handleChat(req, res) {
   let personaInfo = null;
   if (mode === "as_fred") {
     try {
-      personaInfo = await persona.personaBlock(lastUserText, { exemplars: 6, sharedOnly: !T.isOwner });
+      personaInfo = await persona.personaBlock(workIntentText, { exemplars: 6, sharedOnly: !T.isOwner });
       if (personaInfo.block) messages.push({ role: "system", content: personaInfo.block });
       sse({ type: "persona", hasProfile: personaInfo.hasProfile, exemplars: personaInfo.exemplars.length });
     } catch {}
@@ -5260,7 +5264,7 @@ async function handleChat(req, res) {
   // E4: tools that create/revise artifacts stamp THIS turn's provenance on the version they write;
   // E1: and re-sweep the artifact triggers after doing so.
   reqCtx.provenance = () => ({ sourceChatId: chatId, sourceContextRefs: ctxInfo.used.map((c) => c.citationLabel),
-                               sourceToolRunIds: [...toolRunIds], promptSummary: lastUserText.slice(0, 200) });
+                               sourceToolRunIds: [...toolRunIds], promptSummary: workGoalText.slice(0, 200) });
   reqCtx.artifactTriggers = (id, sig) => { try { return evalArtifactTriggers(id, sig || {}); } catch { return null; } };
 
   try {
@@ -5299,9 +5303,9 @@ async function handleChat(req, res) {
       // crowding out the file, shell, source-context, and review tools needed for the job. Wildfire
       // remains the explicit "open everything up front" override; ordinary work can expand through
       // toolbox_open without requiring Wildfire.
-      if (cloudTools && !wildfireOn && isFocusedBuildTurn(lastUserText)) {
+      if (cloudTools && !wildfireOn && isFocusedBuildTurn(workIntentText)) {
         const beforeScope = cloudTools.length;
-        cloudTools = withToolbox(scopeBuildTools(cloudTools, lastUserText));
+        cloudTools = withToolbox(scopeBuildTools(cloudTools, workIntentText));
         console.log(`[dominion-ai] build tool scope: ${cloudTools.length} of ${beforeScope} tools offered to ${cloudModel}`);
         sse({ type: "tools_scoped", scope: "build", offered: cloudTools.length, omitted: beforeScope - cloudTools.length });
       }
@@ -5381,7 +5385,8 @@ async function handleChat(req, res) {
       const CONT_MAX = 16;
       // Seamless-continuation nudge (user role: agent-tuned models weight a trailing user turn highest).
       const CONTINUE_NUDGE = "[Dominion system notice — not Fred] Your reply was cut off at the output-length limit before it finished. Continue from the EXACT point you stopped. Do not repeat any earlier text, do not add a preface, recap, or apology, do not restate the last line — resume mid-sentence if that is where you stopped and write straight through to the natural end of the full response.";
-      let concludeNudged = false, emptyRetried = false, intentNudged = false, lastReasoning = "", promisePrefix = "";
+      const EMPTY_RECOVERY_MAX = 2;
+      let concludeNudged = false, emptyRetries = 0, intentNudged = false, sawReasoning = false, reasoningOnlyPaused = false, promisePrefix = "";
 
       for (let round = 0; !aborted; round++) {
         roundsUsed = round + 1;
@@ -5400,7 +5405,7 @@ async function handleChat(req, res) {
         if (concludeAt === Infinity && cloudTools && round > 0 && round % SUP_CHECK_EVERY === 0) {
           working("supervisor check");
           const sv = await cloudChatStream(UTILITY_MODEL,
-            [{ role: "user", content: supervisorPrompt({ goal: lastUserText, rounds: round, toolSummaries }) }],
+            [{ role: "user", content: supervisorPrompt({ goal: workGoalText, rounds: round, toolSummaries }) }],
             { temperature: 0, num_predict: 200, signal: ac.signal, tools: null, toolChoice: "none" }, null);
           const verdict = parseVerdict(sv && sv.ok ? sv.content : "");
           sse({ type: "supervisor", monitored: cloudModel, supervisor: UTILITY_MODEL, round,
@@ -5625,7 +5630,7 @@ async function handleChat(req, res) {
         // Final answer for this turn (no tool calls this round). A promise kept after the guard
         // fired carries its opening line with it (see promisePrefix below).
         answer = promisePrefix + (or.content || "");
-        if (or.reasoning) lastReasoning = or.reasoning;
+        if (or.reasoning) sawReasoning = true;
         // No-truncation: if the model stopped ONLY because it hit the output cap (finish_reason
         // "length"), resume seamlessly and keep streaming until it reaches a natural stop or the
         // continuation budget runs out. Tools stay OFF during continuation — this is pure writing.
@@ -5668,17 +5673,22 @@ async function handleChat(req, res) {
               break;
             }
             answer += (cont.content || "");
-            if (cont.reasoning) lastReasoning = cont.reasoning;
+            if (cont.reasoning) sawReasoning = true;
             fr = cont.finishReason;
           }
           if (contLeft <= 0 && fr === "length") console.log(`[dominion-ai] continuation budget (${CONT_MAX}) exhausted for ${cloudModel} — answer may still be capped`);
         }
         answer = answer.trim();
-        if (!answer && !emptyRetried && round + 1 < SUP_HARD_CAP) {
-          // Reasoning models sometimes think without speaking (all output in the reasoning channel).
-          // One explicit retry: demand plain text. If it's empty again, fall back to reasoning below.
-          emptyRetried = true;
-          messages.push({ role: "user", content: "[Dominion system notice — not Fred] Your last response contained no visible text. Write your final answer now as plain text." });
+        if (!answer && emptyRetries < EMPTY_RECOVERY_MAX && round + 1 < SUP_HARD_CAP) {
+          // During active work, an empty response must resume with a concrete tool action—not get
+          // steered into prematurely narrating a final answer. Conclusion rounds request the
+          // required pause report instead.
+          emptyRetries++;
+          messages.push({ role: "user", content: emptyResponseInstruction({
+            toolsAvailable: !!(cloudTools && cloudTools.length),
+            concludePhase,
+            attempt: emptyRetries,
+          }) });
           continue;
         }
         // THE KEPT-PROMISE GUARD (Fred, 2026-07-19). A turn may not end on "let me go look at that"
@@ -5704,10 +5714,14 @@ async function handleChat(req, res) {
         }
         break;
       }
-      // Honest last resort: if the model thought without ever speaking, surface the tail of its
-      // reasoning instead of a blank — Fred gets SOMETHING true rather than "(no response)".
-      if (!answer && lastReasoning) answer = "(The model researched but never wrote a final answer. The tail of its reasoning:)\n\n…" + lastReasoning.trim().slice(-900);
-      if (!answer) answer = "(no response)";
+      // Never expose a provider's private reasoning as an answer. If recovery failed, pause with
+      // deterministic, user-facing state that says exactly what was—and was not—verified.
+      if (!answer) {
+        reasoningOnlyPaused = true;
+        answer = reasoningOnlyPause({ model: cloudModel, attempts: emptyRetries, hadReasoning: sawReasoning });
+        sse({ type: "supervisor", monitored: cloudModel, supervisor: "deterministic empty-response guard",
+              paused: true, reason: "no visible answer or tool action after recovery attempts" });
+      }
 
       if (aborted) { sse({ type: "stopped" }); return endStream(); }
       // If nothing ever streamed (some providers buffer, or the answer landed post-tools without
@@ -5740,7 +5754,7 @@ async function handleChat(req, res) {
         : (sawTok && cloudRec) ? +(((inTokTotal * (cloudRec.inCost || 0)) + (outTokTotal * (cloudRec.outCost || 0))) / 1e6).toFixed(6)
         : null;
       console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=${toolCount} rounds=${roundsUsed} conf=${quality.confidence}`);
-      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: "completed", rounds: roundsUsed, tools: toolCount, images: imagesThisTurn || undefined, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo || undefined, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
+      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: reasoningOnlyPaused ? "paused_empty_response" : "completed", rounds: roundsUsed, tools: toolCount, images: imagesThisTurn || undefined, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo || undefined, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
       try { T.chatlog.record(chatId, history, answer); } catch {}
       const metered = await meterTurn(T, costUsd, lastUserText, answer);   // SaaS: charge credits / draw cap / training sink (non-owner only)
       // Session budget: mirror the REAL deduction (guest credits from meterTurn; owner turn cost in
@@ -5750,7 +5764,7 @@ async function handleChat(req, res) {
         const sbr = sessionBudgets.recordSpend(sbEmail, chatId, spendAmt);
         if (!sbr.error) sse({ type: "budget", event: "state", budget: SB.budget, spent: sbr.spent, remaining: sbr.remaining, over: sbr.over || undefined, unit: SB.unit });
       }
-      sse({ type: "done", meta: { model: cloudModel, mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
+      sse({ type: "done", meta: { model: cloudModel, mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: reasoningOnlyPaused ? ["The model produced no visible answer or tool action after recovery attempts."] : [] } });
       return endStream();
     }
 

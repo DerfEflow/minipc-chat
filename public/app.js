@@ -1600,7 +1600,7 @@ function regenerate() {
 // Pick up where a (possibly stopped) answer left off (spec: offer continuation after stop).
 function continueLast() {
   if (busyFor(curId)) return; const c = cur(); if (!c) return;
-  c.messages.push({ role: "user", content: "Continue exactly where you left off.", modelId: modelSel ? modelSel.value : (c.model || "local") });
+  c.messages.push({ role: "user", content: "Continue the unfinished work from the prior run now. Resume with the next concrete tool action; do not merely restate what remains. Work until complete unless a safety, context, or funded session-budget guard pauses you.", modelId: modelSel ? modelSel.value : (c.model || "local") });
   c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save(); renderAll(); streamReply(c);
 }
 function editUser(i) {
