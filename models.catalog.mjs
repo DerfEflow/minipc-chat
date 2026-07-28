@@ -102,12 +102,18 @@ export const MODELS = [
   // MANDATORY and the ONLY supported effort is "max", and reasoningEffort below is passed on every call
   // (the "new required language"). Draws reasoning tokens from the output budget, so maxOut is large
   // and the server auto-continues past it.
-  { id: "moonshotai/kimi-k3", name: "Kimi K3", origin: "Moonshot AI (Beijing)",
-    category: "Frontier / Flagship", vision: true, params: "2.8T (open-weight MoE)", paramsB: 2800, inCost: 3.00, outCost: 15.00, ctx: 1048576,
+  // Moonshot DIRECT (Fred, 2026-07-28: active prompt caching on every call). Moonshot's caching
+  // is automatic (Mooncake): unchanged prefixes over 256 tokens bill at cacheHitCost, one tenth
+  // of fresh input, with no cache ids and no write fee. The provider key is OPTIONAL: while
+  // MOONSHOT_API_KEY is absent these ride OpenRouter under the catalog id exactly as before
+  // (server resolveProviderCfg). K3's direct id is documented; K2.6's directId and its direct
+  // pricing are UNVERIFIED until the key lands — first live call confirms or falls back out loud.
+  { id: "moonshotai/kimi-k3", name: "Kimi K3", origin: "Moonshot AI (direct)", provider: "moonshot", directId: "kimi-k3",
+    category: "Frontier / Flagship", vision: true, params: "2.8T (open-weight MoE)", paramsB: 2800, inCost: 3.00, outCost: 15.00, cacheHitCost: 0.30, ctx: 1048576,
     maxOut: 32768, reasoning: true, reasoningEffort: "max",
     specialty: "Newest frontier open-weight reasoner: complex coding, long-horizon agentic work, multimodal" },
-  { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", origin: "Moonshot AI (Beijing)",
-    category: "Frontier / Flagship", vision: true, params: "1T (MoE·32B active)", paramsB: 1000, inCost: 0.66, outCost: 3.41, ctx: 262144, maxOut: 16384,
+  { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", origin: "Moonshot AI (direct)", provider: "moonshot", directId: "kimi-k2.6",
+    category: "Frontier / Flagship", vision: true, params: "1T (MoE·32B active)", paramsB: 1000, inCost: 0.66, outCost: 3.41, cacheHitCost: 0.066, ctx: 262144, maxOut: 16384,
     specialty: "Agentic tool-use heavyweight; cult favorite for doing things" },
   // Anthropic Claude: DIRECT to the native Messages API for full tool-use, thinking,
   // stop-reason, and usage fidelity. directId = the native Anthropic model id.
@@ -120,8 +126,11 @@ export const MODELS = [
   { id: "anthropic/claude-haiku-4-5", name: "Claude Haiku 4.5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-haiku-4-5-20251001",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 5.00, ctx: 200000, maxOut: 64000, reasoning: true,
     specialty: "Fast, cheap Claude: quick turns kept off training data (direct)" },
+  // cacheHitCost: DeepSeek's automatic context caching bills repeated prefixes at ~1/120th of
+  // fresh input (verified against published pricing 2026-07-28). The server's cost math applies
+  // it only to cache tokens the provider actually counts (prompt_cache_hit_tokens).
   { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-pro",
-    category: "Frontier / Flagship", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.43, outCost: 0.87, ctx: 1000000, maxOut: 384000, reasoning: true,
+    category: "Frontier / Flagship", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.43, outCost: 0.87, cacheHitCost: 0.003625, ctx: 1000000, maxOut: 384000, reasoning: true,
     specialty: "Near-frontier reasoning + code at ~1/30th flagship price (direct to DeepSeek)" },
   { id: "minimax/minimax-m2.5", name: "MiniMax M2.5", origin: "MiniMax (Shanghai)",
     category: "Frontier / Flagship", params: "456B (MoE)", paramsB: 456, inCost: 0.12, outCost: 0.48, ctx: 204000,
@@ -140,14 +149,19 @@ export const MODELS = [
   { id: "deepseek/deepseek-r1", name: "DeepSeek R1", origin: "DeepSeek (China)",
     category: "Reasoning & Math", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.70, outCost: 2.50, ctx: 163000, maxOut: 16384, reasoning: true,
     specialty: "Visible chain-of-thought; watch it reason step by step" },
-  { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra", origin: "NVIDIA",
+  // NVIDIA DIRECT (Fred, 2026-07-28): the build.nvidia.com developer endpoint serves these free
+  // (63 free endpoints; Fred: "limits are extremely generous"). While NVIDIA_API_KEY is absent
+  // they ride OpenRouter at the prices below; with the key, the server routes direct and bills
+  // the call at $0 (transport-aware cost math). directId is the NIM catalog id, UNVERIFIED until
+  // the key's first live call; a refused id falls back to OpenRouter out loud.
+  { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-ultra-550b-a55b",
     category: "Reasoning & Math", params: "550B (MoE·55B active)", paramsB: 550, inCost: 0.42, outCost: 2.61, ctx: 1000000, maxOut: 16384, reasoning: true,
     specialty: "Deep STEM reasoning when you need the big gun" },
   { id: "qwen/qwen3-8b", name: "Qwen3 8B", origin: "Alibaba",
     category: "Reasoning & Math", params: "8B", paramsB: 8, inCost: 0.05, outCost: 0.40, ctx: 128000, reasoning: true,
     specialty: "Tiny thinking-mode model; cheap step-by-step math (Apache 2.0)" },
   { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-flash",
-    category: "Reasoning & Math", params: "undisclosed (MoE)", paramsB: null, inCost: 0.05, outCost: 0.24, ctx: 1000000, maxOut: 384000, reasoning: true,
+    category: "Reasoning & Math", params: "undisclosed (MoE)", paramsB: null, inCost: 0.05, outCost: 0.24, cacheHitCost: 0.0028, ctx: 1000000, maxOut: 384000, reasoning: true,
     specialty: "Cheapest strong reasoning/math+code engine, direct to DeepSeek" },
 
   // ---- Coding -------------------------------------------------------------------------------
@@ -245,7 +259,7 @@ export const MODELS = [
   { id: "google/gemma-4-31b-it:free", name: "Gemma 4 31B", origin: "Google (open weights)",
     category: "Open & Trainable", vision: true, params: "31B", paramsB: 31, inCost: 0, outCost: 0, ctx: 262144,
     specialty: "Capable FREE baseline to sanity-check everything against" },
-  { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 3 Super", origin: "NVIDIA (open weights)",
+  { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 3 Super", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-super-120b-a12b",
     category: "Open & Trainable", params: "120B (MoE·12B active)", paramsB: 120, inCost: 0, outCost: 0, ctx: 1000000,
     specialty: "The largest FREE model here: 1M context, tools, and no cost to run" },
   { id: "mistralai/mistral-nemo", name: "Mistral Nemo", origin: "Mistral AI (France)",

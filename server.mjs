@@ -570,15 +570,41 @@ const DEEPSEEK_KEY = cfgGet("DEEPSEEK_AI_DOMINION_UI_APIKEY", cfgGet("DEEPSEEK_A
 // Anthropic direct (added 2026-07-14 for Trusted mode). It uses the native Messages API so
 // thinking signatures, tool blocks, stop reasons, and usage survive multi-step work.
 const ANTHROPIC_KEY = cfgGet("ANTHROPIC_API_KEY", cfgGet("CLAUDE_ANTHROPIC_KEY", ""));
-// One endpoint config per provider. All three speak the OpenAI-compatible chat-completions format,
-// so a single streamer serves them — only base URL, key, and a couple of headers differ.
+// Moonshot + NVIDIA direct (Fred, 2026-07-28: "take advantage of prompt caching actively on every
+// call"). Moonshot's caching is automatic (unchanged prefixes over 256 tokens bill at the cache-hit
+// rate, ~10x below fresh input; no cache ids, no TTLs). NVIDIA's integrate endpoint is their
+// OpenAI-compatible lane. Both keys are OPTIONAL: see resolveProviderCfg below for what happens
+// while a key has not been minted yet.
+const MOONSHOT_KEY = cfgGet("MOONSHOT_API_KEY", cfgGet("MOONSHOT_KEY", ""));
+const NVIDIA_KEY = cfgGet("NVIDIA_API_KEY", cfgGet("NVIDIA_KEY", ""));
+// One endpoint config per provider. All of these speak the OpenAI-compatible chat-completions
+// format, so a single streamer serves them — only base URL, key, and a couple of headers differ.
 const PROVIDER_CFG = {
   openrouter: { url: OPENROUTER_URL, key: () => OPENROUTER_KEY, label: "OpenRouter",
     extraHeaders: { "http-referer": OPENROUTER_REFERER, "x-title": "Dominion AI" }, wantUsage: true },
   openai:     { url: cfgGet("OPENAI_URL", "https://api.openai.com/v1/chat/completions"), key: () => OPENAI_KEY, label: "OpenAI (direct)", extraHeaders: {}, wantUsage: false },
   deepseek:   { url: cfgGet("DEEPSEEK_URL", "https://api.deepseek.com/chat/completions"), key: () => DEEPSEEK_KEY, label: "DeepSeek (direct)", extraHeaders: {}, wantUsage: false },
   anthropic:  { url: cfgGet("ANTHROPIC_URL", "https://api.anthropic.com/v1/messages"), key: () => ANTHROPIC_KEY, label: "Anthropic (direct)", extraHeaders: {}, wantUsage: false },
+  moonshot:   { url: cfgGet("MOONSHOT_URL", "https://api.moonshot.ai/v1/chat/completions"), key: () => MOONSHOT_KEY, label: "Moonshot (direct)", extraHeaders: {}, wantUsage: false },
+  nvidia:     { url: cfgGet("NVIDIA_URL", "https://integrate.api.nvidia.com/v1/chat/completions"), key: () => NVIDIA_KEY, label: "NVIDIA (direct)", extraHeaders: {}, wantUsage: false },
 };
+/*
+ * Resolve-at-call-time provider routing (SOW docs/PROVIDER-CACHING-SOW.md, W1). A model may
+ * declare a direct provider it PREFERS; if that provider's key is absent from the environment,
+ * the call rides OpenRouter under the model's catalog id exactly as it did before the provider
+ * existed. The moment the key lands in the env, calls flip to the direct wire. Production never
+ * breaks while Fred is still minting keys, and no previously-working model ever shows
+ * "needs a provider key". Applies only to OpenAI-DIALECT providers; the openai and anthropic
+ * native branches keep their explicit no-key errors (those models never had an OpenRouter row).
+ */
+const OPENROUTER_FALLBACK_PROVIDERS = new Set(["moonshot", "nvidia"]);
+function resolveProviderCfg(provider) {
+  const cfg = PROVIDER_CFG[provider] || PROVIDER_CFG.openrouter;
+  if (OPENROUTER_FALLBACK_PROVIDERS.has(provider) && !cfg.key()) {
+    return { cfg: PROVIDER_CFG.openrouter, provider: "openrouter", fellBack: true };
+  }
+  return { cfg, provider, fellBack: false };
+}
 // Allow-list = exactly the catalog ids (the single source of truth). A forced model is treated as
 // "cloud" ONLY if it's in the catalog — an unknown id can never silently egress.
 const isCloudModel = (m) => typeof m === "string" && CATALOG_IDS.has(m);
@@ -669,11 +695,19 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     }, onDelta);
   }
   return new Promise((resolve) => {
-    // Resolve the model's provider + native id from the catalog (single source of truth).
+    // Resolve the model's provider + native id from the catalog (single source of truth), then
+    // resolve WHICH WIRE actually carries it (key-present direct, else OpenRouter — SOW W1).
+    // opts.__forceProvider is the one-shot recovery path below: a direct provider that rejects
+    // the model id (unverified directId, W2) retries once through OpenRouter and logs it.
     const rec = modelById(catalogId);
-    const provider = (rec && rec.provider) || "openrouter";
-    const directId = (rec && rec.directId) || catalogId;
-    const cfg = PROVIDER_CFG[provider] || PROVIDER_CFG.openrouter;
+    const declaredProvider = opts.__forceProvider || (rec && rec.provider) || "openrouter";
+    const resolved = resolveProviderCfg(declaredProvider);
+    const provider = resolved.provider;
+    const cfg = resolved.cfg;
+    if (resolved.fellBack) console.log(`[dominion-ai] ${declaredProvider} key absent — ${catalogId} rides OpenRouter until the key lands`);
+    // On the direct wire the model travels under its native id; on OpenRouter it travels under
+    // the catalog id (which IS the OpenRouter slug).
+    const directId = provider === "openrouter" ? catalogId : ((rec && rec.directId) || catalogId);
     const KEY = cfg.key();
     if (!KEY) return resolve({ ok: false, error: `No ${cfg.label} key configured on the server. Add the key to the box's .env to use this model. Local Qwen still works.` });
     if (opts.signal && opts.signal.aborted) return resolve({ ok: false, aborted: true, error: "stopped" });
@@ -752,6 +786,21 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     const done = (r) => {
       if (settled) return; settled = true;
       if (shaped.toolsDropped && r && typeof r === "object") r.toolsDropped = shaped.toolsDropped;
+      if (r && typeof r === "object") {
+        // The wire that actually carried the call rides the result, so cost math can price the
+        // transport truthfully (the NVIDIA developer lane bills nothing; catalog prices are the
+        // OpenRouter lane's). Stamped on usage too: bumpUsage sees only the usage object.
+        r.transport = provider;
+        if (r.usage && typeof r.usage === "object") r.usage.__transport = provider;
+        // W2 recovery: a DIRECT wire refusing the model id itself (unverified directId, or the
+        // provider retired it) falls back to OpenRouter exactly once, out loud. Transport errors
+        // and rate limits do NOT reroute — those retry on the same wire upstream.
+        if (!r.ok && !opts.__forceProvider && OPENROUTER_FALLBACK_PROVIDERS.has(provider) &&
+            (Number(r.status) === 404 || /model.*(not found|does not exist|invalid|unknown)|no such model/i.test(String(r.error || "")))) {
+          console.log(`[dominion-ai] ${providerLabel} refused model id "${directId}" — retrying ${catalogId} via OpenRouter`);
+          return resolve(cloudChatStream(catalogId, messages, { ...opts, __forceProvider: "openrouter" }, onDelta));
+        }
+      }
       resolve(r);
     };
     // One attempt = one HTTP request with its own stream state. On a 400 that NAMES a parameter
@@ -2082,16 +2131,33 @@ function ideHandsFor(T) {
     : (tool, args, opts = {}) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000, ...opts });
 }
 
+/*
+ * Catalog-derived cost for one settled call, cache-aware (SOW docs/PROVIDER-CACHING-SOW.md).
+ * Cached prompt tokens bill at the provider's cache-hit rate (catalog cacheHitCost; DeepSeek
+ * V4 Pro is 120x below fresh input), and only the counted cache tokens get the discount:
+ * an uncounted token is full freight, so a provider that reports nothing can never be
+ * undercharged (W4). The NVIDIA developer lane bills nothing today; a call that actually rode
+ * that transport costs $0 whatever the catalog says about the OpenRouter lane.
+ */
+function catalogCallCost(rec, u) {
+  if (!rec || !u) return 0;
+  if (u.__transport === "nvidia") return 0;
+  const inTok = Number(u.prompt_tokens ?? u.input_tokens) || 0;
+  const outTok = Number(u.completion_tokens ?? u.output_tokens) || 0;
+  const cachedRaw = (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens)
+    ?? u.prompt_cache_hit_tokens ?? u.cached_tokens;
+  const cached = Math.max(0, Math.min(Number(cachedRaw) || 0, inTok));
+  const hitRate = typeof rec.cacheHitCost === "number" ? rec.cacheHitCost : (rec.inCost || 0);
+  return ((inTok - cached) * (rec.inCost || 0) + cached * hitRate + outTok * (rec.outCost || 0)) / 1e6;
+}
+
 function ideCloudCost(model, r) {
   let costUsd = 0;
   const rec = modelById(model);
   if (r && r.usage) {
-    if (typeof r.usage.cost === "number") costUsd = r.usage.cost;
-    else if (rec) {
-      const inTok = r.usage.prompt_tokens ?? r.usage.input_tokens ?? 0;
-      const outTok = r.usage.completion_tokens ?? r.usage.output_tokens ?? 0;
-      costUsd = ((inTok * (rec.inCost || 0)) + (outTok * (rec.outCost || 0))) / 1e6;
-    }
+    if (r.transport === "nvidia" || r.usage.__transport === "nvidia") costUsd = 0;
+    else if (typeof r.usage.cost === "number") costUsd = r.usage.cost;
+    else if (rec) costUsd = catalogCallCost(rec, r.usage);
   }
   return +costUsd.toFixed(6);
 }
@@ -6518,13 +6584,13 @@ async function handleChat(req, res) {
         const it = u.prompt_tokens ?? u.input_tokens, ot = u.completion_tokens ?? u.output_tokens;
         if (typeof it === "number") { inTokTotal += it; sawTok = true; }
         if (typeof ot === "number") { outTokTotal += ot; sawTok = true; }
-        if (typeof u.cost === "number") { costTotal += u.cost; sawCost = true; }
+        if (u.__transport === "nvidia") { sawCost = true; /* the NVIDIA developer lane bills nothing */ }
+        else if (typeof u.cost === "number") { costTotal += u.cost; sawCost = true; }
         else {
-          const usageRec = modelById(usageModel) || cloudRec || {};
-          catalogCostTotal += (
-            (Number(it) || 0) * (Number(usageRec.inCost) || 0) +
-            (Number(ot) || 0) * (Number(usageRec.outCost) || 0)
-          ) / 1e6;
+          // Cache-aware catalog pricing (catalogCallCost): counted cache-hit tokens bill at the
+          // provider's hit rate instead of full freight, so the live budget gate and the final
+          // meter both see the money the wire actually moves.
+          catalogCostTotal += catalogCallCost(modelById(usageModel) || cloudRec || {}, u);
         }
         // Cached-read tokens: OpenAI nests under prompt_tokens_details.cached_tokens; DeepSeek
         // reports prompt_cache_hit_tokens; OpenRouter surfaces cache_discount in dollars.
@@ -7869,7 +7935,10 @@ const server = http.createServer(async (req, res) => {
       // UI needs to know which rows to offer without re-deriving the rule: the flag rides every
       // model for every caller. Same copy-then-flag discipline as broadAccess above.
       for (const g of payload.groups || []) g.models = (g.models || []).map((m) => ({ ...m, orchestratorOk: isOrchestratorApproved(m.id) }));
-      payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY };
+      // moonshot/nvidia are callable whenever EITHER their own key or the OpenRouter fallback key
+      // exists (resolveProviderCfg): the picker must not grey out a model that would answer fine.
+      payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY,
+        moonshot: !!(MOONSHOT_KEY || OPENROUTER_KEY), nvidia: !!(NVIDIA_KEY || OPENROUTER_KEY) };
       // Phase 2: tell the UI the privacy modes + which providers each mode permits, so the picker can
       // filter and the switch can render. The server ALSO enforces (privacy.mjs) — this is display only.
       payload.privacy = { modes: PRIVACY_MODES, default: DEFAULT_PRIVACY_MODE, trustedProviders: [...TRUSTED_PROVIDERS] };
@@ -8278,7 +8347,7 @@ server.listen(PORT, HOST, () => {
   console.log(`[dominion-ai] listening ${HOST}:${PORT}  ->  Ollama light=${OLLAMA_LIGHT_URL}${SPLIT_TIERS ? "  heavy=" + OLLAMA_HEAVY_URL : ""}${OLLAMA_KEY ? "  (bearer)" : ""}  ·  data=${DATA_DIR}`);
   console.log(`[dominion-ai] tools: deck/forge/sandbox  ·  sync=${CTX.syncKey ? "set" : "MISSING"}  ·  run-password=${CTX.runPassword ? "set" : "unset"}  ·  sandbox=${CTX.sandboxDir}`);
   console.log(`[dominion-ai] hands: ${handsHub.enabled ? "ENABLED (dial-out hub at /hands/*, bearer-authed)" : "disabled (HANDS_TOKEN unset — /hands/* answers 503)"}`);
-  console.log(`[dominion-ai] privacy: modes ${PRIVACY_MODES.join("/")} (default ${DEFAULT_PRIVACY_MODE})  ·  trusted providers: local+${[...TRUSTED_PROVIDERS].join("+")}  ·  refuse-not-substitute  ·  providers keyed: openrouter=${!!OPENROUTER_KEY} openai=${!!OPENAI_KEY} deepseek=${!!DEEPSEEK_KEY} anthropic=${!!ANTHROPIC_KEY}`);
+  console.log(`[dominion-ai] privacy: modes ${PRIVACY_MODES.join("/")} (default ${DEFAULT_PRIVACY_MODE})  ·  trusted providers: local+${[...TRUSTED_PROVIDERS].join("+")}  ·  refuse-not-substitute  ·  providers keyed: openrouter=${!!OPENROUTER_KEY} openai=${!!OPENAI_KEY} deepseek=${!!DEEPSEEK_KEY} anthropic=${!!ANTHROPIC_KEY} moonshot=${!!MOONSHOT_KEY} nvidia=${!!NVIDIA_KEY}`);
   console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  needs_* consumed (retrieval skip + tool-def gating)  ·  post-retrieval long-context re-check  ·  usage log=${LOG_DIR}`);
   const ms = memory.stats();
   console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  gating=${ms.gating}${ms.gatedLax ? " (" + ms.gatedLax + " lax-auto-approved)" : ""}${ms.unverified ? " · " + ms.unverified + " unverified mentor claim(s) pending" : ""}  ·  scope-filtered retrieval  ·  vectors=${EMBED_MODEL} (${ms.embedded} embedded)  ·  dir=${MEMORY_DIR}`);
