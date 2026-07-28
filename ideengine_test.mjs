@@ -6,13 +6,13 @@
  *   2. a snapshot is taken BEFORE any write, and no snapshot means no write at all
  *   3. carve-out refusals name the file and the offending words, and cost nothing
  *   4. metering happens ONCE per move on a FINALLY path, including on failure
- *   5. one repair round on a failed check, then the truth, never an infinite loop
+ *   5. bounded adaptive repair on a failed check, then an honest incomplete result
  *   6. path traversal and absolute paths are refused rather than normalized
  */
 import assert from "node:assert/strict";
 import {
-  isSmallAsk, parseBlueprint, parseFileBlocks, carveOutReport, budgetCheck, estimateMove,
-  verifyCommandFor, buildMoveMessages, createIdeEngine, SYSTEM_PREFIX, lineDiff,
+  isSmallAsk, parseBlueprint, parseFileBlocks, fileCoverage, carveOutReport, budgetCheck, estimateMove,
+  verifyCommandFor, verificationPlanFor, buildMoveMessages, createIdeEngine, SYSTEM_PREFIX, lineDiff,
 } from "./ideengine.mjs";
 
 let passed = 0, failed = 0;
@@ -91,6 +91,27 @@ await t("a move can say it needs a file it was not given", () => {
   assert.equal(out.files.length, 0);
 });
 
+await t("an unterminated response is rejected atomically instead of writing truncated files", () => {
+  const out = parseFileBlocks([
+    "```path=src/complete.ts", "export const complete = true;", "```",
+    "```path=src/truncated.ts", "export const cutOff =",
+  ].join("\n"));
+  assert.equal(out.truncated, true);
+  assert.deepEqual(out.files, [], "even earlier blocks are withheld because the move is incomplete");
+  assert.deepEqual(out.needs, []);
+  assert.equal(out.issues.length, 1);
+  assert.equal(out.issues[0].path, "src/truncated.ts");
+  assert.match(out.issues[0].reason, /closing fence|truncated/i);
+});
+
+await t("planned-file coverage is case-insensitive and names every omission", () => {
+  const complete = fileCoverage(["src/A.ts", "README.md"], [{ path: "src/a.ts" }, { path: "README.md" }]);
+  assert.equal(complete.complete, true);
+  const partial = fileCoverage(["src/a.ts", "src/b.ts", "src/c.ts"], [{ path: "./src/A.ts" }]);
+  assert.equal(partial.complete, false);
+  assert.deepEqual(partial.missing, ["src/b.ts", "src/c.ts"]);
+});
+
 /* ---- carve-outs -------------------------------------------------------------------------- */
 await t("carve-out refusals name the FILE and the exact words that tripped it", () => {
   const r = carveOutReport([{ path: "scripts/backup.sh", content: "pg_dump mydb > out.sql" }]);
@@ -128,6 +149,17 @@ await t("the check command is DISCOVERED, never guessed", () => {
   assert.equal(verifyCommandFor('{"scripts":{}}').cmd, "", "no scripts means nothing is run");
   assert.equal(verifyCommandFor("not json").cmd, "");
   assert.match(verifyCommandFor("{}").why, /nothing to run|no check/);
+});
+
+await t("the verification plan includes every relevant declared script in stable order", () => {
+  const plan = verificationPlanFor('{"scripts":{"build":"vite build","test":"vitest","lint":"eslint .","typecheck":"tsc --noEmit","dev":"vite"}}');
+  assert.deepEqual(plan.commands.map((c) => c.name), ["typecheck", "lint", "test", "build"]);
+  assert.deepEqual(plan.commands.map((c) => c.cmd), [
+    "npm run typecheck --silent",
+    "npm run lint --silent",
+    "npm run test --silent",
+    "npm run build --silent",
+  ]);
 });
 
 /* ---- the cacheable prefix ---------------------------------------------------------------- */
@@ -169,6 +201,28 @@ function rig({ chatReplies = [], handsImpl = null } = {}) {
 const JOB = { id: "ide_test" };
 const WS = { root: "C:/Projects/demo", name: "Demo" };
 const MOVE = { id: "m1", title: "Add a thing", why: "because", files: ["src/a.ts"] };
+
+await t("verification runs every check and treats ok:false without an exit code as failure", async () => {
+  const calls = [];
+  const r = rig({
+    handsImpl: async (tool, args) => {
+      calls.push({ tool, args });
+      if (tool === "fs_read" && String(args.path).endsWith("package.json")) {
+        return { content: '{"scripts":{"typecheck":"tsc","lint":"eslint .","test":"vitest","build":"vite build"}}' };
+      }
+      if (tool === "shell_run" && /run lint/.test(args.command)) return { ok: false, error: "lint launcher failed" };
+      if (tool === "shell_run") return { ok: true, code: 0, stdout: "passed" };
+      return {};
+    },
+  });
+  const out = await r.engine.verify(JOB, WS);
+  assert.equal(out.ran, true);
+  assert.equal(out.ok, false);
+  assert.deepEqual(out.commands.map((c) => c.name), ["typecheck", "lint", "test", "build"]);
+  assert.deepEqual(out.failed.map((c) => c.name), ["lint"]);
+  assert.equal(calls.filter((c) => c.tool === "shell_run").length, 4, "one failed check must not hide the remaining evidence");
+  assert.match(out.output, /\[lint\] failed/);
+});
 
 await t("a successful move snapshots BEFORE writing, then verifies", async () => {
   const r = rig({ chatReplies: [{ ok: true, content: "```path=src/a.ts\nexport const a = 1;\n```", costUsd: 0.01 }] });
@@ -223,7 +277,11 @@ await t("NO SNAPSHOT means NO WRITE: without a restore point the move refuses", 
 
 await t("a carve-out hit blocks the move BEFORE any snapshot or write", async () => {
   const r = rig({ chatReplies: [{ ok: true, content: "```path=scripts/b.sh\npg_dump mydb\n```", costUsd: 0.02 }] });
-  const out = await r.engine.runMove(JOB, { move: MOVE, workspace: WS, assignments: {} });
+  const out = await r.engine.runMove(JOB, {
+    move: { ...MOVE, files: ["scripts/b.sh"] },
+    workspace: WS,
+    assignments: {},
+  });
   assert.equal(out.blocked, true);
   assert.ok(!r.calls.some((c) => c.tool === "fs_write"), "nothing may be written");
   assert.ok(!r.types().includes("snapshot"), "and no snapshot is even needed");
@@ -250,13 +308,14 @@ await t("METERING happens once per move on a FINALLY path, even when the move FA
   assert.deepEqual(free.metered, [], "a zero-cost move is never charged a floor");
 });
 
-await t("a failed check gets ONE repair round, then the truth instead of a loop", async () => {
+await t("a failed check gets three adaptive repair rounds, then the truth instead of a loop", async () => {
   let checks = 0;
   const r = rig({
     chatReplies: [
       { ok: true, content: "```path=src/a.ts\nbroken\n```", costUsd: 0.01 },
       { ok: true, content: "```path=src/a.ts\nstill broken\n```", costUsd: 0.01 },
       { ok: true, content: "```path=src/a.ts\nthird try\n```", costUsd: 0.01 },
+      { ok: true, content: "```path=src/a.ts\nfourth try\n```", costUsd: 0.01 },
     ],
     handsImpl: async (tool, args) => {
       if (tool === "fs_read" && String(args.path).endsWith("package.json")) return { content: '{"scripts":{"test":"x"}}' };
@@ -270,12 +329,12 @@ await t("a failed check gets ONE repair round, then the truth instead of a loop"
   });
   const out = await r.engine.runMove(JOB, { move: MOVE, workspace: WS, assignments: {} });
   assert.equal(out.ok, false);
-  assert.equal(checks, 2, "the check runs twice: original then one repair, never a third");
+  assert.equal(checks, 4, "the original check plus all three bounded repairs must run");
   assert.ok(r.types().includes("move:repairing"));
   const fail = r.events.find((e) => e.state === "failed");
-  assert.match(fail.message, /still fails after one repair/i);
-  assert.match(fail.message, /nothing further was tried automatically/i);
-  assert.deepEqual(r.metered, [0.02], "both calls charged together, once");
+  assert.match(fail.message, /still fails after three adaptive repair attempts/i);
+  assert.match(fail.message, /remains incomplete/i);
+  assert.deepEqual(r.metered, [0.04], "all calls are charged together, once");
 });
 
 await t("a move that returns no files fails honestly and names what it wanted", async () => {
@@ -286,8 +345,29 @@ await t("a move that returns no files fails honestly and names what it wanted", 
   assert.match(f.message, /src\/other\.ts/);
 });
 
+await t("a move that repeatedly omits one planned file writes nothing", async () => {
+  const partial = "```path=src/a.ts\nexport const a = 1;\n```";
+  const r = rig({ chatReplies: [
+    { ok: true, content: partial, costUsd: 0.01 },
+    { ok: true, content: partial, costUsd: 0.01 },
+  ] });
+  const out = await r.engine.runMove(JOB, {
+    move: { ...MOVE, files: ["src/a.ts", "src/b.ts"] },
+    workspace: WS,
+    assignments: {},
+  });
+  assert.equal(out.ok, false);
+  assert.deepEqual(out.missing, ["src/b.ts"]);
+  assert.equal(r.calls.some((call) => call.tool === "fs_write"), false);
+  assert.match(r.events.find((event) => event.state === "failed").message, /src\/b\.ts/);
+  assert.deepEqual(r.metered, [0.02]);
+});
+
 await t("the manifest is read straight off the node, not through the truncating tool loop", async () => {
-  const r = rig({ chatReplies: [{ ok: true, content: "```path=src/a.ts\nx\n```", costUsd: 0 }] });
+  const r = rig({ chatReplies: [
+    { ok: true, content: "```path=src/a.ts\nx\n```", costUsd: 0 },
+    { ok: true, content: "```path=src/a.ts\nx\n```\n```path=src/b.ts\ny\n```", costUsd: 0 },
+  ] });
   await r.engine.runMove(JOB, { move: { ...MOVE, files: ["src/a.ts", "src/b.ts"] }, workspace: WS, assignments: {} });
   const reads = r.calls.filter((c) => c.tool === "fs_read" && !String(c.args.path).endsWith("package.json"));
   assert.equal(reads.length, 2, "one direct read per manifest file");
@@ -326,7 +406,7 @@ await t("a repair that returns no files FAILS the move instead of passing a red 
   const out = await r.engine.runMove(JOB, { move: MOVE, workspace: WS, assignments: {} });
   assert.equal(out.ok, false, "a red check with an empty repair must never come back ok");
   const fail = r.events.find((e) => e.state === "failed");
-  assert.match(fail.message, /returned nothing usable/i);
+  assert.match(fail.message, /remains incomplete/i);
 });
 
 await t("every written file gets a DIFF event, so the Workshop lens shows real changes", async () => {

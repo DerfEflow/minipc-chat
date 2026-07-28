@@ -34,7 +34,7 @@
     showFullPlan: false,    // after a finished build folds itself, this reopens the steps
     doneAnnounced: "",      // job id whose completion event already fired
     previewOn: false,       // the live try-it frame is open
-    doneWitnessedLive: new Set(), // job ids we saw complete live on this page lifetime
+    terminalWitnessedLive: new Set(), // job ids whose terminal event arrived live on this page
     logOpen: false,         // past-builds log panel visible
     verifyAnnounced: "",    // job whose first recorded check advanced the shared journey
     endedAnnounced: "",     // failed/stopped job whose retryable ending was announced
@@ -88,7 +88,7 @@
         case "snapshot": d.snapshots.push(ev); break;
         case "need_input": d.question = ev; break;
         case "answer": d.question = null; break;
-        case "done": case "error": case "stopped":
+        case "done": case "checkpoint": case "error": case "stopped":
           d.outcome = ev.type; d.ended = ev.at || 0;
           if (ev.code === "interrupted") d.interrupted = true;
           break;
@@ -178,7 +178,7 @@
     state.verifyAnnounced = "";
     state.endedAnnounced = "";
     state.autoWorkshop = "";
-    state.doneWitnessedLive.clear();
+    state.terminalWitnessedLive.clear();
     render();
 
     const es = new EventSource("/ide/job/attach?job=" + encodeURIComponent(jobId) + "&from=0");
@@ -186,15 +186,25 @@
     es.onmessage = (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch { return; }
       if (ev.type === "gone") { es.close(); return; }
-      if (ev.type === "done" || ev.type === "error" || ev.type === "stopped") {
+      const terminal = ev.type === "done" || ev.type === "checkpoint"
+        || ev.type === "error" || ev.type === "stopped";
+      if (terminal) {
         ended = true;
         // Witnessing a build finish live on this page is the ONLY thing that earns a publish
         // invitation. A replayed terminal is marked seen at once so the modal can never surface.
         if (replay) { try { localStorage.setItem("dominion.publish.seen." + jobId, "1"); } catch {} }
-        else state.doneWitnessedLive.add(jobId);
+        else state.terminalWitnessedLive.add(jobId);
       }
       state.events.push(ev);
       render();
+      // Terminal means this journal is settled for this run. Close explicitly instead of waiting
+      // for EventSource to interpret the server's normal EOF as a reconnectable network error.
+      // A checkpoint is terminal but deliberately not successful; its event remains in `events`
+      // for an honest replay and the lifecycle dispatch below reports it as unfinished.
+      if (terminal) {
+        closed = true;
+        es.close();
+      }
     };
     /*
      * On error, close and RESET rather than merely closing. follow() refuses to re-attach to the
@@ -266,7 +276,7 @@
     // The completion moment, announced exactly once per job and ONLY when witnessed live: the tour
     // ends on it, and the closing flow (windows fold, the invitation leads) keys off the same fact.
     // A replayed done never announces, so reopening an old build stays silent.
-    if (d.outcome === "done" && state.doneWitnessedLive.has(state.jobId) && state.doneAnnounced !== state.jobId) {
+    if (d.outcome === "done" && state.terminalWitnessedLive.has(state.jobId) && state.doneAnnounced !== state.jobId) {
       state.doneAnnounced = state.jobId;
       try { document.dispatchEvent(new CustomEvent("dominion-build-done", { detail: { jobId: state.jobId } })); } catch {}
     }
@@ -274,16 +284,21 @@
     // "during"), the Workshop is the app itself (the "here it is"). Once per job, and only for a
     // build watched live, so a manual switch back to the Blueprint is respected (Fred, 2026-07-24:
     // the Workshop felt dead because nobody was ever taken to it). setLens re-renders, so return.
-    if (d.outcome === "done" && state.doneWitnessedLive.has(state.jobId) && state.autoWorkshop !== state.jobId) {
+    if (d.outcome === "done" && state.terminalWitnessedLive.has(state.jobId) && state.autoWorkshop !== state.jobId) {
       state.autoWorkshop = state.jobId;
       if (state.lens !== "workshop") { setLens("workshop"); return; }
     }
-    if ((d.outcome === "error" || d.outcome === "stopped")
-      && state.doneWitnessedLive.has(state.jobId) && state.endedAnnounced !== state.jobId) {
+    if ((d.outcome === "checkpoint" || d.outcome === "error" || d.outcome === "stopped")
+      && state.terminalWitnessedLive.has(state.jobId) && state.endedAnnounced !== state.jobId) {
       state.endedAnnounced = state.jobId;
       try {
+        if (d.outcome === "checkpoint") {
+          document.dispatchEvent(new CustomEvent("dominion-build-checkpointed", {
+            detail: { jobId: state.jobId, outcome: "checkpoint", complete: false },
+          }));
+        }
         document.dispatchEvent(new CustomEvent("dominion-build-ended", {
-          detail: { jobId: state.jobId, outcome: d.outcome },
+          detail: { jobId: state.jobId, outcome: d.outcome, complete: false },
         }));
       } catch {}
     }
@@ -333,7 +348,7 @@
    */
   function maybeOfferPublish(d) {
     if (d.outcome !== "done" || !state.jobId) return;
-    if (!state.doneWitnessedLive.has(state.jobId)) return;
+    if (!state.terminalWitnessedLive.has(state.jobId)) return;
     let seen = null;
     try { seen = localStorage.getItem("dominion.publish.seen." + state.jobId); } catch {}
     if (seen) return;
@@ -463,7 +478,7 @@
         const title = (job.move && job.move.title) || job.kind || "";
         const dateStr = job.startedAt ? new Date(job.startedAt).toLocaleDateString() : "";
         // A finished job reads through the outcome register; one still running has no outcome yet.
-        const outcomeWord = job.done ? L("outcome_" + (job.outcome || "done")) : L("st_running");
+        const outcomeWord = job.done ? outcomeText(job.outcome || "done") : L("st_running");
         const t = document.createElement("span"); t.className = "log-title"; t.textContent = title || job.kind || "";
         const meta = document.createElement("span"); meta.className = "log-meta";
         meta.textContent = (dateStr ? dateStr + " " : "") + outcomeWord;
@@ -621,10 +636,17 @@
     el.className = "cru-outcome";
     el.dataset.outcome = d.outcome;
     el.textContent = d.interrupted ? L("outcome_interrupted")
-      : d.outcome === "done" ? L("outcome_done")
-      : d.outcome === "stopped" ? L("outcome_stopped")
-      : L("outcome_error");
+      : outcomeText(d.outcome);
     return el;
+  }
+
+  function outcomeText(outcome) {
+    const value = String(outcome || "error").toLowerCase();
+    if (value === "checkpoint") return "Checkpoint saved. This build is not complete and is ready to continue.";
+    const key = value === "done" ? "outcome_done"
+      : value === "stopped" ? "outcome_stopped"
+      : "outcome_error";
+    return L(key);
   }
 
   // Never print a raw provider id at a person. The catalog name is the display name.

@@ -45,7 +45,7 @@ await t("personas match the product contract: mentor, collaborator, staff engine
   assert.ok(/technical details fully/i.test(personaVoice("vibe")), "vibe adapts its technical depth");
 });
 
-await t("beginner persona has the sharpened rules: 8th grade, proactive, next-step, motivation, ambitious", () => {
+await t("beginner persona explains simply without silently shrinking authorized scope", () => {
   const b = personaVoice("beginner");
   assert.ok(/8th grade reading level/i.test(b), "beginner must mention 8th grade ceiling");
   assert.ok(/proactive/i.test(b), "beginner must be proactive");
@@ -53,7 +53,9 @@ await t("beginner persona has the sharpened rules: 8th grade, proactive, next-st
   assert.ok(/motivat/i.test(b), "beginner must ask about motivation");
   assert.ok(/ambitious/i.test(b), "beginner must acknowledge ambitious apps");
   assert.ok(/complicated/i.test(b), "beginner must explain why it is complicated");
-  assert.ok(/smaller first version|smaller.*grow/i.test(b), "beginner must offer smaller first version");
+  assert.ok(/complete authorized request/i.test(b), "simple language must not reduce the work");
+  assert.ok(/never silently.*reduce/i.test(b), "scope reduction must be expressly forbidden");
+  assert.ok(!/offer a smaller first version/i.test(b), "the persona must not replace the requested build with an MVP");
   assert.ok(/gentle humor/i.test(b), "beginner may use light, kind humor");
 });
 

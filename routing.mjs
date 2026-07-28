@@ -53,8 +53,11 @@ export const NO_RETRIEVAL_RE = /^(format|reformat|convert (this|the following)|r
 //                   transform ask all skip the retrieval pass (pinned/profile memory still loads).
 //   attachTools   — tool defs cost prompt tokens on every call; drop them ONLY on fast-mode turns
 //                   with no tool-shaped language (conservative bias: everything else keeps tools).
+const TOOL_SHAPED_RE = /\b(search|browse|look up|latest|current|web|internet|file|folder|repo|repository|code|build|fix|edit|write|save|run|shell|terminal|deploy|commit|push|artifact|document|spreadsheet|slides?|pdf|email|calendar|drive|github|connector|tool|machine|computer|server|database)\b/i;
+
 export function consumeNeeds({ mode, needsTools = true, needsRetrieval = true, lastUserText = "" } = {}) {
-  const skipRetrieval = mode === "fast" || needsRetrieval === false || NO_RETRIEVAL_RE.test(String(lastUserText).trim());
-  const attachTools = mode === "tool" ? true : mode === "fast" ? needsTools === true : true;
+  const text = String(lastUserText).trim();
+  const skipRetrieval = mode === "fast" || needsRetrieval === false || NO_RETRIEVAL_RE.test(text);
+  const attachTools = mode === "tool" || needsTools === true || TOOL_SHAPED_RE.test(text);
   return { skipRetrieval, attachTools };
 }

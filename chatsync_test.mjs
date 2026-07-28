@@ -34,18 +34,85 @@ await t("push assigns revisions; pull(0) returns everything", async () => {
 });
 
 await t("the selected model is part of the chat and survives cross-device sync", async () => {
-  store.push([{ ...chat("model-chat", 1150, [msg("user", "keep my coder")]), model: "anthropic/claude-opus-4-8", draft: "unfinished thought" }]);
+  store.push([{
+    ...chat("model-chat", 1150, [msg("user", "keep my coder")]),
+    model: "anthropic/claude-opus-4-8", draft: "unfinished thought",
+    forgeTier: "furnace", forgeMode: true,
+  }]);
   const got = store.pull(0).chats.find((c) => c.id === "model-chat");
   if (got.model !== "anthropic/claude-opus-4-8") throw new Error("model was not preserved with the session");
   if (got.draft !== "unfinished thought") throw new Error("draft text was not preserved with the session");
+  if (got.forgeTier !== "furnace" || got.forgeMode !== true) throw new Error("Forge state was not preserved with the session");
 });
 
-await t("an older client cannot erase a session's model or draft by omitting new fields", async () => {
+await t("an older client cannot erase session settings by omitting new fields", async () => {
   store.push([chat("model-chat", 1160, [msg("user", "older browser added a message")])]);
   const got = store.pull(0).chats.find((c) => c.id === "model-chat");
-  if (got.model !== "anthropic/claude-opus-4-8" || got.draft !== "unfinished thought") {
+  if (got.model !== "anthropic/claude-opus-4-8" || got.draft !== "unfinished thought" ||
+      got.forgeTier !== "furnace" || got.forgeMode !== true) {
     throw new Error("rolling deployment erased session state: " + JSON.stringify(got));
   }
+});
+
+await t("stale phone preferences cannot shrink a newer laptop transcript", async () => {
+  const laptopMessages = Array.from({ length: 20 }, (_, i) =>
+    msg(i % 2 ? "assistant" : "user", "laptop turn " + i));
+  store.push([{
+    ...chat("two-device-merge", 2000, laptopMessages, "Laptop work"),
+    activityAt: 2000,
+    model: "openai/gpt-5.6-sol", draft: "",
+    forgeTier: "ember", forgeMode: false,
+    transcriptUpdatedAt: 2000, titleUpdatedAt: 2000,
+    transcriptClockTrusted: true,
+    modelUpdatedAt: 1000, draftUpdatedAt: 1000, forgeUpdatedAt: 1000,
+  }]);
+
+  const phoneResult = store.push([{
+    ...chat("two-device-merge", 3000, laptopMessages.slice(0, 2), "Laptop work"),
+    activityAt: 3000,
+    model: "anthropic/claude-opus-4-8", draft: "typed later on phone",
+    forgeTier: "furnace", forgeMode: true,
+    transcriptUpdatedAt: 1000, titleUpdatedAt: 1000,
+    modelUpdatedAt: 3000, draftUpdatedAt: 3000, forgeUpdatedAt: 3000,
+  }]);
+  if (!phoneResult.accepted.some((x) => x.id === "two-device-merge")) {
+    throw new Error("preference update was not accepted: " + JSON.stringify(phoneResult));
+  }
+
+  const got = store.pull(0).chats.find((c) => c.id === "two-device-merge");
+  if (got.messages.length !== 20 || got.messages.at(-1).content !== "laptop turn 19") {
+    throw new Error("stale phone erased the laptop transcript: " + JSON.stringify(got.messages));
+  }
+  if (got.model !== "anthropic/claude-opus-4-8" || got.draft !== "typed later on phone") {
+    throw new Error("newer phone preferences were lost");
+  }
+  if (got.forgeTier !== "furnace" || got.forgeMode !== true) {
+    throw new Error("newer phone Forge state was lost");
+  }
+});
+
+await t("rolling-deploy guard blocks a legacy stale transcript with a newer preference timestamp", async () => {
+  const before = store.pull(0).chats.find((c) => c.id === "two-device-merge");
+  store.push([{
+    ...chat("two-device-merge", 4000, before.messages.slice(0, 1), "Laptop work"),
+    model: before.model, draft: before.draft,
+    forgeTier: before.forgeTier, forgeMode: before.forgeMode,
+  }]);
+  const got = store.pull(0).chats.find((c) => c.id === "two-device-merge");
+  if (got.messages.length !== 20) throw new Error("legacy stale client shrank the transcript");
+});
+
+await t("first upgraded sync cannot pass a legacy preference timestamp off as transcript provenance", async () => {
+  const before = store.pull(0).chats.find((c) => c.id === "two-device-merge");
+  store.push([{
+    ...chat("two-device-merge", 5000, before.messages.slice(0, 2), "Laptop work"),
+    transcriptUpdatedAt: 5000,
+    transcriptClockTrusted: false,
+    model: "deepseek/deepseek-v4", modelUpdatedAt: 5000,
+  }]);
+  const got = store.pull(0).chats.find((c) => c.id === "two-device-merge");
+  if (got.messages.length !== 20) throw new Error("derived first-upgrade clock shrank the transcript");
+  if (got.model !== "deepseek/deepseek-v4") throw new Error("newer preference should still merge");
 });
 
 await t("the revision cursor is incremental (a device only gets what it lacks)", async () => {
@@ -66,7 +133,11 @@ await t("last-write-wins: newer updatedAt replaces, older is refused as stale", 
 });
 
 await t("a shrinking write keeps the previous version as recovery ballast (never shipped to devices)", async () => {
-  store.push([chat("a", 3000, [msg("user", "only one now")])]);
+  store.push([{
+    ...chat("a", 3000, [msg("user", "only one now")]),
+    transcriptUpdatedAt: 3000,
+    transcriptClockTrusted: true,
+  }]);
   const p = store.pull(0).chats.find((c) => c.id === "a");
   if (p.messages.length !== 1) throw new Error("shrink not applied");
   if ("prev" in p) throw new Error("prev leaked to the device payload");

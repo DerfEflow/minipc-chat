@@ -25,7 +25,8 @@
  */
 
 export const MAX_FILES_PER_MOVE = 24;
-export const MAX_FILE_BYTES = 120000;      // one file's worth of context, generous but bounded
+export const MAX_FILE_BYTES = 120000;      // one manifest page; large files are paged below
+export const MAX_MANIFEST_FILE_BYTES = 600000; // disaster/context guard, disclosed whenever reached
 export const MAX_MOVES = 40;
 export const VERIFY_TIMEOUT_MS = 180000;
 
@@ -150,10 +151,37 @@ export function parseFileBlocks(text) {
     if (info !== null) { depth++; body.push(line); continue; }
     body.push(line);
   }
-  // An unterminated final block is still committed with what it had (a truncated stream should
-  // save partial work rather than drop the whole file).
-  if (path !== null) commit(path, body);
-  return { files: out, needs, issues };
+  // A missing outer closing fence is indistinguishable from a provider-truncated response. Reject
+  // the WHOLE response, including earlier complete blocks: writing file A when file B was cut off
+  // leaves an internally inconsistent move and is worse than retrying it atomically.
+  if (path !== null) {
+    const unfinished = String(path).replace(/^(path=|file=)/i, "").trim().replace(/^["']|["']$/g, "");
+    issues.push({
+      path: unfinished || "(unknown file)",
+      reason: "response ended before the closing fence; no files from this truncated response were accepted",
+    });
+    return { files: [], needs: [], issues, truncated: true };
+  }
+  return { files: out, needs, issues, truncated: false };
+}
+
+function normalizedMovePath(value) {
+  return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase();
+}
+
+/*
+ * A roadmap file is an implementation obligation, not a suggestion. A model may return useful
+ * edits for one file while silently skipping its siblings; without an explicit coverage check the
+ * move used to look successful. Keep this pure so the standard, relay, and task-graph runners can
+ * all enforce the same contract.
+ */
+export function fileCoverage(expected, returned) {
+  const wanted = [...new Set((expected || []).map(normalizedMovePath).filter(Boolean))];
+  const got = new Set((returned || []).map((entry) =>
+    normalizedMovePath(typeof entry === "string" ? entry : entry && entry.path)).filter(Boolean));
+  const original = new Map((expected || []).map((entry) => [normalizedMovePath(entry), String(entry)]));
+  const missing = wanted.filter((path) => !got.has(path)).map((path) => original.get(path) || path);
+  return { complete: missing.length === 0, missing, covered: wanted.filter((path) => got.has(path)) };
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -207,19 +235,33 @@ export function estimateMove({ manifestBytes = 0, inCost = 0, outCost = 0, expec
 }
 
 /* ---------------------------------------------------------------------------------------------
- * Verify command discovery. Guessing a build command and running it is how you burn three minutes
- * on a project that has no build. This reads package.json and picks what actually exists.
+ * Verification discovery. Guessing a command is unreliable, while running only the first declared
+ * check can call a broken project complete. Build a deterministic plan from every relevant script.
  * ------------------------------------------------------------------------------------------- */
-export function verifyCommandFor(packageJsonText) {
+const VERIFY_SCRIPT_ORDER = ["typecheck", "check", "lint", "test", "build"];
+
+export function verificationPlanFor(packageJsonText) {
   let scripts = null;
   try { scripts = (JSON.parse(String(packageJsonText || "{}")) || {}).scripts || null; } catch {}
-  if (!scripts) return { cmd: "", why: "no package.json scripts, so there is nothing to run" };
-  for (const name of ["typecheck", "check", "lint", "test", "build"]) {
-    if (typeof scripts[name] === "string" && scripts[name].trim()) {
-      return { cmd: "npm run " + name + " --silent", why: "package.json defines a " + name + " script" };
-    }
-  }
-  return { cmd: "", why: "package.json has no check, test, or build script" };
+  if (!scripts) return { commands: [], why: "no package.json scripts, so there is nothing to run" };
+  const commands = VERIFY_SCRIPT_ORDER
+    .filter((name) => typeof scripts[name] === "string" && scripts[name].trim())
+    .map((name) => ({
+      name,
+      cmd: "npm run " + name + " --silent",
+      why: "package.json defines a " + name + " script",
+    }));
+  return commands.length
+    ? { commands, why: "package.json defines " + commands.map((c) => c.name).join(", ") }
+    : { commands: [], why: "package.json has no check, test, or build script" };
+}
+
+// Backward-compatible single-command view for callers that only need a preview. The engine itself
+// consumes `verificationPlanFor` and runs the complete plan.
+export function verifyCommandFor(packageJsonText) {
+  const plan = verificationPlanFor(packageJsonText);
+  const first = plan.commands[0];
+  return first ? { cmd: first.cmd, why: first.why } : { cmd: "", why: plan.why };
 }
 
 /*
@@ -239,14 +281,15 @@ export function buildMoveMessages({ move, manifest = [], workspaceName = "", goa
     parts.push("FILES YOU MAY EDIT (current contents follow):");
     for (const f of manifest) {
       parts.push("");
-      parts.push("--- " + f.path + (f.missing ? "  (does not exist yet, create it)" : "") + " ---");
+      parts.push("--- " + f.path + (f.missing ? "  (does not exist yet, create it)"
+        : f.truncated ? "  (partial manifest; page the disclosed remainder before relying on omitted code)" : "") + " ---");
       if (!f.missing) parts.push(f.content || "");
     }
   } else {
     parts.push("This move creates new files. None exist yet.");
   }
   parts.push("");
-  parts.push("Return the complete contents of every file you changed, each in its own path block.");
+  parts.push("Return one complete path block for EVERY file listed in this move, including a byte-identical block when inspection proves that file needs no change. Omitting a listed file leaves the move incomplete.");
   return [
     { role: "system", content: SYSTEM_PREFIX },
     { role: "user", content: parts.join("\n") },
@@ -324,10 +367,38 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
     for (const rel of paths.slice(0, MAX_FILES_PER_MOVE)) {
       const full = root.replace(/[\\/]+$/, "") + "/" + rel;
       try {
-        const r = await hands("fs_read", { path: full, maxBytes: MAX_FILE_BYTES });
-        const content = (r && (r.content || r.text)) || "";
-        if (r && r.ok === false) out.push({ path: rel, missing: true });
-        else out.push({ path: rel, content: String(content).slice(0, MAX_FILE_BYTES) });
+        let offset = 0, content = "", missing = false, totalBytes = null, eof = false;
+        for (let page = 0; page < Math.ceil(MAX_MANIFEST_FILE_BYTES / MAX_FILE_BYTES); page++) {
+          const r = await hands("fs_read", {
+            path: full,
+            offset,
+            maxBytes: Math.min(MAX_FILE_BYTES, MAX_MANIFEST_FILE_BYTES - content.length),
+            partial: true,
+          });
+          if (r && r.ok === false) { missing = offset === 0; break; }
+          const text = String((r && (r.content ?? r.text)) || "");
+          content += text;
+          if (Number.isFinite(Number(r && r.totalBytes))) totalBytes = Number(r.totalBytes);
+          const nextOffset = Number(r && r.nextOffset);
+          eof = !!(r && r.eof === true) || (totalBytes != null && offset + text.length >= totalBytes);
+          if (eof || !text || content.length >= MAX_MANIFEST_FILE_BYTES) break;
+          // Older hands nodes returned a single complete string without pagination metadata. Do
+          // not duplicate that page; continue only when a cursor or total explicitly proves more.
+          const canPage = (Number.isFinite(nextOffset) && nextOffset > offset)
+            || (totalBytes != null && offset + text.length < totalBytes);
+          if (!canPage) { eof = true; break; }
+          offset = Number.isFinite(nextOffset) && nextOffset > offset ? nextOffset : offset + text.length;
+        }
+        if (missing) out.push({ path: rel, missing: true });
+        else {
+          const truncated = !eof && (totalBytes == null || content.length < totalBytes);
+          if (truncated) {
+            content += "\n\n[Dominion manifest window: read " + content.length +
+              " characters" + (totalBytes != null ? " of " + totalBytes : "") +
+              ". The remainder was not silently discarded; use workspace_read with an offset before changing code that depends on it.]";
+          }
+          out.push({ path: rel, content, truncated, totalBytes });
+        }
       } catch { out.push({ path: rel, missing: true }); }
     }
     return out;
@@ -389,22 +460,66 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       const r = await hands("fs_read", { path: workspace.root.replace(/[\\/]+$/, "") + "/package.json", maxBytes: 20000 });
       pkg = (r && (r.content || r.text)) || "";
     } catch {}
-    const { cmd, why } = verifyCommandFor(pkg);
-    if (!cmd) { jobs.emit(job.id, { type: "run", skipped: true, message: "Nothing to verify: " + why + "." }); return { ran: false, ok: true }; }
-    try {
-      // No "&&": the node runs PowerShell 5.1 on Windows, where "&&" is a PARSE ERROR (the
-      // standing house lesson, relearned live when the first real build failed its check on
-      // exactly this). ";" is a statement separator in both PowerShell and sh, and set-location
-      // failing on a missing folder makes the check fail loudly rather than run somewhere else.
-      const r = await hands("shell_run", { command: "cd \"" + workspace.root + "\"; " + cmd, timeoutMs: VERIFY_TIMEOUT_MS });
-      const code = (r && (r.code ?? r.exitCode)) || 0;
-      const output = String((r && (r.stdout || r.output)) || "") + String((r && r.stderr) || "");
-      jobs.emit(job.id, { type: "run", command: cmd, ok: code === 0, output: output.slice(-4000) });
-      return { ran: true, ok: code === 0, output, cmd };
-    } catch (e) {
-      jobs.emit(job.id, { type: "run", command: cmd, ok: false, output: String(e && e.message || e) });
-      return { ran: true, ok: false, output: String(e && e.message || e), cmd };
+    const { commands, why } = verificationPlanFor(pkg);
+    if (!commands.length) {
+      jobs.emit(job.id, { type: "run", skipped: true, message: "Nothing to verify: " + why + "." });
+      return { ran: false, ok: true, output: "", cmd: "", commands: [], failed: [] };
     }
+
+    const results = [];
+    for (const check of commands) {
+      let result;
+      try {
+        // No "&&": the node runs PowerShell 5.1 on Windows, where "&&" is a parse error. Each
+        // discovered check is dispatched separately so every result remains attributable.
+        const r = await hands("shell_run", {
+          command: "cd \"" + workspace.root + "\"; " + check.cmd,
+          timeoutMs: VERIFY_TIMEOUT_MS,
+        });
+        const rawCode = r && (r.code ?? r.exitCode);
+        const hasCode = (typeof rawCode === "number" && Number.isFinite(rawCode))
+          || (typeof rawCode === "string" && /^-?\d+$/.test(rawCode.trim()));
+        const code = hasCode ? Number(rawCode) : null;
+        const hasExplicitOk = !!r && typeof r.ok === "boolean";
+        const ok = !!r && r.ok !== false && (hasCode ? code === 0 : r.ok === true);
+        let output = String((r && (r.stdout || r.output)) || "") + String((r && r.stderr) || "");
+        if (!hasCode && !hasExplicitOk) {
+          output += (output ? "\n" : "") + "Verification command returned no success status or exit code.";
+        } else if (r && r.ok === false && !output) {
+          output = String(r.error || "The machine reported that the verification command failed.");
+        }
+        result = { name: check.name, cmd: check.cmd, ran: true, ok, code, output };
+      } catch (e) {
+        result = {
+          name: check.name,
+          cmd: check.cmd,
+          ran: true,
+          ok: false,
+          code: null,
+          output: String(e && e.message || e),
+        };
+      }
+      results.push(result);
+      jobs.emit(job.id, {
+        type: "run",
+        command: result.cmd,
+        ok: result.ok,
+        output: result.output.slice(-4000),
+      });
+    }
+
+    const failed = results.filter((r) => !r.ok);
+    const output = results.map((r) =>
+      "[" + r.name + "] " + (r.ok ? "passed" : "failed") + (r.output ? "\n" + r.output : "")
+    ).join("\n\n");
+    return {
+      ran: true,
+      ok: failed.length === 0,
+      output,
+      cmd: results.length === 1 ? results[0].cmd : results.map((r) => r.cmd).join("; "),
+      commands: results,
+      failed,
+    };
   }
 
   /*
@@ -436,8 +551,15 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
 
       const manifest = await readManifest(workspace.root, move.files || []);
       const messages = buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal });
-      let res = await chat({ model: decision.model, messages });
-      costUsd += Number(res && res.costUsd) || 0;
+      let res = null, resumeState = null;
+      for (let inspectionWindow = 0; inspectionWindow < 3; inspectionWindow++) {
+        res = await chat({ model: decision.model, messages, resumeState });
+        costUsd += Number(res && res.costUsd) || 0;
+        if (!res || !res.checkpoint || !res.resumeState) break;
+        resumeState = res.resumeState;
+        jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
+          message: "The bounded inspection window checkpointed; resuming from its exact tool cursors and evidence." });
+      }
       if (!res || !res.ok) {
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
           message: (res && res.error) || "The model call failed." });
@@ -460,6 +582,24 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         costUsd += Number(retry && retry.costUsd) || 0;
         if (retry && retry.ok) { const rp = parseFileBlocks(retry.content); if (rp.files.length) { res = retry; parsed = rp; } }
       }
+      let coverage = fileCoverage(move.files || [], parsed.files);
+      if (parsed.files.length && !parsed.truncated && !coverage.complete) {
+        jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
+          message: "The response omitted " + coverage.missing.length + " planned file(s); asking once for an atomic result." });
+        const retry = await chat({ model: decision.model, messages: [
+          ...messages,
+          { role: "assistant", content: String(res.content || "").slice(0, 12000) },
+          { role: "user", content:
+            "The move is atomic, but your response omitted these planned files: " + coverage.missing.join(", ") + ". " +
+            "Return ONLY complete fenced path blocks for EVERY file in the move. Include a byte-identical complete block if inspection proves one needs no edit." },
+        ] });
+        costUsd += Number(retry && retry.costUsd) || 0;
+        if (retry && retry.ok) {
+          res = retry;
+          parsed = parseFileBlocks(retry.content);
+          coverage = fileCoverage(move.files || [], parsed.files);
+        }
+      }
       for (const bad of parsed.issues) jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "warned", message: bad.path + ": " + bad.reason });
       if (!parsed.files.length) {
         // A surfaced error carries a NEXT ACTION, never just a verdict (Kimi: flawless fails with
@@ -470,6 +610,13 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
             : "The model did not return any files to write, even after a retry. Try again, or simplify the ask.",
           nextAction: parsed.needs.length ? "retry" : "retry_or_simplify" });
         return { ok: false, costUsd };
+      }
+      if (!coverage.complete) {
+        jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
+          message: "The model still omitted planned files: " + coverage.missing.join(", ") +
+            ". Nothing was written because a partial move could leave the project inconsistent.",
+          nextAction: "retry" });
+        return { ok: false, costUsd, missing: coverage.missing };
       }
 
       // Carve-out BEFORE the snapshot and before any write, so a refusal costs nothing.
@@ -489,6 +636,13 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       const { written, unchanged, failed } = await writeFiles(job, workspace, parsed.files);
       for (const f of failed) jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "warned", message: f.path + ": " + f.reason });
       emitDiffs(job, manifest, parsed.files, new Set(written));
+      if (failed.length) {
+        jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
+          message: failed.length + " file write" + (failed.length === 1 ? "" : "s") +
+            " failed. The move remains incomplete; successful sibling writes are preserved in the restore point.",
+          nextAction: "retry" });
+        return { ok: false, costUsd, wroteAnyway: written.length > 0, failed };
+      }
       if (!written.length && !failed.length) {
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
           message: "The model returned files, but every write was byte-for-byte unchanged. Nothing was implemented. Reread the current files and retry with a specific change.",
@@ -498,51 +652,48 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
 
       const v = await verify(job, workspace);
       if (v.ran && !v.ok) {
-        // ONE repair round. Then the raw output is surfaced and the human decides, rather than
-        // looping on a red build burning money.
-        jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "repairing" });
-        const repair = await chat({ model: decision.model, messages: [
-          ...messages,
-          { role: "assistant", content: res.content },
-          { role: "user", content: "The check failed. Fix it and return the complete corrected files.\n\n" + String(v.output || "").slice(-4000) },
-        ] });
-        costUsd += Number(repair && repair.costUsd) || 0;
-        if (repair && repair.ok) {
+        // Diagnose and retry several times before asking a human. Each attempt receives the newest
+        // check evidence and must regenerate complete atomic files; repeated identical/no-file
+        // replies are failures, never a route to "done".
+        let check = v;
+        let priorContent = res.content;
+        let repaired = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "repairing",
+            message: "Verification failed; repair attempt " + attempt + " of 3." });
+          const repair = await chat({ model: decision.model, messages: [
+            ...messages,
+            { role: "assistant", content: String(priorContent || "") },
+            { role: "user", content:
+              "Verification failed. Diagnose the actual error, change approach if the last attempt did not help, and return the complete corrected files. " +
+              "Do not merely explain the failure.\n\nLATEST CHECK OUTPUT:\n" + String(check.output || "").slice(-12000) },
+          ] });
+          costUsd += Number(repair && repair.costUsd) || 0;
+          if (!repair || !repair.ok) continue;
+          priorContent = repair.content;
           const again = parseFileBlocks(repair.content);
           const carve2 = carveOutReport(again.files);
           if (carve2) {
             jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "blocked", message: carve2.message });
             return { ok: false, costUsd, blocked: true };
           }
-          if (!again.files.length) {
-            // A repair with no files leaves the check red. Falling through to "done" here is how
-            // a broken build gets reported as a finished one.
-            jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
-              message: "The check failed and the repair attempt returned nothing usable. The output is above." });
-            return { ok: false, costUsd, wroteAnyway: true };
-          }
+          if (!again.files.length || again.truncated) continue;
           const repairWrite = await writeFiles(job, workspace, again.files);
           emitDiffs(job, manifest, again.files, new Set(repairWrite.written));
-          if (!repairWrite.written.length && !repairWrite.failed.length) {
-            jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
-              message: "The check failed and the repair attempt changed no bytes. Nothing further was tried automatically." });
-            return { ok: false, costUsd, wroteAnyway: true };
-          }
-          const v2 = await verify(job, workspace);
-          if (!v2.ok) {
-            jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
-              message: "The check still fails after one repair attempt. The output is above; nothing further was tried automatically." });
-            return { ok: false, costUsd, wroteAnyway: true };
-          }
-        } else {
+          if (repairWrite.failed.length || !repairWrite.written.length) continue;
+          check = await verify(job, workspace);
+          if (check.ok) { repaired = true; break; }
+        }
+        if (!repaired) {
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
-            message: "The check failed and the repair call could not be made. The output is above." });
-          return { ok: false, costUsd, wroteAnyway: true };
+            message: "Verification still fails after three adaptive repair attempts. The latest raw check output is above; the build remains incomplete.",
+            nextAction: "retry_with_guidance" });
+          return { ok: false, costUsd, wroteAnyway: true, verification: check };
         }
       }
 
       jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: written.length });
-      return { ok: true, costUsd, written };
+      return { ok: true, costUsd, written, covered: parsed.files.map((file) => file.path) };
     } finally {
       // FINALLY, always. Aborted and failed moves still burned tokens, and pretending otherwise is
       // the exact leak the chat path has (its early returns skip metering entirely).

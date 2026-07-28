@@ -12,6 +12,7 @@ let passed = 0;
 const ok = (n) => { console.log("  PASS  " + n); passed++; };
 
 const EXPECTED = [
+  "openai/gpt-5.6-sol", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna",
   "anthropic/claude-opus-4-8", "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4-5",
   "moonshotai/kimi-k3", "moonshotai/kimi-k2.6",
   "deepseek/deepseek-v4-pro", "deepseek/deepseek-r1",
@@ -25,15 +26,15 @@ const EXPECTED = [
   const all = new Set(MODELS.map((m) => m.id));
   const missing = EXPECTED.filter((id) => !all.has(id));
   assert.deepEqual(missing, [], "rostered ids missing from the catalog: " + missing.join(", "));
-  ok("all 13 rostered ids exist in the catalog");
+  ok("all 16 rostered ids exist in the catalog");
 }
 
-// 2. all 13 actually arm
+// 2. all 16 actually arm
 {
   const armed = broadCapableIds();
-  assert.equal(armed.length, 13, "expected 13 armed, got " + armed.length + ": " + armed.join(", "));
+  assert.equal(armed.length, 16, "expected 16 armed, got " + armed.length + ": " + armed.join(", "));
   for (const id of EXPECTED) assert.equal(isBroadCapable(id), true, id + " should be broad-capable");
-  ok("all 13 resolve as broad-capable");
+  ok("all 16 resolve as broad-capable");
 }
 
 // 3. tool capability is a hard prerequisite
@@ -42,13 +43,13 @@ const EXPECTED = [
   ok("every rostered model is tool-capable (prerequisite holds)");
 }
 
-// 4. Fred's explicit exclusions stay excluded
+// 4. OpenAI's Responses transport restores GPT-5.6's full tool + reasoning capability
 {
-  // GPT-5.6 Sol: dropped at his direction because tools force reasoning off on that path.
-  assert.equal(isBroadCapable("openai/gpt-5.6-sol"), false, "GPT-5.6 Sol must NOT be starred (Fred's call)");
-  assert.equal(isBroadCapable("openai/gpt-5.6-terra"), false);
+  assert.equal(isBroadCapable("openai/gpt-5.6-sol"), true);
+  assert.equal(isBroadCapable("openai/gpt-5.6-terra"), true);
+  assert.equal(isBroadCapable("openai/gpt-5.6-luna"), true);
   assert.equal(isBroadCapable("openai/gpt-5.5"), false);
-  ok("the GPT-5 family stays off the roster, per Fred's ruling");
+  ok("GPT-5.6 is broad-capable while older GPT-5.5 remains unstarred");
 }
 
 // 5. small and chat-only models never arm, even the tool-capable ones
@@ -72,9 +73,9 @@ const EXPECTED = [
 // 7. the names list is usable in the refusal message
 {
   const names = broadCapableNames();
-  assert.equal(names.length, 13);
+  assert.equal(names.length, 16);
   assert.ok(names.every((n) => typeof n === "string" && n.length), "names must be human-facing");
-  ok("broadCapableNames returns 13 usable display names");
+  ok("broadCapableNames returns 16 usable display names");
 }
 
 console.log(`\n${passed}/7 checks passed - Wildfire roster verified against the live catalog`);

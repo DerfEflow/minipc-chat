@@ -19,7 +19,7 @@
  * `ctx` is the context window in tokens. Snapshot date below.
  */
 
-export const CATALOG_UPDATED = "2026-07-18";   // tool+vision flags + ctx audited against live OpenRouter (tools_audit.mjs)
+export const CATALOG_UPDATED = "2026-07-27";   // provider-native context/output limits and transports audited
 
 // The owner's default engine (Fred, 2026-07-18): DeepSeek V4 Pro: frontier-class 671B MoE, 1M
 // context, tool-capable, served direct to DeepSeek. Picked over the old Qwen 235B all-rounder.
@@ -71,9 +71,8 @@ export const CATEGORIES = [
 //               (2026-07-18 pull); direct OpenAI/Anthropic per their documented multimodal support.
 //               DeepSeek is false until a live probe proves otherwise (wrong-true throws a guest-facing
 //               error; wrong-false costs only an honest refusal). Audited weekly with the tool flags.
-// Direct hookups (Fred): OpenAI + DeepSeek go straight to their own APIs, with no OpenRouter middleman,
-// so there's no question about where the calls go. Everything else rides OpenRouter. Claude stays
-// out entirely (Fred uses it through its own app).
+// Direct hookups: OpenAI, DeepSeek, and Anthropic go straight to their native APIs, with no
+// OpenRouter middleman. Everything else rides OpenRouter.
 export const TOOL_CAPABLE_CATEGORIES = new Set([
   "Frontier / Flagship", "Reasoning & Math", "Coding", "Science & Technical",
   "Web / Research", "Vision / Multimodal", "Open & Trainable",
@@ -85,13 +84,13 @@ export const MODELS = [
   // OpenAI GPT-5.6 family: DIRECT to OpenAI (provider:"openai"). Sol=agentic flagship, Terra=mid,
   // Luna=lightest/cheapest (price-implied tiering; ~1M context each). Fred picks per turn.
   { id: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-sol",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 32768, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 128000, reasoning: true,
     specialty: "Agentic/terminal-coding flagship: the top 'doing' model" },
   { id: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-terra",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 15.00, ctx: 1050000, maxOut: 32768, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 15.00, ctx: 1050000, maxOut: 128000, reasoning: true,
     specialty: "Mid-tier GPT-5.6: strong general reasoning at half Sol's cost" },
   { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-luna",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 6.00, ctx: 1050000, maxOut: 16384, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 6.00, ctx: 1050000, maxOut: 128000, reasoning: true,
     specialty: "Lightest/cheapest GPT-5.6: fast conversational tier" },
   { id: "openai/gpt-5.5", name: "GPT-5.5", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.5",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 32768, reasoning: true,
@@ -110,20 +109,19 @@ export const MODELS = [
   { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", origin: "Moonshot AI (Beijing)",
     category: "Frontier / Flagship", vision: true, params: "1T (MoE·32B active)", paramsB: 1000, inCost: 0.66, outCost: 3.41, ctx: 262144, maxOut: 16384,
     specialty: "Agentic tool-use heavyweight; cult favorite for doing things" },
-  // Anthropic Claude: DIRECT to Anthropic (provider:"anthropic"), added 2026-07-14 for Trusted mode
-  // (strictest retention; ZDR-eligible). Reached via Anthropic's OpenAI-compatible endpoint so the
-  // existing OpenAI-shaped streamer serves them unchanged. directId = the native Anthropic model id.
+  // Anthropic Claude: DIRECT to the native Messages API for full tool-use, thinking,
+  // stop-reason, and usage fidelity. directId = the native Anthropic model id.
   { id: "anthropic/claude-opus-4-8", name: "Claude Opus 4.8", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-opus-4-8",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 25.00, ctx: 200000, maxOut: 32768,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 25.00, ctx: 1000000, maxOut: 128000, reasoning: true,
     specialty: "Anthropic flagship: top-tier reasoning + agentic 'doing'; strictest data retention" },
   { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-sonnet-5",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 200000, maxOut: 32768,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 1000000, maxOut: 128000, reasoning: true,
     specialty: "Balanced Claude: strong general work at mid cost; no-train direct provider" },
   { id: "anthropic/claude-haiku-4-5", name: "Claude Haiku 4.5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-haiku-4-5-20251001",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 5.00, ctx: 200000, maxOut: 16384,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 5.00, ctx: 200000, maxOut: 64000, reasoning: true,
     specialty: "Fast, cheap Claude: quick turns kept off training data (direct)" },
   { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-pro",
-    category: "Frontier / Flagship", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.43, outCost: 0.87, ctx: 1000000, maxOut: 16384,
+    category: "Frontier / Flagship", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.43, outCost: 0.87, ctx: 1000000, maxOut: 384000, reasoning: true,
     specialty: "Near-frontier reasoning + code at ~1/30th flagship price (direct to DeepSeek)" },
   { id: "minimax/minimax-m2.5", name: "MiniMax M2.5", origin: "MiniMax (Shanghai)",
     category: "Frontier / Flagship", params: "456B (MoE)", paramsB: 456, inCost: 0.12, outCost: 0.48, ctx: 204000,
@@ -149,7 +147,7 @@ export const MODELS = [
     category: "Reasoning & Math", params: "8B", paramsB: 8, inCost: 0.05, outCost: 0.40, ctx: 128000, reasoning: true,
     specialty: "Tiny thinking-mode model; cheap step-by-step math (Apache 2.0)" },
   { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-flash",
-    category: "Reasoning & Math", params: "undisclosed (MoE)", paramsB: null, inCost: 0.05, outCost: 0.24, ctx: 1000000, maxOut: 16384, reasoning: true,
+    category: "Reasoning & Math", params: "undisclosed (MoE)", paramsB: null, inCost: 0.05, outCost: 0.24, ctx: 1000000, maxOut: 384000, reasoning: true,
     specialty: "Cheapest strong reasoning/math+code engine, direct to DeepSeek" },
 
   // ---- Coding -------------------------------------------------------------------------------
@@ -296,10 +294,10 @@ export const isToolCapable = (id) => { const m = BY_ID.get(id); return !!(m && m
  * losing the thread. Starring all 31 would be worse than starring none: Fred would pick a small
  * free model for a big job, watch it flounder, and reasonably conclude the wiring is broken again.
  *
- * Curated with Fred on 2026-07-19. Two of his calls, recorded so nobody quietly "corrects" them:
- *   - GPT-5.6 Sol was REMOVED at his direction. The OpenAI chat-completions path forces
- *     reasoning_effort:"none" whenever tools are attached (server.mjs ~506), so it would run its
- *     broad tasks with reasoning off. His words: "not worth it."
+ * Curated with Fred on 2026-07-19 and revised when OpenAI moved to the Responses API. GPT-5.6 is
+ * now included because tools no longer force reasoning off; that former transport limitation was
+ * a Dominion defect, not a model limitation.
+ * Two of his original calls, recorded so nobody quietly "corrects" them:
  *   - DeepSeek R1 and Nemotron 3 Ultra were ADDED at his direction over my hesitation. R1 in
  *     particular sometimes emits reasoning where a clean tool call belongs. Logged as accepted risk.
  *
@@ -307,8 +305,11 @@ export const isToolCapable = (id) => { const m = BY_ID.get(id); return !!(m && m
  */
 // NOTE: these are catalog ids, NOT provider ids. Direct-provider models carry a "<provider>/" prefix
 // here and a bare directId on the wire (anthropic/claude-opus-4-8 vs claude-opus-4-8). Mixing the
-// two silently unstars a model, so isBroadCapable is covered by a test that asserts all 13 resolve.
+// two silently unstars a model, so isBroadCapable is covered by a test that asserts all 16 resolve.
 const WILDFIRE_ROSTER = new Set([
+  "openai/gpt-5.6-sol",
+  "openai/gpt-5.6-terra",
+  "openai/gpt-5.6-luna",
   "anthropic/claude-opus-4-8",
   "anthropic/claude-sonnet-5",
   "anthropic/claude-haiku-4-5",
@@ -344,8 +345,10 @@ export const visionModelNames = (limit = 6) => MODELS.filter((m) => m.vision).sl
 // Per-CALL output ceiling for a model in a given mode. This is the CHUNK a single round may emit;
 // the server auto-continues past it (finish_reason "length") until the full answer is written, so a
 // smaller number here never truncates the final result; it only changes how many round-trips it takes.
-// Light modes cap low (short turns should stay short); the writing/reasoning modes get the full window.
-const OUT_MODE_CEIL = { fast: 512, normal: 4096 };   // any mode not listed -> the model's full maxOut
+// Fast is the only explicit brevity mode. Normal and all work modes receive the
+// selected model's native output window; Dominion must not quietly starve a
+// frontier model and then mistake the resulting boundary for task completion.
+const OUT_MODE_CEIL = { fast: 2048 };   // any mode not listed -> the model's full maxOut
 export function outLimitFor(id, mode) {
   const m = BY_ID.get(id);
   const cap = (m && m.maxOut) || DEFAULT_MAX_OUT;

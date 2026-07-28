@@ -77,7 +77,9 @@ const anyBusy = () => Object.keys(liveJobs).length > 0;
 // ctxMem/ctxDocs/ctxChats (Fred, 2026-07-25): the 🧠/📄/💬 context chips are diagnostic clutter to
 // most people, so they are OFF by default and each has its own restore checkbox in System Settings.
 let settings = { persona: "default", personaCustom: "", temperature: 0.7, confirmTools: false, privacy: "redacted_external", ctxMem: false, ctxDocs: false, ctxChats: false };
-let pendingAtt = [];   // attachments staged in the composer for the NEXT send
+// View binding for the open chat's pendingAttachments. The durable source of truth lives on each
+// chat, just like draft text; this array is rebound whenever the sidebar changes conversations.
+let pendingAtt = [];
 
 // Background video: muted+playsinline autoplay is usually allowed, but Android suppresses it under
 // battery saver / when the PWA resumes from background — kick it back to life on those signals.
@@ -102,16 +104,23 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "c" + Date.now() + 
 // placeholders. If a save STILL overflows, one retry strips all attachment data rather than
 // silently losing the whole history write.
 const ATT_KEEP_CHATS = 12;
+function attachmentForStorage(a) {
+  if (a.kind === "image" && a.dataUrl) return { kind: "image_ref", name: a.name };
+  if (a.kind === "text") return { kind: "text", name: a.name, text: "" };
+  return a;
+}
 function serializeChats(stripAll) {
   const byRecency = [...chats].sort((a, b) => (b.activityAt || b.updatedAt || 0) - (a.activityAt || a.updatedAt || 0));
   const keep = new Set(byRecency.slice(0, ATT_KEEP_CHATS).map((c) => c.id));
   return JSON.stringify(chats.slice(0, 100).map((c) => {
-    if (!c.messages.some((m) => m.attachments && m.attachments.length)) return c;
+    const staged = Array.isArray(c.pendingAttachments) ? c.pendingAttachments : [];
+    const hasSentAttachments = c.messages.some((m) => m.attachments && m.attachments.length);
+    if (!hasSentAttachments && !staged.length) return c;
     const full = keep.has(c.id) && !stripAll;
-    return { ...c, messages: c.messages.map((m) => {
+    return { ...c, pendingAttachments: full ? staged : staged.map(attachmentForStorage), messages: c.messages.map((m) => {
       if (!m.attachments || !m.attachments.length) return m;
       if (full) return m;
-      return { ...m, attachments: m.attachments.map((a) => a.kind === "image" && a.dataUrl ? { kind: "image_ref", name: a.name } : a.kind === "text" ? { kind: "text", name: a.name, text: "" } : a) };
+      return { ...m, attachments: m.attachments.map(attachmentForStorage) };
     }) };
   }));
 }
@@ -128,10 +137,30 @@ function load() {
   // changed most recently. activityAt keeps preference-sync revisions from reordering the sidebar.
   let migratedSessionState = false;
   const legacyModel = localStorage.getItem(LS_MODEL) || "local";
+  const legacyForgeTier = ["ember", "flame", "furnace"].includes(localStorage.getItem("dominion.forgeTier"))
+    ? localStorage.getItem("dominion.forgeTier") : "ember";
+  const legacyForgeMode = localStorage.getItem("dominion.forgeModeEnabled") === "1";
   for (const c of chats) {
+    const legacyClock = Math.max(1, Number(c.updatedAt) || Date.now());
+    const hadTrustedTranscriptClock = c.transcriptClockTrusted === true && Number(c.transcriptUpdatedAt) > 0;
     if (typeof c.model !== "string" || !c.model) { c.model = legacyModel; migratedSessionState = true; }
     if (typeof c.draft !== "string") { c.draft = ""; migratedSessionState = true; }
+    if (!Array.isArray(c.pendingAttachments)) { c.pendingAttachments = []; migratedSessionState = true; }
+    if (!["ember", "flame", "furnace"].includes(c.forgeTier)) { c.forgeTier = legacyForgeTier; migratedSessionState = true; }
+    if (typeof c.forgeMode !== "boolean") { c.forgeMode = legacyForgeMode; migratedSessionState = true; }
     if (!Number.isFinite(c.activityAt)) { c.activityAt = c.updatedAt || 0; migratedSessionState = true; }
+    // `updatedAt` used to govern the entire chat. Split it once into component clocks so changing
+    // a model or typing a draft on a stale device can never make that device's old messages newer.
+    for (const field of ["transcriptUpdatedAt", "titleUpdatedAt", "modelUpdatedAt", "draftUpdatedAt", "forgeUpdatedAt"]) {
+      if (!(Number(c[field]) > 0)) { c[field] = legacyClock; migratedSessionState = true; }
+    }
+    // A legacy updatedAt may have come from typing or changing a model, not from messages. Until
+    // this browser performs an actual transcript mutation, mark the derived transcript clock as
+    // untrusted so its first upgraded sync cannot shrink a newer device's conversation.
+    if (c.transcriptClockTrusted !== hadTrustedTranscriptClock) {
+      c.transcriptClockTrusted = hadTrustedTranscriptClock;
+      migratedSessionState = true;
+    }
     // Old messages predate model history, so their exact picker state cannot be reconstructed.
     // Freeze the session's migrated model onto that legacy transcript once. Every new user message
     // gets an exact picker snapshot, making future model changes durable and scrollable.
@@ -160,9 +189,10 @@ function load() {
 // The server now keeps a faithful per-account copy (chatsync.mjs) and this is the client half:
 // push what changed here, pull what changed elsewhere, merge by chat id.
 //
-// MERGE RULE: last-write-wins per chat on updatedAt, and STRICTLY greater to win, so a lossy echo
-// of our own push (the server strips image pixels) can never overwrite the fuller local copy.
-// Merging by id means a chat that exists only here is never destroyed by another device's push.
+// MERGE RULE: transcript, title, model, draft, and Forge state each have their own freshness clock.
+// `updatedAt` only tells us a chat needs syncing; a newer draft/model choice on a stale device can
+// no longer replace newer messages. Strict component-clock ties also keep the server's pixel-stripped
+// echo from overwriting the fuller local attachment copy.
 //
 // PIXELS DO NOT TRAVEL. The server does not store image bytes (Fred's standing ruling: the service
 // does not pay to house user images), and a data URL per image would blow the request. They are
@@ -182,7 +212,63 @@ function chatForPush(c) {
     if (!m.attachments || !m.attachments.length) return m;
     return { ...m, attachments: m.attachments.map((a) => (a.kind === "image" && a.dataUrl ? { kind: "image_ref", name: a.name } : a)) };
   });
-  return { id: c.id, title: c.title, updatedAt: c.updatedAt || 0, activityAt: c.activityAt || c.updatedAt || 0, model: c.model, draft: c.draft || "", lastMode: c.lastMode, messages };
+  return {
+    id: c.id, title: c.title, updatedAt: c.updatedAt || 0,
+    activityAt: c.activityAt || c.updatedAt || 0,
+    model: c.model, draft: c.draft || "", lastMode: c.lastMode,
+    forgeTier: c.forgeTier || "ember", forgeMode: c.forgeMode === true,
+    transcriptUpdatedAt: c.transcriptUpdatedAt || c.updatedAt || 0,
+    titleUpdatedAt: c.titleUpdatedAt || c.updatedAt || 0,
+    modelUpdatedAt: c.modelUpdatedAt || c.updatedAt || 0,
+    draftUpdatedAt: c.draftUpdatedAt || c.updatedAt || 0,
+    forgeUpdatedAt: c.forgeUpdatedAt || c.updatedAt || 0,
+    transcriptClockTrusted: c.transcriptClockTrusted === true,
+    messages,
+  };
+}
+
+function syncClock(chat, field) {
+  const value = Number(chat && chat[field]);
+  if (Number.isFinite(value) && value > 0) return value;
+  return Math.max(0, Number(chat && chat.updatedAt) || 0);
+}
+
+// Merge server state by field. `updatedAt` remains the cheap "does this chat need a push?" marker,
+// but it no longer grants an unrelated draft/model edit authority to replace the transcript.
+function mergeIncomingChat(local, inc) {
+  let changed = false;
+  const take = (clockField, fields) => {
+    const nextClock = syncClock(inc, clockField);
+    if (!(nextClock > syncClock(local, clockField))) return;
+    let took = false;
+    for (const field of fields) {
+      if (inc[field] === undefined) continue;
+      local[field] = inc[field];
+      took = true;
+    }
+    if (took) {
+      local[clockField] = nextClock;
+      changed = true;
+    }
+  };
+
+  take("transcriptUpdatedAt", ["messages", "lastMode"]);
+  if (inc.transcriptClockTrusted === true && local.transcriptClockTrusted !== true) {
+    local.transcriptClockTrusted = true;
+    changed = true;
+  }
+  take("titleUpdatedAt", ["title"]);
+  take("modelUpdatedAt", ["model"]);
+  take("draftUpdatedAt", ["draft"]);
+  take("forgeUpdatedAt", ["forgeTier", "forgeMode"]);
+
+  const nextActivity = Math.max(Number(local.activityAt) || 0, Number(inc.activityAt) || 0);
+  if (nextActivity !== (Number(local.activityAt) || 0)) {
+    local.activityAt = nextActivity;
+    changed = true;
+  }
+  local.updatedAt = Math.max(Number(local.updatedAt) || 0, Number(inc.updatedAt) || 0);
+  return changed;
 }
 
 // Fold the server's changes into the local array. Returns what moved so the caller can decide
@@ -194,16 +280,21 @@ function mergeIncoming(incoming, deleted) {
     if (syncState.deletes.some((d) => d.id === inc.id && (d.deletedAt || 0) >= (inc.updatedAt || 0))) continue;  // deleted here, not yet pushed
     const local = chats.find((c) => c.id === inc.id);
     if (!local) {
-      chats.unshift({ id: inc.id, title: inc.title || "New chat", messages: inc.messages || [], updatedAt: inc.updatedAt || 0, activityAt: inc.activityAt || inc.updatedAt || 0, model: inc.model, draft: inc.draft || "", lastMode: inc.lastMode });
+      chats.unshift({
+        id: inc.id, title: inc.title || "New chat", messages: inc.messages || [],
+        updatedAt: inc.updatedAt || 0, activityAt: inc.activityAt || inc.updatedAt || 0,
+        model: inc.model, draft: inc.draft || "", lastMode: inc.lastMode,
+        forgeTier: ["ember", "flame", "furnace"].includes(inc.forgeTier) ? inc.forgeTier : "ember",
+        forgeMode: inc.forgeMode === true,
+        transcriptUpdatedAt: syncClock(inc, "transcriptUpdatedAt"),
+        transcriptClockTrusted: inc.transcriptClockTrusted === true,
+        titleUpdatedAt: syncClock(inc, "titleUpdatedAt"),
+        modelUpdatedAt: syncClock(inc, "modelUpdatedAt"),
+        draftUpdatedAt: syncClock(inc, "draftUpdatedAt"),
+        forgeUpdatedAt: syncClock(inc, "forgeUpdatedAt"),
+      });
       changedAny = true;
-    } else if ((inc.updatedAt || 0) > (local.updatedAt || 0)) {
-      local.title = inc.title || local.title;
-      local.messages = inc.messages || [];
-      local.updatedAt = inc.updatedAt || 0;
-      local.activityAt = inc.activityAt || local.activityAt || inc.updatedAt || 0;
-      if (inc.model !== undefined) local.model = inc.model;
-      if (inc.draft !== undefined) local.draft = inc.draft;
-      local.lastMode = inc.lastMode;
+    } else if (mergeIncomingChat(local, inc)) {
       changedAny = true;
       if (local.id === curId) changedCur = true;
     }
@@ -298,24 +389,69 @@ function loadLiveJobs() {
 }
 const persistLiveJobs = () => { try { localStorage.setItem(LS_LIVEJOBS, JSON.stringify(liveJobs)); } catch {} };
 const cur = () => chats.find((c) => c.id === curId);
+function touchChatComponent(c, clockField, at = Date.now()) {
+  if (!c) return 0;
+  const stamp = Math.max(Number(at) || 0, (Number(c[clockField]) || 0) + 1);
+  c[clockField] = stamp;
+  if (clockField === "transcriptUpdatedAt") c.transcriptClockTrusted = true;
+  c.updatedAt = Math.max(Number(c.updatedAt) || 0, stamp);
+  return stamp;
+}
+// The Forge controls are conversation state, not browser-global state. dominion-forge.js loads
+// before this file, so it discovers this bridge lazily each time the dial is read or changed.
+window.dominionForgeSession = {
+  get() {
+    const c = cur();
+    return c ? { tier: c.forgeTier || "ember", mode: c.forgeMode === true } : null;
+  },
+  set(patch) {
+    const c = cur();
+    if (!c || !patch || typeof patch !== "object") return;
+    let changed = false;
+    if (["ember", "flame", "furnace"].includes(patch.tier) && c.forgeTier !== patch.tier) {
+      c.forgeTier = patch.tier; changed = true;
+    }
+    if (typeof patch.mode === "boolean" && c.forgeMode !== patch.mode) {
+      c.forgeMode = patch.mode; changed = true;
+    }
+    if (changed) {
+      touchChatComponent(c, "forgeUpdatedAt");
+      save();
+    }
+  },
+};
 const titleFrom = (msgs) => { const u = msgs.find((m) => m.role === "user"); const base = u ? (u.content || (Array.isArray(u.attachments) && u.attachments[0] && ("📎 " + u.attachments[0].name)) || "") : "New chat"; return String(base).replace(/\s+/g, " ").trim().slice(0, 40) || "New chat"; };
 const resolvePersona = () => settings.persona === "custom" ? (settings.personaCustom || "") : (PRESETS[settings.persona] || "");
 const forcedModel = () => { const v = modelSel ? modelSel.value : "local"; return (v && v !== "auto" && v !== "local") ? v : ""; };
 let draftSaveTimer = null;
+function chatPendingAttachments(c) {
+  if (!c) return [];
+  if (!Array.isArray(c.pendingAttachments)) c.pendingAttachments = [];
+  return c.pendingAttachments;
+}
 function captureChatDraft() {
   const c = cur();
   if (!c) return false;
   const next = input.value || "";
   if ((c.draft || "") === next) return false;
   c.draft = next;
-  c.updatedAt = Date.now();
-  c.activityAt = c.updatedAt;
+  c.activityAt = touchChatComponent(c, "draftUpdatedAt");
   return true;
 }
-function persistChatDraft() {
+function captureChatAttachments() {
+  const c = cur();
+  if (!c || c.pendingAttachments === pendingAtt) return false;
+  c.pendingAttachments = pendingAtt;
+  c.activityAt = touchChatComponent(c, "draftUpdatedAt");
+  return true;
+}
+function persistChatComposer() {
   clearTimeout(draftSaveTimer);
-  if (captureChatDraft()) save();
-  else save(); // switching must persist an earlier in-memory keystroke even if the text is unchanged
+  captureChatDraft();
+  captureChatAttachments();
+  // Switching must persist earlier in-memory changes even when both view bindings already point at
+  // their chat fields (the normal case after an attachment add/remove).
+  save();
 }
 function restoreChatDraft() {
   if (input.dataset.chatId === (curId || "")) return;
@@ -323,6 +459,23 @@ function restoreChatDraft() {
   input.value = (c && c.draft) || "";
   input.dataset.chatId = curId || "";
   autosize();
+}
+function restoreChatAttachments() {
+  pendingAtt = chatPendingAttachments(cur());
+  renderAttachStrip();
+}
+function setChatPendingAttachments(c, attachments) {
+  if (!c || !chats.some((x) => x.id === c.id)) return false;
+  const next = Array.isArray(attachments) ? attachments : [];
+  c.pendingAttachments = next;
+  c.activityAt = touchChatComponent(c, "draftUpdatedAt");
+  if (c.id === curId) {
+    pendingAtt = next;
+    renderAttachStrip();
+    updateEstimate();
+  }
+  save();
+  return true;
 }
 function restoreChatModel() {
   if (!modelSel) return;
@@ -344,7 +497,26 @@ function summarizeLeft(id) {
   if (!c || c.messages.length < 4) return;
   fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
 }
-function newChat() { const prev = curId; if (prev) persistChatDraft(); detachCurrentSession(); const now = Date.now(); const defaultModel = localStorage.getItem(LS_MODEL) || (modelSel ? modelSel.value : "local"); const c = { id: uid(), title: "New chat", messages: [], model: defaultModel, draft: "", updatedAt: now, activityAt: now }; chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev); try { fetchBudget(); } catch {} }
+function newChat() {
+  const prev = curId;
+  if (prev) persistChatComposer();
+  if (typeof window.closeForgeDial === "function") window.closeForgeDial();
+  detachCurrentSession();
+  const now = Date.now();
+  const defaultModel = localStorage.getItem(LS_MODEL) || (modelSel ? modelSel.value : "local");
+  const savedTier = localStorage.getItem("dominion.forgeTier");
+  const c = {
+    id: uid(), title: "New chat", messages: [], model: defaultModel, draft: "", pendingAttachments: [],
+    forgeTier: ["ember", "flame", "furnace"].includes(savedTier) ? savedTier : "ember",
+    forgeMode: localStorage.getItem("dominion.forgeModeEnabled") === "1",
+    transcriptUpdatedAt: now, titleUpdatedAt: now, modelUpdatedAt: now, draftUpdatedAt: now, forgeUpdatedAt: now,
+    transcriptClockTrusted: true,
+    updatedAt: now, activityAt: now,
+  };
+  chats.unshift(c); curId = c.id; save(); renderAll(); scroll(true); closeSidebar();
+  igniteChatSurface(); input.focus(); if (prev) summarizeLeft(prev);
+  try { fetchBudget(); } catch {}
+}
 // Fresh-start ignition: a quick green scan-sweep over the chat surface as the rail closes.
 function igniteChatSurface() {
   const surf = document.getElementById("neural-glass") || document.body;
@@ -355,8 +527,34 @@ function igniteChatSurface() {
 // Switching chats no longer blocks on a running turn: the run keeps generating server-side and its
 // per-chat liveJobs entry persists. We tear down the on-screen streaming session (WITHOUT stopping
 // the server job), render the target chat, then reattach if IT has a live run.
-function switchChat(id) { if (id === curId) { closeSidebar(); return; } const prev = curId; persistChatDraft(); detachCurrentSession(); curId = id; save(); renderAll(); scroll(true); closeSidebar(); if (prev && prev !== id) summarizeLeft(prev); maybeReattach(); try { fetchBudget(); } catch {} }
+function switchChat(id) {
+  if (id === curId) { closeSidebar(); return; }
+  const prev = curId;
+  persistChatComposer();
+  if (typeof window.closeForgeDial === "function") window.closeForgeDial();
+  detachCurrentSession();
+  curId = id; save(); renderAll(); scroll(true); closeSidebar();
+  if (prev && prev !== id) summarizeLeft(prev);
+  maybeReattach();
+  try { fetchBudget(); } catch {}
+}
 function deleteChat(id) {
+  // Deleting a chat is also an explicit stop for that chat's durable turn. Merely removing the
+  // sidebar row used to orphan the server job; boot reconciliation could later rediscover it and
+  // resurrect output for a conversation the user had deliberately forgotten.
+  const running = liveJobs[id];
+  if (running && running.jobId) {
+    fetch("/chat/stop", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jobId: running.jobId }),
+    }).catch(() => {});
+  }
+  if (curId === id && running) detachCurrentSession();
+  if (running) {
+    delete liveJobs[id];
+    persistLiveJobs();
+  }
   // True forget: also erase the server's transcript copy + any episodic memory distilled from this
   // chat, so cross-chat retrieval can never resurrect it (fire-and-forget; nothing breaks offline).
   const deletedAt = Date.now();
@@ -368,7 +566,7 @@ function deleteChat(id) {
   saveSync();
   chats = chats.filter((c) => c.id !== id); if (curId === id) curId = (chats[0] && chats[0].id) || null; if (!curId) { newChat(); return; } save(); renderAll();
 }
-async function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = await askText({ kicker: "Conversation", title: "Rename chat", multiline: false, value: c.title, maxlen: 60, saveLabel: "Rename" }); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; save(); renderSidebar(); } }
+async function renameChat(id) { const c = chats.find((x) => x.id === id); if (!c) return; const t = await askText({ kicker: "Conversation", title: "Rename chat", multiline: false, value: c.title, maxlen: 60, saveLabel: "Rename" }); if (t != null) { c.title = t.trim().slice(0, 60) || c.title; touchChatComponent(c, "titleUpdatedAt"); save(); renderSidebar(); } }
 
 // ---------- sidebar ----------
 const openSidebar = () => { sidebar.classList.add("open"); overlay.classList.add("show"); document.body.classList.add("rail-open"); };
@@ -477,7 +675,13 @@ function renderMsg(m, i, isLastAi, mount = wrap) {
     const sep = () => mm.appendChild(document.createTextNode(" · "));
     const bit = (text, title, fn) => { const s = document.createElement("span"); s.textContent = text; if (title) s.title = title; if (fn) { s.style.cursor = "pointer"; s.onclick = fn; } if (mm.childNodes.length) sep(); mm.appendChild(s); return s; };
     if (m.meta.mode && MODE_LABEL[m.meta.mode]) bit(MODE_LABEL[m.meta.mode]);
-    if (m.meta.interrupted) { const b = bit("⏸ interrupted", "You stopped this answer before it finished"); b.style.color = "#e8b07c"; }
+    if (m.meta.checkpoint) {
+      const b = bit("⏸ checkpointed", "The task is unfinished and can resume from this saved checkpoint");
+      b.style.color = "#9ee6ad";
+    } else if (m.meta.interrupted) {
+      const b = bit("⏸ interrupted", "You stopped this answer before it finished");
+      b.style.color = "#e8b07c";
+    }
     // Context chips are individually gated on settings (all OFF by default — Fred, 2026-07-25;
     // System Settings has a restore checkbox for each). Split from the old single fused span so
     // each can be toggled on its own; any of them still taps open the per-item detail.
@@ -642,7 +846,9 @@ function renderTranscript() {
 }
 function renderAll() {
   restoreChatDraft();
+  restoreChatAttachments();
   restoreChatModel();
+  try { document.dispatchEvent(new CustomEvent("dominion-chat-changed", { detail: { chatId: curId } })); } catch {}
   updateFocusMode();   // Chat Focus Mode follows the open chat: first sent message folds the chrome
   renderTranscript();  // measure after focus mode settles so names fit the field's real height
   renderSidebar(); renderBudget(); syncComposer(); scroll();
@@ -984,20 +1190,31 @@ async function postOcr(pages, name, source) {
 // taps it from the vision-gate warning, because on a vision model real pixels beat OCR.
 let ocrBusy = false;
 async function ocrPendingImages() {
-  const imgs = pendingAtt.filter((a) => a.kind === "image" && a.dataUrl);
+  const targetChatId = curId;
+  const target = chats.find((c) => c.id === targetChatId);
+  const imgs = chatPendingAttachments(target).filter((a) => a.kind === "image" && a.dataUrl);
   if (!imgs.length || ocrBusy) return;
   ocrBusy = true; if (attachBtn) attachBtn.classList.add("busy");
   attStatus("Reading " + imgs.length + " picture" + (imgs.length === 1 ? "" : "s") + " with OCR… (~" + Math.max(5, imgs.length * 2) + "s)");
   try {
     const j = await postOcr(imgs.map((a) => a.dataUrl), imgs[0].name || "photo", "photo");
-    pendingAtt = pendingAtt.filter((a) => !(a.kind === "image" && a.dataUrl));
-    const base = imgs.length === 1 ? (imgs[0].name || "photo").replace(/\.[a-z0-9]+$/i, "") : imgs.length + " pictures";
-    pendingAtt.push({ kind: "text", name: (base + " — transcribed").slice(0, 120), text: j.text });
-    renderAttachStrip(); updateEstimate(); attStatus("");
+    const source = new Set(imgs);
+    const liveTarget = chats.find((c) => c.id === targetChatId);
+    const current = chatPendingAttachments(liveTarget);
+    // A removal while OCR was running wins; never resurrect an attachment the user discarded.
+    if (liveTarget && current.some((a) => source.has(a))) {
+      const next = current.filter((a) => !source.has(a));
+      const base = imgs.length === 1 ? (imgs[0].name || "photo").replace(/\.[a-z0-9]+$/i, "") : imgs.length + " pictures";
+      next.push({ kind: "text", name: (base + " — transcribed").slice(0, 120), text: j.text });
+      setChatPendingAttachments(liveTarget, next);
+    }
+    attStatus("");
   } catch (e) {
     attStatus("");
-    attachWarn.hidden = false; attachWarn.textContent = "OCR: " + ((e && e.message) || "failed");
-    setTimeout(updateAttachGate, 6000);
+    if (targetChatId === curId) {
+      attachWarn.hidden = false; attachWarn.textContent = "OCR: " + ((e && e.message) || "failed");
+      setTimeout(updateAttachGate, 6000);
+    }
   } finally { ocrBusy = false; if (attachBtn) attachBtn.classList.remove("busy"); }
 }
 async function extractDocFile(f) {
@@ -1031,8 +1248,12 @@ async function extractDocFile(f) {
   const r = await extractMod.extractDocx(buf, { maxChars: ATT_MAX_TEXT_BYTES });
   return { kind: "text", name: (f.name || "document.docx").slice(0, 120), text: r.text };
 }
-const attImages = () => pendingAtt.filter((a) => a.kind === "image").length;
-const attTexts = () => pendingAtt.filter((a) => a.kind === "text").length;
+const attImages = (attachments = pendingAtt) => attachments.filter((a) => a.kind === "image").length;
+const attTexts = (attachments = pendingAtt) => attachments.filter((a) => a.kind === "text").length;
+const usablePendingAttachment = (a) => !!(a && (
+  (a.kind === "image" && a.dataUrl) ||
+  (a.kind === "text" && typeof a.text === "string" && a.text.length)
+));
 
 // Current model's vision capability: cloud models per the live catalog flag; local has none.
 function modelSeesImages() {
@@ -1071,35 +1292,65 @@ function readTextFile(file) {
 
 async function addFiles(fileList) {
   const files = Array.from(fileList || []); if (!files.length) return;
+  const targetChatId = curId;
+  if (!chats.some((c) => c.id === targetChatId)) return;
   let rejected = [];
+  const hasSlot = (kind, max) => {
+    const c = chats.find((x) => x.id === targetChatId);
+    const staged = chatPendingAttachments(c);
+    return !!c && (kind === "image" ? attImages(staged) : attTexts(staged)) < max;
+  };
+  const stage = (a, kind, max, fullMessage) => {
+    const c = chats.find((x) => x.id === targetChatId);
+    if (!c) return false;
+    const staged = chatPendingAttachments(c);
+    if ((kind === "image" ? attImages(staged) : attTexts(staged)) >= max) {
+      rejected.push(fullMessage);
+      return false;
+    }
+    return setChatPendingAttachments(c, [...staged, a]);
+  };
   if (attachBtn) attachBtn.classList.add("busy");   // PDF extraction on a phone can take a couple seconds
   try {
     for (const f of files) {
       if (f.type && f.type.startsWith("image/")) {
-        if (attImages() >= ATT_MAX_IMAGES) { rejected.push(f.name + " (max " + ATT_MAX_IMAGES + " pictures)"); continue; }
+        const fullMessage = f.name + " (max " + ATT_MAX_IMAGES + " pictures)";
+        if (!hasSlot("image", ATT_MAX_IMAGES)) { rejected.push(fullMessage); continue; }
         const a = await downscaleImage(f);
-        if (a) pendingAtt.push(a); else rejected.push((f.name || "picture") + " (couldn't read it)");
+        if (a) stage(a, "image", ATT_MAX_IMAGES, fullMessage);
+        else rejected.push((f.name || "picture") + " (couldn't read it)");
       } else if (f.type === "application/pdf" || f.type === DOCX_MIME || ATT_DOC_EXT.test(f.name || "")) {
-        if (attTexts() >= ATT_MAX_TEXTS) { rejected.push(f.name + " (max " + ATT_MAX_TEXTS + " files)"); continue; }
-        try { pendingAtt.push(await extractDocFile(f)); }
+        const fullMessage = f.name + " (max " + ATT_MAX_TEXTS + " files)";
+        if (!hasSlot("text", ATT_MAX_TEXTS)) { rejected.push(fullMessage); continue; }
+        try { stage(await extractDocFile(f), "text", ATT_MAX_TEXTS, fullMessage); }
         catch (e) { rejected.push((f.name || "document") + " (" + ((e && e.message) || "couldn't read it") + ")"); }
       } else if (/\.(doc|xls)$/i.test(f.name || "")) {
         rejected.push(f.name + (/\.doc$/i.test(f.name) ? " (old .doc format; save it as .docx first)" : " (old .xls format; save it as .xlsx first)"));
       } else if ((f.type && f.type.startsWith("text/")) || f.type === "application/json" || ATT_TEXT_EXT.test(f.name || "")) {
-        if (attTexts() >= ATT_MAX_TEXTS) { rejected.push(f.name + " (max " + ATT_MAX_TEXTS + " files)"); continue; }
+        const fullMessage = f.name + " (max " + ATT_MAX_TEXTS + " files)";
+        if (!hasSlot("text", ATT_MAX_TEXTS)) { rejected.push(fullMessage); continue; }
         const a = await readTextFile(f);
-        if (a) pendingAtt.push(a); else rejected.push((f.name || "file") + " (empty or unreadable)");
+        if (a) stage(a, "text", ATT_MAX_TEXTS, fullMessage);
+        else rejected.push((f.name || "file") + " (empty or unreadable)");
       } else {
         rejected.push((f.name || "file") + " (pictures, PDFs, Word .docx, Excel .xlsx, and text files only)");
       }
     }
   } finally { if (attachBtn) attachBtn.classList.remove("busy"); }
-  renderAttachStrip();
-  if (rejected.length) { attachWarn.hidden = false; attachWarn.textContent = "Skipped: " + rejected.join(", "); setTimeout(updateAttachGate, 4000); }
-  updateEstimate();
+  if (targetChatId === curId) {
+    renderAttachStrip();
+    if (rejected.length) { attachWarn.hidden = false; attachWarn.textContent = "Skipped: " + rejected.join(", "); setTimeout(updateAttachGate, 4000); }
+    updateEstimate();
+  }
 }
 
-function removeAttachment(i) { pendingAtt.splice(i, 1); renderAttachStrip(); updateEstimate(); }
+function removeAttachment(i) {
+  const c = cur();
+  if (!c) return;
+  const staged = chatPendingAttachments(c);
+  if (i < 0 || i >= staged.length) return;
+  setChatPendingAttachments(c, staged.filter((_, n) => n !== i));
+}
 
 function renderAttachStrip() {
   if (!attachStrip) return;
@@ -1107,12 +1358,15 @@ function renderAttachStrip() {
   attachStrip.hidden = pendingAtt.length === 0;
   pendingAtt.forEach((a, i) => {
     const cell = document.createElement("div"); cell.className = "att-cell";
-    if (a.kind === "image") {
+    if (a.kind === "image" && a.dataUrl) {
       const img = document.createElement("img"); img.src = a.dataUrl; img.alt = a.name; img.title = a.name;
       img.onclick = () => openImageFull(a.dataUrl);
       cell.appendChild(img);
     } else {
-      const chip = document.createElement("span"); chip.className = "att-file"; chip.textContent = "📄 " + a.name; chip.title = a.name;
+      const available = usablePendingAttachment(a);
+      const chip = document.createElement("span"); chip.className = "att-file";
+      chip.textContent = (available ? "📄 " : "⚠ ") + a.name;
+      chip.title = available ? a.name : a.name + " is no longer stored on this device; remove and re-attach it";
       cell.appendChild(chip);
     }
     const x = document.createElement("button"); x.className = "att-x"; x.textContent = "×"; x.title = "Remove"; x.setAttribute("aria-label", "Remove " + a.name);
@@ -1127,10 +1381,16 @@ function renderAttachStrip() {
 // model, never silently drops the picture — it says so, and offers the one real fix that doesn't
 // change the user's model pick: transcribing the picture to text ("Read text instead"). Private
 // mode gets its own honest copy with NO button, because OCR itself is cloud and would be refused.
-function attachSendBlocked() { return attImages() > 0 && !modelSeesImages(); }
+function attachSendBlocked(attachments = pendingAtt) {
+  return attachments.some((a) => !usablePendingAttachment(a)) || (attImages(attachments) > 0 && !modelSeesImages());
+}
 function updateAttachGate() {
   if (!attachWarn) return;
-  if (attachSendBlocked()) {
+  const unavailable = pendingAtt.filter((a) => !usablePendingAttachment(a));
+  if (unavailable.length) {
+    attachWarn.hidden = false;
+    attachWarn.textContent = "A staged attachment is no longer stored on this device. Remove it and attach the file again before sending.";
+  } else if (attachSendBlocked()) {
     attachWarn.hidden = false;
     attachWarn.replaceChildren();
     const priv = privacyModeSel && privacyModeSel.value === "private";
@@ -1212,6 +1472,7 @@ function newSession(c) {
   (eraTurns || wrap).appendChild(row); scroll();
   const st = { c, inner, tools, live, chips: [], raw: "", ctxEl: null, ctxItems: null, doneMeta: null,
                mentorCritique: null, done: false, stopped: false, gone: false, errMsg: "", warm: 0,
+               checkpoint: null, stopReason: "",
                jobId: "", detached: false, modelId: modelSel ? modelSel.value : (c.model || "local"),
                // Wall-clock for the pace warning: the only duration it will ever quote is one
                // measured here, on this device, for this exact model/mode/dial combination.
@@ -1308,8 +1569,16 @@ function processEvent(st, ev) {
     st.mentorCritique = ev.critique || null;
   } else if (ev.type === "done") {
     st.done = true; st.doneMeta = ev.meta || null;
+  } else if (ev.type === "checkpoint") {
+    st.checkpoint = ev;
+    const note = document.createElement("div");
+    note.className = "ctx";
+    note.textContent = "⏸ Saved checkpoint · task unfinished" + (ev.nextAction ? " · next: " + ev.nextAction : "");
+    inner.insertBefore(note, tools);
+    scroll();
   } else if (ev.type === "stopped") {
-    st.stopped = true;   // explicit /chat/stop — finalize keeps the partial, marked interrupted
+    st.stopped = true;
+    st.stopReason = ev.reason || "";
   } else if (ev.type === "gone") {
     st.gone = true;      // the job expired server-side — say so honestly, never a silent retry
   } else if (ev.type === "artifact") {
@@ -1437,16 +1706,39 @@ function finalizeSession(st) {
     if (st.doneMeta) { msg.meta = st.doneMeta; if (st.ctxItems) msg.meta.contextItems = st.ctxItems; if (st.doneMeta.mode) c.lastMode = st.doneMeta.mode; }
     // Produced documents belong to the message, so the download survives a reload and a device hop.
     if (st.files && st.files.length) { msg.meta = msg.meta || {}; msg.meta.files = st.files; }
-    c.messages.push(msg); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save();
+    c.messages.push(msg); c.activityAt = touchChatComponent(c, "transcriptUpdatedAt"); save();
     if (speakOn && final) speakAnswer(final);   // voice: read the finished answer aloud (toggle)
   } else if (final) {
-    c.messages.push({ role: "assistant", content: final, modelId: st.modelId || c.model || "local", meta: { interrupted: true } }); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save();
+    c.messages.push({
+      role: "assistant", content: final, modelId: st.modelId || c.model || "local",
+      meta: st.checkpoint
+        ? { interrupted: true, checkpoint: st.checkpoint, stopReason: st.stopReason || st.checkpoint.state || "" }
+        : { interrupted: true, stopReason: st.stopReason || "" },
+    });
+    c.activityAt = touchChatComponent(c, "transcriptUpdatedAt"); save();
   } else if (st.errMsg) {
     // Nothing ever came back (e.g. "Failed to fetch") — the composer was already cleared when the
     // turn was sent, so "tap send to retry" would otherwise hit an empty box and do nothing. Pull
     // the unanswered question back out of history and into the composer so retry actually works.
     const last = c.messages[c.messages.length - 1];
-    if (last && last.role === "user") { c.messages.pop(); input.value = last.content; c.draft = last.content; autosize(); }
+    if (last && last.role === "user") {
+      const at = Date.now();
+      c.messages.pop();
+      c.draft = last.content;
+      c.pendingAttachments = Array.isArray(last.attachments)
+        ? last.attachments.filter(usablePendingAttachment) : [];
+      touchChatComponent(c, "transcriptUpdatedAt", at);
+      c.activityAt = touchChatComponent(c, "draftUpdatedAt", at);
+      save();
+      // A background chat can fail after the user has switched away. Restore its own durable
+      // composer state without overwriting the text or attachment strip of the chat now on screen.
+      if (c.id === curId) {
+        input.value = c.draft;
+        pendingAtt = c.pendingAttachments;
+        renderAttachStrip();
+        autosize();
+      }
+    }
   }
   // Clear this chat's live-job entry and tell the server we've merged the result (starts the
   // collected-retention clock; also the idempotency guard against a reconcile re-delivering it).
@@ -1596,8 +1888,9 @@ async function reconcileJobs() {
       const jobChat = chats.find((x) => x.id === j.chatId);
       if (jobChat && !jobChat.model && j.model) {
         jobChat.model = j.model;
-        jobChat.updatedAt = Math.max(jobChat.updatedAt || 0, Number(j.startedAt) || 0, Date.now());
-        jobChat.activityAt = jobChat.updatedAt;
+        jobChat.activityAt = touchChatComponent(
+          jobChat, "modelUpdatedAt", Math.max(Number(j.startedAt) || 0, Date.now())
+        );
         changed = true;
       }
       if (j.status === "running") {
@@ -1626,7 +1919,7 @@ async function deliverResult(jobId, c) {
     const msg = { role: "assistant", content: text, modelId: ranModel };
     if (r.meta && typeof r.meta === "object") { msg.meta = { ...r.meta }; if (r.meta.mode) c.lastMode = r.meta.mode; }
     if (interrupted) { msg.meta = msg.meta || {}; msg.meta.interrupted = true; }
-    c.messages.push(msg); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save();
+    c.messages.push(msg); c.activityAt = touchChatComponent(c, "transcriptUpdatedAt"); save();
   }
   if (liveJobs[c.id] && liveJobs[c.id].jobId === jobId) { delete liveJobs[c.id]; }
   collectJob(jobId);
@@ -1644,38 +1937,58 @@ function send() {
     } else if (aborter) aborter.abort();
     return;
   }
-  const text = input.value.trim(); if (!text && !pendingAtt.length) return;
-  if (attachSendBlocked()) { updateAttachGate(); attachWarn.classList.remove("shake"); void attachWarn.offsetWidth; attachWarn.classList.add("shake"); return; }
   const c = cur(); if (!c) return;
-  input.value = ""; c.draft = ""; autosize(); hideCostChip();
+  const staged = chatPendingAttachments(c);
+  const text = input.value.trim(); if (!text && !staged.length) return;
+  if (attachSendBlocked(staged)) { updateAttachGate(); attachWarn.classList.remove("shake"); void attachWarn.offsetWidth; attachWarn.classList.add("shake"); return; }
+  const at = Date.now();
+  input.value = ""; c.draft = "";
+  touchChatComponent(c, "draftUpdatedAt", at);
+  autosize(); hideCostChip();
   scroll(true);   // a fresh send always re-engages the follow so the reply starts in view
   const msg = { role: "user", content: text || "", modelId: modelSel ? modelSel.value : (c.model || "local") };
-  if (pendingAtt.length) { msg.attachments = pendingAtt; pendingAtt = []; renderAttachStrip(); }
+  if (staged.length) {
+    msg.attachments = staged;
+    c.pendingAttachments = [];
+    pendingAtt = c.pendingAttachments;
+    renderAttachStrip();
+  }
   c.messages.push(msg);
-  if (c.title === "New chat") c.title = titleFrom(c.messages);
-  c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save(); renderAll();
+  touchChatComponent(c, "transcriptUpdatedAt", at);
+  if (c.title === "New chat") {
+    c.title = titleFrom(c.messages);
+    touchChatComponent(c, "titleUpdatedAt", at);
+  }
+  c.activityAt = c.updatedAt; save(); renderAll();
   streamReply(c);
 }
 function regenerate() {
   if (busyFor(curId)) return; const c = cur(); if (!c) return;
-  for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") { c.messages.splice(i, 1); break; }
+  for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].role === "assistant") {
+    c.messages.splice(i, 1); c.activityAt = touchChatComponent(c, "transcriptUpdatedAt"); break;
+  }
   save(); renderAll(); streamReply(c);
 }
 // Pick up where a (possibly stopped) answer left off (spec: offer continuation after stop).
 function continueLast() {
   if (busyFor(curId)) return; const c = cur(); if (!c) return;
   c.messages.push({ role: "user", content: "Continue the unfinished work from the prior run now. Resume with the next concrete tool action; do not merely restate what remains. Work until complete unless a safety, context, or funded session-budget guard pauses you.", modelId: modelSel ? modelSel.value : (c.model || "local") });
-  c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save(); renderAll(); streamReply(c);
+  c.activityAt = touchChatComponent(c, "transcriptUpdatedAt"); save(); renderAll(); streamReply(c);
 }
 function editUser(i) {
   if (busyFor(curId)) return; const c = cur(); if (!c) return;
+  const at = Date.now();
   input.value = c.messages[i].content;
   c.draft = input.value;
+  touchChatComponent(c, "draftUpdatedAt", at);
   // Attachments come back to the staging strip with the text, so an edited resend keeps them.
   const att = c.messages[i].attachments;
-  pendingAtt = Array.isArray(att) ? att.filter((a) => a.kind === "image" ? a.dataUrl : a.kind === "text") : [];
+  pendingAtt = Array.isArray(att) ? att.filter(usablePendingAttachment) : [];
+  c.pendingAttachments = pendingAtt;
   renderAttachStrip();
-  c.messages = c.messages.slice(0, i); c.updatedAt = Date.now(); c.activityAt = c.updatedAt; save(); renderAll(); autosize(); input.focus();
+  c.messages = c.messages.slice(0, i);
+  c.activityAt = touchChatComponent(c, "transcriptUpdatedAt", at);
+  save(); renderAll(); autosize(); input.focus();
 }
 
 // ---------- settings ----------
@@ -2215,7 +2528,11 @@ function renderCritiqueCard(card, c, orig, answer, ids = {}) {
         const d = await aApi("/mentor/revise", { content: answer, originalRequest: orig, critique: c });
         if (d.revised) {
           const ch = cur();
-          if (ch) { ch.messages.push({ role: "assistant", content: d.revised, meta: { revised: true } }); ch.updatedAt = Date.now(); ch.activityAt = ch.updatedAt; save(); renderAll(); }
+          if (ch) {
+            ch.messages.push({ role: "assistant", content: d.revised, meta: { revised: true } });
+            ch.activityAt = touchChatComponent(ch, "transcriptUpdatedAt");
+            save(); renderAll();
+          }
           b.textContent = "applied ✓";
         } else { b.textContent = "failed"; b.disabled = false; }
       } catch { b.textContent = "failed"; b.disabled = false; }
@@ -2383,7 +2700,7 @@ input.addEventListener("input", () => {
   autosize();
   captureChatDraft();
   clearTimeout(draftSaveTimer);
-  draftSaveTimer = setTimeout(() => persistChatDraft(), 350);
+  draftSaveTimer = setTimeout(() => persistChatComposer(), 350);
 });
 input.addEventListener("input", scheduleEstimate);
 // Desktop (mouse) sends on Enter; phone/touch lets Enter insert a newline (use the send button).
@@ -2448,7 +2765,7 @@ if (modelSel) modelSel.addEventListener("change", () => {
   const c = cur();
   if (c && c.model !== modelSel.value) {
     c.model = modelSel.value;
-    c.updatedAt = Date.now();
+    touchChatComponent(c, "modelUpdatedAt");
     save();
     if (!busyFor(c.id)) { renderTranscript(); scroll(); }
   }

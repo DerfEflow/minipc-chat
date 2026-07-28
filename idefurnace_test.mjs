@@ -46,6 +46,16 @@ await t("findings are capped so a disaster stays readable", () => {
   assert.equal(f.length, 40);
 });
 
+await t("the sweep inspects files beyond the first 24", () => {
+  const files = Array.from({ length: 30 }, (_, index) => ({
+    path: "src/file-" + (index + 1) + ".js",
+    text: index === 29 ? "// TODO: the thirtieth file is unfinished" : "export const ready = true;",
+  }));
+  const findings = sweepFindings(files);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].path, "src/file-30.js");
+});
+
 await t("the fidelity protocol round-trips", () => {
   const out = parseFidelity([
     "OK: A page that lists chores",

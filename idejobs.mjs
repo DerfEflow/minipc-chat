@@ -11,18 +11,21 @@
  * and the in-memory index is a cache rebuilt from those journals at boot.
  *
  * WHAT IS AND IS NOT JOURNALLED.
- * Structural events only: plan, move, file, diff, run, cost, need_input, snapshot, done, error.
- * Never per-token streaming. A build emits tens of events, not thousands, so append-per-event is
- * cheap and the journal stays replayable and readable by a human.
+ * Public records are structural events only: plan, move, file, diff, run, cost, need_input,
+ * snapshot, done, error. The private `_lease` heartbeat is filtered from replay/event indexes.
+ * Never per-token streaming. A build emits tens of public events, so the journal stays replayable
+ * and readable by a human.
  *
  * Zero dependencies, sync fs, one file per job. Same discipline as artifacts.mjs and forge.mjs.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, appendFileSync, readFileSync, readdirSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync, readdirSync, unlinkSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
-// Terminal states. A job whose journal ends without one of these was interrupted by a restart.
-export const TERMINAL = new Set(["done", "error", "stopped"]);
+// Terminal states. `checkpoint` is explicitly unfinished but safely sealed: it exists so a runner
+// can preserve partial work without lying that it completed or collapsing every recoverable limit
+// into an error. A journal ending without any terminal was interrupted by a restart.
+export const TERMINAL = new Set(["done", "checkpoint", "error", "stopped"]);
 
 // Event types the spine understands. Anything else is refused so a typo cannot become a silent
 // no-op that the client waits on forever.
@@ -38,6 +41,7 @@ export const EVENT_TYPES = new Set([
   "need_input", // frozen, waiting on a human (zero spend from here)
   "answer",     // a human answered; the freeze lifts
   "done",       // terminal: finished
+  "checkpoint", // terminal: unfinished, work/evidence preserved for a resumable follow-up
   "error",      // terminal: failed
   "stopped",    // terminal: explicitly stopped
 ]);
@@ -45,13 +49,25 @@ export const EVENT_TYPES = new Set([
 const isTerminal = (t) => TERMINAL.has(t);
 
 // Rolling-deploy grace (Kimi #2). Railway boots the NEW container while the OLD one is briefly
-// still driving a build; without this, the new container's loadFromDisk would seal that live job
-// as "interrupted" and show a phantom failure on a build that is actually fine. A job whose LAST
-// event is newer than this window is left alone on boot: the outgoing instance is probably still
-// writing to it. Genuinely dead jobs (last event older than the window) are sealed as before.
+// still driving a build. The old instance writes an internal lease heartbeat to the same append-
+// only journal; a new instance tails it until it sees a terminal event or one full grace window
+// passes without foreign activity. Lease records never enter the public event stream or its
+// replay indexes.
 const DEPLOY_GRACE_MS = 120000;
+const RECONCILE_INTERVAL_MS = 1000;
+const LEASE_EVENT = "_lease";
+const MAX_READ_FAILURES = 3;
 
-export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = () => {}, onEvent = null } = {}) {
+export function createIdeJobs({
+  dir,
+  cap = 200,
+  now = () => Date.now(),
+  log = () => {},
+  onEvent = null,
+  deployGraceMs = DEPLOY_GRACE_MS,
+  reconcileIntervalMs = RECONCILE_INTERVAL_MS,
+  heartbeatIntervalMs = null,
+} = {}) {
   if (!dir) throw new Error("createIdeJobs needs a dir");
   const jobsDir = join(dir, "jobs");
   mkdirSync(jobsDir, { recursive: true });
@@ -59,28 +75,234 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
   // id -> { id, uid, workspaceId, kind, startedAt, endedAt, outcome, events[], listeners[],
   //         done, stopped, interrupted, stop() }
   const INDEX = new Map();
+  // Only jobs recovered from another process are followed. Each lease deadline is bounded from
+  // this process's observation time, so a bad/future timestamp cannot create a permanent zombie.
+  const FOLLOWERS = new Map();
+  const HEARTBEATS = new Map();
+  const instanceId = randomUUID();
+  let recordSeq = 0;
+  let disposed = false;
+
+  const asMs = (value, fallback, minimum = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.max(minimum, n) : fallback;
+  };
+  const graceMs = asMs(deployGraceMs, DEPLOY_GRACE_MS);
+  const tailMs = asMs(reconcileIntervalMs, RECONCILE_INTERVAL_MS, 1);
+  const defaultHeartbeatMs = Math.max(1, Math.floor(graceMs / 3));
+  const heartbeatMs = heartbeatIntervalMs == null
+    ? defaultHeartbeatMs
+    : asMs(heartbeatIntervalMs, defaultHeartbeatMs, 1);
+  const clockNow = () => {
+    const n = Number(now());
+    return Number.isFinite(n) ? n : Date.now();
+  };
 
   const fileFor = (id) => join(jobsDir, id + ".jsonl");
 
   function append(id, ev) {
-    try { appendFileSync(fileFor(id), JSON.stringify(ev) + "\n", "utf8"); }
-    catch (e) { log("[ide] journal write failed for " + id + ": " + (e && e.message)); }
+    try {
+      appendFileSync(fileFor(id), JSON.stringify(ev) + "\n", "utf8");
+      return true;
+    } catch (e) {
+      log("[ide] journal write failed for " + id + ": " + (e && e.message));
+      return false;
+    }
+  }
+
+  function ownedRecord(ev) {
+    return { ...ev, _writer: instanceId, _record: instanceId + ":" + (++recordSeq) };
+  }
+
+  function readJournal(id) {
+    try {
+      const raw = readFileSync(fileFor(id), "utf8");
+      const records = [];
+      for (const line of raw.split("\n")) {
+        if (!line) continue;
+        try {
+          const ev = JSON.parse(line);
+          if (ev && typeof ev === "object") records.push(ev);
+        } catch {}
+      }
+      return { records, bytes: Buffer.byteLength(raw, "utf8") };
+    } catch {
+      return null;
+    }
+  }
+
+  function publicEvents(records) {
+    const events = [];
+    for (const ev of records) {
+      if (ev.type === LEASE_EVENT) continue;
+      // A terminal event seals the stream even if a stale writer managed to append afterward.
+      // That keeps every process on the same durable outcome.
+      if (events.length && isTerminal(events[events.length - 1].type)) continue;
+      events.push(ev);
+    }
+    return events;
+  }
+
+  function stopHeartbeat(id) {
+    const timer = HEARTBEATS.get(id);
+    if (timer) clearTimeout(timer);
+    HEARTBEATS.delete(id);
+  }
+
+  function stopFollowing(id) {
+    const follower = FOLLOWERS.get(id);
+    if (follower && follower.timer) clearTimeout(follower.timer);
+    FOLLOWERS.delete(id);
+  }
+
+  function publish(job, ev, fireHook = false) {
+    if (isTerminal(ev.type)) {
+      job.done = true;
+      job.endedAt = ev.at || clockNow();
+      job.outcome = ev.type;
+      job.stopped = ev.type === "stopped";
+      job.interrupted = ev.type === "error" && ev.code === "interrupted";
+      stopHeartbeat(job.id);
+      stopFollowing(job.id);
+    }
+    for (const listener of [...job.listeners]) {
+      try { listener(ev); } catch {}
+    }
+    if (fireHook && typeof onEvent === "function") {
+      try { onEvent(job, ev); } catch (e) { log("[ide] onEvent threw: " + (e && e.message)); }
+    }
+    if (job.done) {
+      for (const listener of [...job.listeners]) {
+        try { listener(null); } catch {}
+      }
+      job.listeners.length = 0;
+    }
+  }
+
+  function sealInterrupted(job) {
+    if (!job || job.done) return false;
+    const ev = ownedRecord({
+      type: "error",
+      at: clockNow(),
+      code: "interrupted",
+      message: "This build was interrupted when the server restarted. Its work up to here is on disk.",
+    });
+    job.events.push(ev);
+    append(job.id, ev);
+    publish(job, ev);
+    return true;
+  }
+
+  function scheduleHeartbeat(job) {
+    if (disposed || !job || job.done || HEARTBEATS.has(job.id)) return;
+    const timer = setTimeout(() => {
+      HEARTBEATS.delete(job.id);
+      if (disposed || job.done || INDEX.get(job.id) !== job) return;
+      append(job.id, {
+        type: LEASE_EVENT,
+        at: clockNow(),
+        instanceId,
+        _writer: instanceId,
+      });
+      scheduleHeartbeat(job);
+    }, heartbeatMs);
+    if (typeof timer.unref === "function") timer.unref();
+    HEARTBEATS.set(job.id, timer);
+  }
+
+  function scheduleFollower(id) {
+    const follower = FOLLOWERS.get(id);
+    if (disposed || !follower || follower.timer) return;
+    const remaining = Math.max(0, follower.leaseUntil - clockNow());
+    const delay = Math.max(1, Math.min(tailMs, remaining));
+    follower.timer = setTimeout(() => {
+      follower.timer = null;
+      reconcileOne(id);
+    }, delay);
+    if (typeof follower.timer.unref === "function") follower.timer.unref();
+  }
+
+  function startFollowing(job, snapshot, remainingGrace) {
+    stopFollowing(job.id);
+    FOLLOWERS.set(job.id, {
+      rawCursor: snapshot.records.length,
+      bytes: snapshot.bytes,
+      seen: new Set(snapshot.records.map((ev) => ev._record).filter(Boolean)),
+      leaseUntil: clockNow() + Math.max(0, remainingGrace),
+      readFailures: 0,
+      timer: null,
+    });
+    scheduleFollower(job.id);
+  }
+
+  function reconcileOne(id, allowInterrupt = true) {
+    const follower = FOLLOWERS.get(id);
+    const job = INDEX.get(id);
+    if (!follower || !job || job.done) {
+      if (follower) stopFollowing(id);
+      return false;
+    }
+
+    const snapshot = readJournal(id);
+    if (!snapshot) {
+      follower.readFailures++;
+      if (allowInterrupt && clockNow() >= follower.leaseUntil &&
+          follower.readFailures >= MAX_READ_FAILURES) {
+        return sealInterrupted(job);
+      }
+      scheduleFollower(id);
+      return false;
+    }
+
+    follower.readFailures = 0;
+    let foreignActivity = snapshot.bytes > follower.bytes &&
+      snapshot.records.length === follower.rawCursor;
+    if (snapshot.records.length < follower.rawCursor) {
+      // Journals are append-only. If one was unexpectedly replaced, trust the durable terminal
+      // state already in memory and rebase without replaying an ambiguous prefix twice.
+      follower.rawCursor = snapshot.records.length;
+    } else {
+      for (const ev of snapshot.records.slice(follower.rawCursor)) {
+        const foreign = !ev._writer || ev._writer !== instanceId;
+        if (foreign) foreignActivity = true;
+        if (ev.type === LEASE_EVENT) continue;
+        if (ev._record && follower.seen.has(ev._record)) continue;
+        if (ev._record) follower.seen.add(ev._record);
+        if (job.done) continue;
+        job.events.push(ev);
+        publish(job, ev);
+      }
+      follower.rawCursor = snapshot.records.length;
+    }
+    follower.bytes = snapshot.bytes;
+
+    if (foreignActivity && !job.done) follower.leaseUntil = clockNow() + graceMs;
+    if (job.done) {
+      stopFollowing(id);
+      return true;
+    }
+    if (allowInterrupt && clockNow() >= follower.leaseUntil) return sealInterrupted(job);
+    scheduleFollower(id);
+    return foreignActivity;
+  }
+
+  function reconcileAll() {
+    for (const id of [...FOLLOWERS.keys()]) reconcileOne(id);
   }
 
   // ---- restart recovery ---------------------------------------------------------------------
-  // Rebuild the index from journals. A job with no terminal event did not finish: the process that
-  // was driving it is gone, so it is marked interrupted rather than left looking alive. Phase 4
-  // offers resume; the honest state in the meantime is "interrupted", never "running".
+  // Rebuild the index from journals. A recent unfinished job gets a bounded lease while this
+  // process tails the outgoing instance's journal. If that instance finishes, its terminal event
+  // is adopted here; if its heartbeats disappear, this process seals the job after the grace.
   function loadFromDisk() {
     let recovered = 0, interrupted = 0;
     let names = [];
     try { names = readdirSync(jobsDir).filter((n) => n.endsWith(".jsonl")); } catch { return { recovered, interrupted }; }
     for (const name of names) {
       const id = name.slice(0, -6);
-      let lines = [];
-      try { lines = readFileSync(join(jobsDir, name), "utf8").split("\n").filter(Boolean); } catch { continue; }
-      const events = [];
-      for (const line of lines) { try { events.push(JSON.parse(line)); } catch {} }
+      const snapshot = readJournal(id);
+      if (!snapshot) continue;
+      const events = publicEvents(snapshot.records);
       if (!events.length) continue;
       const head = events[0] || {};
       const last = events[events.length - 1] || {};
@@ -97,30 +319,24 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
         listeners: [],
         done: isTerminal(last.type),
         stopped: last.type === "stopped",
-        interrupted: false,
+        interrupted: last.type === "error" && last.code === "interrupted",
         stop: () => {},
       };
-      if (!job.done) {
-        // A very recent last event means the OUTGOING container is likely still driving this
-        // build through a rolling deploy; sealing it now would be the phantom failure (Kimi #2).
-        // Leave it as-is; if it is truly dead, the NEXT boot (last event now old) seals it.
-        if (now() - (last.at || 0) < DEPLOY_GRACE_MS) {
-          INDEX.set(id, job);
-          recovered++;
-          continue;
-        }
-        // Seal it honestly: nothing is driving this job any more.
-        job.interrupted = true;
-        job.done = true;
-        job.outcome = "error";
-        job.endedAt = now();
-        const ev = { type: "error", at: job.endedAt, code: "interrupted",
-          message: "This build was interrupted when the server restarted. Its work up to here is on disk." };
-        job.events.push(ev);
-        append(id, ev);
-        interrupted++;
-      }
+      stopFollowing(id);
       INDEX.set(id, job);
+      if (!job.done) {
+        const activity = snapshot.records[snapshot.records.length - 1] || last;
+        const stamp = Number(activity.at);
+        const age = Number.isFinite(stamp) && stamp > 0
+          ? Math.max(0, clockNow() - stamp)
+          : graceMs;
+        const remainingGrace = Math.max(0, graceMs - Math.min(graceMs, age));
+        if (remainingGrace > 0) {
+          startFollowing(job, snapshot, remainingGrace);
+        } else if (sealInterrupted(job)) {
+          interrupted++;
+        }
+      }
       recovered++;
     }
     gc();
@@ -134,6 +350,8 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
     const finished = [...INDEX.values()].filter((j) => j.done).sort((a, b) => (a.endedAt || a.startedAt) - (b.endedAt || b.startedAt));
     while (INDEX.size > cap && finished.length) {
       const victim = finished.shift();
+      stopHeartbeat(victim.id);
+      stopFollowing(victim.id);
       INDEX.delete(victim.id);
       // ARCHIVE, do not delete (Kimi): a build journal is the postmortem when something went
       // wrong. Move it under jobs/archive/ instead of unlinking; the index drops it either way.
@@ -146,17 +364,19 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
   }
 
   function create({ uid, workspaceId = "", kind = "build", isOwner = false } = {}) {
+    if (disposed) throw new Error("ide jobs spine is disposed");
     if (!uid) throw new Error("a job needs a uid");
     const id = "ide_" + randomUUID().slice(0, 12);
-    const at = now();
+    const at = clockNow();
     // isOwner is recorded on the header deliberately: the escalation hook fires long after the
     // request that started the job is gone, and after a restart there is nothing else left to
     // tell it which account's devices to notify.
-    const head = { type: "job", at, id, uid, workspaceId, kind, isOwner: !!isOwner };
+    const head = ownedRecord({ type: "job", at, id, uid, workspaceId, kind, isOwner: !!isOwner });
     const job = { id, uid, workspaceId, kind, isOwner: !!isOwner, startedAt: at, endedAt: 0, outcome: "",
                   events: [head], listeners: [], done: false, stopped: false, interrupted: false, stop: () => {} };
     INDEX.set(id, job);
     append(id, head);
+    scheduleHeartbeat(job);
     gc();
     return job;
   }
@@ -164,27 +384,19 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
   // Append an event: memory, disk, then live listeners. Terminal events seal the job so nothing
   // can be appended afterward (a late tool callback cannot resurrect a finished build).
   function emit(id, ev) {
+    reconcileOne(id, false);
     const job = INDEX.get(id);
     if (!job || job.done) return null;
     const type = String(ev && ev.type || "");
     if (!EVENT_TYPES.has(type)) throw new Error("unknown ide job event type: " + type);
-    const out = { ...ev, type, at: now() };
+    const out = ownedRecord({ ...ev, type, at: clockNow() });
     job.events.push(out);
     append(id, out);
-    if (isTerminal(type)) {
-      job.done = true;
-      job.endedAt = out.at;
-      job.outcome = type;
-      if (type === "stopped") job.stopped = true;
-    }
-    for (const l of [...job.listeners]) { try { l(out); } catch {} }
-    // Escalation hook. Fired AFTER the event is on disk and delivered, and wrapped, so a failing
+    const follower = FOLLOWERS.get(id);
+    if (follower && out._record) follower.seen.add(out._record);
+    // Escalation hook fires after the event is on disk and delivered, and is wrapped so a failing
     // notifier can never corrupt or stall the build it was only meant to announce.
-    if (typeof onEvent === "function") { try { onEvent(job, out); } catch (e) { log("[ide] onEvent threw: " + (e && e.message)); } }
-    if (job.done) {
-      for (const l of [...job.listeners]) { try { l(null); } catch {} }   // null = end of stream
-      job.listeners.length = 0;
-    }
+    publish(job, out, true);
     return out;
   }
 
@@ -194,7 +406,7 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
   }
 
   function stop(id, reason = "stopped by the user") {
-    const job = INDEX.get(id);
+    const job = get(id);
     if (!job) return { ok: false, error: "unknown or expired job" };
     if (job.done) return { ok: true, alreadyDone: true, outcome: job.outcome };
     job.stopped = true;
@@ -204,12 +416,16 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
   }
 
   // ---- reads --------------------------------------------------------------------------------
-  const get = (id) => INDEX.get(id) || null;
+  function get(id) {
+    reconcileOne(id);
+    return INDEX.get(id) || null;
+  }
 
   // The multi-job registry. Chat tracks exactly ONE live job and hides it the moment the user
   // switches chats (app.js liveJob.chatId !== curId); that limitation is the thing Phase 4 exists
   // to remove, so this is per-user and view-independent from the start.
   function listFor(uid, { limit = 50 } = {}) {
+    reconcileAll();
     return [...INDEX.values()]
       .filter((j) => j.uid === uid)
       .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
@@ -254,8 +470,10 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
   }
 
   // Replay from `from`, then live-tail. Returns an unsubscribe fn. The replay happens in the same
-  // tick as the subscribe so no event can slip through the gap between the two.
+  // tick as the subscribe so no event can slip through the gap between the two. Recovered jobs
+  // continue tailing their journal afterward, not merely this process's in-memory emits.
   function attach(id, from, onEvent) {
+    reconcileOne(id);
     const job = INDEX.get(id);
     if (!job) { onEvent({ type: "gone" }); onEvent(null); return () => {}; }
     const start = Math.max(0, Math.floor(Number(from) || 0));
@@ -278,7 +496,7 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
    * Resolves the answer event, or null when the job seals first (stopped, errored, restarted).
    */
   function waitForAnswer(id, from) {
-    const job = INDEX.get(id);
+    const job = get(id);
     if (!job || job.done) return Promise.resolve(null);
     const start = Math.max(0, Math.floor(Number(from) || 0));
     return new Promise((resolve) => {
@@ -291,6 +509,12 @@ export function createIdeJobs({ dir, cap = 200, now = () => Date.now(), log = ()
     });
   }
 
-  return { create, emit, finish, stop, get, listFor, activeFor, attach, loadFromDisk, summarize, waitForAnswer,
+  function dispose() {
+    disposed = true;
+    for (const id of [...HEARTBEATS.keys()]) stopHeartbeat(id);
+    for (const id of [...FOLLOWERS.keys()]) stopFollowing(id);
+  }
+
+  return { create, emit, finish, stop, get, listFor, activeFor, attach, loadFromDisk, summarize, waitForAnswer, dispose,
            get size() { return INDEX.size; } };
 }

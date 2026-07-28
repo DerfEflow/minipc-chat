@@ -10,7 +10,7 @@ const app = readFileSync(new URL("./public/app.js", import.meta.url), "utf8");
 const sync = readFileSync(new URL("./chatsync.mjs", import.meta.url), "utf8");
 
 assert.match(app, /model:\s*c\.model/, "cross-device chat payload must carry the selected model");
-assert.match(app, /local\.model\s*=\s*inc\.model/, "incoming chat state must restore its model");
+assert.match(app, /take\("modelUpdatedAt",\s*\["model"\]\)/, "incoming chat state must restore its model by model freshness");
 assert.match(app, /c\.model\s*=\s*modelSel\.value/, "a user model change must update the open chat");
 assert.match(app, /const legacyModel[\s\S]*c\.model\s*=\s*legacyModel/, "legacy sessions must receive an explicit model before switching");
 assert.match(app, /b\.activityAt\s*\|\|\s*b\.updatedAt/, "preference changes must not reorder the sidebar");
@@ -30,9 +30,37 @@ assert.match(app, /const budgetByChat\s*=\s*Object\.create\(null\)/, "budget sta
 assert.match(app, /budgetByChat\[st\.c\.id\]/, "background SSE budget events must update their source chat");
 assert.match(app, /requestedChat === curId/, "late budget responses must not repaint a different chat");
 assert.match(app, /function captureChatDraft\(\)/, "typed text must be captured on its source chat");
+assert.match(app, /function deleteChat\(id\)[\s\S]{0,700}fetch\("\/chat\/stop"/,
+  "deleting a chat with a durable turn must stop the server job");
+assert.match(app, /function deleteChat\(id\)[\s\S]{0,900}delete liveJobs\[id\][\s\S]{0,120}persistLiveJobs\(\)/,
+  "deleting a chat must clear its persisted live-job pointer");
 assert.match(app, /function restoreChatDraft\(\)/, "the destination chat must restore only its own draft");
 assert.match(app, /draft:\s*c\.draft/, "draft text must travel with cross-device chat state");
 assert.match(app, /c\.draft\s*=\s*""/, "sending must clear only that chat's draft");
+assert.match(app, /transcriptUpdatedAt:\s*c\.transcriptUpdatedAt/, "sync payloads need a transcript-specific freshness clock");
+assert.match(app, /transcriptClockTrusted:\s*c\.transcriptClockTrusted === true/,
+  "a migrated whole-chat timestamp must not masquerade as transcript provenance");
+assert.match(app, /clockField === "transcriptUpdatedAt"[\s\S]{0,80}transcriptClockTrusted = true/,
+  "only a real transcript mutation should promote the transcript clock");
+assert.match(app, /touchChatComponent\(c,\s*"modelUpdatedAt"\)/, "model selection must advance only the model clock");
+assert.match(app, /touchChatComponent\(c,\s*"draftUpdatedAt"/, "typing must advance only the draft clock");
+assert.match(app, /touchChatComponent\(c,\s*"transcriptUpdatedAt"/, "message mutations must advance the transcript clock");
+assert.match(app, /function captureChatAttachments\(\)/, "staged attachments must be captured on their source chat");
+assert.match(app, /function restoreChatAttachments\(\)/, "the destination chat must restore only its own staged attachments");
+assert.match(app, /function switchChat\(id\)[\s\S]*?persistChatComposer\(\)[\s\S]*?curId\s*=\s*id/,
+  "switching chats must persist the source composer before changing the active id");
+assert.match(app, /function newChat\(\)[\s\S]*?persistChatComposer\(\)[\s\S]*?pendingAttachments:\s*\[\]/,
+  "starting a chat must persist the old composer and give the new chat an empty attachment list");
+assert.match(app, /function renderAll\(\)[\s\S]*?restoreChatAttachments\(\)/,
+  "every full chat render must bind the attachment strip to the destination chat");
+assert.match(app, /async function addFiles\(fileList\)[\s\S]*?const targetChatId\s*=\s*curId[\s\S]*?setChatPendingAttachments/,
+  "async file reads must retain the chat id where the add began");
+assert.match(app, /function removeAttachment\(i\)[\s\S]*?setChatPendingAttachments/,
+  "attachment removal must update and persist the open chat");
+assert.match(app, /function send\(\)[\s\S]*?c\.pendingAttachments\s*=\s*\[\]/,
+  "sending must clear the source chat's staged attachments");
+assert.match(app, /function editUser\(i\)[\s\S]*?c\.pendingAttachments\s*=\s*pendingAtt/,
+  "editing a user turn must persist its restored attachments as composer state");
 assert.match(sync, /model:\s*typeof raw\.model/, "the sync store must preserve model identity");
 assert.match(sync, /draft:\s*typeof raw\.draft/, "the sync store must preserve unfinished typing");
 assert.match(sync, /activityAt:/, "cross-device state must preserve conversation recency separately from preference revisions");
@@ -70,4 +98,123 @@ const cappedPlan = transcriptModelPlan({ model: "model-d", messages: [
 assert.deepEqual(cappedPlan.entries.map((e) => e.id), ["model-a", "model-b", "model-c"], "the visual log must ignore model four");
 assert.equal(cappedPlan.slots.at(-1), 2, "messages after the third logged model stay in the final visual lane");
 
-console.log("session_ui_test: per-chat model, budget, and draft state are pinned");
+// Reproduce the original two-device loss in the browser merge itself: the laptop has twenty
+// messages, while a stale phone changes its draft/model/Forge settings with a newer wall clock but
+// still carries only two old messages. Preference clocks win; the older transcript clock cannot.
+const mergeStart = app.indexOf("function syncClock(chat, field)");
+const mergeEnd = app.indexOf("// Fold the server", mergeStart);
+assert.ok(mergeStart >= 0 && mergeEnd > mergeStart, "field-specific sync merge must remain extractable");
+const mergeIncomingChat = Function(`${app.slice(mergeStart, mergeEnd)}; return mergeIncomingChat;`)();
+const laptopChat = {
+  id: "shared", title: "Laptop work",
+  messages: Array.from({ length: 20 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: "turn " + i })),
+  model: "openai/gpt-5.6-sol", draft: "", forgeTier: "ember", forgeMode: false,
+  updatedAt: 2000, activityAt: 2000,
+  transcriptUpdatedAt: 2000, titleUpdatedAt: 2000,
+  modelUpdatedAt: 1000, draftUpdatedAt: 1000, forgeUpdatedAt: 1000,
+};
+const stalePhone = {
+  id: "shared", title: "Laptop work", messages: laptopChat.messages.slice(0, 2),
+  model: "anthropic/claude-opus-4-8", draft: "phone draft", forgeTier: "furnace", forgeMode: true,
+  updatedAt: 3000, activityAt: 3000,
+  transcriptUpdatedAt: 1000, titleUpdatedAt: 1000,
+  modelUpdatedAt: 3000, draftUpdatedAt: 3000, forgeUpdatedAt: 3000,
+};
+assert.equal(mergeIncomingChat(laptopChat, stalePhone), true, "newer preference fields should merge");
+assert.equal(laptopChat.messages.length, 20, "a stale phone preference write shrank the browser transcript");
+assert.equal(laptopChat.messages.at(-1).content, "turn 19", "the live end of the laptop transcript was lost");
+assert.equal(laptopChat.model, "anthropic/claude-opus-4-8", "newer phone model did not merge");
+assert.equal(laptopChat.draft, "phone draft", "newer phone draft did not merge");
+assert.equal(laptopChat.forgeTier, "furnace", "newer phone Forge tier did not merge");
+
+// Execute the shipped composer binding helpers with two chats. This is the exact switch lifecycle:
+// persist A, bind B, mutate B, then return to A without either attachment list crossing the boundary.
+const composerStart = app.indexOf("let draftSaveTimer = null;");
+const composerEnd = app.indexOf("function restoreChatModel()", composerStart);
+assert.ok(composerStart >= 0 && composerEnd > composerStart, "composer state helpers must remain extractable");
+const touchStart = app.indexOf("function touchChatComponent(c, clockField");
+const touchEnd = app.indexOf("// The Forge controls", touchStart);
+assert.ok(touchStart >= 0 && touchEnd > touchStart, "component clock helper must remain extractable");
+const makeComposer = Function("env", `
+  let chats = env.chats, curId = env.curId, pendingAtt = env.pendingAtt;
+  const input = env.input;
+  const cur = () => chats.find((c) => c.id === curId);
+  const save = () => { env.saves++; };
+  const autosize = () => {};
+  const renderAttachStrip = () => { env.renders++; };
+  const updateEstimate = () => {};
+  ${app.slice(touchStart, touchEnd)}
+  ${app.slice(composerStart, composerEnd)}
+  return {
+    persistChatComposer, restoreChatDraft, restoreChatAttachments, setChatPendingAttachments,
+    setChat(id) { curId = id; },
+    pending() { return pendingAtt; },
+  };
+`);
+const aFile = { kind: "text", name: "a.txt", text: "alpha" };
+const bFile = { kind: "text", name: "b.txt", text: "bravo" };
+const addedA = { kind: "text", name: "later.txt", text: "still A" };
+const composerEnv = {
+  chats: [
+    { id: "a", draft: "saved A", pendingAttachments: [aFile], updatedAt: 1, activityAt: 1 },
+    { id: "b", draft: "saved B", pendingAttachments: [bFile], updatedAt: 2, activityAt: 2 },
+  ],
+  curId: "a", pendingAtt: [], input: { value: "typed A", dataset: { chatId: "a" } },
+  saves: 0, renders: 0,
+};
+const composer = makeComposer(composerEnv);
+composer.restoreChatAttachments();
+composer.pending().push(addedA);
+composer.persistChatComposer();
+assert.equal(composerEnv.chats[0].draft, "typed A", "source draft was not captured");
+assert.deepEqual(composerEnv.chats[0].pendingAttachments, [aFile, addedA], "source attachments were not captured");
+composer.setChat("b");
+composer.restoreChatDraft();
+composer.restoreChatAttachments();
+assert.equal(composerEnv.input.value, "saved B", "target draft was not restored");
+assert.deepEqual(composer.pending(), [bFile], "target attachment strip borrowed the source chat's files");
+const lateA = [...composerEnv.chats[0].pendingAttachments,
+  { kind: "text", name: "late.txt", text: "finished after switch" }];
+composer.setChatPendingAttachments(composerEnv.chats[0], lateA);
+assert.deepEqual(composerEnv.chats[0].pendingAttachments, lateA,
+  "a late async add did not land on its source chat");
+assert.deepEqual(composer.pending(), [bFile],
+  "a late async add from the source repainted the target chat");
+composer.setChatPendingAttachments(composerEnv.chats[1], []);
+assert.deepEqual(composerEnv.chats[1].pendingAttachments, [], "target removal did not update chat state");
+assert.ok(composerEnv.saves >= 2, "composer mutations were not persisted");
+composer.setChat("a");
+composer.restoreChatDraft();
+composer.restoreChatAttachments();
+assert.deepEqual(composer.pending(), lateA, "returning to the source chat lost its staged files");
+
+// Run the real localStorage serializer: recent chats keep bytes, old chats get honest placeholders,
+// and the quota retry strips every chat. Sent-attachment degradation remains byte-for-byte aligned.
+const storageStart = app.indexOf("const ATT_KEEP_CHATS = 12;");
+const storageEnd = app.indexOf("const save = () =>", storageStart);
+assert.ok(storageStart >= 0 && storageEnd > storageStart, "attachment serializer must remain extractable");
+const storageChats = Array.from({ length: 13 }, (_, i) => ({
+  id: "storage-" + i, title: "Storage " + i, messages: [],
+  updatedAt: 100 - i, activityAt: 100 - i,
+  pendingAttachments: [
+    { kind: "image", name: "photo-" + i + ".png", dataUrl: "data:image/png;base64,AAAA" },
+    { kind: "text", name: "notes-" + i + ".txt", text: "full text " + i },
+  ],
+}));
+const serializeChats = Function("chats", `${app.slice(storageStart, storageEnd)}; return serializeChats;`)(storageChats);
+const normalStorage = JSON.parse(serializeChats(false));
+assert.equal(normalStorage[0].pendingAttachments[0].dataUrl, "data:image/png;base64,AAAA",
+  "a recent chat lost staged image bytes");
+assert.equal(normalStorage[0].pendingAttachments[1].text, "full text 0",
+  "a recent chat lost staged text");
+assert.deepEqual(normalStorage[12].pendingAttachments[0],
+  { kind: "image_ref", name: "photo-12.png" }, "an old staged image was not degraded");
+assert.deepEqual(normalStorage[12].pendingAttachments[1],
+  { kind: "text", name: "notes-12.txt", text: "" }, "an old staged text file was not degraded");
+const fallbackStorage = JSON.parse(serializeChats(true));
+assert.equal(fallbackStorage[0].pendingAttachments[0].kind, "image_ref",
+  "the quota fallback retained staged image bytes");
+assert.equal(fallbackStorage[0].pendingAttachments[1].text, "",
+  "the quota fallback retained staged text bytes");
+
+console.log("session_ui_test: per-chat model, budget, draft, and attachment state are pinned");

@@ -21,6 +21,14 @@ function t(name, fn) {
 }
 const dirs = [];
 const freshDir = () => { const d = mkdtempSync(join(tmpdir(), "ide-jobs-")); dirs.push(d); return d; };
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const within = (promise, ms, message) => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error(message)), ms);
+  promise.then(
+    (value) => { clearTimeout(timer); resolve(value); },
+    (error) => { clearTimeout(timer); reject(error); },
+  );
+});
 
 await t("a created job writes a header line to its own journal file on disk", () => {
   const dir = freshDir();
@@ -54,7 +62,19 @@ await t("an unknown event type is refused rather than silently dropped", () => {
   const job = jobs.create({ uid: "u1" });
   assert.throws(() => jobs.emit(job.id, { type: "sneaky" }), /unknown ide job event type/);
   assert.ok(EVENT_TYPES.has("need_input"));
-  assert.ok(TERMINAL.has("done") && TERMINAL.has("error") && TERMINAL.has("stopped"));
+  assert.ok(TERMINAL.has("done") && TERMINAL.has("checkpoint") && TERMINAL.has("error") && TERMINAL.has("stopped"));
+});
+
+await t("a checkpoint seals the run as explicitly unfinished, never done", () => {
+  const dir = freshDir();
+  const jobs = createIdeJobs({ dir });
+  const job = jobs.create({ uid: "u1" });
+  jobs.finish(job.id, { type: "checkpoint", complete: false, remaining: ["one failed check"] });
+  const back = jobs.get(job.id);
+  assert.equal(back.done, true);
+  assert.equal(back.outcome, "checkpoint");
+  assert.notEqual(back.outcome, "done");
+  assert.equal(jobs.listFor("u1")[0].outcome, "checkpoint");
 });
 
 await t("a terminal event SEALS the job: later emits are refused", () => {
@@ -109,7 +129,7 @@ await t("RESTART: an unfinished OLD job is sealed as INTERRUPTED and says so hon
   assert.equal(rec3.interrupted, 0, "already-sealed jobs must not be sealed twice");
 });
 
-await t("ROLLING DEPLOY: a job with a RECENT last event is NOT sealed (Kimi #2 phantom kill)", () => {
+await t("ROLLING DEPLOY: a recent job gets grace, then seals in the SAME process when stale", () => {
   const dir = freshDir();
   const clock = { t: 1000000 };
   const first = createIdeJobs({ dir, now: () => clock.t });
@@ -124,10 +144,94 @@ await t("ROLLING DEPLOY: a job with a RECENT last event is NOT sealed (Kimi #2 p
   const back = second.get(job.id);
   assert.equal(back.done, false, "left running, because the outgoing instance may still finish it");
 
-  // Much later, with no further activity, it IS genuinely dead and gets sealed.
+  // The old process disappears. Much later, the already-running replacement reconciles and seals
+  // it itself; no third boot is needed to unstick the status rail.
+  first.dispose();
   clock.t += 5 * 60000;
-  const third = createIdeJobs({ dir, now: () => clock.t });
-  assert.equal(third.loadFromDisk().interrupted, 1, "a truly stale job is sealed on a later boot");
+  const stale = second.get(job.id);
+  assert.equal(stale.done, true, "a truly stale job is sealed without another restart");
+  assert.equal(stale.interrupted, true);
+  assert.equal(stale.events[stale.events.length - 1].code, "interrupted");
+  second.dispose();
+});
+
+await t("ROLLING DEPLOY: the new process tails an old process that finishes after load", async () => {
+  const dir = freshDir();
+  const timings = {
+    deployGraceMs: 90,
+    reconcileIntervalMs: 5,
+    heartbeatIntervalMs: 10,
+  };
+  const oldProcess = createIdeJobs({ dir, ...timings });
+  const job = oldProcess.create({ uid: "u1" });
+  oldProcess.emit(job.id, { type: "move", id: "m1", state: "running" });
+
+  const newProcess = createIdeJobs({ dir, ...timings });
+  assert.equal(newProcess.loadFromDisk().interrupted, 0);
+  const from = newProcess.get(job.id).events.length;
+  const seen = [];
+  let endStream;
+  const ended = new Promise((resolve) => { endStream = resolve; });
+  newProcess.attach(job.id, from, (ev) => {
+    if (ev === null) endStream();
+    else seen.push(ev);
+  });
+
+  // Stay overlapped for longer than the original event's grace. The old instance's private
+  // heartbeat must keep the recovered job alive without polluting its public replay indexes.
+  await sleep(140);
+  assert.equal(newProcess.get(job.id).done, false, "a live old process must retain its lease");
+  const rawBeforeFinish = readFileSync(join(dir, "jobs", job.id + ".jsonl"), "utf8")
+    .trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(rawBeforeFinish.some((ev) => ev.type === "_lease"), "the owner should heartbeat in the journal");
+  assert.ok(!newProcess.get(job.id).events.some((ev) => ev.type === "_lease"),
+    "lease records are internal and must not shift attach cursors");
+
+  oldProcess.finish(job.id, { type: "done", message: "old instance completed" });
+  await within(ended, 500, "the replacement never observed the old process's terminal event");
+  assert.deepEqual(seen.map((ev) => ev.type), ["done"]);
+  const back = newProcess.get(job.id);
+  assert.equal(back.done, true);
+  assert.equal(back.outcome, "done");
+  assert.equal(back.interrupted, false);
+  oldProcess.dispose();
+  newProcess.dispose();
+});
+
+await t("ROLLING DEPLOY: a disappeared old process auto-seals after grace and closes attach", async () => {
+  const dir = freshDir();
+  const timings = {
+    deployGraceMs: 60,
+    reconcileIntervalMs: 5,
+    heartbeatIntervalMs: 10,
+  };
+  const oldProcess = createIdeJobs({ dir, ...timings });
+  const job = oldProcess.create({ uid: "u1" });
+  oldProcess.emit(job.id, { type: "move", id: "m1", state: "running" });
+
+  const newProcess = createIdeJobs({ dir, ...timings });
+  assert.equal(newProcess.loadFromDisk().interrupted, 0);
+  const from = newProcess.get(job.id).events.length;
+  const seen = [];
+  let endStream;
+  const ended = new Promise((resolve) => { endStream = resolve; });
+  newProcess.attach(job.id, from, (ev) => {
+    if (ev === null) endStream();
+    else seen.push(ev);
+  });
+
+  oldProcess.dispose(); // exactly what a vanished process does: heartbeats stop, no terminal write
+  await within(ended, 500, "the replacement left the disappeared process's job alive forever");
+  assert.deepEqual(seen.map((ev) => ev.type), ["error"]);
+  assert.equal(seen[0].code, "interrupted");
+  const back = newProcess.get(job.id);
+  assert.equal(back.done, true, "the same replacement process must seal the zombie");
+  assert.equal(back.interrupted, true);
+  assert.equal(back.outcome, "error");
+  const disk = readFileSync(join(dir, "jobs", job.id + ".jsonl"), "utf8")
+    .trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(disk.filter((ev) => ev.code === "interrupted").length, 1, "the durable seal is written once");
+  newProcess.dispose();
 });
 
 await t("attach replays from N and then live-tails, with no gap", async () => {

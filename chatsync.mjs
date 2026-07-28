@@ -7,20 +7,18 @@
  * than synced). This store is the faithful one.
  *
  * SHAPE. One JSON file per user (atomic tmp+rename, same discipline as chatlog.mjs):
- *   { rev, chats: { <id>: {id, title, updatedAt, rev, model, lastMode, messages[], prev?} },
+ *   { rev, chats: { <id>: {id, title, updatedAt, rev, model, lastMode, forgeTier, forgeMode, messages[], prev?} },
  *     tombstones: { <id>: {deletedAt, rev} } }
  * `rev` is a per-user monotonic counter. Every accepted write stamps the chat with the next rev,
  * which is what makes an incremental pull possible: a device asks "everything after rev N".
  *
- * MERGE RULE: last-write-wins on the client's `updatedAt`, per chat, never wholesale replacement.
- * Merging by id means a chat that exists on only one device is never destroyed by another device's
- * push. Ties go to the incoming copy so a re-push of the same chat updates cleanly.
+ * MERGE RULE: transcript, title, model, draft, and Forge state each have their own freshness clock.
+ * A newer preference can therefore merge without granting a stale device permission to replace
+ * newer messages. `updatedAt` remains the cheap dirty/sync marker, not an authority over every field.
  *
- * THE ONE INSURANCE POLICY: when an incoming version has FEWER messages than the stored one, the
- * stored version is kept in `prev` before being overwritten. That is the only shape a real data
- * loss can take here (a device that was offline and behind pushing a short copy over a long one),
- * and one level of history on the volume makes it recoverable instead of gone. No cost in the
- * normal case, since a growing conversation never triggers it.
+ * INSURANCE: when an intentional transcript write has FEWER messages than the stored one, the
+ * stored version is kept in `prev` before being overwritten. Preference-only writes never replace
+ * the transcript and therefore never create a misleading recovery copy.
  *
  * IMAGES DO NOT SYNC. Pixels are stripped to {kind:"image_ref"} before storage, matching Fred's
  * standing ruling that the service does not pay to house user images (and matching what the client
@@ -60,6 +58,17 @@ function normalizeChat(raw) {
   if (!id) return null;
   const updatedAt = Number(raw.updatedAt) || 0;
   if (!updatedAt) return null;
+  // Presence alone is not provenance: the first upgraded browser may have derived this clock from
+  // legacy whole-chat updatedAt, which could represent only a draft/model edit. Trust it only after
+  // that browser explicitly reports a real transcript mutation.
+  const explicitTranscriptClock = raw.transcriptClockTrusted === true
+    && Number.isFinite(Number(raw.transcriptUpdatedAt))
+    && Number(raw.transcriptUpdatedAt) > 0;
+  const componentClock = (name, present = true) => {
+    if (!present) return undefined;
+    const value = Number(raw[name]);
+    return Number.isFinite(value) && value > 0 ? value : updatedAt;
+  };
   let [messages] = stripPixels(raw.messages);
   messages = messages.filter((m) => m && typeof m.role === "string");
   let truncated = false;
@@ -72,8 +81,23 @@ function normalizeChat(raw) {
     model: typeof raw.model === "string" ? raw.model.slice(0, 160) : undefined,
     draft: typeof raw.draft === "string" ? raw.draft.slice(0, 50_000) : undefined,
     lastMode: typeof raw.lastMode === "string" ? raw.lastMode.slice(0, 40) : undefined,
+    forgeTier: ["ember", "flame", "furnace"].includes(raw.forgeTier) ? raw.forgeTier : undefined,
+    forgeMode: typeof raw.forgeMode === "boolean" ? raw.forgeMode : undefined,
+    transcriptUpdatedAt: componentClock("transcriptUpdatedAt"),
+    transcriptClockTrusted: explicitTranscriptClock,
+    titleUpdatedAt: componentClock("titleUpdatedAt", typeof raw.title === "string"),
+    modelUpdatedAt: componentClock("modelUpdatedAt", typeof raw.model === "string"),
+    draftUpdatedAt: componentClock("draftUpdatedAt", typeof raw.draft === "string"),
+    forgeUpdatedAt: componentClock("forgeUpdatedAt",
+      ["ember", "flame", "furnace"].includes(raw.forgeTier) || typeof raw.forgeMode === "boolean"),
     messages,
   };
+  // Rolling-deployment guard. This flag is deliberately non-enumerable: it controls this merge
+  // only and must never become part of the stored/synced chat shape.
+  Object.defineProperty(chat, "_explicitTranscriptClock", {
+    value: explicitTranscriptClock,
+    enumerable: false,
+  });
   // Byte cap: drop from the HEAD (oldest turns) so the live end of the conversation survives.
   while (messages.length > 2 && Buffer.byteLength(JSON.stringify(chat)) > MAX_BYTES_PER_CHAT) {
     messages.shift();
@@ -82,6 +106,100 @@ function normalizeChat(raw) {
   }
   if (truncated) chat.truncated = true;
   return chat;
+}
+
+const componentClock = (chat, field) => {
+  const value = Number(chat && chat[field]);
+  if (Number.isFinite(value) && value > 0) return value;
+  return Math.max(0, Number(chat && chat.updatedAt) || 0);
+};
+
+function normalizeStoredClocks(chat) {
+  if (!chat) return chat;
+  const base = Math.max(0, Number(chat.updatedAt) || 0);
+  if (!(Number(chat.transcriptUpdatedAt) > 0)) chat.transcriptUpdatedAt = base;
+  if (!(Number(chat.titleUpdatedAt) > 0)) chat.titleUpdatedAt = base;
+  if (chat.model !== undefined && !(Number(chat.modelUpdatedAt) > 0)) chat.modelUpdatedAt = base;
+  if (chat.draft !== undefined && !(Number(chat.draftUpdatedAt) > 0)) chat.draftUpdatedAt = base;
+  if ((chat.forgeTier !== undefined || chat.forgeMode !== undefined) && !(Number(chat.forgeUpdatedAt) > 0)) {
+    chat.forgeUpdatedAt = base;
+  }
+  return chat;
+}
+
+/*
+ * Merge one device's chat by component rather than replacing the whole object on `updatedAt`.
+ * A draft or model selection is allowed to be newer than the transcript without carrying a newer
+ * transcript. That distinction is what prevents a stale phone with two messages from erasing the
+ * twenty messages a laptop already wrote.
+ */
+function mergeChat(stored, incoming) {
+  normalizeStoredClocks(stored);
+  const merged = { ...stored };
+  let changed = false;
+  let transcriptChanged = false;
+
+  const incomingTranscriptAt = componentClock(incoming, "transcriptUpdatedAt");
+  const storedTranscriptAt = componentClock(stored, "transcriptUpdatedAt");
+  const sameTranscript = JSON.stringify(incoming.messages || []) === JSON.stringify(stored.messages || []);
+  // An old browser has no component clock, so its updatedAt may represent typing a draft. During a
+  // rolling deploy, accept only transcript growth from that client; an equal/shorter transcript is
+  // preserved until the upgraded client can identify a deliberate edit with an explicit clock.
+  const legacyTranscriptSafe = incoming._explicitTranscriptClock
+    || (incoming.messages || []).length > (stored.messages || []).length
+    || sameTranscript;
+  if (incomingTranscriptAt > storedTranscriptAt && legacyTranscriptSafe) {
+    if (!sameTranscript) {
+      merged.messages = incoming.messages || [];
+      transcriptChanged = true;
+    }
+    merged.transcriptUpdatedAt = incomingTranscriptAt;
+    merged.transcriptClockTrusted = incoming._explicitTranscriptClock === true;
+    if (incoming.lastMode !== undefined) merged.lastMode = incoming.lastMode;
+    if (incoming.truncated) merged.truncated = true;
+    else delete merged.truncated;
+    changed = true;
+  }
+
+  const take = (clockField, valueFields) => {
+    const nextClock = componentClock(incoming, clockField);
+    const priorClock = componentClock(stored, clockField);
+    if (!(nextClock > priorClock)) return;
+    let took = false;
+    for (const field of valueFields) {
+      if (incoming[field] === undefined) continue;
+      merged[field] = incoming[field];
+      took = true;
+    }
+    if (took) {
+      merged[clockField] = nextClock;
+      changed = true;
+    }
+  };
+  take("titleUpdatedAt", ["title"]);
+  take("modelUpdatedAt", ["model"]);
+  take("draftUpdatedAt", ["draft"]);
+  take("forgeUpdatedAt", ["forgeTier", "forgeMode"]);
+
+  const nextActivity = Math.max(Number(stored.activityAt) || 0, Number(incoming.activityAt) || 0);
+  if (nextActivity !== (Number(stored.activityAt) || 0)) {
+    merged.activityAt = nextActivity;
+    changed = true;
+  }
+  const nextUpdated = Math.max(
+    Number(stored.updatedAt) || 0,
+    Number(incoming.updatedAt) || 0,
+    componentClock(merged, "transcriptUpdatedAt"),
+    componentClock(merged, "titleUpdatedAt"),
+    componentClock(merged, "modelUpdatedAt"),
+    componentClock(merged, "draftUpdatedAt"),
+    componentClock(merged, "forgeUpdatedAt"),
+  );
+  if (nextUpdated !== (Number(stored.updatedAt) || 0)) {
+    merged.updatedAt = nextUpdated;
+    changed = true;
+  }
+  return { chat: merged, changed, transcriptChanged };
 }
 
 export function createChatSync({ dir }) {
@@ -132,7 +250,11 @@ export function createChatSync({ dir }) {
     const chats = Object.values(state.chats)
       .filter((c) => (c.rev || 0) > since)
       .sort((a, b) => (a.rev || 0) - (b.rev || 0))
-      .map(({ prev, ...c }) => c);                 // `prev` is recovery ballast, never shipped
+      .map((stored) => {
+        normalizeStoredClocks(stored);
+        const { prev, ...c } = stored;
+        return c;
+      });                                         // `prev` is recovery ballast, never shipped
     const deleted = Object.entries(state.tombstones)
       .filter(([, t]) => (t.rev || 0) > since)
       .map(([id, t]) => ({ id, deletedAt: t.deletedAt }));
@@ -156,23 +278,31 @@ export function createChatSync({ dir }) {
       if (tomb) delete state.tombstones[c.id];       // deliberate resurrection: newer than the delete
 
       const stored = state.chats[c.id];
-      if (stored && (stored.updatedAt || 0) > c.updatedAt) { rejected.push({ id: c.id, reason: "stale" }); continue; }
-      // Rolling deployment compatibility: an older browser does not know these fields yet. A
-      // newer message from that browser must not erase the model or draft saved by another device.
-      if (stored && c.model === undefined) c.model = stored.model;
-      if (stored && c.draft === undefined) c.draft = stored.draft;
-      if (stored && c.activityAt === undefined) c.activityAt = stored.activityAt || stored.updatedAt;
-      if (c.activityAt === undefined) c.activityAt = c.updatedAt;
+      let next = c;
+      let transcriptChanged = true;
+      if (stored) {
+        const merged = mergeChat(stored, c);
+        if (!merged.changed) {
+          rejected.push({ id: c.id, reason: "stale" });
+          continue;
+        }
+        next = merged.chat;
+        transcriptChanged = merged.transcriptChanged;
+      } else {
+        normalizeStoredClocks(next);
+        if (next.activityAt === undefined) next.activityAt = next.updatedAt;
+      }
 
       state.rev += 1;
-      c.rev = state.rev;
-      // The insurance policy: only when this write would SHRINK the conversation.
-      if (stored && stored.messages && c.messages.length < stored.messages.length) {
+      next.rev = state.rev;
+      // The insurance policy is now transcript-specific: preference-only writes never create a
+      // "short previous copy" because they never replace the transcript in the first place.
+      if (stored && transcriptChanged && stored.messages && next.messages.length < stored.messages.length) {
         const { prev, ...bare } = stored;
-        c.prev = bare;
+        next.prev = bare;
       }
-      state.chats[c.id] = c;
-      accepted.push({ id: c.id, rev: c.rev, truncated: !!c.truncated });
+      state.chats[next.id] = next;
+      accepted.push({ id: next.id, rev: next.rev, truncated: !!next.truncated });
     }
 
     for (const d of (Array.isArray(deletes) ? deletes : []).slice(0, MAX_PUSH_CHATS)) {

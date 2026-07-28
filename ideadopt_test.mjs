@@ -350,7 +350,9 @@ await t("source: both clients retain the deep analysis and resend the adoption r
 
 await t("source: Vibe hidden panels stay hidden and adopted jobs retain the roadmap", () => {
   assert.match(vibeCss, /\.vb-shell \[hidden\]\s*\{\s*display:\s*none\s*!important/);
-  assert.match(ideJobsSource, /\.slice\(0,\s*40000\)/);
+  assert.match(ideJobsSource, /IDE_PROMPT_MAX_CHARS\s*=\s*3_000_000/);
+  assert.match(ideJobsSource, /rawPrompt\.length\s*>\s*IDE_PROMPT_MAX_CHARS/);
+  assert.doesNotMatch(ideJobsSource, /\.slice\(0,\s*40000\)/, "large briefs must be rejected explicitly, never silently truncated");
   assert.match(handsSource, /args\.partial === true \|\| args\.offset != null/);
 });
 

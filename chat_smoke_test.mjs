@@ -39,14 +39,24 @@ const dataDir = mkdtempSync(join(tmpdir(), "chatsmoke-"));
 let passed = 0;
 const ok = (n) => { console.log("  ok  " + n); passed++; };
 
+let localLengthCalls = 0;
 // Mock Ollama so boot and any local call is harmless and instant.
 const mock = http.createServer((req, res) => {
   let b = ""; req.on("data", (d) => (b += d));
   req.on("end", () => {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(req.url === "/api/chat"
-      ? JSON.stringify({ message: { role: "assistant", content: "mock reply" }, eval_count: 3 })
-      : "{}");
+    if (req.url !== "/api/chat") return res.end("{}");
+    let body = {};
+    try { body = JSON.parse(b || "{}"); } catch {}
+    const isLengthCase = (body.messages || []).some((message) =>
+      String(message && message.content || "").includes("LOCAL_LENGTH_CONTINUATION_TEST"));
+    if (isLengthCase) {
+      localLengthCalls++;
+      return res.end(JSON.stringify(localLengthCalls === 1
+        ? { message: { role: "assistant", content: "first bounded piece " }, done_reason: "length", eval_count: 3 }
+        : { message: { role: "assistant", content: "continued to the real end" }, done_reason: "stop", eval_count: 4 }));
+    }
+    res.end(JSON.stringify({ message: { role: "assistant", content: "mock reply" }, done_reason: "stop", eval_count: 3 }));
   });
 });
 await new Promise((r) => mock.listen(MOCK, "127.0.0.1", r));
@@ -118,6 +128,8 @@ async function turn(body, { email = null, ms = 20000 } = {}) {
           events.push(o.type);
           if (o.type === "wildfire") detail.wildfire = o;
           if (o.type === "error") detail.error = o;
+          if (o.type === "token" && o.delta) detail.answer = String(detail.answer || "") + o.delta;
+          if (o.type === "done") detail.done = o;
         } catch { /* partial frame */ }
       }
       if (events.some((e) => e === "done" || e === "stopped" || e === "error")) break;
@@ -157,10 +169,9 @@ const TERMINAL = (evs) => evs.some((e) => e === "done" || e === "stopped" || e =
   const t = await turn({ messages: [{ role: "user", content: "build the project" }],
                          model: "mistralai/mistral-nemo", wildfire: true }, { email: OWNER });
   assert.ok(t.events.includes("wildfire"), "expected a wildfire event, got: " + t.events.join(","));
-  assert.equal(t.detail.wildfire.kind, "blocked", "arming a non-rostered model must be blocked");
-  assert.match(t.detail.wildfire.text, /roster/i, "the refusal should explain why");
-  assert.match(t.detail.wildfire.text, /Claude Opus 4\.8/, "and name the models that qualify");
-  ok("Wildfire refuses to arm on a non-rostered model, and says which ones qualify");
+  assert.equal(t.detail.wildfire.kind, "fallback", "a non-rostered model should fall back to on-demand tools");
+  assert.match(t.detail.wildfire.text, /toolbox_open/i, "the fallback should explain how capabilities remain available");
+  ok("Wildfire mismatch keeps the focused/on-demand toolbox instead of disarming the model");
 }
 
 // 4. Wildfire is optional: ordinary machine work uses the focused/on-demand toolbox without a
@@ -189,7 +200,20 @@ const TERMINAL = (evs) => evs.some((e) => e === "done" || e === "stopped" || e =
   ok("a guest posting wildfire:true is never armed");
 }
 
-// 7. THE LOAD-BEARING CHECK. A crash inside handleChat killed the process outright. If the server
+// 7. A local provider output boundary is a continuation signal, never task completion.
+{
+  const t = await turn({
+    messages: [{ role: "user", content: "LOCAL_LENGTH_CONTINUATION_TEST" }],
+    model: "local",
+    mode: "normal",
+  }, { email: OWNER });
+  assert.equal(localLengthCalls, 2, "the local response was not resumed after done_reason:length");
+  assert.match(String(t.detail.answer || ""), /first bounded piece continued to the real end/);
+  assert.ok(t.events.includes("done"), "the resumed local turn did not reach its natural completion");
+  ok("local output limits preserve partial text and continue the same model");
+}
+
+// 8. THE LOAD-BEARING CHECK. A crash inside handleChat killed the process outright. If the server
 //    is still serving after all of the above, it did not throw its way out of the room.
 {
   assert.equal(serverExited, null, "the server process EXITED during the run (code " + serverExited + "). Log tail:\n" + serverLog.slice(-1200));

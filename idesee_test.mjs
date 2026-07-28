@@ -115,6 +115,8 @@ await t("a critique applies ONE fix round and takes the after shot", async () =>
   const out = await r.see.run(JOB, { workspace: WS, goal: "g", visionModel: "openai/gpt-4o",
     applyFixes: async (c) => { guidance = c; return { costUsd: 0.01 }; } });
   assert.equal(out.improved, true);
+  assert.equal(out.costUsd, 0.002, "only the unmetered vision call belongs in costUsd");
+  assert.equal(out.fixCostUsd, 0.01, "the self-metered fix cost must remain separate");
   assert.match(guidance, /contrast/);
   assert.ok(r.types().some((c) => /look \(after\)/.test(String(c))), "the after shot goes on the record");
   assert.equal(r.killLog.length, 1);

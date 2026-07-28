@@ -98,17 +98,32 @@ await new Promise((r) => mockOllama.listen(MOCK_OLLAMA, "127.0.0.1", r));
 // deliver. The second round's payload is captured so we can prove the nudge rode as a user turn.
 let round = 0;
 const seen = [];
+const responseText = (id, text) => [
+  `data: ${JSON.stringify({ type: "response.output_text.delta", response_id: id, output_index: 0, content_index: 0, delta: text })}`,
+  `data: ${JSON.stringify({
+    type: "response.completed",
+    response: {
+      id,
+      status: "completed",
+      output: [{ id: "msg_" + id, type: "message", role: "assistant", content: [{ type: "output_text", text }] }],
+      usage: { input_tokens: 18, output_tokens: 10, total_tokens: 28 },
+    },
+  })}`,
+  "data: [DONE]",
+  "",
+  "",
+].join("\n\n");
 const mockProvider = http.createServer((req, res) => {
   let b = ""; req.on("data", (d) => b += d);
   req.on("end", () => {
     const body = JSON.parse(b);
-    seen.push(body);
+    seen.push({ url: req.url, body });
     round++;
     const say = round === 1
       ? "Before I answer, let me familiarize myself with the project so I don't guess."
       : "I read the project files. It is a Node service with a chat loop and a tool registry.";
     res.writeHead(200, { "content-type": "text/event-stream" });
-    res.end(`data: {"choices":[{"delta":{"content":${JSON.stringify(say)}}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n`);
+    res.end(responseText("resp_" + round, say));
   });
 });
 await new Promise((r) => mockProvider.listen(MOCK_PROVIDER, "127.0.0.1", r));
@@ -121,7 +136,7 @@ const env = { ...process.env, PORT: String(PORT), OLLAMA_URL: "http://127.0.0.1:
   AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0", CATALOG_AUDIT: "0",
   MAIN_MODEL: "mock-main", LIGHT_MODEL: "mock-light", EMBED_MODEL: "mock-embed",
   OPEN_AI_DOMINION_UI_APIKEY: "test-key-not-real",
-  OPENAI_URL: "http://127.0.0.1:" + MOCK_PROVIDER + "/v1/chat/completions",
+  OPENAI_URL: "http://127.0.0.1:" + MOCK_PROVIDER + "/v1/responses",
   OPENROUTER_API_KEY: "", DEEPSEEK_AI_DOMINION_UI_APIKEY: "", ANTHROPIC_API_KEY: "", STRIPE_SECRET_KEY: "" };
 const child = spawn(process.execPath, [join(HERE, "server.mjs")], { env, cwd: HERE, stdio: ["ignore", "pipe", "pipe"] });
 let bootLog = ""; child.stdout.on("data", (d) => bootLog += d); child.stderr.on("data", (d) => bootLog += d);
@@ -163,14 +178,24 @@ function chat(model, mode) {
 await t("e2e: the turn does NOT end on the promise; the model is made to deliver", async () => {
   const answer = await chat("openai/gpt-4o", "tool");
   if (seen.length < 2) throw new Error("the loop accepted the promise and stopped (" + seen.length + " provider call)");
+  for (const call of seen) {
+    if (call.url !== "/v1/responses") throw new Error("wrong OpenAI path: " + call.url);
+    if (!Array.isArray(call.body.input) || !call.body.input.length) throw new Error("Responses input missing");
+    if ("messages" in call.body) throw new Error("legacy messages leaked into Responses payload");
+    if (!("max_output_tokens" in call.body)) throw new Error("max_output_tokens missing");
+  }
   if (!/Node service with a chat loop/.test(answer)) throw new Error("the delivered answer never reached the user: " + JSON.stringify(answer).slice(0, 200));
 });
 
-await t("e2e: the nudge rides as a USER turn (agent models ignore trailing system messages)", async () => {
-  const second = seen[1];
-  const last = second.messages[second.messages.length - 1];
+await t("e2e: the nudge rides as a USER Responses input item", async () => {
+  const second = seen[1].body;
+  const last = [...second.input].reverse().find((item) => item.role === "user");
+  if (!last) throw new Error("no user input item found");
+  const lastText = typeof last.content === "string"
+    ? last.content
+    : (Array.isArray(last.content) ? last.content.map((part) => part && part.text || "").join("") : "");
   if (last.role !== "user") throw new Error("nudge role was " + last.role);
-  if (!/Dominion system notice/.test(last.content) || !/familiarize/.test(last.content)) throw new Error("nudge did not quote the promise: " + String(last.content).slice(0, 160));
+  if (!/Dominion system notice/.test(lastText) || !/familiarize/.test(lastText)) throw new Error("nudge did not quote the promise: " + lastText.slice(0, 160));
 });
 
 console.log(`\nintentguard: ${passed} passed, ${failed} failed`);

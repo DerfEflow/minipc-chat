@@ -6,7 +6,7 @@
  *   Esc cancels, Ctrl/Cmd+Enter saves. Resolves the raw string on save, null on cancel — same
  *   control-flow contract as prompt(), so callers keep their `if (t == null) return` guards.
  *
- * The Forge dial: Ember/Flame/Furnace, revealed from the composer. Persists to localStorage.
+ * The Forge dial: Ember/Flame/Furnace, revealed from the composer. Persists with each chat.
  *   forgeTierValue() feeds the chat body. Ember returns "" so the turn is byte-identical to the
  *   pre-dial default (server treats absent forgeMode and "ember" the same; sending nothing proves it).
  */
@@ -96,25 +96,53 @@
   // ============================ Forge dial ============================
   const TIERS = ["ember", "flame", "furnace"];
   const TIER_META = {
-    ember:   { name: "Ember",   desc: "The always-on floor. Fast, direct, everyday answers.", cost: "Standard credits" },
-    flame:   { name: "Flame",   desc: "Fuller reasoning and voice, for work with real weight.", cost: "More credits · slower" },
-    furnace: { name: "Furnace", desc: "The whole framework, applied deliberately. Highest quality.", cost: "Most credits · slowest" },
+    ember:   { name: "Ember",   desc: "Native model behavior for simple questions and ordinary work.", cost: "Standard effort" },
+    flame:   { name: "Flame",   desc: "Deeper planning, stronger persistence, and explicit verification.", cost: "More time and tokens" },
+    furnace: { name: "Furnace", desc: "Maximum model-supported effort with a finish-or-checkpoint contract.", cost: "Highest time and token use" },
   };
   const ANGLE = { ember: -38, flame: 0, furnace: 38 };
   const KEY = "dominion.forgeTier";
   const MODE_KEY = "dominion.forgeModeEnabled";
 
-  const getTier = () => { const t = localStorage.getItem(KEY); return TIERS.includes(t) ? t : "ember"; };
+  const sessionState = () => {
+    try {
+      const bridge = window.dominionForgeSession;
+      const state = bridge && typeof bridge.get === "function" ? bridge.get() : null;
+      return state && typeof state === "object" ? state : null;
+    } catch { return null; }
+  };
+  const getTier = () => {
+    const state = sessionState();
+    const t = state && state.tier;
+    if (TIERS.includes(t)) return t;
+    const fallback = localStorage.getItem(KEY);
+    return TIERS.includes(fallback) ? fallback : "ember";
+  };
   function setTier(t) {
     if (!TIERS.includes(t)) t = "ember";
+    try {
+      const bridge = window.dominionForgeSession;
+      if (bridge && typeof bridge.set === "function") bridge.set({ tier: t });
+    } catch {}
+    // Only a default for a brand-new chat; an existing chat reads from the bridge above.
     localStorage.setItem(KEY, t);
     if (triggerEl) triggerEl.setAttribute("data-tier", t);
     // The composer's pace warning depends on this position (Furnace is the slowest setting in the
     // app), so it hears about every turn of the dial instead of waiting for a reload.
     try { document.dispatchEvent(new CustomEvent("dominion-forge-tier", { detail: t })); } catch {}
   }
-  const getForgeMode = () => localStorage.getItem(MODE_KEY) === "1";
+  const getForgeMode = () => {
+    const state = sessionState();
+    return state && typeof state.mode === "boolean"
+      ? state.mode
+      : localStorage.getItem(MODE_KEY) === "1";
+  };
   function setForgeMode(on) {
+    try {
+      const bridge = window.dominionForgeSession;
+      if (bridge && typeof bridge.set === "function") bridge.set({ mode: !!on });
+    } catch {}
+    // Only a default for a brand-new chat; never overwrites another existing chat.
     localStorage.setItem(MODE_KEY, on ? "1" : "0");
     if (triggerEl) triggerEl.setAttribute("data-forge", on ? "on" : "off");
   }
@@ -159,6 +187,17 @@
 
   let triggerEl = null;
   let dialRoot = null;
+
+  // Switching chats restores that chat's dial state immediately. If the full-screen dial is open,
+  // the caller closes it before changing the active chat so its setting is sealed to the old chat.
+  document.addEventListener("dominion-chat-changed", () => {
+    const tier = getTier();
+    if (triggerEl) {
+      triggerEl.setAttribute("data-tier", tier);
+      triggerEl.setAttribute("data-forge", getForgeMode() ? "on" : "off");
+    }
+    try { document.dispatchEvent(new CustomEvent("dominion-forge-tier", { detail: tier })); } catch {}
+  });
 
   function openDial() {
     if (dialRoot) return;                       // already open
@@ -237,8 +276,8 @@
     }
     /*
      * The armed state names the currently selected model, because the roster is the whole point:
-     * arming Wildfire on a model that is not starred does nothing except earn a refusal from the
-     * server. Saying so here, at the moment of arming, beats discovering it mid-job.
+     * Arming Wildfire on a model that is not starred falls back to the normal on-demand toolbox.
+     * The model remains capable; only the all-tools-up-front preload is unavailable.
      */
     function paintWildfire() {
       if (!wildfireButton) return;
@@ -251,7 +290,7 @@
       wildfireButton.querySelector("small").textContent =
         !wildOn ? "One turn"
         : starred ? "NEXT TURN"
-        : "Armed, but this model is not starred";
+        : "On-demand toolbox fallback";
     }
     function apply(t, persist) { live = t; paint(t); if (persist !== false) setTier(t); }
     paint(cur);

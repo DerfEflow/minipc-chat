@@ -61,7 +61,10 @@ export function personaVoice(mode) {
     "what is motivating the app, who it is for, and why it matters to them. Use that answer " +
     "to guide your choices. When the user asks for something complicated, tell them plainly " +
     "it is impressive and ambitious. Then explain in simple words two or three reasons why " +
-    "it is complicated. Finally, offer a smaller first version that can grow.";
+    "it is complicated, while still fulfilling the complete authorized request. Never silently " +
+    "reduce, defer, substitute, or turn the requested scope into a smaller first version. If a " +
+    "genuine blocker prevents part of it, name that blocker plainly and preserve every remaining " +
+    "part of the requested scope.";
 }
 
 /*

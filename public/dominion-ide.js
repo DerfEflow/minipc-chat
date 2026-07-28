@@ -1735,6 +1735,55 @@
     return (e && e.name === "AbortError") ? L("err_timeout") : L("err_network");
   }
 
+  /*
+   * Forge is part of the build contract, not ambient page state. Capture both controls at the
+   * exact request boundary so a detached Crucible job keeps the tier/mode it started with even if
+   * the user later changes the dial in chat. `wolfeTier` is the established server field;
+   * `forgeTier` travels beside it as the explicit shared-policy name during the compatibility
+   * window. Sending Ember and false is intentional: omission must never make the server inherit a
+   * stale setting from another chat or build.
+   */
+  function forgeExecutionFields() {
+    let tier = "ember";
+    let mode = false;
+    try {
+      const selected = window.forgeTierValue && window.forgeTierValue();
+      if (selected === "ember" || selected === "flame" || selected === "furnace") tier = selected;
+    } catch {}
+    try { mode = !!(window.forgeModeValue && window.forgeModeValue()); } catch {}
+    return { wolfeTier: tier, forgeTier: tier, forgeMode: mode };
+  }
+
+  const JOB_UI = {
+    complete: { label: "Complete", message: "Build complete.", error: false },
+    checkpointed: { label: "Checkpoint saved", message: "Checkpoint saved. The work is ready to continue.", error: false },
+    paused: { label: "Paused", message: "Build paused. The work so far is saved.", error: false },
+    failed: { label: "Failed", message: "Build failed before completion. The work so far is saved.", error: true },
+    stopped: { label: "Stopped", message: "Build stopped before completion. The work so far is saved.", error: false },
+    running: { label: "Building", message: "", error: false },
+  };
+
+  function jobUiState(job) {
+    const raw = String((job && (job.executionState || job.status || job.outcome || job.state)) || "").toLowerCase();
+    if (raw === "complete" || raw === "completed" || raw === "done") return "complete";
+    if (raw === "checkpoint" || raw === "checkpointed" || raw === "checkpoint_context" || raw === "retry") return "checkpointed";
+    if (raw === "pause" || raw === "paused" || raw === "paused_budget" || (job && job.waiting)) return "paused";
+    if (raw === "error" || raw === "failed" || raw === "failure" || (job && job.interrupted)) return "failed";
+    if (raw === "stop" || raw === "stopped" || (job && job.stopped)) return "stopped";
+    return job && job.done ? "failed" : "running";
+  }
+
+  function paintBuildStatus(kind) {
+    const spec = JOB_UI[kind] || JOB_UI.failed;
+    const el = $("#st-status");
+    const root = $("#ide-root");
+    if (root) root.dataset.buildState = kind;
+    if (el) {
+      el.textContent = spec.message;
+      el.classList.toggle("bad", !!spec.error);
+    }
+  }
+
   /* ---------- the intake conversation (Fred's ruling 2026-07-21) ---------------------------
    * The old flow assumed almost everything, which can build an app that looks or acts like
    * nothing the user intended, on their money. Now the model interviews the user, one question
@@ -2103,7 +2152,7 @@
     const timeout = setTimeout(() => controller.abort(), 60000);
     try {
       const r = await fetch("/ide/job", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind: "build", workspaceId, prompt }),
+        body: JSON.stringify({ kind: "build", workspaceId, prompt, ...forgeExecutionFields() }),
         signal: controller.signal });
       const j = await r.json();
       if (!r.ok || j.error) { status(j.error || "The build could not start.", true); go.disabled = false; window.ideFlame.hide(); return; }
@@ -2155,16 +2204,24 @@
     if (!rail) return;
     const live = (state.jobs || []).filter((j) => !j.done);
     const asking = live.find((j) => j.waiting);
-    rail.classList.toggle("on", state.allowed && state.engaged && live.length > 0);
+    const latest = live[0] || (state.jobs || [])[0] || null;
+    const uiState = latest ? jobUiState(latest) : "";
+    rail.classList.toggle("on", state.allowed && state.engaged && !!latest);
     const txt = rail.querySelector(".txt"), count = rail.querySelector(".count");
     if (asking) {
-      rail.dataset.state = "waiting";
-      txt.textContent = "Needs you";
+      rail.dataset.state = "paused";
+      txt.textContent = "Paused — needs you";
       count.textContent = "";
     } else if (live.length) {
-      rail.dataset.state = "running";
-      txt.textContent = live[0].move && live[0].move.title ? live[0].move.title.slice(0, 34) : "Building";
+      rail.dataset.state = uiState;
+      txt.textContent = uiState === "running" && live[0].move && live[0].move.title
+        ? live[0].move.title.slice(0, 34)
+        : (JOB_UI[uiState] || JOB_UI.running).label;
       count.textContent = live.length > 1 ? "+" + (live.length - 1) : "";
+    } else if (latest) {
+      rail.dataset.state = uiState;
+      txt.textContent = (JOB_UI[uiState] || JOB_UI.failed).label;
+      count.textContent = "";
     } else {
       rail.dataset.state = "idle";
       txt.textContent = "";
@@ -2188,7 +2245,20 @@
     paintRail();
     renderAsk();
     const live = state.jobs.find((j) => !j.done);
-    if (live && state.phase !== "verify") setJourneyPhase("build");
+    if (live) {
+      const kind = jobUiState(live);
+      if (kind === "running") {
+        if (state.phase !== "verify") setJourneyPhase("build");
+      } else {
+        paintBuildStatus(kind);
+        setJourneyPhase("ready");
+      }
+    } else if (state.jobs[0]) {
+      const kind = jobUiState(state.jobs[0]);
+      paintBuildStatus(kind);
+      setJourneyPhase(kind === "complete" ? "ship"
+        : (intake.vision ? "ready" : (intake.messages.length ? "clarify" : "idea")));
+    }
   }
 
   // A frozen build asking for a human. Answering is one tap, and the card says plainly that
@@ -2252,7 +2322,7 @@
     try {
       await fetch("/ide/job/answer", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jobId, questionId, answer: text }),
+        body: JSON.stringify({ jobId, questionId, answer: text, ...forgeExecutionFields() }),
         signal: controller.signal,
       });
     } catch {} finally {
@@ -2645,9 +2715,23 @@
   document.addEventListener("dominion-build-verifying", () => setJourneyPhase("verify"));
   document.addEventListener("dominion-build-done", () => {
     setJourneyPhase("ship");
+    paintBuildStatus("complete");
     clearDraft();
   });
-  document.addEventListener("dominion-build-ended", () => {
+  document.addEventListener("dominion-build-checkpointed", () => {
+    paintBuildStatus("checkpointed");
+    setJourneyPhase("ready");
+  });
+  document.addEventListener("dominion-build-paused", () => {
+    paintBuildStatus("paused");
+    setJourneyPhase("ready");
+  });
+  document.addEventListener("dominion-build-ended", (e) => {
+    const outcome = String((e && e.detail && e.detail.outcome) || "").toLowerCase();
+    paintBuildStatus(outcome === "stopped" ? "stopped"
+      : (outcome === "paused" || outcome === "paused_budget") ? "paused"
+      : (outcome === "checkpoint" || outcome === "checkpointed") ? "checkpointed"
+      : "failed");
     setJourneyPhase(intake.vision ? "ready" : (intake.messages.length ? "clarify" : "idea"));
   });
 
@@ -2680,6 +2764,8 @@
   window.ideModeSetEngaged = (on) => setEngaged(!!on, { reveal: false, push: true });
   window.ideRefreshJobs = refreshJobs;
   window.ideEnsurePush = ensurePush;
+  window.ideForgeExecutionFields = forgeExecutionFields;
+  window.ideJobUiState = jobUiState;
   window.dominionStudioHas = (module) => state.mode !== "vibe" || state.studio.modules.has(module);
   window.dominionJourneyPhase = () => state.phase;
 

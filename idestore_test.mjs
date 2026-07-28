@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createIdeGate, createIdeStore, createIdeFeature, MAX_WORKSPACES, autoWorkspaceName } from "./ide.mjs";
+import { createIdeGate, createIdeStore, createIdeFeature, IDE_PROMPT_MAX_CHARS, MAX_WORKSPACES, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs } from "./idejobs.mjs";
 import { isProtectedPath } from "./tools.mjs";
 
@@ -92,13 +92,16 @@ await t("update re-validates a new root with the rules create used, and refuses 
 await t("prefs persist across a reopen, and a corrupt state file is quarantined rather than fatal", () => {
   const dir = freshDir();
   const s1 = createIdeStore({ dir, isProtectedPath });
-  s1.setPrefs({ engaged: true });
+  s1.setPrefs({ engaged: true, mode: "engineer" });
   s1.create({ root: "C:\\Projects\\keepme" });
-  assert.equal(createIdeStore({ dir, isProtectedPath }).prefs().engaged, true);
+  const reopened = createIdeStore({ dir, isProtectedPath }).prefs();
+  assert.equal(reopened.engaged, true);
+  assert.equal(reopened.mode, "engineer", "the selected mode must survive a real store reopen");
 
   writeFileSync(s1.file, "{ this is not json", "utf8");
   const s2 = createIdeStore({ dir, isProtectedPath });
   assert.equal(s2.prefs().engaged, false, "a corrupt file starts clean instead of throwing");
+  assert.equal(s2.prefs().mode, "", "a clean recovery returns to the never-chosen mode sentinel");
   assert.deepEqual(s2.list(), []);
   assert.ok(existsSync(s1.file + ".bad"), "the corrupt bytes are kept for inspection, never destroyed");
   assert.match(readFileSync(s1.file + ".bad", "utf8"), /not json/);
@@ -216,6 +219,36 @@ await t("a build demands a workspace and a prompt BEFORE anything runs", () => {
   const junk = f.startJob(OWNER, { kind: "banana" });
   assert.equal(junk.status, 400);
   assert.equal(junk.code, "unknown_kind");
+});
+
+await t("long build briefs preserve their tail instead of silently slicing at 40K", () => {
+  const f = featureFor("owner");
+  const ws = f.createWorkspace(OWNER, { name: "Long", root: "C:/Projects/long-brief" }).body.workspace;
+  const marker = "TAIL_REQUIREMENT_MUST_SURVIVE";
+  const prompt = "Build this:\n" + "scope detail ".repeat(4_000) + marker;
+  let received = "";
+  const result = f.startJob(OWNER, { kind: "build", workspaceId: ws.id, prompt }, {
+    runner: (_job, extra) => { received = extra.prompt; },
+  });
+  assert.equal(result.status, 200);
+  assert.ok(prompt.length > 40_000, "fixture must cross the former silent-slice boundary");
+  assert.equal(received, prompt.trim());
+  assert.ok(received.endsWith(marker), "the source/roadmap tail was dropped");
+});
+
+await t("an impossible build brief is rejected explicitly before a runner is called", () => {
+  const f = featureFor("owner");
+  const ws = f.createWorkspace(OWNER, { name: "Huge", root: "C:/Projects/huge-brief" }).body.workspace;
+  let called = false;
+  const result = f.startJob(OWNER, {
+    kind: "build",
+    workspaceId: ws.id,
+    prompt: "x".repeat(IDE_PROMPT_MAX_CHARS + 1),
+  }, { runner: () => { called = true; } });
+  assert.equal(result.status, 413);
+  assert.equal(result.code, "prompt_too_large");
+  assert.equal(called, false);
+  assert.match(result.body.error, /current limit/i);
 });
 
 await t("one build per workspace: a second one is refused at the door", () => {

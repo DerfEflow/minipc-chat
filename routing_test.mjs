@@ -66,10 +66,15 @@ await t("consumeNeeds: fast mode with tool-shaped language keeps tools (conserva
   assert.equal(r.attachTools, true);
 });
 
-await t("consumeNeeds: normal mode always attaches tools, even when the sniff was negative", () => {
+await t("consumeNeeds: an ordinary explanatory turn does not carry the toolbox", () => {
   const r = consumeNeeds({ mode: "normal", needsTools: false, needsRetrieval: true, lastUserText: "explain something" });
-  assert.equal(r.attachTools, true, "when in doubt, attach");
+  assert.equal(r.attachTools, false);
   assert.equal(r.skipRetrieval, false);
+});
+
+await t("consumeNeeds: concrete tool-shaped language overrides a false classifier sniff", () => {
+  const r = consumeNeeds({ mode: "normal", needsTools: false, needsRetrieval: true, lastUserText: "search this repository for the bug" });
+  assert.equal(r.attachTools, true);
 });
 
 await t("consumeNeeds: needs_retrieval=false is honored outside fast mode", () => {

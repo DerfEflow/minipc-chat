@@ -218,7 +218,10 @@ export function createRunAndSee({ hands, chat, jobs, log = () => {} } = {}) {
         const after = await screenshot(job, "after", port);
         if (after.ok) emitRun(job, { command: "look (after)", ok: true, output: "Second look taken after the improvements: " + after.path });
       }
-      return { improved: true, critique: verdict, costUsd: (judged.costUsd || 0) + fixCost };
+      // The fix move meters itself through ideengine.runMove. Return the two
+      // costs separately so the caller meters only the vision judgment and
+      // merely adds the already-metered fix to its in-job budget ledger.
+      return { improved: true, critique: verdict, costUsd: judged.costUsd || 0, fixCostUsd: fixCost };
     } finally {
       await stopPreview(started.pid);
     }

@@ -25,20 +25,91 @@ const MOCK_PROVIDER = PORT + 2;
 const mockOllama = http.createServer((req, res) => { let b = ""; req.on("data", (d) => b += d); req.on("end", () => { res.writeHead(200, { "content-type": "application/json" }); res.end(req.url === "/api/chat" ? JSON.stringify({ message: { role: "assistant", content: "ok" }, eval_count: 5 }) : "{}"); }); });
 await new Promise((r) => mockOllama.listen(MOCK_OLLAMA, "127.0.0.1", r));
 
-// Round 1: the model calls create_docx. Round 2: it answers WITHOUT mentioning any link, which is
-// exactly the case that used to leave the user with nothing.
+function responseFunction(id, callId, name, args) {
+  const item = {
+    id: "fc_" + id,
+    type: "function_call",
+    call_id: callId,
+    name,
+    arguments: JSON.stringify(args),
+  };
+  return [
+    `data: ${JSON.stringify({ type: "response.output_item.added", response_id: id, output_index: 0, item })}`,
+    `data: ${JSON.stringify({
+      type: "response.completed",
+      response: {
+        id,
+        status: "completed",
+        output: [item],
+        usage: { input_tokens: 20, output_tokens: 8, total_tokens: 28 },
+      },
+    })}`,
+    "data: [DONE]",
+    "",
+    "",
+  ].join("\n\n");
+}
+
+function responseText(id, text) {
+  return [
+    `data: ${JSON.stringify({ type: "response.output_text.delta", response_id: id, output_index: 0, content_index: 0, delta: text })}`,
+    `data: ${JSON.stringify({
+      type: "response.completed",
+      response: {
+        id,
+        status: "completed",
+        output: [{ id: "msg_" + id, type: "message", role: "assistant", content: [{ type: "output_text", text }] }],
+        usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 },
+      },
+    })}`,
+    "data: [DONE]",
+    "",
+    "",
+  ].join("\n\n");
+}
+
+// Round 1: the model tries to claim completion before doing anything; Dominion must reject it
+// because no successful action exists in the execution ledger. Round 2 creates the DOCX. Round 3
+// crosses the completion gate with observed action evidence. Round 4 answers WITHOUT mentioning
+// any link, which is exactly the case that used to leave the user with nothing.
 let round = 0;
+const seen = [];
 const mockProvider = http.createServer((req, res) => {
   let b = ""; req.on("data", (d) => b += d);
   req.on("end", () => {
+    const body = JSON.parse(b);
+    seen.push({ url: req.url, body });
     round++;
     res.writeHead(200, { "content-type": "text/event-stream" });
     if (round === 1) {
-      const call = { index: 0, id: "call_1", type: "function", function: { name: "create_docx", arguments: JSON.stringify({ title: "Roof Scope", content: "# Roof Scope\n\nTear-off, primer, two coats." }) } };
-      res.end(`data: {"choices":[{"delta":{"tool_calls":[${JSON.stringify(call)}]}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n`);
-    } else {
-      res.end(`data: {"choices":[{"delta":{"content":"The document is ready."}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n`);
+      return res.end(responseFunction("resp_premature", "call_premature", "task_complete", {
+        status: "completed",
+        result: "The document was created.",
+        changes: ["Created the requested document."],
+        validation: [{ name: "create_docx", status: "passed" }],
+        remaining: [],
+      }));
     }
+    if (round === 2) {
+      return res.end(responseFunction("resp_create", "call_1", "create_docx", {
+        title: "Roof Scope",
+        content: "# Roof Scope\n\nTear-off, primer, two coats.",
+      }));
+    }
+    if (round === 3) {
+      const created = (body.input || []).find((item) =>
+        item.type === "function_call_output" && item.call_id === "call_1");
+      const evidenceId = /\[Dominion evidence id:\s*([^;\]]+)/i.exec(String(created && created.output || ""))?.[1] || "";
+      return res.end(responseFunction("resp_complete", "call_complete", "task_complete", {
+        status: "completed",
+        result: "The Roof Scope Word document was created and delivered.",
+        changes: ["Created the requested Roof Scope Word document."],
+        validation: [{ name: "create_docx", status: "passed", detail: "The tool returned a DOCX artifact." }],
+        remaining: [],
+        evidenceIds: evidenceId ? [evidenceId] : ["invented-missing-evidence"],
+      }));
+    }
+    res.end(responseText("resp_final", "The document is ready."));
   });
 });
 await new Promise((r) => mockProvider.listen(MOCK_PROVIDER, "127.0.0.1", r));
@@ -51,7 +122,7 @@ const env = { ...process.env, PORT: String(PORT), OLLAMA_URL: "http://127.0.0.1:
   AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0", CATALOG_AUDIT: "0",
   MAIN_MODEL: "mock-main", LIGHT_MODEL: "mock-light", EMBED_MODEL: "mock-embed",
   OPEN_AI_DOMINION_UI_APIKEY: "test-key-not-real",
-  OPENAI_URL: "http://127.0.0.1:" + MOCK_PROVIDER + "/v1/chat/completions",
+  OPENAI_URL: "http://127.0.0.1:" + MOCK_PROVIDER + "/v1/responses",
   OPENROUTER_API_KEY: "", DEEPSEEK_AI_DOMINION_UI_APIKEY: "", ANTHROPIC_API_KEY: "", STRIPE_SECRET_KEY: "" };
 const child = spawn(process.execPath, [join(HERE, "server.mjs")], { env, cwd: HERE, stdio: ["ignore", "pipe", "pipe"] });
 let bootLog = ""; child.stdout.on("data", (d) => bootLog += d); child.stderr.on("data", (d) => bootLog += d);
@@ -109,6 +180,30 @@ await t("a turn that produces a document emits a file event with a download URL"
   if (!/\.docx$/i.test(fileEvent.name)) throw new Error("bad name: " + fileEvent.name);
   // The point of the whole change: the model never said a word about a link.
   if (/exports|download/i.test(answer)) throw new Error("this test is meant to run with a silent model; adjust it");
+});
+
+await t("the complex export crosses the native Responses completion-evidence gate", async () => {
+  if (seen.length !== 4) throw new Error("expected rejected completion, create, accepted completion, and final Responses calls; saw " + seen.length);
+  for (const call of seen) {
+    if (call.url !== "/v1/responses") throw new Error("wrong OpenAI path: " + call.url);
+    if (!Array.isArray(call.body.input) || !call.body.input.length) throw new Error("Responses input missing");
+    if ("messages" in call.body) throw new Error("legacy messages leaked into Responses payload");
+    if (!("max_output_tokens" in call.body)) throw new Error("max_output_tokens missing");
+  }
+  const completionDef = seen[0].body.tools?.find((tool) => tool.name === "task_complete");
+  if (!completionDef || completionDef.type !== "function") {
+    throw new Error("task_complete was not offered as a native Responses function tool; saw " +
+      JSON.stringify((seen[0].body.tools || []).map((tool) => tool.name || tool.function?.name).filter(Boolean).slice(0, 20)));
+  }
+  const prematureOutput = seen[1].body.input.find((item) => item.type === "function_call_output" && item.call_id === "call_premature");
+  if (!prematureOutput || !/execution ledger|state-changing action/i.test(String(prematureOutput.output))) {
+    throw new Error("fabricated completion evidence was not rejected against observed actions");
+  }
+  const createOutput = seen[2].body.input.find((item) => item.type === "function_call_output" && item.call_id === "call_1");
+  if (!createOutput) throw new Error("create_docx result was not returned as a Responses function_call_output");
+  if (!/Dominion evidence id:/i.test(String(createOutput.output))) throw new Error("successful action did not issue a citable evidence id");
+  const completionOutput = seen[3].body.input.find((item) => item.type === "function_call_output" && item.call_id === "call_complete");
+  if (!completionOutput || !/accepted/i.test(String(completionOutput.output))) throw new Error("completion evidence was not accepted before the final answer");
 });
 
 await t("the download URL serves the real file as an attachment", async () => {

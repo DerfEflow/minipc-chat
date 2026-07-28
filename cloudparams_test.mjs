@@ -1,10 +1,11 @@
 /*
  * Cloud request-shaping self-test — run: node cloudparams_test.mjs
  * Part 1: unit tests on cloudparams.mjs (temperature rules, tool cap, 400-retry adjustments).
- * Part 2: END-TO-END — boots the REAL server with mock OpenAI + Anthropic endpoints
- * (OPENAI_URL / ANTHROPIC_URL) and proves over the wire that: gpt-5.x turns carry NO
- * temperature, Anthropic turns carry temperature clamped to 1, and a 400 naming a parameter
- * is retried once with the corrected payload. No real provider calls, no spend.
+ * Part 2: END-TO-END — boots the REAL server with mock OpenAI Responses + Anthropic
+ * Chat Completions endpoints (OPENAI_URL / ANTHROPIC_URL) and proves over the wire that:
+ * direct OpenAI turns use the native Responses request/stream dialect, gpt-5.x turns carry
+ * NO temperature, Anthropic turns carry temperature clamped to 1, and a 400 naming a
+ * parameter is retried once with the corrected payload. No real provider calls, no spend.
  */
 import http from "node:http";
 import { spawn } from "node:child_process";
@@ -82,17 +83,44 @@ await new Promise((r) => mockOllama.listen(MOCK_OLLAMA, "127.0.0.1", r));
 // payload and, for gpt-4o, rejects the FIRST request with a parameter-naming 400 to exercise the net.
 const calls = [];
 let gpt4oRejects = 1;
+const responsesText = (id, value) => [
+  `data: ${JSON.stringify({ type: "response.output_text.delta", response_id: id, output_index: 0, content_index: 0, delta: value })}`,
+  `data: ${JSON.stringify({
+    type: "response.completed",
+    response: {
+      id,
+      status: "completed",
+      output: [{ id: "msg_" + id, type: "message", role: "assistant", content: [{ type: "output_text", text: value }] }],
+      usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+    },
+  })}`,
+  "data: [DONE]",
+  "",
+  "",
+].join("\n\n");
+const anthropicText = (id, value) => [
+  `data: ${JSON.stringify({ type: "message_start", message: { id, type: "message", role: "assistant", model: "claude-haiku-4-5-20251001", content: [], usage: { input_tokens: 12, output_tokens: 0 } } })}`,
+  `data: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })}`,
+  `data: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: value } })}`,
+  `data: ${JSON.stringify({ type: "content_block_stop", index: 0 })}`,
+  `data: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 3 } })}`,
+  `data: ${JSON.stringify({ type: "message_stop" })}`,
+  "",
+  "",
+].join("\n\n");
 const mockProvider = http.createServer((req, res) => {
   let b = ""; req.on("data", (d) => b += d);
   req.on("end", () => {
     const body = JSON.parse(b);
-    calls.push(body);
+    calls.push({ url: req.url, body });
     if (body.model === "gpt-4o" && gpt4oRejects > 0) {
       gpt4oRejects--;
       res.writeHead(400, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "Unsupported value: 'temperature' does not support 0.4 with this model. Only the default (1) value is supported." } }));
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
+    if (req.url === "/v1/responses") return res.end(responsesText("resp_" + calls.length, "shaped ok"));
+    if (req.url === "/v1/messages") return res.end(anthropicText("msg_" + calls.length, "shaped ok"));
     res.end('data: {"choices":[{"delta":{"content":"shaped ok"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
   });
 });
@@ -106,7 +134,7 @@ const env = { ...process.env, PORT: String(PORT), OLLAMA_URL: "http://127.0.0.1:
   AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0", CATALOG_AUDIT: "0",
   MAIN_MODEL: "mock-main", LIGHT_MODEL: "mock-light", EMBED_MODEL: "mock-embed",
   OPEN_AI_DOMINION_UI_APIKEY: "test-key-not-real", ANTHROPIC_API_KEY: "test-key-not-real",
-  OPENAI_URL: "http://127.0.0.1:" + MOCK_PROVIDER + "/v1/chat/completions",
+  OPENAI_URL: "http://127.0.0.1:" + MOCK_PROVIDER + "/v1/responses",
   ANTHROPIC_URL: "http://127.0.0.1:" + MOCK_PROVIDER + "/v1/chat/completions",
   OPENROUTER_API_KEY: "", DEEPSEEK_AI_DOMINION_UI_APIKEY: "", STRIPE_SECRET_KEY: "" };
 const child = spawn(process.execPath, [join(HERE, "server.mjs")], { env, cwd: HERE, stdio: ["ignore", "pipe", "pipe"] });
@@ -147,29 +175,44 @@ function chat(model, temperature) {
     setTimeout(() => { if (!done) { try { r.destroy(); } catch {} resolve({ answer, errors: errors.concat("timeout") }); } }, 15000);
   });
 }
-const callsFor = (m) => calls.filter((c) => c.model === m);
+const callsFor = (m) => calls.filter((c) => c.body.model === m);
 
-await t("e2e: gpt-5.6 turn carries NO temperature over the wire", async () => {
+await t("e2e: gpt-5.6 uses native Responses input/max_output_tokens and NO temperature", async () => {
   const r = await chat("openai/gpt-5.6-luna", 0.9);
   const sent = callsFor("gpt-5.6-luna");
   if (!sent.length) throw new Error("no call reached the mock: " + JSON.stringify(r.errors));
-  for (const c of sent) if ("temperature" in c) throw new Error("temperature leaked: " + c.temperature);
-  if (!("max_completion_tokens" in sent[0])) throw new Error("max_completion_tokens missing");
+  for (const call of sent) {
+    const c = call.body;
+    if (call.url !== "/v1/responses") throw new Error("wrong OpenAI path: " + call.url);
+    if (!Array.isArray(c.input) || !c.input.length) throw new Error("Responses input missing");
+    if ("messages" in c) throw new Error("legacy messages leaked into Responses payload");
+    if ("temperature" in c) throw new Error("temperature leaked: " + c.temperature);
+    if (!("max_output_tokens" in c)) throw new Error("max_output_tokens missing");
+    if ("max_completion_tokens" in c || "max_tokens" in c) throw new Error("legacy token field leaked");
+  }
+  if (!r.answer.includes("shaped ok")) throw new Error("Responses stream did not reach the client: " + JSON.stringify(r));
 });
 
-await t("e2e: Anthropic turn clamps temperature 1.2 -> 1", async () => {
-  await chat("anthropic/claude-haiku-4-5", 1.2);
+await t("e2e: Anthropic turn uses native Messages thinking without sampling controls", async () => {
+  const r = await chat("anthropic/claude-haiku-4-5", 1.2);
   const sent = callsFor("claude-haiku-4-5-20251001");   // the catalog's dated directId
   if (!sent.length) throw new Error("no call reached the mock");
-  for (const c of sent) if (c.temperature !== 1) throw new Error("temperature " + c.temperature);
+  for (const call of sent) {
+    if (call.url !== "/v1/messages") throw new Error("wrong Anthropic path: " + call.url);
+    if (!Array.isArray(call.body.messages) || !call.body.messages.length) throw new Error("native messages missing");
+    if (!call.body.thinking || call.body.thinking.type !== "enabled") throw new Error("native thinking missing");
+    if ("temperature" in call.body) throw new Error("temperature leaked into a thinking request");
+  }
+  if (!r.answer.includes("shaped ok")) throw new Error("Messages stream did not reach the client: " + JSON.stringify(r));
 });
 
 await t("e2e: a 400 naming 'temperature' is retried ONCE without it and the turn succeeds", async () => {
   const r = await chat("openai/gpt-4o", 0.4);
   const sent = callsFor("gpt-4o");
   if (sent.length !== 2) throw new Error("expected 2 attempts, saw " + sent.length);
-  if (!("temperature" in sent[0])) throw new Error("first attempt should carry temperature");
-  if ("temperature" in sent[1]) throw new Error("retry still carried temperature");
+  if (!("temperature" in sent[0].body)) throw new Error("first attempt should carry temperature");
+  if ("temperature" in sent[1].body) throw new Error("retry still carried temperature");
+  for (const call of sent) if (call.url !== "/v1/responses") throw new Error("wrong retry path: " + call.url);
   if (!r.answer.includes("shaped ok")) throw new Error("turn did not complete: " + JSON.stringify(r));
 });
 

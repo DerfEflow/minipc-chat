@@ -21,6 +21,10 @@ import { normalizeRegister, DEFAULT_REGISTER } from "./idelang.mjs";
 import { normalizeMode } from "./idemodes.mjs";
 
 export const IDE_MODE_DEFAULT = "owner";
+// Large adopted-project briefs can legitimately contain a roadmap plus source
+// material. Never silently cut them. The HTTP body has its own 32 MB ceiling;
+// this bound keeps one model request sane and returns an explicit error above it.
+export const IDE_PROMPT_MAX_CHARS = 3_000_000;
 
 // Sanitizer helper (2026-07-25): accept an object only if its serialized size is sane; otherwise
 // drop it (null). Callers keep their old value on a drop, so an oversized patch changes nothing.
@@ -124,6 +128,12 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
         prefs: {
           engaged: !!(j && j.prefs && j.prefs.engaged),
           language: normalizeRegister(j && j.prefs && j.prefs.language),
+          // Preserve the never-chosen "" sentinel, but normalize every real saved choice. Omitting
+          // this field made the browser remember Vibe/Engineer while every build silently received
+          // undefined and fell back to Beginner on the server.
+          mode: (j && j.prefs && typeof j.prefs.mode === "string")
+            ? (j.prefs.mode === "" ? "" : normalizeMode(j.prefs.mode))
+            : "",
           // Model assignments made before the first workspace exists, so the board is usable on
           // day one and the first workspace inherits them.
           assignments: (j && j.prefs && j.prefs.assignments && typeof j.prefs.assignments === "object") ? j.prefs.assignments : {},
@@ -476,10 +486,14 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       const workspace = workspaceId ? storeFor(T).get(workspaceId) : null;
       if (workspaceId && !workspace) return err(404, "not_found", "No such workspace.");
 
-      // Adopted builds legitimately carry the goal, agreed vision, structural brief, and deep
-      // production analysis. Keep a hard sanitizer cap, but make it large enough that the roadmap
-      // at the report's tail is not silently removed before the engineering job starts.
-      const prompt = String((body && body.prompt) || "").trim().slice(0, 40000);
+      // Adopted builds legitimately carry the goal, agreed vision, structural brief, roadmap,
+      // and source material. Reject an impossible payload explicitly; never cut its tail.
+      const rawPrompt = String((body && body.prompt) || "");
+      if (rawPrompt.length > IDE_PROMPT_MAX_CHARS) {
+        return err(413, "prompt_too_large",
+          `This build brief is ${rawPrompt.length.toLocaleString()} characters; the current limit is ${IDE_PROMPT_MAX_CHARS.toLocaleString()}. Attach the source as a workspace file or split it deliberately.`);
+      }
+      const prompt = rawPrompt.trim();
       if (kind === "build") {
         // A build writes real files on a real machine, so it needs to know WHERE before it starts.
         if (!workspace) return err(400, "workspace_required", "Pick a workspace folder before starting a build.");
@@ -494,8 +508,10 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       log("[ide] job " + job.id + " (" + kind + ") started by " + (T.uid || "owner"));
       if (typeof runner === "function") {
         try { const prefs = storeFor(T).prefs() || {};
+          const requestedTier = String((body && (body.wolfeTier || body.forgeTier)) || "ember").toLowerCase();
+          const forgeTier = ["ember", "flame", "furnace"].includes(requestedTier) ? requestedTier : "ember";
           runner(job, { workspace, prompt, assignments: assignmentsFor(T, workspace),
-          register: prefs.language, mode: prefs.mode }); }
+          register: prefs.language, mode: prefs.mode, forgeTier, forgeMode: body && body.forgeMode === true }); }
         catch (e) { jobs.emit(job.id, { type: "error", message: String(e && e.message || e) }); }
       }
       return ok({ jobId: job.id, kind, workspaceId });
