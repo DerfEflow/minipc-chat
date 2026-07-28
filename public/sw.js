@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v124-model-era-ledger";
+const CACHE = "dominion-ai-v125-command-rail";
 const SHELL = [
   "/",
   "/index.html",
@@ -9,7 +9,6 @@ const SHELL = [
   "/dominion-vault.css?v=1",
   "/dominion-images.css?v=8",
   "/dominion-images.js?v=11",
-  "/dominion-compass.css?v=9",
   "/dominion-lexicon.js?v=14",
   "/dominion-lenses.css?v=7",
   "/dominion-beginner.css?v=3",
@@ -18,18 +17,17 @@ const SHELL = [
   "/dominion-lenses.js?v=14",
   "/dominion-beginner.js?v=2",
   "/dominion-vibe.js?v=7",
-  "/dominion-compass.js?v=9",
   "/dominion-ide.css?v=24",
   "/dominion-ide.js?v=31",
   "/dominion-tour.js?v=6",
   "/app.js?v=57",
   "/dominion-ui.css?v=41",
   "/dominion-ui.js?v=39",
-  "/dominion-cinematic.js?v=41",
+  "/dominion-cinematic.js?v=42",
   "/dominion-cinematic-01.css?v=30",
   "/dominion-cinematic-02.css?v=30",
   "/dominion-cinematic-03.css?v=31",
-  "/dominion-cinematic-04.css?v=30",
+  "/dominion-cinematic-04.css?v=31",
   "/dominion-cinematic-05.css?v=30",
   "/dominion-cinematic-06.css?v=30",
   "/dominion-rendered-v2.css?v=41",
@@ -69,7 +67,10 @@ self.addEventListener("fetch", (e) => {
     "/ide",
     // "/chats" and "/chatlog" are NOT covered by "/chat": the match is exact-or-prefix-with-slash,
     // so /chats/sync would otherwise be cached and served stale to the device that just synced.
-    "/chats", "/chatlog"];
+    "/chats", "/chatlog",
+    // The build id is the update watcher's ground truth: a cached copy served on a flaky network
+    // would mask a deploy and the app would never learn it is stale (Fred's force-update ruling).
+    "/api/version"];
   if (url.pathname.startsWith("/ollama") || dyn.some((b) => url.pathname === b || url.pathname.startsWith(b + "/"))) return;
   e.respondWith(
     fetch(e.request)

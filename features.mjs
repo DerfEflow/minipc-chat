@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Dominion AI — the feature map (Fred, 2026-07-19).
  *
  * THE PROBLEM: a user asks "make me an image" and the model tries to describe one, or says it
@@ -23,10 +23,10 @@ export const FEATURES = [
     brief: "generate images",
     aliases: ["image", "images", "picture", "photo", "art", "draw", "generate image", "image generation", "image generator", "make an image"],
     name: "Image Generator",
-    where: "the compass handle in the message bar: press it and tap Images",
-    what: "Generates images. The whole interface slides to the right and the image generator takes the screen.",
+    where: "the right-side navigation rail (phones: bottom bar): tap The Foundry",
+    what: "Generates images. The image generator takes the screen.",
     how: [
-      "Press the compass handle in the message bar (the small copper hub with three arrows) and tap Images. Dragging the handle to the right does the same thing.",
+      "Tap The Foundry (Image Generator) in the navigation rail on the right side of the screen; on a phone it is in the bar along the bottom.",
       "Type what you want under WHAT TO MAKE. REFINE rewrites a rough idea into a fuller description.",
       "GENERATE, directly under the box, makes the picture now. Everything below it is optional.",
       "While it works, a line under the button says MAKING YOUR PICTURE with the seconds so far, and a card holding the picture's place appears in the gallery. There is no percentage, because nothing can honestly predict when it will finish.",
@@ -42,10 +42,10 @@ export const FEATURES = [
     brief: "effort and tool gate",
     aliases: ["dial", "effort", "ember", "flame", "furnace", "forge mode", "thinking level", "reasoning effort"],
     name: "The Forge dial (effort) and Forge Mode",
-    where: "the compass handle in the message bar: press it and tap Forge dial",
+    where: "the right-side navigation rail (phones: bottom bar): tap Forge Dial",
     what: "Sets how hard the model thinks, and separately whether it may use tools.",
     how: [
-      "Press the compass handle and tap Forge dial, or drag the handle to the LEFT, and the dial takes the screen.",
+      "Tap Forge Dial (Effort level and tool control) in the navigation rail on the right side; on a phone it is in the bar along the bottom. The dial takes the screen.",
       "Ember is the everyday floor, Flame is fuller reasoning, Furnace applies the whole framework and is slowest and most expensive.",
       "Flame and Furnace make every reply take longer; when the chosen combination is a slow one, a small red line above the message box says so before the wait and names what to change.",
       "FORGE MODE is a separate switch on the same panel: it is the gate that lets the assistant use its tools and act rather than only answer.",
@@ -183,10 +183,10 @@ export const FEATURES = [
     aliases: ["crucible", "app builder", "build an app", "make an app", "app launcher", "full stack",
               "ide", "ide mode", "beginner mode", "vibe coder", "engineer mode", "pong", "build it"],
     name: "The Crucible (App Builder)",
-    where: "the compass handle in the message bar: press it and tap The Crucible",
+    where: "the right-side navigation rail (phones: bottom bar): tap The Crucible",
     what: "Builds real, working apps on your own computer, through a conversation.",
     how: [
-      "Press the compass handle in the message bar and tap The Crucible. A welcome screen asks how you want to work: Beginner (Newbie), Vibe Coder (Intermediate) or Engineer (Professional). It appears once per session.",
+      "Tap The Crucible (App Builder) in the navigation rail on the right side; on a phone it is in the bar along the bottom. A welcome screen asks how you want to work: Beginner (Newbie), Vibe Coder (Intermediate) or Engineer (Professional). It appears once per session.",
       "Beginner is one big conversation: say what you want, answer a few questions, and press BUILD IT when it appears above the chat. A paperclip and a camera sit under the chat for sending a drawing of what you want.",
       "Saved Projects along the bottom of the chat reopen anything built before. The big red HELP, I'M STUCK button opens a separate conversation that helps with whatever went wrong, pictures included.",
       "While it builds you can play Pong against the machine; a welding robot shows how far along it is and roughly how long is left.",

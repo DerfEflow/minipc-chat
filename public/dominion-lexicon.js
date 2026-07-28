@@ -323,7 +323,7 @@
     tour_go_start: ["When the plan looks right, just say: build it", "Step 3: run the build", "Step 3: run the build (tap to start)"],
     tour_done_t: ["That's the whole loop", "Tour complete", "Tour complete (that's the whole loop)"],
     tour_done_b: [
-      "You now know everything you need. Tap the compass question mark any time to see this again.",
+      "You now know everything you need. Open the Quick Start Guide from the menu any time to see this again.",
       "Recall the tour any time from the ? control.",
       "Recall the tour (this walkthrough) any time from the ? control.",
     ],

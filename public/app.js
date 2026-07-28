@@ -2852,25 +2852,42 @@ scheduleSync(400);
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
 
 // ---- update watcher ----
-// This tab can stay open for days; the service worker only refreshes cache on a NEW page load,
-// so a long-lived tab silently keeps running whatever JS it loaded first — any later deploy (or
-// crash-restart) never reaches it. Poll the server's build id and reload once it changes. Never
-// yank the page out from under an in-flight answer: defer until the turn finishes.
-let lastBuild = null, pendingReload = false;
+// This tab can stay open for days, and an installed PWA RESUMES its frozen page rather than
+// reloading, so a deploy never reaches a running app unless something in here reloads it. Poll
+// the server's build id and reload once it changes.
+//
+// THE DEADLOCK THIS REPLACES (Fred, 2026-07-28: "hard refresh literally never works, only
+// clearing data updates the app"): the old guard deferred while ANY chat had a live run, and on
+// Fred's devices some long detached job nearly always exists, so the pending reload waited
+// forever and every deploy died in the queue. Wrong guard: detached jobs are DESIGNED to survive
+// a reload (journal, replay, reattach); only the chat visibly streaming on screen deserves a
+// courtesy wait, and even that gets a hard deadline rather than a veto.
+let lastBuild = null, pendingSince = 0;
 async function doReload() {
+  try { const reg = await navigator.serviceWorker.getRegistration(); if (reg) await reg.update(); } catch {}
   try { const keys = await caches.keys(); await Promise.all(keys.map((k) => caches.delete(k))); } catch {}
   location.reload();
+}
+const RELOAD_WAIT_MAX_MS = 10 * 60 * 1000;   // a visible stream defers the update, never vetoes it
+const visibleChatStreaming = () => { try { return busyFor(curId); } catch { return false; } };
+function maybeReload() {
+  if (!pendingSince) return;
+  if (!visibleChatStreaming() || Date.now() - pendingSince > RELOAD_WAIT_MAX_MS) doReload();
 }
 async function checkVersion() {
   try {
     const r = await fetch("/api/version", { cache: "no-store" });
     if (!r.ok) return;
     const { build } = await r.json();
+    if (!build) return;
     if (lastBuild === null) { lastBuild = build; return; }
-    if (build !== lastBuild) { if (anyBusy()) pendingReload = true; else doReload(); }
+    if (build !== lastBuild && !pendingSince) pendingSince = Date.now();
+    maybeReload();
   } catch {}
 }
-setInterval(() => { if (pendingReload && !anyBusy()) doReload(); else checkVersion(); }, 90000);
+setInterval(() => { if (pendingSince) maybeReload(); else checkVersion(); }, 90000);
+// Resuming the app is the moment the user expects freshness: check immediately, and a pending
+// update applies right away (they were not mid-read; they just arrived).
 document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVersion(); });
 checkVersion();
 

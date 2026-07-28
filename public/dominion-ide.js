@@ -2757,9 +2757,10 @@
   window.openIdeMode = openPanel;
   window.closeIdeMode = closePanel;
   window.ideModeEngaged = () => state.engaged;
-  // The compass needs both facts: ALLOWED decides whether the up arrow exists at all, and
-  // programmatic engage lets a deliberate upward drag turn the mode on instead of silently
-  // hitting openPanel's engaged gate (the live bug: left and right worked, up did nothing).
+  // The Command Rail needs both facts (it inherited them from the retired compass): ALLOWED
+  // decides whether The Crucible entry may act at all, and programmatic engage lets a deliberate
+  // tap turn the mode on instead of silently hitting openPanel's engaged gate (the compass-era
+  // live bug: left and right worked, up did nothing).
   window.ideModeAllowed = () => state.allowed;
   window.ideModeSetEngaged = (on) => setEngaged(!!on, { reveal: false, push: true });
   window.ideRefreshJobs = refreshJobs;

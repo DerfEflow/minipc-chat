@@ -60,30 +60,22 @@
     const send = document.getElementById("send");
     if (send && !document.querySelector(".console-tune")) send.insertAdjacentHTML("beforebegin", '<button type="button" class="mic console-tune" title="Command controls" aria-label="Command controls"><svg class="glyph"><use href="#i-sliders"></use></svg></button>');
 
+    /*
+     * THE COMMAND RAIL (Fred, 2026-07-28, docs/COMMAND-RAIL-SOW.md). The right rail stopped being
+     * decorative telemetry and became the app's map. Cut on Fred's order: the telemetry text list
+     * ("no one uses it"), the context cube, and the whole security card (two static strings nobody
+     * acts on). Kept: the efficiency dial, and the context counter as plain text directly under
+     * it. The freed space carries navigation to every surface, which is what retired the compass.
+     */
     if (pane && !document.querySelector(".telemetry-rail")) {
       pane.insertAdjacentHTML("afterend", `
-        <aside class="telemetry-rail" aria-label="System telemetry">
+        <aside class="telemetry-rail" aria-label="System telemetry and navigation">
           <section class="telemetry-card efficiency-card">
             <div class="module-title"><svg class="glyph"><use href="#i-gauge"></use></svg><span>System Telemetry</span></div>
             <div class="efficiency-gauge" id="efficiency-gauge"><div><b id="efficiency-value">98.7%</b><small>Efficiency</small></div></div>
-            <dl class="telemetry-list">
-              <div><dt>UI Load</dt><dd id="telemetry-load">24%</dd></div>
-              <div><dt>Device Memory</dt><dd id="telemetry-memory">--</dd></div>
-              <div><dt>Threads</dt><dd id="telemetry-threads">--</dd></div>
-              <div><dt>Session</dt><dd id="telemetry-session">00:00</dd></div>
-              <div><dt>Link</dt><dd class="green">Stable</dd></div>
-            </dl>
+            <div class="context-line"><b class="context-count" id="context-count">128K / 128K</b><small>context available</small></div>
           </section>
-          <section class="telemetry-card context-card">
-            <div class="module-title"><svg class="glyph"><use href="#i-context"></use></svg><span>Context Window</span></div>
-            <div class="context-cube"><span></span><i></i></div>
-            <b class="context-count" id="context-count">128K / 128K</b><small>Available tokens</small>
-          </section>
-          <section class="telemetry-card security-card">
-            <div class="module-title"><svg class="glyph"><use href="#i-shield"></use></svg><span>Security Status</span></div>
-            <div class="security-row"><svg class="glyph"><use href="#i-lock"></use></svg><span>Local route<b>AES transport</b></span></div>
-            <div class="security-row"><svg class="glyph"><use href="#i-shield"></use></svg><span>Integrity<b>Verified</b></span></div>
-          </section>
+          <nav class="rail-nav" id="rail-nav" aria-label="Dominion surfaces"></nav>
         </aside>
         <div class="console-footer" aria-label="Dominion system status">
           <div class="clock-module"><b id="hud-time">--:--</b><small id="hud-date">---</small></div>
@@ -99,6 +91,54 @@
   }
 
   buildCinematicShell();
+
+  /*
+   * THE NAV STACK + THE MOBILE DOCK (Fred's ruling 2026-07-28, Option A: the compass is retired
+   * everywhere, so this is now the ONLY navigation and must exist on every screen size). One
+   * destination list renders twice: as the rail's stack on desktop, and as a fixed bottom strip
+   * on phones (the rail itself is display:none under 720px, so the dock is a separate element).
+   * The open calls are the same globals the compass used to fire; they are optional-chained
+   * because their modules load deferred and a click can beat them.
+   */
+  const RAIL_DESTS = [
+    { id: "foundry", label: "The Foundry", sub: "Image Generator", subShort: "Images", icon: "M4 17l5-6 4 5 3-4 4 5H4z", go: () => window.openForgeImages && window.openForgeImages() },
+    { id: "dial", label: "Forge Dial", sub: "Effort level and tool control", subShort: "Effort", icon: "M12 4v4M12 16v4M4 12h4M16 12h4", go: () => window.openForgeDial && window.openForgeDial() },
+    // Engage BEFORE open: openPanel has a silent engaged gate, the exact live bug the compass hit
+    // (its up-drag did nothing until it learned to call ideModeSetEngaged first).
+    { id: "crucible", label: "The Crucible", sub: "App Builder", icon: "M9 8l-4 4 4 4M15 8l4 4-4 4",
+      go: () => { if (window.ideModeAllowed && !window.ideModeAllowed()) return;
+        window.ideModeSetEngaged && window.ideModeSetEngaged(true);
+        window.openIdeMode && window.openIdeMode(); } },
+    // Fred is building video generation later; the button is a visible promise, honestly inert.
+    { id: "video", label: "Video Generation", sub: "Coming Soon", icon: "M5 6h9v12H5zM14 10l5-3v10l-5-3z", soon: true },
+  ];
+  function railButton(d, compact) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "rail-dest rail-dest-" + d.id + (d.soon ? " rail-soon" : "");
+    b.innerHTML = '<svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="' + d.icon + '"/></svg>'
+      + '<span><b></b><small></small></span>';
+    b.querySelector("b").textContent = d.label;
+    // The dock's grid columns must stay equal quarters; a long sub is the min-width:auto trap.
+    b.querySelector("small").textContent = compact ? (d.soon ? "Soon" : (d.subShort || d.sub)) : d.sub;
+    if (d.soon) {
+      b.title = "Fred is building this; it is not wired yet.";
+      b.setAttribute("aria-disabled", "true");
+      b.addEventListener("click", () => { b.classList.remove("soon-pulse"); void b.offsetWidth; b.classList.add("soon-pulse"); });
+    } else {
+      b.addEventListener("click", () => d.go());
+    }
+    return b;
+  }
+  const railNav = document.getElementById("rail-nav");
+  if (railNav) for (const d of RAIL_DESTS) railNav.append(railButton(d, false));
+  if (!document.getElementById("dock-nav")) {
+    const dock = document.createElement("nav");
+    dock.id = "dock-nav";
+    dock.setAttribute("aria-label", "Dominion surfaces");
+    for (const d of RAIL_DESTS) dock.append(railButton(d, true));
+    document.body.append(dock);
+  }
 
   const $ = (id) => document.getElementById(id);
   const root = document.documentElement;
@@ -328,20 +368,12 @@
     const uptime = $("hud-uptime");
     const stream = $("hud-stream");
     const efficiencyValue = $("efficiency-value");
-    const load = $("telemetry-load");
-    const memory = $("telemetry-memory");
-    const threads = $("telemetry-threads");
-    const session = $("telemetry-session");
 
     if (time) time.textContent = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     if (date) date.textContent = now.toLocaleDateString([], { month: "short", day: "2-digit", year: "numeric" });
     if (uptime) uptime.textContent = `${pad(days)}D ${pad(hourRemainder)}H ${pad(minuteRemainder)}M`;
     if (stream) stream.textContent = body.classList.contains("is-thinking") ? "Streaming" : "Ready";
     if (efficiencyValue) efficiencyValue.textContent = efficiency.toFixed(1) + "%";
-    if (load) load.textContent = uiLoad + "%";
-    if (memory) memory.textContent = navigator.deviceMemory ? navigator.deviceMemory + " GB" : "Ready";
-    if (threads) threads.textContent = navigator.hardwareConcurrency || "--";
-    if (session) session.textContent = `${pad(hours)}:${pad(minuteRemainder)}`;
   }
 
   window.addEventListener("online", syncConnection);

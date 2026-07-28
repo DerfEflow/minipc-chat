@@ -7,7 +7,7 @@
  * it is worse than nothing. These tests check the map is complete, that the lookup answers, and
  * that the locations it claims are real by checking them against the shipped interface.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FEATURES, featureIndex, featureHelp } from "./features.mjs";
@@ -54,7 +54,9 @@ t("an unknown topic says so and lists the real options, never invents one", () =
  */
 t("the image answer names the control a user can actually find", () => {
   const r = featureHelp("images");
-  if (!/compass handle/.test(r) || !/message bar/.test(r)) throw new Error("image location is not concrete: " + r.slice(0, 160));
+  // The Command Rail replaced the compass (Fred's ruling 2026-07-28): the map must send people
+  // to the rail on desktop and the bottom bar on phones, both by name.
+  if (!/navigation rail/.test(r) || !/bottom/.test(r)) throw new Error("image location is not concrete: " + r.slice(0, 160));
 });
 
 // The anti-drift check: claimed controls must exist in the shipped interface.
@@ -78,10 +80,17 @@ t("the controls the map points at exist in the interface", () => {
   if (!imagesJs.includes("GENERATE")) throw new Error("the generate control the map names is gone");
   if (!imagesJs.includes("MAKE SEVERAL AT ONCE")) throw new Error("the batch control the map names is gone");
   if (!imagesJs.includes("MAKING YOUR PICTURE")) throw new Error("the working line the map names is gone");
-  // The compass is now the route the map sends people down, so it has to be a real control.
-  const compassJs = readFileSync(join(HERE, "public", "dominion-compass.js"), "utf8");
-  if (!compassJs.includes('el.id = "compass"')) throw new Error("the compass handle the map names is gone");
-  if (!compassJs.includes("toggleDial")) throw new Error("pressing the compass no longer opens a menu");
+  // The Command Rail is now the route the map sends people down, so it has to be a real control:
+  // the rail stack on desktop, the dock strip on phones, and the retired compass must STAY gone
+  // (a resurrected file would put two navigation systems back on screen).
+  const cinematicJs = readFileSync(join(HERE, "public", "dominion-cinematic.js"), "utf8");
+  if (!cinematicJs.includes('id="rail-nav"')) throw new Error("the rail nav stack the map names is gone");
+  if (!cinematicJs.includes('dock.id = "dock-nav"')) throw new Error("the phone bottom bar the map names is gone");
+  for (const label of ["The Foundry", "Forge Dial", "The Crucible", "Video Generation"]) {
+    if (!cinematicJs.includes(label)) throw new Error("the rail is missing its " + label + " entry");
+  }
+  if (!cinematicJs.includes("Coming Soon")) throw new Error("the video button lost its Coming Soon honesty");
+  if (existsSync(join(HERE, "public", "dominion-compass.js"))) throw new Error("the compass came back; the rail replaced it");
   // The beginner surface the crucible entry describes, control by control.
   const beginnerJs = readFileSync(join(HERE, "public", "dominion-beginner.js"), "utf8");
   for (const [needle, label] of [
