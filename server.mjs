@@ -793,11 +793,17 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
         r.transport = provider;
         if (r.usage && typeof r.usage === "object") r.usage.__transport = provider;
         // W2 recovery: a DIRECT wire refusing the model id itself (unverified directId, or the
-        // provider retired it) falls back to OpenRouter exactly once, out loud. Transport errors
-        // and rate limits do NOT reroute — those retry on the same wire upstream.
+        // provider retired it) falls back to OpenRouter exactly once, out loud. Broadened
+        // 2026-07-29 after the live probe found Fred's Moonshot ACCOUNT suspended (HTTP 429
+        // "account ... is suspended"): an account-level death (suspension, bad key, no quota)
+        // strands every model on that wire, so it reroutes the same way. Ordinary transport
+        // errors and per-request rate limits still retry on the same wire upstream.
+        const accountDead = [401, 403].includes(Number(r.status)) ||
+          /suspended|invalid api key|incorrect api key|account.*(disabled|arrears)|insufficient (balance|quota)/i.test(String(r.error || ""));
         if (!r.ok && !opts.__forceProvider && OPENROUTER_FALLBACK_PROVIDERS.has(provider) &&
-            (Number(r.status) === 404 || /model.*(not found|does not exist|invalid|unknown)|no such model/i.test(String(r.error || "")))) {
-          console.log(`[dominion-ai] ${providerLabel} refused model id "${directId}" — retrying ${catalogId} via OpenRouter`);
+            (Number(r.status) === 404 || accountDead ||
+             /model.*(not found|does not exist|invalid|unknown)|no such model/i.test(String(r.error || "")))) {
+          console.log(`[dominion-ai] ${providerLabel} ${accountDead ? "account-level failure" : "refused model id \"" + directId + "\""} — retrying ${catalogId} via OpenRouter`);
           return resolve(cloudChatStream(catalogId, messages, { ...opts, __forceProvider: "openrouter" }, onDelta));
         }
       }

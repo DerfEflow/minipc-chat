@@ -135,9 +135,12 @@ export const MODELS = [
   { id: "minimax/minimax-m2.5", name: "MiniMax M2.5", origin: "MiniMax (Shanghai)",
     category: "Frontier / Flagship", params: "456B (MoE)", paramsB: 456, inCost: 0.12, outCost: 0.48, ctx: 204000,
     specialty: "Cheap capable all-rounder for high-volume work" },
-  { id: "z-ai/glm-5.2", name: "GLM 5.2", origin: "Zhipu AI (Tsinghua spinout)",
+  // FREE LANE (ARSENAL Wave 2, live-probed 2026-07-29): NVIDIA's developer endpoint serves this
+  // exact id with tool calls verified. With NVIDIA_API_KEY present the call rides free and bills
+  // $0 (transport-aware cost math); without it, OpenRouter at the prices below, unchanged.
+  { id: "z-ai/glm-5.2", name: "GLM 5.2", origin: "Zhipu AI (Tsinghua spinout)", provider: "nvidia", directId: "z-ai/glm-5.2",
     category: "Frontier / Flagship", params: "355B (MoE)", paramsB: 355, inCost: 0.45, outCost: 3.31, ctx: 1048576,
-    specialty: "Strong coder + long-horizon planning" },
+    specialty: "Strong coder + long-horizon planning (FREE via NVIDIA when keyed)" },
   { id: "qwen/qwen3-235b-a22b-2507", name: "Qwen3 235B", origin: "Alibaba",
     category: "Frontier / Flagship", params: "235B (MoE·22B active)", paramsB: 235, inCost: 0.09, outCost: 0.10, ctx: 262144, maxOut: 16384,
     specialty: "Fast, dirt-cheap, strong: the default daily driver" },
@@ -237,9 +240,10 @@ export const MODELS = [
     specialty: "The classic de-censored Dolphin finetune, shipped by Venice as an uncensored build" },
 
   // ---- Vision / Multimodal ------------------------------------------------------------------
-  { id: "minimax/minimax-m3", name: "MiniMax M3", origin: "MiniMax (Shanghai)",
+  // FREE LANE (Wave 2, live-probed 2026-07-29: answers with tools AND vision on NVIDIA's id).
+  { id: "minimax/minimax-m3", name: "MiniMax M3", origin: "MiniMax (Shanghai)", provider: "nvidia", directId: "minimaxai/minimax-m3",
     category: "Vision / Multimodal", vision: true, params: "undisclosed (MoE)", paramsB: null, inCost: 0.10, outCost: 1.21, ctx: 1048576,
-    specialty: "Strongest visual understanding here (image/video reasoning)" },
+    specialty: "Strongest visual understanding here (image/video reasoning; FREE via NVIDIA when keyed)" },
   { id: "qwen/qwen3-vl-8b-instruct", name: "Qwen3-VL 8B", origin: "Alibaba",
     category: "Vision / Multimodal", vision: true, params: "8B", paramsB: 8, inCost: 0.08, outCost: 0.50, ctx: 128000,
     specialty: "Image/style critique, art analysis, prompt-writing (text+vision)" },
@@ -262,6 +266,20 @@ export const MODELS = [
   { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 3 Super", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-super-120b-a12b",
     category: "Open & Trainable", params: "120B (MoE·12B active)", paramsB: 120, inCost: 0, outCost: 0, ctx: 1000000,
     specialty: "The largest FREE model here: 1M context, tools, and no cost to run" },
+  /*
+   * THE FREE FLEET (ARSENAL Wave 2, docs/ARSENAL-PROGRAM.md). Every row below was LIVE-PROBED on
+   * 2026-07-29 against integrate.api.nvidia.com with the production key: it answered, and the
+   * tool flag reflects an actual emitted tool call, never a model card. Selection filter: a free
+   * seat joins only by beating or matching an existing seat on some axis. (StepFun step-3.7-flash
+   * answered with tools but was EXCLUDED: undisclosed size and unclear specialty bring nothing
+   * the seats below lack. gpt-oss-120b timed out on the free tier; re-probe at the weekly audit.)
+   */
+  { id: "openai/gpt-oss-20b", name: "GPT-OSS 20B", origin: "OpenAI (open weights)", provider: "nvidia", directId: "openai/gpt-oss-20b",
+    category: "Open & Trainable", params: "21B (MoE·3.6B active)", paramsB: 21, inCost: 0, outCost: 0, ctx: 131072, reasoning: true,
+    specialty: "OpenAI's open-weight reasoner, FREE via NVIDIA: tools live-verified" },
+  { id: "nvidia/nemotron-3-nano-omni-30b-a3b", name: "Nemotron 3 Nano Omni", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    category: "Vision / Multimodal", vision: true, params: "30B (MoE·3B active)", paramsB: 30, inCost: 0, outCost: 0, ctx: 131072, reasoning: true,
+    specialty: "FREE multimodal reasoner with tools: quick looks at images without spending anything" },
   { id: "mistralai/mistral-nemo", name: "Mistral Nemo", origin: "Mistral AI (France)",
     category: "Open & Trainable", params: "12B", paramsB: 12, inCost: 0.02, outCost: 0.04, ctx: 128000,
     specialty: "Cheapest warm conversational base: ideal to fine-tune your own (Apache 2.0)" },
