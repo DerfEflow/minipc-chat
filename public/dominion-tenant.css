@@ -737,3 +737,11 @@
   html body #fire-alarm svg { width: 20px; height: 20px; }
   html body #send { width: 55px; height: 55px; margin: 0; }
 }
+
+/* ---- Crucible stage, phones: the dock floats over the stage's last 82px, and the stage's own
+   36px tail padding left the Build It button and status line shaved to a sliver at full scroll
+   (Fred's phone, Vibe Coder, 2026-07-30). The stage now reserves the dock's full height plus the
+   safe area below its content, matching the reserve the chat body already keeps. ---- */
+@media (max-width: 720px) {
+  html body #ide-root .ide-stage { padding-bottom: calc(40px + 88px + env(safe-area-inset-bottom)); }
+}
