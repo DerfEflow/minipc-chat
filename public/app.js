@@ -29,13 +29,14 @@ const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "mi
 const LS_LIVEJOBS = "dominion.livejobs.v1", LS_LIVEJOB_OLD = "dominion.livejob";
 
 // ---- Phase 2 privacy modes (Fred's hard allow-list; the SERVER enforces, this mirrors it) ----
-// normal = all providers + local · trusted = OpenAI/Anthropic direct + local · private = local only.
-let privacyCfg = { trustedProviders: ["openai", "anthropic"] };   // filled from /api/models .privacy
+// normal = all providers · trusted = OpenAI/Anthropic direct · private = Anthropic direct only
+// (the single-provider lane, repurposed 2026-07-30 when Local Qwen left the picker).
+let privacyCfg = { trustedProviders: ["openai", "anthropic"], privateProviders: ["anthropic"] };   // filled from /api/models .privacy
 let availCache = {};                                              // provider -> has-key, from /api/models
 const providerAllowedClient = (mode, provider) => {
   if (provider === "local" || !provider) return true;
   if (mode === "normal") return true;
-  if (mode === "private") return false;
+  if (mode === "private") return privacyCfg.privateProviders.includes(provider);
   return privacyCfg.trustedProviders.includes(provider);   // trusted
 };
 // Disable (never remove) model options the current privacy mode disallows, with an honest suffix.
@@ -917,6 +918,7 @@ async function loadModels() {
       const avail = cat.available || {};
       availCache = avail;
       if (cat.privacy && Array.isArray(cat.privacy.trustedProviders)) privacyCfg.trustedProviders = cat.privacy.trustedProviders;
+      if (cat.privacy && Array.isArray(cat.privacy.privateProviders)) privacyCfg.privateProviders = cat.privacy.privateProviders;
       // Owner-only surfaces (the Wildfire switch and the roster star) key off this. The server is
       // the authority: it both sets this flag and refuses a non-owner arming attempt independently.
       window.dominionIsOwner = cat.wildfire === true;
@@ -1419,8 +1421,9 @@ function renderAttachStrip() {
 
 // The honest gate, mirrored from the server: pictures need a vision-badged model. Never swaps the
 // model, never silently drops the picture — it says so, and offers the one real fix that doesn't
-// change the user's model pick: transcribing the picture to text ("Read text instead"). Private
-// mode gets its own honest copy with NO button, because OCR itself is cloud and would be refused.
+// change the user's model pick: transcribing the picture to text ("Read text instead"). Since
+// Private became the Anthropic-direct lane (2026-07-30), OCR and vision both work there too, so
+// no mode needs a special buttonless message any more.
 function attachSendBlocked(attachments = pendingAtt) {
   return attachments.some((a) => !usablePendingAttachment(a)) || (attImages(attachments) > 0 && !modelSeesImages());
 }
@@ -1433,13 +1436,10 @@ function updateAttachGate() {
   } else if (attachSendBlocked()) {
     attachWarn.hidden = false;
     attachWarn.replaceChildren();
-    const priv = privacyModeSel && privacyModeSel.value === "private";
     const span = document.createElement("span");
-    span.textContent = priv
-      ? "Private mode is local-only and the local model can't view pictures. Remove the picture, or change Privacy to use a vision model or OCR."
-      : "This model can't view pictures — pick one with the 👁 badge, remove it, or transcribe it: ";
+    span.textContent = "This model can't view pictures — pick one with the 👁 badge, remove it, or transcribe it: ";
     attachWarn.appendChild(span);
-    if (!priv) {
+    {
       const b = document.createElement("button");
       b.type = "button"; b.className = "att-ocr"; b.textContent = "Read text instead";
       b.title = "Transcribe the picture(s) with OCR so this model can read them";

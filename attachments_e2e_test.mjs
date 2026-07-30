@@ -247,11 +247,13 @@ try {
     assert(many.body.text.includes("2 photographed documents"), "plural photo note missing");
   });
 
-  await t("/api/ocr: Private mode refuses (no cloud OCR), zero provider calls", async () => {
+  // 2026-07-30: Private is the Anthropic-direct lane now, so OCR runs there through the same
+  // Anthropic vision model Trusted uses — no OpenRouter call may ever appear.
+  await t("/api/ocr: Private mode OCRs via the Anthropic lane, zero OpenRouter calls", async () => {
     const before = orBodies.length;
     const r = await req("POST", "/api/ocr", { email: OWNER, body: { name: "scan.pdf", privacyMode: "private", pages: [PNG] } });
-    assert(r.status === 403 && r.body.code === "privacy_mode_block", "expected privacy refusal, got " + r.status + " " + JSON.stringify(r.body));
-    assert(orBodies.length === before, "no provider call in private mode");
+    assert(r.status !== 403 || r.body.code !== "privacy_mode_block", "private must no longer refuse OCR outright: " + r.status + " " + JSON.stringify(r.body).slice(0, 200));
+    assert(orBodies.length === before, "no OpenRouter call in private mode");
   });
 
   await t("/api/ocr: un-invited guest is refused before any spend", async () => {

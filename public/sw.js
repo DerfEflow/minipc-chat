@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v136-local-leaves-picker";
+const CACHE = "dominion-ai-v137-private-anthropic-lane";
 const SHELL = [
   "/",
   "/index.html",

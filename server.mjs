@@ -117,7 +117,7 @@ import {
   executionManagerPrompt, forgeFrameworkPrompt, normalizeForgeTier, evaluateCompletionEvidence,
 } from "./execution-policy.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
-import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS } from "./privacy.mjs";
+import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS, PRIVATE_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createUsersStore } from "./tenancy.mjs";
 import { createTenantResolver, filterToolDefs, toolAllowedFor, FORGE_TOOLS } from "./tenantstores.mjs";
@@ -4690,9 +4690,9 @@ function readRawBody(req, maxBytes = 25 * 1024 * 1024) {
 // a cheap vision model transcribes them and the text goes back to ride the normal
 // {kind:"text"} attachment wire — so a scanned document still works with EVERY chat model
 // afterward, DeepSeek and local included. Gates mirror /chat exactly (identity, invite,
-// credits), the privacy allow-list is honored refuse-not-substitute (Private mode = no
-// cloud OCR, period; Trusted mode = a trusted-provider vision model), pages are capped,
-// and non-owner cost is charged to their credits like any turn.
+// credits), the privacy allow-list is honored refuse-not-substitute (Trusted and Private
+// both OCR through the Anthropic vision model; Private is the Anthropic-direct lane since
+// 2026-07-30), pages are capped, and non-owner cost is charged to their credits like any turn.
 const OCR_MODEL = cfgGet("OCR_MODEL", "qwen/qwen3-vl-8b-instruct");
 const OCR_MODEL_TRUSTED = cfgGet("OCR_MODEL_TRUSTED", "anthropic/claude-haiku-4-5");
 const OCR_MAX_PAGES = 12;
@@ -4756,12 +4756,11 @@ async function handleOcr(req, res) {
   if (!T.isOwner && !T.invited) return json(403, { error: "You need an access code before OCR can run.", code: "needs_invite" });
   if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) return json(402, { error: "OCR needs credits. Add credits in Setup first.", code: "needs_credits" });
 
-  // Privacy allow-list, refuse-not-substitute: Private = local only, and there is no local
-  // vision model, so scanned-PDF OCR is refused honestly rather than silently going out.
+  // Privacy allow-list, refuse-not-substitute. Private (the Anthropic-direct lane, 2026-07-30)
+  // and Trusted both OCR through the Anthropic vision model; Normal uses the cheap default.
   const pmode = normalizeMode(body.privacyMode);
   let model = OCR_MODEL;
-  if (pmode === "private") return json(403, { error: "Private mode allows local models only, and OCR needs a cloud vision model. Switch privacy to Normal or Trusted for this file, or attach a text PDF.", code: "privacy_mode_block" });
-  if (pmode === "trusted") model = OCR_MODEL_TRUSTED;
+  if (pmode === "trusted" || pmode === "private") model = OCR_MODEL_TRUSTED;
   const gate = modeAllows(pmode, model);
   if (!gate.allowed) return json(403, { error: gate.reason, code: "privacy_mode_block" });
   const rec = modelById(model);
@@ -5998,12 +5997,14 @@ async function handleChat(req, res) {
   // empty for the owner too, which silently dropped every Auto turn onto the local Qwen — the one
   // path with no auto-continue, a small context window, and a 6-round cap. Fred never wants local
   // answering chat, so Auto now resolves to his real default (DeepSeek V4 Pro), which carries the
-  // full finish-the-job machinery. Explicit "local" still runs local (Command Deck / Private mode).
-  // If the current privacy mode forbids the cloud default (Trusted/Private), fall BACK to local
-  // rather than refuse: Auto means "you choose for me," and local is allowed in every mode.
+  // full finish-the-job machinery. Explicit "local" still runs local (Command Deck's lane only,
+  // since 2026-07-30 when Local Qwen left the app's picker). If the current privacy mode forbids
+  // the cloud default (Trusted/Private, which is now the Anthropic-direct lane), Auto resolves to
+  // the first catalog model that mode DOES allow — never a silent drop onto local.
   if (T.isOwner && !cloudModel && !explicitLocal) {
     const ownerDefault = defaultModelFor(true);
     if (modeAllows(privacyMode, ownerDefault).allowed) cloudModel = ownerDefault;
+    else { const alt = CATALOG_MODELS.find((m) => modeAllows(privacyMode, m.id).allowed); if (alt) cloudModel = alt.id; }
   }
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
@@ -8121,7 +8122,7 @@ const server = http.createServer(async (req, res) => {
       }
       // Phase 2: tell the UI the privacy modes + which providers each mode permits, so the picker can
       // filter and the switch can render. The server ALSO enforces (privacy.mjs) — this is display only.
-      payload.privacy = { modes: PRIVACY_MODES, default: DEFAULT_PRIVACY_MODE, trustedProviders: [...TRUSTED_PROVIDERS] };
+      payload.privacy = { modes: PRIVACY_MODES, default: DEFAULT_PRIVACY_MODE, trustedProviders: [...TRUSTED_PROVIDERS], privateProviders: [...PRIVATE_PROVIDERS] };
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify(payload));
     }

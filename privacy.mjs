@@ -6,10 +6,14 @@
  * within that allow-list, whatever model Fred picks is used exactly, never substituted. A picked
  * model that the mode disallows is REFUSED with a clear message, never silently swapped.
  *
- *   Normal  (default) : all providers (OpenRouter, DeepSeek, OpenAI direct, Anthropic direct) + local
- *   Trusted           : direct no-train providers (OpenAI direct, Anthropic direct) + local ONLY.
+ *   Normal  (default) : all providers (OpenRouter, DeepSeek, OpenAI direct, Anthropic direct)
+ *   Trusted           : direct no-train providers (OpenAI direct, Anthropic direct) ONLY.
  *                       No OpenRouter, no DeepSeek.
- *   Private           : LOCAL model only. Zero cloud calls.
+ *   Private           : the single-provider lane — Anthropic direct ONLY. One contract, one
+ *                       endpoint, the smallest possible set of parties that ever sees a message.
+ *                       (Repurposed 2026-07-30 when Local Qwen left the app's picker; it used to
+ *                       mean "local only". The local class is still permitted server-side in every
+ *                       mode because a non-catalog id never egresses at all.)
  *
  * This module is pure and dependency-light on purpose: the whole privacy guarantee is one small,
  * auditable, unit-tested function. server.mjs enforces it before any egress; the UI mirrors it.
@@ -22,6 +26,11 @@ export const DEFAULT_PRIVACY_MODE = "normal";
 // The providers that do NOT train on API data and retain briefly / offer ZDR (see
 // docs/ACCESS-AND-PRIVACY-DESIGN.md §4). These are the only cloud providers Trusted mode permits.
 export const TRUSTED_PROVIDERS = new Set(["openai", "anthropic"]);
+
+// Private mode's whole allow-list: one direct no-train provider, so the exposure surface cannot
+// get smaller without going to zero. Anthropic because it is the house's deepest-integrated direct
+// lane; swapping the single provider is a one-word change here and nowhere else.
+export const PRIVATE_PROVIDERS = new Set(["anthropic"]);
 
 // Normalize a client-supplied mode to one of the three; anything unrecognized falls back to the
 // documented default (Normal). The server is the enforcement point regardless of what the UI sends.
@@ -53,7 +62,9 @@ export function modeAllows(mode, model) {
   if (cls === "local") return { allowed: true, modelClass: "local", reason: "" };
   if (m === "normal") return { allowed: true, modelClass: cls, reason: "" };
   if (m === "private") {
-    return { allowed: false, modelClass: cls, reason: "Private mode allows local models only — nothing leaves your hardware. This model was refused, not substituted; pick a local model or switch modes." };
+    if (PRIVATE_PROVIDERS.has(cls)) return { allowed: true, modelClass: cls, reason: "" };
+    const who = cls === "openrouter" ? "OpenRouter" : cls === "deepseek" ? "DeepSeek" : cls === "openai" ? "OpenAI" : cls;
+    return { allowed: false, modelClass: cls, reason: `Private mode is the single-provider lane: Anthropic direct only, one contract and one endpoint. ${who} was refused, not substituted; pick an Anthropic model or switch modes.` };
   }
   // trusted
   if (TRUSTED_PROVIDERS.has(cls)) return { allowed: true, modelClass: cls, reason: "" };
@@ -67,6 +78,6 @@ export function providerAllowed(mode, provider) {
   const m = normalizeMode(mode);
   if (provider === "local") return true;
   if (m === "normal") return true;
-  if (m === "private") return false;
+  if (m === "private") return PRIVATE_PROVIDERS.has(provider);
   return TRUSTED_PROVIDERS.has(provider);
 }

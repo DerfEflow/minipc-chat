@@ -54,12 +54,14 @@ t("Normal: everything allowed (all providers + local)", () => {
   if (DS) assert.equal(modeAllows("normal", DS).allowed, true);
   if (OAI) assert.equal(modeAllows("normal", OAI).allowed, true);
 });
-t("Private: local allowed, EVERY cloud provider refused", () => {
+// 2026-07-30: Private became the single-provider lane (Anthropic direct only) when Local Qwen
+// left the app's picker. Local class stays allowed server-side (a non-catalog id never egresses).
+t("Private: Anthropic direct allowed, every other cloud provider refused", () => {
   assert.equal(modeAllows("private", "local").allowed, true);
   assert.equal(modeAllows("private", OR).allowed, false);
   if (DS) assert.equal(modeAllows("private", DS).allowed, false);
   if (OAI) assert.equal(modeAllows("private", OAI).allowed, false);
-  if (ANT) assert.equal(modeAllows("private", ANT).allowed, false);
+  if (ANT) assert.equal(modeAllows("private", ANT).allowed, true, "Anthropic direct must be allowed in Private");
 });
 t("Trusted: local + OpenAI + Anthropic allowed; OpenRouter + DeepSeek refused", () => {
   assert.equal(modeAllows("trusted", "local").allowed, true);
