@@ -484,9 +484,10 @@ function setChatPendingAttachments(c, attachments) {
 function restoreChatModel() {
   if (!modelSel) return;
   const c = cur();
-  const desired = (c && c.model) || localStorage.getItem(LS_MODEL) || "local";
+  const saved = (c && c.model) || localStorage.getItem(LS_MODEL) || "";
+  const desired = (saved && saved !== "local" && saved !== "auto") ? saved : defaultCloudModel();
   const opt = Array.from(modelSel.options).find((o) => o.value === desired);
-  modelSel.value = opt ? desired : "local";
+  modelSel.value = opt ? desired : defaultCloudModel();
   updateModelTrigger();
   updateCloudBadge();
   renderModelPanel();
@@ -507,7 +508,8 @@ function newChat() {
   if (typeof window.closeForgeDial === "function") window.closeForgeDial();
   detachCurrentSession();
   const now = Date.now();
-  const defaultModel = localStorage.getItem(LS_MODEL) || (modelSel ? modelSel.value : "local");
+  const lsModel = localStorage.getItem(LS_MODEL);
+  const defaultModel = (lsModel && lsModel !== "local" && lsModel !== "auto") ? lsModel : ((modelSel && modelSel.value) || defaultCloudModel());
   const savedTier = localStorage.getItem("dominion.forgeTier");
   const c = {
     id: uid(), title: "New chat", messages: [], model: defaultModel, draft: "", pendingAttachments: [],
@@ -876,24 +878,36 @@ function showErr(t) { document.querySelector(".err")?.remove(); const e = docume
 // tools, 💬 = chat-only) and dimmed when that provider has no key configured. If either fetch fails
 // the static options in index.html survive as a fallback. Fred's lock: local raw names never surface.
 function fmtCtxShort(n) { if (!n) return ""; return n >= 1e6 ? (n % 1e6 ? (n / 1e6).toFixed(1) : n / 1e6) + "M" : Math.round(n / 1e3) + "K"; }
+/*
+ * The cloud default, now that Local Qwen left the picker (Fred, 2026-07-30). Everything that used
+ * to fall back to "local" resolves here instead: Fred's daily driver first, then the first keyed,
+ * privacy-allowed model in the catalog. Returns "" only before the catalog has loaded; the
+ * post-load re-render resolves it for real. Never returns "battalion" — a swarm is a deliberate
+ * pick, not a silent default.
+ */
+const PREFERRED_DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
+function defaultCloudModel() {
+  const mode = privacyModeSel ? privacyModeSel.value : "normal";
+  const ok = (m) => {
+    if (!m || m.id === "battalion") return false;
+    const keyed = m.provider === "openrouter" ? availCache.openrouter : m.provider === "openai" ? availCache.openai : m.provider === "deepseek" ? availCache.deepseek : m.provider === "anthropic" ? availCache.anthropic : true;
+    return keyed !== false && providerAllowedClient(mode, m.provider);
+  };
+  for (const g of catalogGroups) for (const m of g.models || []) if (m.id === PREFERRED_DEFAULT_MODEL && ok(m)) return m.id;
+  // A default should answer promptly: prefer a model with no hidden thinking step, so the slow-
+  // settings banner never greets a fresh install. Reasoning models remain one deliberate tap away.
+  for (const g of catalogGroups) for (const m of g.models || []) if (ok(m) && !m.reasoning) return m.id;
+  for (const g of catalogGroups) for (const m of g.models || []) if (ok(m)) return m.id;
+  return "";
+}
 function fmtPriceShort(m) { return (!m.inCost && !m.outCost) ? "Free" : `$${m.inCost}/${m.outCost}`; }
 let catalogGroups = [];   // live /api/models groups — the source for the custom model panel
 async function loadModels() {
   if (!modelSel) return;
   const saved = (cur() && cur().model) || localStorage.getItem(LS_MODEL);
-  const localGroup = document.getElementById("model-local-group");
-  try {
-    const r = await fetch("/ollama/v1/models", { cache: "no-store" });
-    if (r.ok && localGroup) {
-      const ids = ((await r.json()).data || []).map((m) => m.id || m.name).filter(Boolean);
-      localGroup.innerHTML = "<option value='local'>Local Qwen (free)</option>";
-      for (const id of ids) {
-        const o = document.createElement("option");
-        o.value = id; o.textContent = (MODEL_TIER_LABEL[id] || id.replace(/:.*$/, "")) + " (local)";
-        localGroup.appendChild(o);
-      }
-    }
-  } catch {}
+  // Local Qwen left this picker (Fred, 2026-07-30): no /ollama model probe, no local optgroup.
+  // The model itself keeps running for Command Deck and the persona pipeline; only Dominion chat
+  // stopped offering it.
   // Cloud groups from the live catalog. Only rebuild if the fetch succeeds — otherwise leave the
   // static index.html options intact so a picked cloud id never vanishes.
   try {
@@ -908,8 +922,8 @@ async function loadModels() {
       window.dominionIsOwner = cat.wildfire === true;
       try { document.dispatchEvent(new CustomEvent("dominion-owner-known")); } catch {}
       catalogGroups = cat.groups || [];
-      // Drop every existing cloud optgroup (keep the local one) before rebuilding.
-      Array.from(modelSel.querySelectorAll("optgroup")).forEach((g) => { if (g.id !== "model-local-group") g.remove(); });
+      // Drop every existing optgroup before rebuilding from the live catalog.
+      Array.from(modelSel.querySelectorAll("optgroup")).forEach((g) => g.remove());
       for (const grp of (cat.groups || [])) {
         if (!grp.models || !grp.models.length) continue;
         const og = document.createElement("optgroup");
@@ -939,9 +953,10 @@ async function loadModels() {
     }
   } catch {}
   // Restore this chat's pick if it exists in the live catalog. Privacy may disable it, but does
-  // not silently change it: the user must explicitly pick a different model.
+  // not silently change it: the user must explicitly pick a different model. A saved "local"/
+  // "auto" (or a model that left the catalog) resolves to the cloud default instead.
   const opt = saved && Array.from(modelSel.options).find((o) => o.value === saved);
-  modelSel.value = (saved === "auto" || !opt) ? "local" : saved;
+  modelSel.value = (saved === "auto" || saved === "local" || !opt) ? defaultCloudModel() : saved;
   updateCloudBadge();
   updateModelTrigger();
   renderModelPanel();
@@ -970,7 +985,7 @@ function modelHue(id) {
 
 function updateModelTrigger() {
   if (!modelCurrent || !modelSel) return;
-  const v = modelSel.value; let name = "Local Qwen", price = "", local = true, granted = false;
+  const v = modelSel.value; let name = "Default", price = "", local = false, granted = false;
   if (v && v !== "local") {
     const m = findCatalogModel(v);
     if (m) { name = m.name; price = (!m.inCost && !m.outCost) ? "Free" : fmtPriceShort(m); local = false; granted = m.broadAccess === true; }
@@ -996,10 +1011,8 @@ function modelRowHtml(o, cur, mode) {
 function renderModelPanel() {
   if (!modelPanel || !modelSel) return;
   const mode = privacyModeSel ? privacyModeSel.value : "normal", cur = modelSel.value;
-  let html = `<div class="model-group is-local">Local · free · private</div>`;
-  html += modelRowHtml({ id: "local", name: "Local Qwen", free: true, meta: "on-box · free · private", tool: true }, cur, mode);
-  const lg = document.getElementById("model-local-group");
-  if (lg) for (const o of lg.querySelectorAll("option")) { if (o.value === "local") continue; html += modelRowHtml({ id: o.value, name: o.textContent.replace(/\s*\(local\)$/, ""), free: true, meta: "on-box · local", tool: true }, cur, mode); }
+  // No local rows: Local Qwen left this picker (Fred, 2026-07-30). Cloud catalog only.
+  let html = "";
   for (const g of catalogGroups) {
     if (!g.models || !g.models.length) continue;
     html += `<div class="model-group">${escapeHtml(g.category)}</div>`;
@@ -1070,7 +1083,9 @@ function paceRead(s) {
   const why = [];
   let score = 0;
   const add = (text, n) => { why.push(text); score += n; };
-  if (!s.model || s.model === "local" || s.model.startsWith("local")) {
+  if (!s.model) {
+    // Unresolved (catalog still loading): unknown is not slow — say nothing rather than guess.
+  } else if (s.model === "local" || s.model.startsWith("local")) {
     add("Local Qwen runs on one computer here instead of a data centre, so it writes slowly", 3);
   } else {
     const m = findCatalogModel(s.model);
@@ -1799,7 +1814,9 @@ async function streamReply(c) {
           ? { role: m.role, content: m.content, attachments: m.attachments }
           : { role: m.role, content: m.content })),
         mode: modeSel ? modeSel.value : "auto",
-        model: (st.modelId && st.modelId !== "local" && st.modelId !== "auto") ? st.modelId : "auto",
+        // Never "local", and "auto" only as a last resort before the catalog has loaded: the
+        // server's auto-routing may still know the local lane, but the app no longer offers it.
+        model: (st.modelId && st.modelId !== "local" && st.modelId !== "auto") ? st.modelId : (defaultCloudModel() || "auto"),
         privacyMode: privacyModeSel ? privacyModeSel.value : "normal",
         persona: resolvePersona(),
         temperature: settings.temperature,

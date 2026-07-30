@@ -227,14 +227,13 @@
         <svg class="glyph control-glyph"><use href="#i-model"></use></svg>
         <button type="button" class="control-copy model-trigger" id="model-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="Model">
           <small>Model</small>
-          <span class="model-current" id="model-current">Local Qwen</span>
+          <span class="model-current" id="model-current">Default</span>
         </button>
-        <!-- Hidden native select = the state holder; all model logic drives this, the panel mirrors it. -->
-        <select id="model" aria-label="Model" class="model-native" tabindex="-1" aria-hidden="true">
-          <optgroup label="Local (free · private)" id="model-local-group">
-            <option value="local">Local Qwen (free)</option>
-          </optgroup>
-        </select>
+        <!-- Hidden native select = the state holder; all model logic drives this, the panel mirrors it.
+             Local Qwen left this picker (Fred, 2026-07-30): the local model still runs for Command
+             Deck and the persona pipeline, but Dominion chat routes cloud-only. Options arrive from
+             /api/models at load. -->
+        <select id="model" aria-label="Model" class="model-native" tabindex="-1" aria-hidden="true"></select>
         <div class="model-panel" id="model-panel" role="listbox" aria-label="Choose a model" hidden></div>
       </div>
 
@@ -558,7 +557,7 @@
   <script src="/dominion-lenses.js?v=14" defer></script>
   <script src="/dominion-beginner.js?v=3" defer></script>
   <script src="/dominion-vibe.js?v=11" defer></script>
-  <script src="/app.js?v=60"></script>
+  <script src="/app.js?v=61"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=5" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>

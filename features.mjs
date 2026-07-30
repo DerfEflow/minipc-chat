@@ -140,7 +140,7 @@ export const FEATURES = [
       "In the picker: 🔧 means the model can use tools, 💬 means it can only talk, 👁 means it can see pictures.",
       "In the owner's interface only, a model whose name is RED AND BOLD holds the machine grant: full read and write on the laptop's C, F, G and Z drives through an elevated node, plus administrator PowerShell, Command Prompt and Terminal. A name in the normal colour cannot reach the machines at all. 30 of the 43 models carry the grant.",
       "Still owner-only, ★ marks the shorter Wildfire roster: models trusted to run broad multi-step work once the Wildfire switch on the Forge dial is armed. Red says CAN reach the machines; ★ says trusted to be turned loose on them.",
-      "Privacy: Normal allows every provider, Trusted restricts to OpenAI and Anthropic direct plus local, Private uses the local model only.",
+      "Privacy: Normal allows every provider, Trusted restricts to OpenAI and Anthropic direct. The local model left the picker; Private (local only) currently allows no chat model.",
       "A privacy setting is never silently overridden. A disallowed choice is refused and explained.",
     ],
   },

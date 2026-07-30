@@ -23,7 +23,10 @@ assert.match(app, /function transcriptModelPlan\(c\)/, "model history must be de
 assert.match(app, /entries\.length\s*<\s*3/, "the visual model ledger must stop after three entries");
 assert.match(app, /c\.model\s*!==\s*actualModel/, "a newly selected model must render as a pending era without falsifying message history");
 assert.match(app, /className\s*=\s*"model-era-divider"/, "model changes need a visible transcript boundary");
-assert.match(app, /const defaultModel\s*=\s*localStorage\.getItem\(LS_MODEL\)/, "new chats must start with the user's default model, not the previous session's model");
+// 2026-07-30: the default now filters out local/auto (Local Qwen left the picker) but must still
+// originate from the stored per-device default, not the previous session's live selection.
+assert.match(app, /const lsModel\s*=\s*localStorage\.getItem\(LS_MODEL\)/, "new chats must start with the user's default model, not the previous session's model");
+assert.match(app, /lsModel !== "local" && lsModel !== "auto"/, "the stored default must never resolve to the local model");
 assert.match(app, /loadModels\(\)\.then\(\(\)\s*=>\s*\{[\s\S]*renderAll\(\)/, "catalog arrival must replace raw provider ids with human model names");
 assert.match(app, /!jobChat\.model && j\.model/, "legacy and paused chats must recover their model from the durable job ledger");
 assert.match(app, /const budgetByChat\s*=\s*Object\.create\(null\)/, "budget state must be keyed by chat");
