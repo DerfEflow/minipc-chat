@@ -32,6 +32,10 @@ const PROTECTED_RE = [
 
 const sha = (s) => createHash("sha256").update(String(s)).digest();
 
+// How long a silent stream stays "healthy" before a same-name newcomer may replace it. Two missed
+// heartbeats plus slack, mirroring the client's own HEARTBEAT_LAPSE_MS judgement of the hub.
+const DUP_STALE_MS = 45000;
+
 export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, authNode = null, onConnect = null } = {}) {
   const enabled = !!token;
   const tokenDigest = enabled ? sha(token) : null;
@@ -71,9 +75,28 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     } else {
       name = authKey;   // "user:<uid>"
     }
-    // One live stream per node: a reconnect replaces the old socket (the old one is dead or dying).
+    /*
+     * One live stream per node — but WHO wins matters. This used to kick the old socket
+     * unconditionally, on the theory that a reconnect means the old one is dead or dying. On
+     * 2026-07-30 two laptop clients (a scheduled-task node plus an orphan from an earlier manual
+     * start) turned that theory into an eviction war: each connect kicked the other, the kicked one
+     * reconnected on its 1s post-success backoff, and the hub logged connect/disconnect every ~1.3s
+     * for days. Any job dispatched down the stream died with it — Fred saw "workshop cannot be
+     * reached" on adopt. So now: while the current stream is provably healthy (a heartbeat write
+     * landed recently), a same-name newcomer is REFUSED with 409. The client treats that as a
+     * failed connect and backs off toward its 30s cap, harmless. When the old stream really dies,
+     * its close handler clears the entry (or its beats stop landing and it goes stale), and the
+     * next knock is accepted. Worst-case lockout for a genuine fast reconnect is DUP_STALE_MS.
+     */
     const prev = nodes.get(name);
-    if (prev) { try { prev.res.end(); } catch {} clearInterval(prev.beat); }
+    if (prev) {
+      const aliveMs = Date.now() - (prev.lastBeatOk || prev.connectedAt);
+      if (aliveMs < DUP_STALE_MS) {
+        log(`hands: node "${name}" duplicate connect REFUSED (live stream healthy, last beat ${Math.round(aliveMs / 1000)}s ago) — a second client is running somewhere`);
+        return json(res, 409, { error: "a live stream for this node already exists; refusing the duplicate" });
+      }
+      try { prev.res.end(); } catch {} clearInterval(prev.beat);
+    }
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
     res.write("event: hb\ndata: {}\n\n");
     // The node's self-description (drives, platform, elevation) rides the connect URL as base64url
@@ -95,8 +118,10 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
         };
       }
     } catch { info = null; }
-    const entry = { res, info, connectedAt: Date.now(), lastSeen: Date.now(), jobsSent: 0, jobsDone: 0 };
-    entry.beat = setInterval(() => { try { res.write("event: hb\ndata: {}\n\n"); } catch {} }, heartbeatMs);
+    const entry = { res, info, connectedAt: Date.now(), lastSeen: Date.now(), lastBeatOk: Date.now(), jobsSent: 0, jobsDone: 0 };
+    // lastBeatOk only advances when the write is ACCEPTED (true = flushed to the socket). A wedged
+    // or dead connection stops advancing it, which is what lets a genuine reconnect through above.
+    entry.beat = setInterval(() => { try { if (res.write("event: hb\ndata: {}\n\n")) entry.lastBeatOk = Date.now(); } catch {} }, heartbeatMs);
     nodes.set(name, entry);
     log(`hands: node "${name}" connected`);
     try { if (typeof onConnect === "function") onConnect(name); } catch {}

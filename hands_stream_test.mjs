@@ -92,8 +92,23 @@ assert.equal(hub.stats().nodes, 1, "the test node should connect");
   ok("the carve-out refuses a protected path even with streaming on");
 }
 
+// 6. a duplicate same-name connect is refused while the live stream is healthy (the 2026-07-30
+// laptop eviction war: two clients kicked each other every ~1.3s and every dispatched job died
+// with the stream it rode in on).
+{
+  const r = await fetch(BASE + "/hands/stream?node=streamnode", {
+    headers: { authorization: "Bearer " + TOKEN, accept: "text/event-stream" },
+  });
+  assert.equal(r.status, 409, "the newcomer must be refused, not the incumbent kicked");
+  try { await r.body?.cancel(); } catch {}
+  assert.equal(hub.stats().nodes, 1, "the original node must still be registered");
+  const alive = await hub.dispatch("streamnode", "__echo_stream", { count: 2 }, { timeoutMs: 30000 });
+  assert.equal(alive.ok, true, "the incumbent stream must still carry jobs after the refusal");
+  ok("a duplicate connect is refused and the incumbent keeps working");
+}
+
 node.kill();
 server.close();
 rmSync(WORK, { recursive: true, force: true });
-console.log(`\n${passed}/5 checks passed - hands streaming verified against a real node`);
+console.log(`\n${passed}/6 checks passed - hands streaming verified against a real node`);
 process.exit(0);
