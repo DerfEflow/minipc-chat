@@ -11,6 +11,23 @@
     linear-gradient(180deg, rgba(235, 249, 255, .09), transparent 7%),
     linear-gradient(90deg, #0b1a22, #010709 78%, #071418); overflow-y: auto; }
   #overlay { z-index: 1150; }
+  /* Android repaint trap (Fred's phone, 2026-07-30: hamburger = "just a blurry pane" on a CLEAN
+     cache — the scrim shows, the drawer never arrives; desktop at phone width renders fine).
+     The drawer carried backdrop-filter + clip-path + a compositor transform slide, and that trio
+     is exactly the layer-promotion family Android Chrome mishandles. On phones the drawer now
+     slides by plain `left` with no blur and no clip: boring on purpose, and it cannot not-paint.
+     transform:none !important because cinematic-05's #sidebar rule sets translateX(-105%) and
+     the *-open panel rules (ide/forge/images .css, loaded after this file) set body-scoped
+     transforms at higher specificity — the drawer must never ride ANY transform on a phone. */
+  #sidebar {
+    backdrop-filter: none;
+    clip-path: none;
+    will-change: auto;
+    transform: none !important;
+    left: -110%;
+    transition: left .22s ease;
+  }
+  #sidebar.open { left: 0; }
 }
 /* Panel sheets always sit above the cinematic chrome (telemetry rail z7, footer z8, header z100). */
 #smodal, #mmodal, #pmodal, #tmodal, #amodal, #imodal { z-index: 1300; }
