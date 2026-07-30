@@ -23,7 +23,7 @@
   let CFG = {
     available: true,
     syncMaxN: 4,
-    draft: { available: false, model: "", refs: false, brand: "Free Draft (NVIDIA)" },
+    draft: { available: false, model: "", refs: false, brand: "Free Draft Engine" },
     tokens: {
       low: { square: 200, portrait: 167, landscape: 167 },
       medium: { square: 1767, portrait: 1367, landscape: 1367 },
@@ -676,7 +676,7 @@
 
         <section class="draft-module" id="draft-module">
           <div class="draft-icon" aria-hidden="true"><i></i><i></i><i></i></div>
-          <div><span>FREE DRAFT</span><b>$0 · NVIDIA</b><small id="draft-note">Same picture, a faster free engine. No reference images yet — turn this off to use your own photos.</small></div>
+          <div><span>FREE DRAFT ENGINE</span><b>$0</b><small id="draft-note">Same picture, a faster free engine. No reference images yet — turn this off to use your own photos.</small></div>
           <button id="draft-toggle" class="power-toggle" type="button" role="switch" aria-checked="false" aria-label="Use the free draft engine"><i></i></button>
         </section>
 
@@ -1498,7 +1498,7 @@
     try {
       const c = await apiJson(API.config);
       if (c && c.tokens) CFG = c;
-      if (!CFG.draft) CFG.draft = { available: false, model: "", refs: false, brand: "Free Draft (NVIDIA)" };
+      if (!CFG.draft) CFG.draft = { available: false, model: "", refs: false, brand: "Free Draft Engine" };
       syncDraftToggle();
       renderEstimate();
       renderFoundry();

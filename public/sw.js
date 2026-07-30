@@ -1,14 +1,14 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v130-drawer-android-fix";
+const CACHE = "dominion-ai-v131-strip-option1";
 const SHELL = [
   "/",
   "/index.html",
   "/setup.html",
-  "/dominion-tenant.css?v=11",
+  "/dominion-tenant.css?v=12",
   "/dominion-tenant.js?v=4",
   "/dominion-vault.css?v=2",
   "/dominion-images.css?v=8",
-  "/dominion-images.js?v=11",
+  "/dominion-images.js?v=13",
   "/dominion-lexicon.js?v=14",
   "/dominion-lenses.css?v=7",
   "/dominion-beginner.css?v=3",

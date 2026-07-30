@@ -219,7 +219,7 @@ export function createImagesFeature(deps) {
       // Draft lane: same prompt/aspect/n controls, $0, no reference plates (flux.1-dev has no
       // edits endpoint on the free tier) — disabled with the reason, never hidden, same rule OCR
       // and paid generation already follow for a provider with no key.
-      draft: { available: !!nvidiaKey(), model: draftModel, refs: false, brand: "Free Draft (NVIDIA)" },
+      draft: { available: !!nvidiaKey(), model: draftModel, refs: false, brand: "Free Draft Engine" },
     });
   }
 
@@ -238,9 +238,9 @@ export function createImagesFeature(deps) {
       body: payload, timeout: 120000,
     });
     if (r.status !== 200) return { error: apiErrorMessage(r, "Draft image generation failed") };
-    let j; try { j = JSON.parse(r.buf.toString("utf8")); } catch { return { error: "Unreadable response from NVIDIA." }; }
+    let j; try { j = JSON.parse(r.buf.toString("utf8")); } catch { return { error: "Unreadable response from the draft engine." }; }
     const b64 = j.artifacts?.[0]?.base64;
-    if (!b64) return { error: (j.artifacts?.[0]?.finishReason && j.artifacts[0].finishReason !== "SUCCESS") ? "NVIDIA: " + j.artifacts[0].finishReason : "NVIDIA returned no image." };
+    if (!b64) return { error: (j.artifacts?.[0]?.finishReason && j.artifacts[0].finishReason !== "SUCCESS") ? "Draft engine: " + j.artifacts[0].finishReason : "The draft engine returned no image." };
     return { b64 };
   }
 
@@ -270,7 +270,7 @@ export function createImagesFeature(deps) {
     const isDraft = !!body.draft;
     if (isDraft ? !nvidiaKey() : !key()) {
       return json(res, 503, { error: isDraft
-        ? "The free draft lane needs the NVIDIA key."
+        ? "The free draft engine is not configured on this server."
         : "Image generation needs the OpenAI key (OPEN_AI_DOMINION_UI_APIKEY)." });
     }
 
