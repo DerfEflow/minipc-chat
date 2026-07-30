@@ -591,13 +591,18 @@
         addKv(ui.accountDetails, "Access", account.invited ? "Authorized" : "Code required");
         if (account.credits) {
           addKv(ui.accountDetails, "Credit balance", `${Number(account.credits.balance || 0).toLocaleString()} credits`);
-          addKv(ui.accountDetails, "Usage value", money(account.credits.usdValue));
+          // "Usage value $12.34" was the same number as the balance wearing a currency the holder
+          // cannot spend (Fred, 2026-07-30: guests read cost in credits, never dollars). Dropped
+          // rather than converted, because converting it reprints the line directly above it.
           if (Number(account.credits.pendingPromo || 0) > 0) addKv(ui.accountDetails, "Welcome bonus", `${Number(account.credits.pendingPromo).toLocaleString()} credits held until first purchase`);
         }
         if (account.sponsored) {
           const spent = Number(account.sponsored.spentUsd || 0);
           const cap = Number(account.sponsored.capUsd || 0);
-          addKv(ui.accountDetails, "Monthly usage", `${money(spent)} of ${money(cap)}`);
+          // A sponsored guest's allowance, in the unit they read everywhere else.
+          const perUsd = Number((account.pricing && account.pricing.CREDITS_PER_USD) || 100);
+          const asCredits = (usd) => Math.round((Number(usd) || 0) * perUsd).toLocaleString();
+          addKv(ui.accountDetails, "Monthly usage", `${asCredits(spent)} of ${asCredits(cap)} credits`);
           const meter = node("div", `dt-meter${cap > 0 && spent >= cap ? " dt-meter-danger" : ""}`);
           const fill = node("span");
           fill.style.width = `${Math.min(100, cap > 0 ? spent / cap * 100 : 0)}%`;

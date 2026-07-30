@@ -455,7 +455,17 @@
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => [...(root || document).querySelectorAll(sel)];
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const fmtUsd = (v) => "$" + (v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
+  /*
+   * Guests read every price in this deck as credits (Fred, 2026-07-30). dominion-money.js decides
+   * the wording; the fallback keeps the old dollar text alive if that file ever fails to load,
+   * because a Foundry that throws mid-render is worse than one quoting the wrong unit.
+   */
+  const money = () => window.DominionMoney || { cost: (u) => "$" + (Number(u) || 0).toFixed(4), inCredits: () => false };
+  const fmtUsd = (v) => {
+    const n = Number(v) || 0;
+    if (money().inCredits()) return money().cost(n);
+    return "$" + (n >= 0.01 ? n.toFixed(3) : n.toFixed(4));
+  };
   const pad4 = (n) => String(n).padStart(4, "0");
   async function apiJson(url, opts) {
     const r = await fetch(url, opts);

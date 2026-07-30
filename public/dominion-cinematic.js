@@ -445,6 +445,9 @@
     panel.querySelector("#vault-close").addEventListener("click", () => { panel.hidden = true; });
   }
   const vpLine = (text, cls) => `<div class="vp-line${cls ? " " + cls : ""}">${text}</div>`;
+  // Catalog rates in the viewer's own currency: credits for guests, dollars for the owner
+  // (Fred, 2026-07-30). Falls back to the old dollar wording if dominion-money.js is missing.
+  const vpRate = (i, o) => (window.DominionMoney ? window.DominionMoney.rate(i, o) : "$" + i + " / $" + o);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
   async function openVault(kind) {
@@ -473,7 +476,7 @@
         const groups = (d && d.groups) || [];
         out.innerHTML = vpLine("MODEL ARSENAL · LIVE CATALOG", "cap") + groups.map((g) =>
           vpLine(esc(g.category || "MODELS"), "group") + (g.models || []).map((m) =>
-            `<div class="vp-row"><b>${esc(m.name)}${m.toolCapable ? ' <em class="vp-badge">TOOLS</em>' : ""}</b><span>${[m.params && m.params !== "undisclosed" ? esc(m.params) : null, m.ctx ? esc(Math.round(m.ctx / 1000)) + "K context" : null, (!m.inCost && !m.outCost) ? "free" : "$" + esc(m.inCost) + " / $" + esc(m.outCost) + " per M"].filter(Boolean).join(" · ")}</span></div>`).join("")).join("");
+            `<div class="vp-row"><b>${esc(m.name)}${m.toolCapable ? ' <em class="vp-badge">TOOLS</em>' : ""}</b><span>${[m.params && m.params !== "undisclosed" ? esc(m.params) : null, m.ctx ? esc(Math.round(m.ctx / 1000)) + "K context" : null, (!m.inCost && !m.outCost) ? "free" : esc(vpRate(m.inCost, m.outCost)) + " per M"].filter(Boolean).join(" · ")}</span></div>`).join("")).join("");
         out.innerHTML += vpLine("Pick any of these from the Model selector in the command bar.", "hint");
       } else {
         const d = await (await fetch("/memory")).json();

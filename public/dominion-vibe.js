@@ -29,6 +29,8 @@
   const $ = (s, r) => (r || document).querySelector(s);
   const bridge = () => window.dominionIdeBridge || null;
   const L = (k) => (window.DominionLexicon ? window.DominionLexicon.L(k) : k);
+  // Guests read plan estimates in credits (Fred, 2026-07-30); see dominion-money.js for the rule.
+  const money = () => window.DominionMoney || { cost: (u, o) => ((o && o.approx) ? "~" : "") + "$" + (Number(u) || 0).toFixed(2), inCredits: () => false };
   const reg = () => (window.DominionLexicon ? window.DominionLexicon.register : "hybrid");
 
   const WINDOWS = ["main", "second", "third"];
@@ -1059,14 +1061,14 @@
         if (!r.ok) return;
         (j.per || []).forEach((e, i) => {
           const cost = $("#vb-cost-" + i), time = $("#vb-time-" + i);
-          if (cost) cost.textContent = "~$" + e.usd.toFixed(2) + (e.basis === "prior" ? "*" : "");
+          if (cost) cost.textContent = money().cost(e.usd, { approx: true }) + (e.basis === "prior" ? "*" : "");
           if (time) time.textContent = e.seconds >= 90 ? "~" + Math.round(e.seconds / 60) + " min" : "~" + e.seconds + "s";
         });
         const total = $("#vb-army-total");
         if (total && j.plan) {
           total.hidden = false;
           const tmin = j.plan.seconds >= 90 ? Math.round(j.plan.seconds / 60) + " min" : j.plan.seconds + "s";
-          total.textContent = "Whole plan: ~" + tmin + " · ~" + Math.round(j.plan.tokens / 1000) + "k tokens · ~$" + j.plan.usd.toFixed(2) + "  (estimates; * = little data yet)";
+          total.textContent = "Whole plan: ~" + tmin + " · ~" + Math.round(j.plan.tokens / 1000) + "k tokens · " + money().cost(j.plan.usd, { approx: true }) + "  (estimates; * = little data yet)";
         }
       } catch {}
     }, 280);

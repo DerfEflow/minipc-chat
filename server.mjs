@@ -1839,7 +1839,10 @@ async function handleIde(req, res, u) {
       const rec = modelById(model) || {};
       const moves = Math.max(2, Math.min(12, (parsed.vision.match(/^\s*[-*]/gm) || []).length));
       const x = visionExtras(parsed.vision, { moves, inCost: rec.inCost || 0, outCost: rec.outCost || 0 });
-      involves = { flags: x.flags, band: costBand(x.est) };
+      // The raw band rides beside the pre-worded string so the client can say it in the viewer's
+      // own currency (Fred, 2026-07-30: guests read credits, never dollars). The string stays for
+      // older clients and for the owner, who reads dollars anyway.
+      involves = { flags: x.flags, band: costBand(x.est), lowUsd: x.est.lowUsd, highUsd: x.est.highUsd };
     }
     // `vision` stays the field name in both phases so one client path reads either; `phase` tells
     // the client whether the bullets are a first build or a change to an app that already exists.
@@ -3124,8 +3127,15 @@ async function runIdeBuild(job, {
     const capOriginal = budget.capUsd;
     // Money for humans. toFixed(2) turned a deliberately tiny test cap into "limit of $0.00,
     // spent $0.0000", which reads as a broken calculator. Small amounts get honest words.
+    // Guests are asked about their build budget in credits, the only currency they hold (Fred,
+    // 2026-07-30). Same conversion billing uses, so the figure in the question matches the figure
+    // that will actually be deducted. The owner keeps dollars, which is what he pays providers in.
     const money = (usd) => {
       const n = Number(usd) || 0;
+      if (!T.isOwner) {
+        const c = creditsForCostUsd(n);
+        return n <= 0 ? "0 credits" : c.toLocaleString() + " credit" + (c === 1 ? "" : "s");
+      }
       if (n === 0) return "$0";
       if (n < 0.01) return "less than a cent";
       return "$" + n.toFixed(2);

@@ -69,6 +69,14 @@
   const $ = (sel) => document.querySelector(sel);
   // Every user-facing string on this surface goes through the register dictionary.
   const L = (k) => (window.DominionLexicon ? window.DominionLexicon.L(k) : k);
+  // Money wording for whoever is looking: credits for guests, dollars for the owner (Fred,
+  // 2026-07-30). dominion-money.js holds the rule; this fallback keeps the old dollar text if that
+  // file fails to load, because an estimate that throws is worse than one in the wrong unit.
+  const money = () => window.DominionMoney || {
+    cost: (u, o) => ((o && o.approx) ? "~" : "") + "$" + (Number(u) || 0).toFixed(2),
+    rate: (i, o, opt) => (opt && opt.long) ? "$" + i + " in / $" + o + " out per million tokens" : "$" + i + "/$" + o,
+    inCredits: () => false,
+  };
   const readEngaged = () => {
     try { return localStorage.getItem(ENGAGED_KEY) === "1"; } catch { return false; }
   };
@@ -526,7 +534,7 @@
           if (est) {
             const mins = e.seconds >= 90 ? Math.round(e.seconds / 60) + " min" : e.seconds + "s";
             const basis = e.basis === "prior" ? " " + L("af_est_prior") : "";
-            est.textContent = "~" + mins + " · ~" + Math.round(e.tokens / 1000) + "k tokens · ~$" + e.usd.toFixed(2) + basis;
+            est.textContent = "~" + mins + " · ~" + Math.round(e.tokens / 1000) + "k tokens · " + money().cost(e.usd, { approx: true }) + basis;
           }
           if (warn) { if (e.warning) { warn.hidden = false; warn.textContent = e.warning.text; warn.className = "af-section-warn af-warn-" + e.warning.level; } else warn.hidden = true; }
         });
@@ -534,7 +542,7 @@
         if (total && j.plan) {
           total.hidden = false;
           const tmin = j.plan.seconds >= 90 ? Math.round(j.plan.seconds / 60) + " min" : j.plan.seconds + "s";
-          total.textContent = L("af_plan_total") + " ~" + tmin + " · ~" + Math.round(j.plan.tokens / 1000) + "k tokens · ~$" + j.plan.usd.toFixed(2);
+          total.textContent = L("af_plan_total") + " ~" + tmin + " · ~" + Math.round(j.plan.tokens / 1000) + "k tokens · " + money().cost(j.plan.usd, { approx: true });
         }
       } catch {}
     }, 280);
@@ -831,8 +839,8 @@
           return {
             id: m.id,
             name: m.name || m.id,
-            priceShort: priced ? "$" + inC + "/$" + outC : "",
-            priceLong: priced ? "$" + inC + " in / $" + outC + " out per million tokens" : "",
+            priceShort: priced ? money().rate(inC, outC) : "",
+            priceLong: priced ? money().rate(inC, outC, { long: true }) : "",
             unavailable: !hasKey(m.provider),
             // The one slot in the app with a floor (Vibe SOW 5.1). The server computes the rule;
             // this only carries the verdict to the orchestrator row's picker.
@@ -1698,11 +1706,31 @@
   /* ---------- progress flame (Fred's ruling 2026-07-21) -----
    * A visible indicator that work is being sent, preventing the UI from looking frozen.
    */
+  /*
+   * TWO CHANNELS, because one was a lie (Fred, 2026-07-30: "the kit lights flash on and then
+   * disappear when working"). The scanner used to bracket the HTTP REQUEST rather than the WORK:
+   * startBuild POSTs /ide/job, gets a job id back in about a second, and its finally-block hid the
+   * light while the build it just started ran on the server for minutes. Every job-starting flow
+   * had the same shape. On top of that, a single global `active` flag meant any one operation's
+   * hide() killed the indicator for every other operation still in flight (the lenses poll,
+   * running every couple of seconds, was a reliable assassin).
+   *
+   *   request channel : refcounted show()/hide() pairs around short fetches. Depth, not a boolean,
+   *                     so overlapping requests cannot switch each other off. Floored at zero, so
+   *                     a call site that hides twice on one path can only under-count, never go
+   *                     negative and wedge the light on forever.
+   *   work channel    : track(labelOrFalse) — server-side jobs, which outlive their start request.
+   *                     Set at build start, reconciled by refreshJobs() against real job state,
+   *                     and cleared the instant the lens sees a terminal event. hide() cannot
+   *                     touch it, which is the whole point.
+   *
+   * The light is lit while EITHER channel wants it. The green sweep still means exactly what the
+   * CSS comment says it means: work is happening right now. A job that is waiting on the user is
+   * not working, and refreshJobs() clears the channel for it.
+   */
   window.ideFlame = (() => {
-    let active = false, timer = null, startTime = 0;
-    const show = (label) => {
-      if (active) return;
-      active = true;
+    let depth = 0, tracking = false, trackLabel = "", timer = null, startTime = 0, lastLabel = "";
+    const el = () => {
       let flame = $("#ide-flame");
       if (!flame) {
         flame = document.createElement("div");
@@ -1710,26 +1738,52 @@
         flame.innerHTML = '<div class="if-inner"><div class="if-scanner"><span class="if-led"></span></div></div><strong class="if-label"></strong><div class="if-timer"></div>';
         document.body.append(flame);
       }
-      flame.querySelector(".if-label").textContent = label || L("flame_working");
-      flame.classList.add("on");
-      startTime = Date.now();
-      const timerEl = flame.querySelector(".if-timer");
-      timer = setInterval(() => {
-        const sec = Math.floor((Date.now() - startTime) / 1000);
-        const m = Math.floor(sec / 60), s = sec % 60;
-        timerEl.textContent = (m > 0 ? m + ":" : "") + (s < 10 ? "0" : "") + s;
-      }, 1000);
+      return flame;
     };
-    const hide = () => {
-      active = false;
-      if (timer) clearInterval(timer);
-      const flame = $("#ide-flame");
-      if (flame) {
-        flame.classList.remove("on");
-        setTimeout(() => { if (flame && !active) flame.remove(); }, 200);
+    // One paint for both channels. The elapsed clock starts when the light first comes on and keeps
+    // running across a handover (request -> tracked job), because from the user's side it is one
+    // continuous wait, not two.
+    const paint = () => {
+      const want = depth > 0 || tracking;
+      if (!want) {
+        if (timer) { clearInterval(timer); timer = null; }
+        const flame = $("#ide-flame");
+        if (flame) {
+          flame.classList.remove("on");
+          setTimeout(() => { if (flame && !(depth > 0 || tracking)) flame.remove(); }, 200);
+        }
+        lastLabel = "";
+        return;
+      }
+      const flame = el();
+      const label = (tracking && trackLabel) || lastLabel || L("flame_working");
+      if (label !== lastLabel) { flame.querySelector(".if-label").textContent = label; lastLabel = label; }
+      flame.classList.add("on");
+      if (!timer) {
+        startTime = Date.now();
+        const timerEl = flame.querySelector(".if-timer");
+        const tick = () => {
+          const sec = Math.floor((Date.now() - startTime) / 1000);
+          const m = Math.floor(sec / 60), s = sec % 60;
+          timerEl.textContent = (m > 0 ? m + ":" : "") + (s < 10 ? "0" : "") + s;
+        };
+        tick();
+        timer = setInterval(tick, 1000);
       }
     };
-    return { show, hide };
+    const show = (label) => { depth++; if (label) { lastLabel = label; const f = el(); f.querySelector(".if-label").textContent = label; } paint(); };
+    const hide = () => { depth = Math.max(0, depth - 1); paint(); };
+    // No pre-seeding of lastLabel here: paint() compares against it to decide whether to write, so
+    // setting it first made the handover silently keep the request's wording ("starting build")
+    // after the work channel had taken over with a truer one ("Building").
+    const track = (labelOrFalse) => {
+      tracking = !!labelOrFalse;
+      trackLabel = typeof labelOrFalse === "string" ? labelOrFalse : "";
+      paint();
+    };
+    // Hard reset for a surface teardown: forget both channels rather than leaving a stuck light.
+    const clear = () => { depth = 0; tracking = false; trackLabel = ""; paint(); };
+    return { show, hide, track, clear, isOn: () => depth > 0 || tracking };
   })();
 
   // Friendly error messages for network and timeout issues.
@@ -1915,6 +1969,20 @@
 
   // The vibe coder's honesty card: the cost band and every real-world commitment the vision
   // implies, before the Build button, never after the money is gone.
+  /*
+   * "What this involves" quotes a cost BAND. In credits the two ends are whole numbers, so a band
+   * whose ends round together collapses to a single figure rather than printing "3 and 3", and a
+   * band that rounds to nothing at all says so in words instead of quoting a confident zero.
+   */
+  function involvesBand(inv) {
+    const lo = Number(inv && inv.lowUsd), hi = Number(inv && inv.highUsd);
+    if (!money().inCredits() || !isFinite(lo) || !isFinite(hi)) return (inv && inv.band) || "";
+    const c = window.DominionMoney;
+    const a = c.toCredits(lo), b = c.toCredits(hi);
+    if (!a && !b) return "under one credit";
+    return a === b ? c.cost(lo) : c.cost(lo) + " to " + c.cost(hi);
+  }
+
   function renderInvolves(inv) {
     const log = $("#st-chat-log");
     const card = document.createElement("div");
@@ -1924,7 +1992,9 @@
     card.append(h);
     const cost = document.createElement("div");
     cost.className = "inv-cost";
-    cost.textContent = L("involves_cost") + " " + (inv.band || "");
+    // Guests read the band in credits. The server's pre-worded string is the fallback for a payload
+    // that predates the raw numbers, and it is what the owner sees regardless.
+    cost.textContent = L("involves_cost") + " " + involvesBand(inv);
     card.append(cost);
     const flags = Array.isArray(inv.flags) ? inv.flags : [];
     if (!flags.length) {
@@ -2158,6 +2228,9 @@
         signal: controller.signal });
       const j = await r.json();
       if (!r.ok || j.error) { status(j.error || "The build could not start.", true); go.disabled = false; window.ideFlame.hide(); return; }
+      // The request is over; the WORK has just begun. Hand the scanner to the work channel here so
+      // there is no dark gap between this response and the first refreshJobs() reconciliation.
+      window.ideFlame.track(JOB_UI.running.label);
       status("");
       setJourneyPhase("build");
       const chat = $("#st-chat");
@@ -2232,6 +2305,22 @@
   }
 
   /*
+   * The scanner's work channel, reconciled against real job state. A job that is RUNNING lights it
+   * and names the move in flight; a job waiting on the user does not, because the green sweep is
+   * reserved for "burning tokens right now" (see the CSS note) and a paused wait is the opposite.
+   * No live job at all clears the channel, which is what finally turns the light off after a build
+   * ends while the page was in the background.
+   */
+  function trackFlameFromJobs() {
+    if (!window.ideFlame) return;
+    const live = (state.jobs || []).filter((j) => !j.done);
+    const working = live.find((j) => !j.waiting && jobUiState(j) === "running");
+    if (!working) return window.ideFlame.track(false);
+    const move = working.move && working.move.title ? working.move.title.slice(0, 40) : "";
+    window.ideFlame.track(move || JOB_UI.running.label);
+  }
+
+  /*
    * Reconcile with the server. Called on boot, on becoming visible, and on pageshow. This IS the
    * "come back and it is still there" promise: the client keeps no build state of its own, it
    * simply asks what is true now.
@@ -2246,6 +2335,7 @@
     } catch { return; }
     paintRail();
     renderAsk();
+    trackFlameFromJobs();
     const live = state.jobs.find((j) => !j.done);
     if (live) {
       const kind = jobUiState(live);

@@ -28,6 +28,18 @@ const LS_CHATS = "dominion.chats.v1", LS_CUR = "dominion.cur.v1", LS_MODEL = "mi
 // stream in the background at once. LS_LIVEJOB_OLD is the legacy single-job key, migrated once.
 const LS_LIVEJOBS = "dominion.livejobs.v1", LS_LIVEJOB_OLD = "dominion.livejob";
 
+/*
+ * Money wording (Fred, 2026-07-30: guests never read dollars). dominion-money.js owns the rule for
+ * every surface; this accessor exists so a failed/stale load of that file degrades to the old
+ * dollar wording instead of throwing inside a render loop. See dominion-money.js for the doctrine.
+ */
+const money = () => window.DominionMoney || {
+  cost: (u, o) => ((o && o.approx) ? "~" : "") + "$" + (Number(u) || 0).toFixed(2),
+  rate: (i, o) => (!i && !o) ? "Free" : "$" + i + "/" + o,
+  balance: (u) => "$" + (Number(u) || 0).toFixed(2),
+  inCredits: () => false, toCredits: (u) => Math.max(1, Math.ceil((Number(u) || 0) * 100)),
+};
+
 // ---- Phase 2 privacy modes (Fred's hard allow-list; the SERVER enforces, this mirrors it) ----
 // normal = all providers · trusted = OpenAI/Anthropic direct · private = Anthropic direct only
 // (the single-provider lane, repurposed 2026-07-30 when Local Qwen left the picker).
@@ -705,7 +717,9 @@ function renderMsg(m, i, isLastAi, mount = wrap) {
     if (m.meta.outputTokens || m.meta.costUsd) {
       const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(n));
       const toks = [m.meta.inputTokens ? fmt(m.meta.inputTokens) + " in" : null, m.meta.outputTokens ? fmt(m.meta.outputTokens) + " out" : null].filter(Boolean).join(" / ");
-      const cost = typeof m.meta.costUsd === "number" && m.meta.costUsd > 0 ? "$" + (m.meta.costUsd < 0.01 ? m.meta.costUsd.toFixed(4) : m.meta.costUsd.toFixed(2)) : "";
+      // Guests read this in credits, the only currency they hold (Fred, 2026-07-30). DominionMoney
+      // owns the wording for every surface; the number itself is the server's, untouched.
+      const cost = typeof m.meta.costUsd === "number" && m.meta.costUsd > 0 ? money().cost(m.meta.costUsd) : "";
       const label = ["⚡ " + (toks || "tokens n/a"), cost].filter(Boolean).join(" · ");
       bit(label, "Tokens and cost for this exchange");
     }
@@ -901,7 +915,27 @@ function defaultCloudModel() {
   for (const g of catalogGroups) for (const m of g.models || []) if (ok(m)) return m.id;
   return "";
 }
-function fmtPriceShort(m) { return (!m.inCost && !m.outCost) ? "Free" : `$${m.inCost}/${m.outCost}`; }
+function fmtPriceShort(m) { return money().rate(m.inCost, m.outCost); }
+/*
+ * One composer for a native <select> row, so the money-ready repaint can rewrite the labels without
+ * refetching the catalog. The native list is aria-hidden but still reachable by keyboard and by some
+ * mobile pickers, and it must never disagree with the panel about the price or the currency.
+ */
+function optionLabel(m) {
+  const bench = m.toolCapable ? "🔧" : "💬";
+  const bits = [m.name, fmtPriceShort(m), fmtCtxShort(m.ctx)].filter(Boolean);
+  return `${m.broadCapable ? "★ " : ""}${bench} ${bits.join(" · ")}`;
+}
+function relabelModelOptions() {
+  if (!modelSel) return;
+  for (const g of catalogGroups) {
+    for (const m of g.models || []) {
+      const o = Array.from(modelSel.options).find((x) => x.value === m.id);
+      if (o) o.textContent = optionLabel(m);
+    }
+  }
+  applyPrivacyFilter();   // re-applies the "blocked in x" / "key needed" suffixes it owns
+}
 let catalogGroups = [];   // live /api/models groups — the source for the custom model panel
 async function loadModels() {
   if (!modelSel) return;
@@ -944,7 +978,7 @@ async function loadModels() {
           // Fred normally sees, but the native list is still reachable (keyboard, some mobile
           // browsers), and it should not disagree with the panel about which models can act.
           if (m.broadAccess) o.dataset.grant = "1";
-          o.textContent = `${m.broadCapable ? "★ " : ""}${bench} ${bits.join(" · ")}`;
+          o.textContent = optionLabel(m);
           const provOk = m.provider === "openrouter" ? avail.openrouter : m.provider === "openai" ? avail.openai : m.provider === "deepseek" ? avail.deepseek : m.provider === "anthropic" ? avail.anthropic : true;
           if (provOk === false) o.dataset.noKey = "1";   // key-vs-privacy annotation applied by applyPrivacyFilter
           og.appendChild(o);
@@ -2066,15 +2100,27 @@ function saveSettingsUI() {
 // both sides because the server composes it once.
 const budgetByChat = Object.create(null);
 const currentBudget = () => curId ? budgetByChat[curId] || null : null;
-const fmtBudget = (n, unit) => unit === "usd" ? "$" + (+n).toFixed(2) : Math.floor(n) + " credits";
+/*
+ * The session's own unit leads, because the server created the session with it and every figure in
+ * the row is denominated in it. A guest whose session was nevertheless opened in dollars (an older
+ * row, or a session inherited from an owner-side context) gets the FIGURE converted as well as the
+ * word, so the box can never label a dollar amount as credits (Fred, 2026-07-30).
+ */
+const fmtBudget = (n, unit) => {
+  if (unit !== "usd") return Math.floor(Number(n) || 0).toLocaleString() + " credits";
+  if (money().inCredits()) return money().balance(n);
+  return "$" + (Number(n) || 0).toFixed(2);
+};
 function renderBudget() {
   const box = document.getElementById("budgetbox"); if (!box) return;
   const budgetCur = currentBudget();
   if (!budgetCur || !curId) { box.hidden = true; return; }
   box.hidden = false;
   const el = document.getElementById("bb-nums");
+  // The free-balance tail carried a bare number ("· 1240 free"), which is the one place in a money
+  // window where a unitless figure is unforgivable. It wears the session's own unit now.
   if (el) el.textContent = fmtBudget(budgetCur.spent || 0, budgetCur.unit) + " of " + fmtBudget(budgetCur.budget || 0, budgetCur.unit)
-    + (budgetCur.available != null ? " · " + Math.floor(budgetCur.available) + " free" : "");
+    + (budgetCur.available != null ? " · " + fmtBudget(budgetCur.available, budgetCur.unit) + " free" : "");
 }
 async function fetchBudget(chatId = curId) {
   if (!chatId) { renderBudget(); return; }
@@ -2137,6 +2183,15 @@ function wireBudgetUi() {
   const bc = document.getElementById("bcredits"); if (bc) bc.addEventListener("click", () => { location.href = "/setup.html"; });
 }
 try { wireBudgetUi(); fetchBudget(); } catch {}
+
+/*
+ * Money wording starts as guest wording and firms up when /account answers (dominion-money.js).
+ * Anything already painted with a price repaints once, here, so the owner never keeps a credits
+ * figure from the first few hundred milliseconds of a cold load.
+ */
+document.addEventListener("dominion-money-ready", () => {
+  try { relabelModelOptions(); updateModelTrigger(); renderModelPanel(); renderAll(); renderBudget(); } catch {}
+});
 
 /*
  * CHAT FOCUS MODE (Fred, 2026-07-25) — mobile. Once the open chat has a sent message, the

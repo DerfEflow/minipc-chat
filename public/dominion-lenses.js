@@ -204,6 +204,10 @@
       if (terminal) {
         closed = true;
         es.close();
+        // The work really ended, so kill the scanner NOW rather than leaving it sweeping until the
+        // next 20-second reconciliation. The request channel is untouched: a fetch still in flight
+        // keeps its own light (Fred, 2026-07-30).
+        if (window.ideFlame) window.ideFlame.track(false);
       }
     };
     /*
@@ -424,7 +428,11 @@
     if (!el) return;
     if (!state.jobId) { el.textContent = L("cost_none"); return; }
     if (!d.costUsd && !d.costCredits) { el.textContent = L("cost_zero"); return; }
-    el.textContent = d.costCredits ? d.costCredits + " credits" : "$" + d.costUsd.toFixed(4);
+    // Credits when the server counted them; otherwise DominionMoney decides by viewer, so a guest
+    // never falls through to a dollar figure just because this payload omitted the credit count.
+    el.textContent = d.costCredits
+      ? Number(d.costCredits).toLocaleString() + " credits"
+      : (window.DominionMoney ? window.DominionMoney.cost(d.costUsd) : "$" + d.costUsd.toFixed(4));
   }
 
   async function paintLog() {
