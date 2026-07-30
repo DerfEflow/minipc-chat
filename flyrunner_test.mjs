@@ -30,25 +30,35 @@ const t = async (name, fn) => { await fn(); console.log("  PASS  " + name); pass
  * A mock Fly. Records every call so the test can assert on the LIFECYCLE, not just the answer:
  * what was created, what was read, and — the important one — what was destroyed.
  */
-function mockFly({ resultTar = null, stdout = "", stderr = "", exitCode = 0, failCreate = false, neverStops = false } = {}) {
+function mockFly({ resultTar = null, stdout = "", stderr = "", exitCode = 0, failCreate = false, neverFinishes = false, stopsEarly = false } = {}) {
   const calls = [];
+  /*
+   * This mock enforces the rule that broke the first design in production-shaped reality: Fly's exec
+   * endpoint answers 412 on a machine that is not RUNNING. The original mock answered exec happily
+   * whatever the machine's state, so every test passed while the live run returned nothing at all.
+   * A mock permitting what the real API forbids is worse than no mock, because it manufactures
+   * confidence. `stopsEarly` reproduces that exact failure so the test can prove it is handled.
+   */
+  let state = "started";
   const fetchImpl = async (url, opts = {}) => {
     const method = opts.method || "GET";
     calls.push({ method, url });
     const body = opts.body ? JSON.parse(opts.body) : null;
     const reply = (obj, status = 200) => ({ ok: status < 400, status, text: async () => JSON.stringify(obj) });
+    const b64 = (buf) => Buffer.from(buf).toString("base64");
 
     if (method === "POST" && /\/machines$/.test(url)) {
       if (failCreate) return reply({ error: "capacity" }, 500);
-      return reply({ id: "m_test1", state: "started", config: body && body.config });
+      state = stopsEarly ? "stopped" : "started";
+      return reply({ id: "m_test1", state, config: body && body.config });
     }
-    if (method === "GET" && /\/machines\/m_test1$/.test(url)) {
-      return reply({ id: "m_test1", state: neverStops ? "started" : "stopped" });
-    }
+    if (method === "GET" && /\/machines\/m_test1$/.test(url)) return reply({ id: "m_test1", state });
+    if (method === "GET" && /\/machines$/.test(url)) return reply([]);
     if (method === "POST" && /\/exec$/.test(url)) {
+      if (state !== "started") return reply({ error: "failed_precondition: machine not running" }, 412);
       const cmd = String((body && body.command && body.command[2]) || "");
-      const b64 = (buf) => Buffer.from(buf).toString("base64");
-      if (cmd.includes("/tmp/out.log")) return reply({ stdout: b64(stdout + "\n__DOMINION_EXIT__:" + exitCode + "\n") });
+      if (cmd.includes("/tmp/done")) return reply({ stdout: neverFinishes ? "" : b64(String(exitCode) + "\n") });
+      if (cmd.includes("/tmp/out.log")) return reply({ stdout: b64(stdout) });
       if (cmd.includes("/tmp/err.log")) return reply({ stdout: b64(stderr) });
       if (cmd.includes("/tmp/result.tar.gz")) return reply({ stdout: resultTar ? b64(resultTar) : "" });
       return reply({ stdout: "" });
@@ -88,12 +98,26 @@ await t("a FAILING command is a result with an exit code, not an error", async (
   assert.equal(mock.destroyed(), true);
 });
 
-await t("a machine that never stops is timed out AND destroyed", async () => {
-  const mock = mockFly({ neverStops: true });
+await t("a build that never finishes is timed out AND destroyed", async () => {
+  const mock = mockFly({ neverFinishes: true });
   const out = await runnerWith(mock).run({ command: "sleep 999", timeoutMs: 5000 });
   assert.equal(out.ok, false);
   assert.equal(out.timedOut, true, "it must report the timeout honestly");
   assert.equal(mock.destroyed(), true, "a hung machine must still be destroyed — this is the one that costs money");
+});
+
+/*
+ * THE REGRESSION THAT THE FIRST LIVE RUN TAUGHT (2026-07-30). The build used to BE the machine's
+ * init command, so the machine stopped the moment it finished — and every attempt to read the
+ * results back hit Fly's 412 "machine not running". The build now idles after writing its finish
+ * file, and this test holds that line: a machine found already stopped yields nothing readable and
+ * must be reported as a failure rather than as an empty success.
+ */
+await t("a machine that stopped before it could be read is a failure, not an empty success", async () => {
+  const mock = mockFly({ stopsEarly: true, stdout: "invisible" });
+  const out = await runnerWith(mock).run({ command: "npm test", timeoutMs: 4000 });
+  assert.equal(out.ok, false, "unreadable results must never be reported as a successful run");
+  assert.equal(mock.destroyed(), true);
 });
 
 await t("a create failure is reported and leaks nothing", async () => {
@@ -180,4 +204,4 @@ await t("with a runner configured, node_info reports a Linux shell", async () =>
   rmSync(WORK, { recursive: true, force: true });
 });
 
-console.log(`\n${passed}/11 checks passed - the build runner keeps its lifecycle and its walls`);
+console.log(`\n${passed}/12 checks passed - the build runner keeps its lifecycle and its walls`);

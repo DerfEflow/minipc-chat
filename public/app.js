@@ -881,6 +881,7 @@ function renderAll() {
   restoreChatModel();
   try { document.dispatchEvent(new CustomEvent("dominion-chat-changed", { detail: { chatId: curId } })); } catch {}
   updateFocusMode();   // Chat Focus Mode follows the open chat: first sent message folds the chrome
+  try { paintToCrucible(); } catch {}   // the hand-off button follows the same chat
   renderTranscript();  // measure after focus mode settles so names fit the field's real height
   renderSidebar(); renderBudget(); syncComposer(); scroll();
 }
@@ -2189,6 +2190,50 @@ try { wireBudgetUi(); fetchBudget(); } catch {}
  * Anything already painted with a price repaints once, here, so the owner never keeps a credits
  * figure from the first few hundred milliseconds of a cold load.
  */
+/* ---------- Send to Crucible (Fred, 2026-07-30) --------------------------------------------
+ * The crossing from "we talked about an app" to "the app is being built". It appears once the
+ * conversation is actually about something, reads the chat into a project brief on the server,
+ * makes the folder, and hands off to the Crucible with the level picker showing — because the
+ * skill level stays the person's choice, and the surface then reacts to what the chat said.
+ */
+const toCrucibleBtn = document.getElementById("to-crucible");
+function paintToCrucible() {
+  if (!toCrucibleBtn) return;
+  const c = cur();
+  const turns = c && c.messages ? c.messages.filter((m) => m.role === "user").length : 0;
+  const words = c && c.messages
+    ? c.messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content.split(/\s+/).length : 0), 0)
+    : 0;
+  // Two exchanges or a substantial first one. A button offering to start a project after "hello"
+  // is noise, and noise is what people learn to ignore.
+  toCrucibleBtn.hidden = !(turns >= 2 || words > 120);
+}
+if (toCrucibleBtn) toCrucibleBtn.addEventListener("click", async () => {
+  const c = cur();
+  if (!c || busyFor(curId)) return;
+  toCrucibleBtn.disabled = true;
+  const label = toCrucibleBtn.querySelector("span:last-child");
+  const was = label ? label.textContent : "";
+  if (label) label.textContent = "Reading the plan…";
+  try {
+    const r = await fetch("/ide/from-chat", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: c.messages.map((m) => ({ role: m.role, content: typeof m.content === "string" ? m.content : "" })) }),
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { if (label) label.textContent = was; alert(j.error || "The plan could not be read."); return; }
+    // The Crucible owns everything past this point: it makes the folder, fills the brief, and shows
+    // the level picker. Handing it an event rather than reaching into its internals keeps the two
+    // surfaces separable.
+    document.dispatchEvent(new CustomEvent("dominion-to-crucible", { detail: { name: j.name, brief: j.brief, chatId: curId } }));
+  } catch {
+    alert("The server could not be reached.");
+  } finally {
+    toCrucibleBtn.disabled = false;
+    if (label) label.textContent = was || "Send to Crucible";
+  }
+});
+
 document.addEventListener("dominion-money-ready", () => {
   try { relabelModelOptions(); updateModelTrigger(); renderModelPanel(); renderAll(); renderBudget(); } catch {}
 });

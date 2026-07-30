@@ -11,8 +11,8 @@
 <link rel="manifest" href="/manifest.webmanifest" />
 <link rel="apple-touch-icon" href="/icons/dominion-core-180-v1.png" />
 <link rel="icon" href="/icons/dominion-core-192-v1.png" />
-<link rel="stylesheet" href="/dominion-ui.css?v=42" />
-<link rel="stylesheet" href="/dominion-tenant.css?v=13" />
+<link rel="stylesheet" href="/dominion-ui.css?v=43" />
+<link rel="stylesheet" href="/dominion-tenant.css?v=14" />
 <link rel="stylesheet" href="/dominion-vault.css?v=3" />
 <link rel="stylesheet" href="/dominion-forge.css?v=6" />
 <link rel="stylesheet" href="/dominion-images.css?v=9" />
@@ -388,7 +388,14 @@
           </button>
         </div>
         <textarea id="input" rows="1" placeholder="Type your input here" autocomplete="off"></textarea>
-        <div id="bar-mid"></div>
+        <!-- Send to Crucible (Fred, 2026-07-30): the open space at the bottom left of the chat
+             field, which is where the crossing from "we talked about an app" to "the app is being
+             built" belongs. Hidden until the conversation is actually about something. -->
+        <div id="bar-mid">
+          <button type="button" id="to-crucible" hidden title="Turn this conversation into a project in the Crucible">
+            <span class="tc-spark" aria-hidden="true"></span><span>Send to Crucible</span>
+          </button>
+        </div>
         <button id="speak" class="mic" title="Speak answers aloud (off)" aria-label="Toggle spoken answers">
           <svg class="glyph"><use href="#i-speaker"></use></svg>
         </button>
@@ -556,12 +563,12 @@
   <script src="/dominion-forge.js?v=6"></script>
   <script src="/dominion-images.js?v=14" defer></script>
   <script src="/dominion-lexicon.js?v=14"></script>
-  <script src="/dominion-ide.js?v=34" defer></script>
+  <script src="/dominion-ide.js?v=35" defer></script>
   <script src="/dominion-tour.js?v=6" defer></script>
   <script src="/dominion-lenses.js?v=15" defer></script>
   <script src="/dominion-beginner.js?v=3" defer></script>
   <script src="/dominion-vibe.js?v=12" defer></script>
-  <script src="/app.js?v=63"></script>
+  <script src="/app.js?v=64"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=5" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>

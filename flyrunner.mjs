@@ -48,11 +48,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * tell a real result from a machine that died mid-sentence. `set +e` around the user command is the
  * point — a failing build is a RESULT, not an error, and its exit code has to survive.
  */
-function bootScript({ command, workdir }) {
+function bootScript({ command, workdir, keepAliveSec }) {
   return [
     "set -e",
     "mkdir -p " + workdir,
-    "tar -xzf /project.tar.gz -C " + workdir,
+    "tar -xzf /project.tar.gz -C " + workdir + " 2>/dev/null || true",
     "cd " + workdir,
     "set +e",
     "(" + command + ") > /tmp/out.log 2> /tmp/err.log",
@@ -60,7 +60,18 @@ function bootScript({ command, workdir }) {
     "set -e",
     // Exclude the noise nobody wants shipped back across the wire.
     "tar -czf /tmp/result.tar.gz -C " + workdir + " --exclude=node_modules --exclude=.git . 2>/dev/null || true",
-    "echo \"__DOMINION_EXIT__:$CODE\"",
+    // The finish line, written LAST so its existence proves everything above it completed.
+    "echo \"$CODE\" > /tmp/done",
+    /*
+     * Then stay alive to be read. THIS IS THE WHOLE REASON THE FIRST DESIGN FAILED (2026-07-30,
+     * first live run): the build was the machine's init command, so the machine stopped the instant
+     * it finished — and Fly's exec endpoint answers 412 "machine not running" on a stopped machine,
+     * which is the only way to get a file back out. Every result came back empty against a mock that
+     * happily replied to exec regardless of state. The machine now idles here until the caller has
+     * read what it wants and destroys it; if the caller dies first, this sleep ends and auto_destroy
+     * collects the machine, so the worst case is bounded minutes of billing rather than forever.
+     */
+    "sleep " + keepAliveSec,
   ].join("\n");
 }
 
@@ -137,7 +148,7 @@ export function createFlyRunner({
             // No env: the machine gets no secret of ours, on purpose.
             env: { DOMINION_SANDBOX: "1" },
             files: projectBase64 ? [{ guest_path: "/project.tar.gz", raw_value: projectBase64 }] : [],
-            init: { cmd: ["/bin/sh", "-lc", bootScript({ command: cmd, workdir })] },
+            init: { cmd: ["/bin/sh", "-lc", bootScript({ command: cmd, workdir, keepAliveSec: Math.ceil(cap / 1000) + 120 })] },
           },
         },
       });
@@ -145,39 +156,53 @@ export function createFlyRunner({
       if (!id) return { ok: false, error: "Fly did not return a machine id" };
       log(`[runner] machine ${id} started (${cpus} cpu / ${memoryMb}MB, cap ${Math.round(cap / 1000)}s)`);
 
-      // Wait for the command to finish, which for a one-shot machine means the machine stopping.
       const deadline = started + cap;
+
+      // First, the machine has to actually be running before anything can be asked of it.
       let state = "created";
       while (Date.now() < deadline) {
-        await sleep(POLL_MS);
         let m = null;
         try { m = await api(`/apps/${app}/machines/${id}`, { timeoutMs: 15_000 }); }
-        catch (e) { if (e.status === 404) { state = "destroyed"; break; } throw e; }
+        catch (e) { if (e.status === 404) { state = "gone"; break; } throw e; }
         state = (m && m.state) || state;
-        if (onLog) { try { onLog({ state, ms: Date.now() - started }); } catch {} }
-        if (state === "stopped" || state === "destroyed" || state === "failed") break;
+        if (state === "started" || state === "stopped" || state === "failed" || state === "destroyed") break;
+        await sleep(POLL_MS);
       }
-      if (state !== "stopped" && state !== "destroyed" && state !== "failed") {
+      if (state === "failed" || state === "gone" || state === "destroyed") {
+        return { ok: false, machineId: id, ms: Date.now() - started, error: "the build machine did not start" };
+      }
+
+      /*
+       * Then wait for the FINISH FILE, not for the machine to stop. The machine deliberately idles
+       * after the build so it can still be read; watching its state would therefore wait forever.
+       * /tmp/done is written last and holds the exit code, so its appearance is proof the command
+       * ran to completion rather than a guess from the outside.
+       */
+      let doneRaw = "";
+      while (Date.now() < deadline) {
+        const d = await readFile(id, "/tmp/done", 32);
+        doneRaw = String(d.text || "").trim();
+        if (doneRaw) break;
+        if (onLog) { try { onLog({ state: "running", ms: Date.now() - started }); } catch {} }
+        await sleep(POLL_MS);
+      }
+      if (!doneRaw) {
         return { ok: false, timedOut: true, machineId: id, ms: Date.now() - started,
                  error: `the build ran past its ${Math.round(cap / 1000)}s limit and was stopped` };
       }
 
-      // Everything the run produced, read back off the (stopped, still-present) machine.
+      // Everything the run produced, read off the still-running machine before it is destroyed.
       const outs = await Promise.all([
         readFile(id, "/tmp/out.log", 400_000),
         readFile(id, "/tmp/err.log", 400_000),
         readFile(id, "/tmp/result.tar.gz", MAX_OUT_BYTES, true),
       ]);
-      const stdout = outs[0].text || "";
-      const stderr = outs[1].text || "";
-      const marker = /__DOMINION_EXIT__:(-?\d+)/.exec(stdout + "\n" + stderr);
-      const exitCode = marker ? Number(marker[1]) : null;
+      const parsedCode = Number(doneRaw);
       return {
         ok: true,
-        exitCode,
-        // The marker is bookkeeping, not output; the user should never see it.
-        stdout: stdout.replace(/__DOMINION_EXIT__:-?\d+\s*/g, ""),
-        stderr,
+        exitCode: Number.isFinite(parsedCode) ? parsedCode : null,
+        stdout: outs[0].text || "",
+        stderr: outs[1].text || "",
         resultBase64: outs[2].base64 || "",
         machineId: id,
         ms: Date.now() - started,

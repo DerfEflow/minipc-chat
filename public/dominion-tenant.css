@@ -745,3 +745,14 @@
 @media (max-width: 720px) {
   html body #ide-root .ide-stage { padding-bottom: calc(40px + 88px + env(safe-area-inset-bottom)); }
 }
+
+/* ---- Send to Crucible on phones (Fred, 2026-07-30). The Option 1 strip above hides #bar-mid,
+   because on a phone that middle slot was dead space between five tiles. The hand-off button now
+   lives there, so the container comes back — but as its own full-width row ABOVE the input rather
+   than a sixth tile squeezed among five. This block sits after the strip block on purpose: same
+   specificity, later file, so it wins the display fight it exists to win. ---- */
+@media (max-width: 720px) {
+  html body #bar-mid { display: flex; grid-column: 1 / -1; order: -1; justify-content: center; }
+  html body #bar-mid:empty, html body #bar-mid:has(> #to-crucible[hidden]) { display: none; }
+  html body #to-crucible { width: 100%; justify-content: center; margin: 0 0 6px; padding: 9px 12px; font-size: 12px; }
+}

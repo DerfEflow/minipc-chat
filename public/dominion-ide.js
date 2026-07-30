@@ -1636,6 +1636,50 @@
   const welcomedThisSession = () => { try { return sessionStorage.getItem(WELCOME_KEY) === "1"; } catch { return false; } };
   const markWelcomed = () => { try { sessionStorage.setItem(WELCOME_KEY, "1"); } catch {} };
 
+  /*
+   * SEND TO CRUCIBLE (Fred, 2026-07-30). The chat hands over a name and a brief; this side does the
+   * rest: open the Crucible, make or reuse a folder, seed the brief, and show the level picker,
+   * because the level stays the person's choice and the surface then dresses itself around what the
+   * chat already decided. The handover is an event rather than a function call, so the two surfaces
+   * stay separable and either can be worked on without the other.
+   */
+  let pendingHandoff = null;
+  document.addEventListener("dominion-to-crucible", async (e) => {
+    const d = (e && e.detail) || {};
+    if (!d.brief) return;
+    pendingHandoff = { name: String(d.name || "").slice(0, 60), brief: String(d.brief || "").slice(0, 8000) };
+    setEngaged(true, { reveal: true });
+    await new Promise((r) => setTimeout(r, 120));
+    // The brief lands first so the level picker is covering a screen that already knows the plan.
+    if ($("#st-prompt")) $("#st-prompt").value = pendingHandoff.brief;
+    if ($("#st-new-name")) $("#st-new-name").value = pendingHandoff.name;
+    saveDraft();
+    await ensureHandoffFolder();
+    setJourneyPhase("clarify");
+    renderStarter();
+    // Always ask the level on a hand-off, even for someone who answered earlier in the session: the
+    // question "how would you like to work" is about THIS project, and this is a new one.
+    if (!$("#cw")) showModePicker();
+  });
+
+  /*
+   * A hand-off should not stall on a folder question. A workshop account gets one made silently; an
+   * account with a real machine keeps its existing folder if it has one, and otherwise is left at
+   * the normal folder row with the name already filled in — the one case where a person must still
+   * choose, because only they know their own disk.
+   */
+  async function ensureHandoffFolder() {
+    if (state.workspaceId) return;
+    if (state.workspaces && state.workspaces.length) { state.workspaceId = state.workspaces[0].id; return; }
+    if (!state.workshop) { const f = $("#dr-folder"); if (f) f.open = true; return; }
+    try {
+      const r = await fetch("/ide/workspace/new", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: (pendingHandoff && pendingHandoff.name) || "my-app" }) });
+      const j = await r.json();
+      if (r.ok && j.workspace) { state.workspaces.push(j.workspace); state.workspaceId = j.workspace.id; }
+    } catch {}
+  }
+
   function showModePicker() {
     const root = $("#ide-root");
     if (!root || $("#cw")) return;

@@ -1841,6 +1841,68 @@ async function handleIde(req, res, u) {
    * That approved vision rides along with the build prompt, so the engine builds what was agreed
    * rather than what was assumed.
    */
+  /*
+   * SEND TO CRUCIBLE (Fred, 2026-07-30): "a button in the chat field... to 'Send to Crucible' which
+   * consolidates an app plan and automatically loads a new project and the default save folder."
+   *
+   * The chat is where people actually decide what they want; the Crucible is where it gets built.
+   * Until now the crossing was manual and lossy — read your own conversation back, summarise it
+   * yourself, retype it into the brief. This reads the conversation once and returns the two things
+   * the Crucible needs to start: a short project NAME and a brief written as instructions rather
+   * than as a recap.
+   *
+   * It does NOT pick the skill level. That stays the person's choice on the next screen, per Fred's
+   * ruling, and the surface then reacts to what the chat said.
+   */
+  if (req.method === "POST" && path === "/ide/from-chat") {
+    const blocked = ideFeature.wall(T) || ideFeature.billableWall(T);
+    if (blocked) return send(blocked);
+    const history = Array.isArray(body.messages) ? body.messages.slice(-40) : [];
+    const said = history
+      .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+      .map((m) => (m.role === "user" ? "PERSON: " : "ASSISTANT: ") + m.content.slice(0, 4000))
+      .join("\n\n")
+      .slice(-24000);
+    if (said.trim().length < 40) {
+      return send({ status: 200, body: { error: "There is not enough in this conversation yet to start a project. Say what you want built, then send it over." } });
+    }
+    const messages = [
+      { role: "system", content: [
+        "You turn a conversation into the opening brief for a software build.",
+        "Return JSON only, no prose around it, shaped exactly:",
+        '{"name":"short-project-name","brief":"what to build, as instructions"}',
+        "",
+        "name: 2 to 4 words, plain, no punctuation beyond spaces and hyphens. It becomes a folder.",
+        "brief: written to the builder, not to the person. State what the thing IS, what it must do,",
+        "and any constraint the person actually stated (a look, a platform, a rule). Use their words",
+        "for anything they were specific about. Do not invent features nobody mentioned, do not pad",
+        "with pleasantries, and do not recap the conversation as a story.",
+        "If the conversation settled a question, write the settled answer, not the debate.",
+        "If something important was never decided, end the brief with a line beginning 'OPEN:' naming it.",
+      ].join("\n") },
+      { role: "user", content: "THE CONVERSATION:\n\n" + said },
+    ];
+    const stored = ((ideFeature.state(T).body || {}).prefs || {}).assignments || {};
+    const resolved = resolveAssignments(stored, { allInOne: stored.allInOne || "", fallback: defaultModelFor(!!T.isOwner) });
+    const model = resolved.build_code || defaultModelFor(!!T.isOwner);
+    const r = await ideChatOnce(model, messages);
+    if (r.costUsd) { try { await meterTurn(T, r.costUsd, "crucible send-to-crucible", ""); } catch {} }
+    if (!r.ok) return send({ status: 200, body: { error: r.error || "The model could not be reached. Try again." } });
+    // JSON-from-a-model is never trusted whole: scan for the object, and fall back to using the raw
+    // reply AS the brief rather than failing the crossing over a formatting slip.
+    let parsed = null;
+    try {
+      const text = String(r.content || "");
+      const a = text.indexOf("{"), b = text.lastIndexOf("}");
+      if (a >= 0 && b > a) parsed = JSON.parse(text.slice(a, b + 1));
+    } catch {}
+    const brief = String((parsed && parsed.brief) || r.content || "").trim().slice(0, 8000);
+    if (!brief) return send({ status: 200, body: { error: "The plan came back empty. Try again, or start the project by hand." } });
+    const rawName = String((parsed && parsed.name) || "").trim();
+    const name = (rawName || brief.split("\n")[0].replace(/^#+\s*/, "")).replace(/[^A-Za-z0-9 ._-]/g, "").trim().slice(0, 48) || "New project";
+    return send({ status: 200, body: { ok: true, name, brief, costUsd: r.costUsd || 0 } });
+  }
+
   if (req.method === "POST" && path === "/ide/intake") {
     const blocked = ideFeature.wall(T) || ideFeature.billableWall(T);
     if (blocked) return send(blocked);

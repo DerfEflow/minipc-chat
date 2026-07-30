@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v139-guest-workshop";
+const CACHE = "dominion-ai-v140-send-to-crucible";
 const SHELL = [
   "/",
   "/index.html",

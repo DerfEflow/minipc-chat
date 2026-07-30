@@ -138,3 +138,31 @@
   .att-cell img, .att-cell .att-file { width: 50px; height: 50px; }
   .att-cell .att-file { width: auto; }
 }
+
+/* ---- Send to Crucible (Fred, 2026-07-30): the open space at the bottom left of the chat field.
+   Quiet until it matters — it appears only once the conversation is about something — and worded
+   rather than iconic, because "this becomes a project" is not a thing a glyph can say. ---- */
+#bar-mid { display: flex; align-items: center; min-width: 0; }
+#to-crucible {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 12px; margin: 0 4px;
+  font: inherit; font-size: 11.5px; font-weight: 600; letter-spacing: .05em; white-space: nowrap;
+  cursor: pointer; border-radius: 9px;
+  color: #d8ecff;
+  border: 1px solid rgba(139, 205, 244, .38);
+  background: linear-gradient(145deg, rgba(18, 52, 78, .85), rgba(4, 14, 24, .92));
+  box-shadow: inset 0 1px 0 rgba(219, 241, 255, .16), 0 6px 18px rgba(0, 0, 0, .45);
+  transition: color .15s ease, border-color .15s ease, box-shadow .15s ease, transform .12s ease;
+}
+#to-crucible:hover { color: #fff; border-color: rgba(157, 255, 146, .55); box-shadow: 0 0 18px rgba(100, 255, 90, .16), inset 0 1px 0 rgba(219, 241, 255, .2); }
+#to-crucible:active { transform: translateY(1px); }
+#to-crucible:disabled { opacity: .6; cursor: default; }
+#to-crucible[hidden] { display: none; }
+#to-crucible .tc-spark {
+  width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+  background: radial-gradient(circle, #d4ffc4 0%, #79ff52 55%, #1c8f3c 100%);
+  box-shadow: 0 0 6px 1px rgba(121, 255, 82, .8);
+}
+/* The phone layout for this button lives at the END of dominion-tenant.css, not here: the Option 1
+   strip block there sets `html body #bar-mid { display: none }` at the same specificity in a LATER
+   file, so a rule written here would lose the cascade and the button would simply never appear. */
