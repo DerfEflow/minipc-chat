@@ -156,7 +156,7 @@ import { createRunAndSee, runPlanFor } from "./idesee.mjs";
 import { createAdoptScanner, composeBrief, analysisPrompt } from "./ideadopt.mjs";
 import { intakeMessages, parseIntake, hasImages, planchatMessages, PLAN_WINDOWS, VISION_MARKER, CHANGE_MARKER } from "./ideintake.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
-import { sweepFindings, sweepReport, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
+import { sweepFindings, sweepReport, brokenReferenceFindings, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
 import { helpVoice } from "./idehelp.mjs";
 import { escalationFor, sendWakeups } from "./idepush.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
@@ -825,6 +825,9 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
       capabilities: catalogReasoningCapabilities(rec),
       sessionKey: opts.sessionId || opts.chatId,
       reasoningMaxTokens: opts.reasoningMaxTokens,
+      // Widen-the-pool recovery (2026-07-30): require_parameters can leave exactly one host, and a
+      // rate-limited host then reads as a dead model. The retry loop sets this to reopen routing.
+      providerPreferences: opts.__widenProviderPool ? { require_parameters: false, allow_fallbacks: true } : undefined,
     });
     const providerLabel = cfg.label;
     const mod = u.protocol === "https:" ? https : http;
@@ -2252,13 +2255,38 @@ async function startIdePreview(T, workspace) {
   const started = await see.launch(job0, root, plan);
   if (!started.ok) return { error: "It could not be started: " + started.error + "." };
 
-  // Poll the port through the node before answering, so the first iframe request finds a page.
-  let up = false;
+  /*
+   * Poll the port through the node before answering, so the first iframe request finds a page.
+   *
+   * IDENTITY CHECK (live catch 2026-07-30). "Something answers on 37311" is NOT proof that YOUR
+   * app answers. When a previous preview survives its kill, the new server cannot bind, the poll
+   * below is satisfied by the OLD app, and the Crucible reports ok:true while the user stares at
+   * the wrong project — a second workspace's preview showed the first workspace's page, start
+   * after start. So when the folder has an index.html, the served page must actually match it.
+   */
+  let up = false, servedHtml = "";
   for (let i = 0; i < 10 && !up; i++) {
     const r = await hands("preview_fetch", { path: "/" }).catch(() => null);
-    if (r && r.ok) up = true; else await new Promise((res) => setTimeout(res, 700));
+    if (r && r.ok) {
+      up = true;
+      try { servedHtml = Buffer.from(String(r.base64 || ""), "base64").toString("utf8").slice(0, 20000); } catch {}
+    } else await new Promise((res) => setTimeout(res, 700));
   }
   if (!up) { await see.stopPreview(started.pid); return { error: "The preview started and then never answered. Try again." }; }
+  if (hasIndex && servedHtml) {
+    let ownTitle = "";
+    try {
+      const own = await hands("fs_read", { path: root + "/index.html", maxBytes: 20000 });
+      ownTitle = (/<title[^>]*>([^<]{1,120})<\/title>/i.exec(String((own && (own.content || own.text)) || "")) || [])[1] || "";
+    } catch {}
+    const servedTitle = (/<title[^>]*>([^<]{1,120})<\/title>/i.exec(servedHtml) || [])[1] || "";
+    if (ownTitle && servedTitle && ownTitle.trim() !== servedTitle.trim()) {
+      await see.stopPreview(started.pid);
+      idePreviews.delete(T.uid);
+      return { error: `The preview port is still held by another app ("${servedTitle.trim()}" instead of "${ownTitle.trim()}"). ` +
+        "Stop the other preview and start this one again; nothing was shown rather than showing you the wrong project." };
+    }
+  }
 
   const until = Date.now() + IDE_PREVIEW_LIFE_MS;
   const timer = setTimeout(() => { stopIdePreview(T).catch(() => {}); }, IDE_PREVIEW_LIFE_MS);
@@ -4005,7 +4033,17 @@ async function runIdeBuild(job, {
         } catch {}
       }
       if (texts.length) {
-        const findings = sweepFindings(texts);
+        // The workspace listing (when the node answers) means a reference to a file that existed
+        // BEFORE this build is never miscalled broken. A failed listing degrades to written-only.
+        let knownPaths = [];
+        try {
+          const listed = await handsFor("fs_list", { path: rootPath, depth: 3, maxEntries: 500 });
+          const entries = (listed && (listed.entries || listed.files || listed.items)) || [];
+          knownPaths = entries.map((e) => String((e && (e.path || e.name)) || e || ""))
+            .map((p) => p.replace(rootPath, "").replace(/^[\\/]+/, ""))
+            .filter(Boolean);
+        } catch {}
+        const findings = [...sweepFindings(texts), ...brokenReferenceFindings(texts, { known: knownPaths })];
         ideJobs.emit(job.id, { type: "run", command: "furnace sweep", ok: findings.length === 0, output: sweepReport(findings) });
 
         let gaps = [];
@@ -4137,6 +4175,13 @@ async function runIdeBuild(job, {
       if (finalFindings.length) {
         knownIncomplete.push(...finalFindings.slice(0, 20).map((f) =>
           "Unfinished marker remains at " + f.path + ":" + f.line + " (" + f.kind + ")."));
+      }
+      // A page that loads a file nobody wrote is a broken app, not a stylistic nit: it must reach
+      // the completion contract as known-incomplete so the build cannot claim it finished.
+      const finalBroken = brokenReferenceFindings(finalTexts);
+      if (finalBroken.length) {
+        knownIncomplete.push(...finalBroken.slice(0, 20).map((f) =>
+          "Broken reference at " + f.path + ":" + f.line + " — " + f.excerpt + "."));
       }
     }
 
@@ -7123,7 +7168,7 @@ async function handleChat(req, res) {
       // turn onto OpenRouter, every later call in the SAME turn stays there — the model id never
       // changes, only the road, and re-fighting a down wire every round would re-spend the whole
       // backoff schedule each time.
-      let usedOverloadReroute = false, forcedTransport = "";
+      let usedOverloadReroute = false, forcedTransport = "", widenedPool = false;
 
       for (let round = 0; !aborted; round++) {
         if (round >= cloudRoundLimit) {
@@ -7309,6 +7354,27 @@ async function handleChat(req, res) {
               tools: toolsThisRound, parallelToolCalls: completionRequired ? false : undefined,
               executionPolicy, sessionId: chatId || job.id,
               __forceProvider: forcedTransport || undefined },
+            onDelta);
+        }
+        /*
+         * Widen-the-pool recovery (live-proven 2026-07-30). An OpenRouter model whose only
+         * parameter-matching host is rate-limited answers 429 forever while the SAME model
+         * answers instantly with routing reopened. Before giving up on an OpenRouter-carried
+         * model, ask again with the pool widened, out loud, once per turn.
+         */
+        if (!or.ok && !aborted && !widenedPool && retryableProviderError(or) &&
+            (forcedTransport === "openrouter" || cloudProvider === "openrouter") &&
+            /429|rate|provider returned error|capacity|overload|unavailable/i.test(String(or.error || ""))) {
+          widenedPool = true;
+          bumpUsage(or && or.usage);
+          sse({ type: "supervisor", monitored: cloudModel, supervisor: "provider recovery",
+                decision: "widen_pool", reason: "the matched host stayed rate-limited; asking OpenRouter to route to any host that can serve this model" });
+          console.log(`[dominion-ai] widening provider pool for ${cloudModel} after: ${String(or.error || "").slice(0, 120)}`);
+          or = await cloudChatStream(cloudModel, messages,
+            { temperature: opts.temperature, num_predict: roundOutputCap, signal: ac.signal,
+              tools: toolsThisRound, parallelToolCalls: completionRequired ? false : undefined,
+              executionPolicy, sessionId: chatId || job.id,
+              __forceProvider: forcedTransport || undefined, __widenProviderPool: true },
             onDelta);
         }
         /*

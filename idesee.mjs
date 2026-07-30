@@ -124,11 +124,28 @@ export function createRunAndSee({ hands, chat, jobs, log = () => {} } = {}) {
     return { ok: true, pid };
   }
 
+  /*
+   * Stop the preview by PID and then by PORT (live catch 2026-07-30).
+   *
+   * Start-Process returns the pid of the launcher, and for the static mode that launcher hands the
+   * work to a detached `node -e` server and exits immediately. So `taskkill /T` on the recorded pid
+   * routinely kills a process that is already gone while the real server keeps holding 37311 — and
+   * every later preview then binds nothing, answers from the STALE app, and reports success. A
+   * second workspace's preview showed the first workspace's page for exactly this reason.
+   *
+   * The port is the thing that must end up free, so the port is what we verify. Killing whoever
+   * owns 37311 is safe by construction: the hands node refuses that port to everything except the
+   * preview relay, so nothing else of the user's is ever listening there.
+   */
   async function stopPreview(pid) {
-    if (!pid) return;
-    try {
+    if (pid) {
       // The child (npm) spawns the real server, so the tree goes together.
-      await hands("shell_run", { command: "taskkill /F /T /PID " + pid, timeoutMs: 20000 });
+      try { await hands("shell_run", { command: "taskkill /F /T /PID " + pid, timeoutMs: 20000 }); } catch {}
+    }
+    try {
+      const owner = "$c = Get-NetTCPConnection -State Listen -LocalPort " + PREVIEW_PORT_BASE +
+        " -ErrorAction SilentlyContinue; if ($c) { $c | ForEach-Object { taskkill /F /T /PID $($_.OwningProcess) } } else { 'port-free' }";
+      await hands("shell_run", { command: owner, timeoutMs: 20000 });
     } catch {}
   }
 

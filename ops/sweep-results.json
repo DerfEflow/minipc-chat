@@ -1,0 +1,814 @@
+{
+  "startedAt": "2026-07-30T21:48:34.431Z",
+  "chat": [
+    {
+      "model": "deepseek/deepseek-v4-pro",
+      "ok": true,
+      "ms": 1989,
+      "transport": "deepseek",
+      "route": "local_light · simple task on cloud model via DeepSeek (direct)",
+      "tokensOut": 44,
+      "costUsd": 0.000508,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_643e8b9b-d1f"
+    },
+    {
+      "model": "moonshotai/kimi-k2.6",
+      "ok": true,
+      "ms": 2767,
+      "transport": "moonshot",
+      "route": "local_light · simple task on cloud model via Moonshot (direct)",
+      "tokensOut": 99,
+      "costUsd": 0.001049,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_4effa013-c1f"
+    },
+    {
+      "model": "moonshotai/kimi-k3",
+      "ok": true,
+      "ms": 3492,
+      "transport": "moonshot",
+      "route": "local_light · simple task on cloud model via Moonshot (direct)",
+      "tokensOut": 55,
+      "costUsd": 0.004314,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_5f2c3593-ae5"
+    },
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "ok": true,
+      "ms": 1629,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 1,
+      "costUsd": 0.000218,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_066f1c0d-36e"
+    },
+    {
+      "model": "minimax/minimax-m2.5",
+      "ok": true,
+      "ms": 3408,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 32,
+      "costUsd": 0.000189,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_5f154610-641"
+    },
+    {
+      "model": "openai/gpt-5.6-terra",
+      "ok": true,
+      "ms": 1503,
+      "transport": "openai",
+      "route": "local_light · simple task on cloud model via OpenAI (direct)",
+      "tokensOut": 5,
+      "costUsd": 0.00276,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_73a09449-79c"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "ok": true,
+      "ms": 2048,
+      "transport": "openai",
+      "route": "local_light · simple task on cloud model via OpenAI (direct)",
+      "tokensOut": 5,
+      "costUsd": 0.00552,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_bfd5ffc7-6af"
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "ok": true,
+      "ms": 849,
+      "transport": "openai",
+      "route": "local_light · simple task on cloud model via OpenAI (direct)",
+      "tokensOut": 5,
+      "costUsd": 0.001104,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_a013364e-403"
+    },
+    {
+      "model": "openai/gpt-5.5",
+      "ok": true,
+      "ms": 1598,
+      "transport": "openai",
+      "route": "local_light · simple task on cloud model via OpenAI (direct)",
+      "tokensOut": 19,
+      "costUsd": 0.00594,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_d6d3f6e1-79e"
+    },
+    {
+      "model": "openai/gpt-4o",
+      "ok": true,
+      "ms": 2060,
+      "transport": "openai",
+      "route": "local_light · simple task on cloud model via OpenAI (direct)",
+      "tokensOut": 2,
+      "costUsd": 0.002707,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_cc4a0c0d-95a"
+    },
+    {
+      "model": "anthropic/claude-sonnet-5",
+      "ok": true,
+      "ms": 1328,
+      "transport": "anthropic",
+      "route": "local_light · simple task on cloud model via Anthropic (direct)",
+      "tokensOut": 4,
+      "costUsd": 0.005073,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_0943b281-368"
+    },
+    {
+      "model": "z-ai/glm-5.2",
+      "ok": true,
+      "ms": 8604,
+      "transport": "nvidia",
+      "route": "local_light · simple task on cloud model via NVIDIA (direct)",
+      "tokensOut": 2,
+      "costUsd": 0,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_05ae01f2-bb0"
+    },
+    {
+      "model": "anthropic/claude-opus-4-8",
+      "ok": true,
+      "ms": 2686,
+      "transport": "anthropic",
+      "route": "local_light · simple task on cloud model via Anthropic (direct)",
+      "tokensOut": 4,
+      "costUsd": 0.008455,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_ba76b6ba-e11"
+    },
+    {
+      "model": "x-ai/grok-4.20",
+      "ok": true,
+      "ms": 594,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 1,
+      "costUsd": 0.001412,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_b967a382-e80"
+    },
+    {
+      "model": "anthropic/claude-haiku-4-5",
+      "ok": true,
+      "ms": 2032,
+      "transport": "anthropic",
+      "route": "local_light · simple task on cloud model via Anthropic (direct)",
+      "tokensOut": 109,
+      "costUsd": 0.001742,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_32ac2b9a-e83"
+    },
+    {
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "ok": true,
+      "ms": 1658,
+      "transport": "nvidia",
+      "route": "local_light · simple task on cloud model via NVIDIA (direct)",
+      "tokensOut": 23,
+      "costUsd": 0,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_d92ae1ae-d48"
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "ok": true,
+      "ms": 3100,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 53,
+      "costUsd": 0.000896,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_1dfc72dd-f16"
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "ok": true,
+      "ms": 1085,
+      "transport": "deepseek",
+      "route": "local_light · simple task on cloud model via DeepSeek (direct)",
+      "tokensOut": 14,
+      "costUsd": 0.000058,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_dfb36010-2b3"
+    },
+    {
+      "model": "mistralai/codestral-2508",
+      "ok": true,
+      "ms": 427,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.000332,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_387d3c1a-aad"
+    },
+    {
+      "model": "qwen/qwen3-coder",
+      "ok": true,
+      "ms": 615,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.000242,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_163e38f2-a7d"
+    },
+    {
+      "model": "mistralai/mistral-small-24b-instruct-2501",
+      "ok": true,
+      "ms": 269,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.000055,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_5b831ead-fdc"
+    },
+    {
+      "model": "mistralai/mistral-small-3.2-24b-instruct",
+      "ok": true,
+      "ms": 353,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.0001,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_ce18bea7-a39"
+    },
+    {
+      "model": "qwen/qwen3-8b",
+      "ok": true,
+      "ms": 2731,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 125,
+      "costUsd": 0.000184,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_b0c5766c-648"
+    },
+    {
+      "model": "anthracite-org/magnum-v4-72b",
+      "ok": true,
+      "ms": 1643,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.003265,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_6c5d75bb-c2f"
+    },
+    {
+      "model": "thedrummer/rocinante-12b",
+      "ok": true,
+      "ms": 352,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 7,
+      "costUsd": 0.000287,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_4aba5bfb-e48"
+    },
+    {
+      "model": "thedrummer/skyfall-36b-v2",
+      "ok": true,
+      "ms": 1855,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.000608,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "Ready",
+      "jobId": "job_afece8f7-7aa"
+    },
+    {
+      "model": "arcee-ai/trinity-large-thinking",
+      "ok": true,
+      "ms": 1149,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 106,
+      "costUsd": 0.000348,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "\nready",
+      "jobId": "job_9475c366-ae6"
+    },
+    {
+      "model": "thedrummer/unslopnemo-12b",
+      "ok": true,
+      "ms": 1732,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.000442,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_bc6f7832-b5c"
+    },
+    {
+      "model": "nousresearch/hermes-4-405b",
+      "ok": true,
+      "ms": 461,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.001089,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_2681b22b-917"
+    },
+    {
+      "model": "microsoft/wizardlm-2-8x22b",
+      "ok": true,
+      "ms": 689,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.00068,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": " ready",
+      "jobId": "job_cfa51840-ab1"
+    },
+    {
+      "model": "nousresearch/hermes-4-70b",
+      "ok": true,
+      "ms": 470,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.000142,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_5b3572a5-ff8"
+    },
+    {
+      "model": "tencent/hy3-preview",
+      "ok": true,
+      "ms": 2735,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 48,
+      "costUsd": 0.00008,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_59f86f0c-21d"
+    },
+    {
+      "model": "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+      "ok": true,
+      "ms": 932,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.000222,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "Ready",
+      "jobId": "job_36b10327-fa2"
+    },
+    {
+      "model": "nvidia/nemotron-3-nano-omni-30b-a3b",
+      "ok": true,
+      "ms": 1177,
+      "transport": "nvidia",
+      "route": "local_light · simple task on cloud model via NVIDIA (direct)",
+      "tokensOut": 107,
+      "costUsd": 0,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_644de173-0e5"
+    },
+    {
+      "model": "qwen/qwen3-vl-8b-instruct",
+      "ok": true,
+      "ms": 532,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.000128,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_48ae106a-63c"
+    },
+    {
+      "model": "minimax/minimax-m3",
+      "ok": true,
+      "ms": 404,
+      "transport": "nvidia",
+      "route": "local_light · simple task on cloud model via NVIDIA (direct)",
+      "tokensOut": 2,
+      "costUsd": 0,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_1cf90e5b-3dc"
+    },
+    {
+      "model": "perplexity/sonar-pro",
+      "ok": true,
+      "ms": 919,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 1,
+      "costUsd": 0.00922,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_12546a58-22a"
+    },
+    {
+      "model": "meta-llama/llama-4-maverick",
+      "ok": true,
+      "ms": 528,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 2,
+      "costUsd": 0.000295,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_ca492d2a-d65"
+    },
+    {
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "ok": true,
+      "ms": 587,
+      "transport": "nvidia",
+      "route": "local_light · simple task on cloud model via NVIDIA (direct)",
+      "tokensOut": 28,
+      "costUsd": 0,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_29cb303f-799"
+    },
+    {
+      "model": "allenai/olmo-3-32b-think",
+      "ok": false,
+      "ms": 53,
+      "transport": "",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 0,
+      "costUsd": null,
+      "events": [
+        "route"
+      ],
+      "errors": [
+        "OpenRouter: No endpoints found for allenai/olmo-3-32b-think."
+      ],
+      "notes": [
+        "checkpoint:retry"
+      ],
+      "text": "Work checkpointed. This task is not complete.\n\nGoal: Reply with exactly the single word: ready\n\nReason: OpenRouter: No endpoints found for allenai/olmo-3-32b-think.\n\nNo completed tool action was verified in this run.\n\nNext action: retry this same session and selected model; Dominion will resume from this goal and the saved evidence.",
+      "jobId": "job_5e7e1548-b6d"
+    },
+    {
+      "model": "sao10k/l3.3-euryale-70b",
+      "ok": false,
+      "ms": 16259,
+      "transport": "",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 0,
+      "costUsd": null,
+      "events": [
+        "route"
+      ],
+      "errors": [
+        "OpenRouter: Provider returned error"
+      ],
+      "notes": [
+        "recovery:retry·OpenRouter: Provider returned error",
+        "recovery:retry·OpenRouter: Provider returned error",
+        "recovery:retry·OpenRouter: Provider returned error",
+        "checkpoint:retry"
+      ],
+      "text": "Work checkpointed. This task is not complete.\n\nGoal: Reply with exactly the single word: ready\n\nReason: OpenRouter: Provider returned error\n\nNo completed tool action was verified in this run.\n\nNext action: retry this same session and selected model; Dominion will resume from this goal and the saved evidence.",
+      "jobId": "job_8a6c0c54-35c"
+    },
+    {
+      "model": "openai/gpt-oss-20b",
+      "ok": true,
+      "ms": 736,
+      "transport": "nvidia",
+      "route": "local_light · simple task on cloud model via NVIDIA (direct)",
+      "tokensOut": 28,
+      "costUsd": 0,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_0fca60ad-37a"
+    },
+    {
+      "model": "google/gemma-4-31b-it:free",
+      "ok": true,
+      "ms": 6026,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 1,
+      "costUsd": 0,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [
+        "recovery:retry·OpenRouter: Provider returned error",
+        "recovery:retry·OpenRouter: Provider returned error"
+      ],
+      "text": "ready",
+      "jobId": "job_7876ca88-ec8"
+    },
+    {
+      "model": "mistralai/mistral-nemo",
+      "ok": true,
+      "ms": 618,
+      "transport": "openrouter",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 1,
+      "costUsd": 0.000021,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [],
+      "text": "ready",
+      "jobId": "job_64de4ec6-c1d"
+    },
+    {
+      "model": "thedrummer/cydonia-24b-v4.1",
+      "ok": false,
+      "ms": 15841,
+      "transport": "",
+      "route": "local_light · simple task on cloud model via OpenRouter",
+      "tokensOut": 0,
+      "costUsd": null,
+      "events": [
+        "route"
+      ],
+      "errors": [
+        "OpenRouter: Provider returned error"
+      ],
+      "notes": [
+        "recovery:retry·OpenRouter: Provider returned error",
+        "recovery:retry·OpenRouter: Provider returned error",
+        "recovery:retry·OpenRouter: Provider returned error",
+        "checkpoint:retry"
+      ],
+      "text": "Work checkpointed. This task is not complete.\n\nGoal: Reply with exactly the single word: ready\n\nReason: OpenRouter: Provider returned error\n\nNo completed tool action was verified in this run.\n\nNext action: retry this same session and selected model; Dominion will resume from this goal and the saved evidence.",
+      "jobId": "job_2f7934db-6cd"
+    }
+  ],
+  "images": [
+    {
+      "model": "image:free-draft",
+      "ok": true,
+      "ms": 5422,
+      "errors": [],
+      "notes": [
+        "keys:images,model,quality,aspect,size,usage,costUsd,draft"
+      ]
+    },
+    {
+      "model": "image:default-paid",
+      "ok": true,
+      "ms": 46160,
+      "errors": [],
+      "notes": [
+        "keys:images,model,quality,aspect,size,usage,costUsd"
+      ]
+    }
+  ],
+  "battalion": [
+    {
+      "model": "battalion",
+      "ok": true,
+      "ms": 1264,
+      "transport": "nvidia (free)",
+      "route": "battalion (free swarm) · a handpicked swarm of AI models to do more work in less time- for free",
+      "tokensOut": 0,
+      "costUsd": 0,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [
+        "battalion:single·0part·1models"
+      ],
+      "text": "Metals have a sea of delocalized electrons that can move freely throughout the lattice, allowing them to transfer kinetic energy quickly when a temperature gradient is applied. This efficient electron‑mediated transport, combined with relatively orderly atomic vibrations, gives metals their high thermal conductivity.",
+      "jobId": "job_813278f9-558"
+    },
+    {
+      "model": "battalion",
+      "ok": true,
+      "ms": 16,
+      "transport": "",
+      "route": "local_main · build task on cloud model via DeepSeek (direct)",
+      "tokensOut": 0,
+      "costUsd": null,
+      "events": [
+        "route"
+      ],
+      "errors": [],
+      "notes": [
+        "battalion_detour->deepseek/deepseek-v4-pro",
+        "stopped-early-by-sweep",
+        "stopped-early-by-sweep",
+        "stopped-early-by-sweep",
+        "stopped-early-by-sweep"
+      ],
+      "text": "",
+      "jobId": "job_56f46c2b-cc4"
+    }
+  ],
+  "serverNotes": [
+    "[dominion-ai] param retry (Moonshot (direct) · kimi-k2.6): temperature removed\n",
+    "[dominion-ai] battalion: single · 1 model(s) · 0 part(s) · 1s · $0\n",
+    "[dominion-ai] battalion detour: build ask -> deepseek/deepseek-v4-pro with tools\n",
+    "[dominion-ai] focused toolbox: 25 of 61 tools offered to deepseek/deepseek-v4-pro (build)\n"
+  ]
+}

@@ -8,7 +8,7 @@
  *   5. the guide mentions every feature on the surface (the keep-up rule with teeth)
  */
 import assert from "node:assert/strict";
-import { sweepFindings, sweepReport, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
+import { sweepFindings, sweepReport, brokenReferenceFindings, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
 import { CRUCIBLE_GUIDE, helpVoice, GUIDE_MUST_MENTION } from "./idehelp.mjs";
 
 let passed = 0, failed = 0;
@@ -38,6 +38,62 @@ await t("clean files produce the honest all-clear", () => {
   const f = sweepFindings([{ path: "app.js", text: "function save(x) { return x + 1; }\nconst done = true;\n" }]);
   assert.equal(f.length, 0);
   assert.ok(/none found/.test(sweepReport(f)));
+});
+
+// LIVE CATCH 2026-07-30: a finished three-file page ended its build asking Fred to close three
+// "unfinished" items that were ordinary HTML/CSS. The platform's own word for finished work must
+// never read as a stub, while a real ALL-CAPS marker still must.
+await t("the web platform's own placeholder forms are not unfinished work", () => {
+  const f = sweepFindings([
+    { path: "index.html", text: '<input placeholder="e.g. Groceries">\n<input placeholder=\'0.00\'>\n' },
+    { path: "styles.css", text: "input::placeholder { color: #888; }\ninput:placeholder-shown { opacity: .8; }\n" },
+    { path: "script.js", text: "el.placeholder = 'Amount';\nconst opts = { placeholder: 'Amount' };\n" },
+    { path: "Form.jsx", text: "<input placeholder={label} />\n" },
+  ]);
+  assert.equal(f.length, 0, "false positives: " + JSON.stringify(f));
+
+  const real = sweepFindings([
+    { path: "api.js", text: "const key = 'PLACEHOLDER';\n" },
+    { path: "form.html", text: '<input placeholder="Name"> <!-- PLACEHOLDER: validate this -->\n' },
+  ]);
+  assert.equal(real.length, 2, "real placeholder markers must still be caught: " + JSON.stringify(real));
+  assert.ok(real.every((x) => x.kind === "placeholder"));
+});
+
+/*
+ * LIVE CATCH 2026-07-30: the Crucible built index.html + styles.css + script.js, every move said
+ * done, the sweep was clean — and the page did nothing, because the HTML loaded "app.js". The
+ * browser proved it (404 on app.js, form fell back to a GET, total stayed $0.00). No text pattern
+ * can see this; only the file list can.
+ */
+await t("a page that loads a file nobody wrote is reported as broken", () => {
+  const f = brokenReferenceFindings([
+    { path: "index.html", text: '<link rel="stylesheet" href="styles.css">\n<script src="app.js"></script>\n' },
+    { path: "styles.css", text: "body{}" },
+    { path: "script.js", text: "console.log(1)" },
+  ]);
+  assert.equal(f.length, 1, JSON.stringify(f));
+  assert.equal(f[0].kind, "broken_reference");
+  assert.equal(f[0].line, 2);
+  assert.ok(/app\.js/.test(f[0].excerpt));
+});
+
+await t("real, external, and pre-existing references are never called broken", () => {
+  const f = brokenReferenceFindings([
+    { path: "index.html", text: [
+      '<link rel="stylesheet" href="styles.css">',
+      '<script src="./script.js"></script>',
+      '<script src="https://cdn.example.com/x.js"></script>',
+      '<script src="//cdn.example.com/y.js"></script>',
+      '<img src="data:image/png;base64,AAA">',
+      '<a href="#top">top</a>',
+      '<img src="assets/logo.png">',
+      '<link rel="icon" href="/favicon.ico">',
+    ].join("\n") },
+    { path: "styles.css", text: "body{}" },
+    { path: "script.js", text: "1" },
+  ], { known: ["assets/logo.png", "favicon.ico"] });
+  assert.equal(f.length, 0, "false positives: " + JSON.stringify(f));
 });
 
 await t("findings are capped so a disaster stays readable", () => {

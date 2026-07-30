@@ -272,10 +272,19 @@ export function openRouterExecutionOptions({
   providerPreferences = {},
   reasoningMaxTokens,
 } = {}) {
+  /*
+   * allow_fallbacks (live-proven 2026-07-30): require_parameters narrows routing to hosts that
+   * accept every declared control, which can leave exactly ONE host — and when that host is
+   * rate-limited the model reads as dead to the user (thedrummer/cydonia-24b-v4.1 answered 429
+   * under the pinned block and answered normally once fallbacks were explicit). Stating fallbacks
+   * out loud keeps the pool as wide as the parameters allow. Callers may still override both via
+   * providerPreferences (the widen-the-pool recovery does exactly that).
+   */
   const request = {
     provider: {
-      ...clone(providerPreferences || {}),
+      allow_fallbacks: true,
       require_parameters: true,
+      ...clone(providerPreferences || {}),
     },
   };
   const omit = [...OPENROUTER_CONTROL_OMISSIONS];

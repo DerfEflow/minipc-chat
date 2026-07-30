@@ -111,6 +111,14 @@ test("OpenRouter emits no reasoning controls without a positive declaration", ()
   });
   assert.equal("reasoning" in options.request, false);
   assert.equal(options.request.provider.require_parameters, true);
+  // Fallbacks stated out loud so one rate-limited host cannot make a live model look dead.
+  assert.equal(options.request.provider.allow_fallbacks, true);
+  // A caller may deliberately widen the pool (the 429 recovery path) and must win.
+  const widened = openRouterExecutionOptions({
+    policy: policy(0), sessionKey: "chat-widen",
+    providerPreferences: { require_parameters: false, allow_fallbacks: true },
+  });
+  assert.equal(widened.request.provider.require_parameters, false);
   assert(options.request.session_id);
   assert.match(options.notes.join(" "), /declares no reasoning capability/i);
 });
@@ -129,6 +137,7 @@ test("OpenRouter selects the nearest model-declared effort and never invents an 
   });
   assert.deepEqual(options.request.reasoning, { effort: "high" });
   assert.deepEqual(options.request.provider, {
+    allow_fallbacks: true,
     sort: "throughput",
     require_parameters: true,
   });
@@ -203,6 +212,7 @@ test("OpenRouter shaping deletes stale guessed controls before applying declared
   assert.equal("reasoning" in shaped, false);
   assert.equal("include_reasoning" in shaped, false);
   assert.deepEqual(shaped.provider, {
+    allow_fallbacks: true,
     order: ["preferred"],
     require_parameters: true,
   });

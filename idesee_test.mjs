@@ -106,7 +106,9 @@ await t("GOOD short-circuits: it looks, approves, applies nothing, and stops the
   const out = await r.see.run(JOB, { workspace: WS, goal: "g", visionModel: "openai/gpt-4o", applyFixes: async () => { fixed++; return {}; } });
   assert.equal(out.good, true);
   assert.equal(fixed, 0, "a page the judge likes gets no paid fixes");
-  assert.equal(r.killLog.length, 1, "the preview process must be stopped");
+  // Content, not count: a stop is now pid-kill PLUS a port sweep (see stopPreview's live catch).
+  assert.ok(r.killLog.some((c) => /PID 4242/.test(c)), "the preview process must be stopped");
+  assert.ok(r.killLog.some((c) => /OwningProcess/.test(c)), "and the port must be freed");
 });
 
 await t("a critique applies ONE fix round and takes the after shot", async () => {
@@ -119,13 +121,13 @@ await t("a critique applies ONE fix round and takes the after shot", async () =>
   assert.equal(out.fixCostUsd, 0.01, "the self-metered fix cost must remain separate");
   assert.match(guidance, /contrast/);
   assert.ok(r.types().some((c) => /look \(after\)/.test(String(c))), "the after shot goes on the record");
-  assert.equal(r.killLog.length, 1);
+  assert.ok(r.killLog.some((c) => /PID 4242/.test(c)), "the preview process must be stopped");
 });
 
 await t("every missing piece skips with a sentence: browser refused, no vision model, nothing runnable", async () => {
   const refused = rig({ browserRefused: true });
   assert.equal((await refused.see.run(JOB, { workspace: WS, goal: "g", visionModel: "x", applyFixes: async () => ({}) })).skipped, "browser_refused");
-  assert.equal(refused.killLog.length, 1, "even a refused look stops the preview it started");
+  assert.ok(refused.killLog.some((c) => /PID 4242/.test(c)), "even a refused look stops the preview it started");
 
   const noModel = rig({});
   assert.equal((await noModel.see.run(JOB, { workspace: WS, goal: "g", visionModel: "", applyFixes: async () => ({}) })).skipped, "no_vision_model");
@@ -135,6 +137,30 @@ await t("every missing piece skips with a sentence: browser refused, no vision m
     hands: async (tool, args) => (tool === "fs_list" ? { entries: [] } : { ok: false }) });
   assert.equal((await bare.run(JOB, { workspace: WS, goal: "g", visionModel: "x" })).skipped, "not_runnable");
   assert.ok(nothing.events.some((e) => e.skipped && /nothing runnable/i.test(e.message || "")), "the skip explains itself");
+});
+
+/*
+ * LIVE CATCH 2026-07-30: Start-Process reports the LAUNCHER's pid, and in static mode that
+ * launcher exits the moment its detached server is up. taskkill on the recorded pid then hits a
+ * corpse, the real server keeps port 37311, and every later preview silently serves the STALE
+ * project while reporting success. The port, not the pid, is what must end up free.
+ */
+await t("stopping a preview frees the PORT, not just the recorded pid", async () => {
+  const commands = [];
+  const see = createRunAndSee({
+    jobs: { emit: () => {} }, chat: async () => ({ ok: true }),
+    hands: async (tool, args) => { if (tool === "shell_run") commands.push(String(args.command || "")); return { ok: true, stdout: "" }; },
+  });
+  await see.stopPreview(4242);
+  assert.ok(commands.some((c) => /taskkill \/F \/T \/PID 4242/.test(c)), "the recorded pid is still killed first");
+  const portSweep = commands.find((c) => c.includes(String(PREVIEW_PORT_BASE)) && /OwningProcess/.test(c));
+  assert.ok(portSweep, "whoever holds the preview port must be killed too: " + JSON.stringify(commands));
+
+  // A stop with no pid at all (server restarted, pid forgotten) must STILL free the port.
+  commands.length = 0;
+  await see.stopPreview(0);
+  assert.ok(commands.some((c) => c.includes(String(PREVIEW_PORT_BASE)) && /OwningProcess/.test(c)),
+    "a forgotten pid must not strand the port forever");
 });
 
 console.log("\n" + passed + " passed, " + failed + " failed");

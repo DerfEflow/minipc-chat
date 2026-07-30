@@ -16,11 +16,27 @@
 // The marks of unfinished work. Each rule names its kind so the report reads like a person wrote it.
 const SWEEP_RULES = [
   { kind: "todo", re: /\b(TODO|FIXME|HACK|XXX)\b[:\s]/ },
-  { kind: "placeholder", re: /\bPLACEHOLDER\b|\byour[-_ ](api[-_ ]?key|key|token|value)\b|<REPLACE|INSERT[-_ ](HERE|VALUE)/i },
+  { kind: "placeholder", re: /\bPLACEHOLDER\b|\byour[-_ ](api[-_ ]?key|key|token|value)\b|<REPLACE|INSERT[-_ ](HERE|VALUE)/i, scrub: true },
   { kind: "lorem", re: /lorem ipsum/i },
   { kind: "coming_soon", re: /coming soon|not (yet )?implemented|to be implemented/i },
   { kind: "empty_function", re: /function\s+\w+\s*\([^)]*\)\s*\{\s*\}/ },
 ];
+
+/*
+ * The web platform's OWN word for finished work (live catch 2026-07-30). A form that says
+ * placeholder="e.g. Groceries" and a stylesheet with input::placeholder are complete, correct
+ * code — but the case-insensitive PLACEHOLDER rule flagged all three, so a finished three-file
+ * page ended its build asking the user to "close 3 unfinished items" that did not exist. Nothing
+ * erodes trust in an honesty pass faster than crying wolf, so these forms are removed from the
+ * line before the placeholder rule reads it. Every other rule still sees the raw line.
+ */
+const scrubPlatformPlaceholders = (line) => String(line)
+  .replace(/placeholder\s*=\s*(?:"[^"]*"|'[^']*'|\{[^}]*\}|[^\s>]+)/gi, "")   // HTML attr, JSX prop
+  .replace(/::?placeholder(?:-shown)?/gi, "")                                  // CSS pseudo-element/class
+  .replace(/\.placeholder\b/gi, "")                                            // el.placeholder in JS
+  // {placeholder: "..."} option key — lowercase and in key position ONLY, so an all-caps
+  // "PLACEHOLDER: fill this in" comment is never scrubbed away with it.
+  .replace(/([{,]\s*)placeholder(\s*:)/g, "$1$2");
 
 /*
  * Sweep the written files. Input: [{path, text}]. Output: findings [{path, line, kind, excerpt}],
@@ -32,13 +48,60 @@ export function sweepFindings(files, { maxFindings = 40 } = {}) {
     const lines = String((f && f.text) || "").split(/\r?\n/);
     for (let i = 0; i < lines.length && findings.length < maxFindings; i++) {
       for (const rule of SWEEP_RULES) {
-        if (rule.re.test(lines[i])) {
+        if (rule.re.test(rule.scrub ? scrubPlatformPlaceholders(lines[i]) : lines[i])) {
           findings.push({ path: f.path, line: i + 1, kind: rule.kind, excerpt: lines[i].trim().slice(0, 120) });
           break;
         }
       }
     }
     if (findings.length >= maxFindings) break;
+  }
+  return findings;
+}
+
+/*
+ * BROKEN LOCAL REFERENCES (live catch 2026-07-30). The Crucible built a three-file page whose
+ * index.html loaded "app.js" while the build had written "script.js": every file existed, every
+ * move said done, the sweep was clean, the page rendered — and nothing worked, because the only
+ * JavaScript never loaded. This is the exact "looks built, does nothing" failure the Furnace
+ * exists to prevent, and no text pattern can catch it: it needs the file LIST.
+ *
+ * So: read every local src/href out of the written HTML and confirm the target was actually
+ * written. Absolute URLs, protocol-relative URLs, data: URIs, and bare #anchors are somebody
+ * else's business and are skipped. `known` may name files the build did not write this round
+ * (the caller passes the workspace listing when it has one), so a reference to a pre-existing
+ * file is never called broken.
+ */
+const REF_RE = /(?:src|href)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi;
+const normalizeRef = (value) => String(value || "").split(/[?#]/)[0].replace(/^\.\//, "").replace(/^\/+/, "").toLowerCase();
+const isExternalRef = (value) => /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(String(value || "").trim()) || String(value || "").trim().startsWith("#");
+
+export function brokenReferenceFindings(files, { known = [] } = {}) {
+  const list = Array.isArray(files) ? files : [];
+  const present = new Set([
+    ...list.map((f) => normalizeRef(f && f.path)),
+    ...(Array.isArray(known) ? known : []).map((p) => normalizeRef(p)),
+  ].filter(Boolean));
+  // A reference may be written relative to its own folder, so index the basenames too and accept
+  // a match on either form. Over-accepting here is deliberate: a false "broken" claim is worse
+  // than a missed one, because it would send a finished build back for imaginary repairs.
+  for (const p of [...present]) present.add(p.split("/").pop());
+  const findings = [];
+  for (const f of list) {
+    if (!/\.(?:html?|htm)$/i.test(String((f && f.path) || ""))) continue;
+    const lines = String((f && f.text) || "").split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      REF_RE.lastIndex = 0;
+      let m;
+      while ((m = REF_RE.exec(lines[i]))) {
+        const raw = m[1] || m[2] || m[3] || "";
+        if (!raw || isExternalRef(raw)) continue;
+        const target = normalizeRef(raw);
+        if (!target || present.has(target) || present.has(target.split("/").pop())) continue;
+        findings.push({ path: f.path, line: i + 1, kind: "broken_reference",
+          excerpt: `references "${raw}", which no file in this build provides` });
+      }
+    }
   }
   return findings;
 }

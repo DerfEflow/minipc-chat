@@ -257,9 +257,10 @@ export const MODELS = [
   { id: "meta-llama/llama-4-maverick", name: "Llama 4 Maverick", origin: "Meta",
     category: "Open & Trainable", vision: true, params: "400B (MoE·17B active)", paramsB: 400, inCost: 0.15, outCost: 0.60, ctx: 1000000,
     specialty: "The trunk of the whole open-source tree; 1M context" },
-  { id: "allenai/olmo-3-32b-think", name: "OLMo 3 32B Think", origin: "Allen Institute (nonprofit)",
-    category: "Open & Trainable", params: "32B", paramsB: 32, inCost: 0.15, outCost: 0.50, ctx: 65536, toolCapable: false,   // audited: no tool endpoints
-    specialty: "Fully open: weights, DATA, and training code. Study how models are built" },
+  // OLMo 3 32B Think REMOVED 2026-07-30. The live sweep and three direct probes all answered
+  // 404 "No endpoints found": OpenRouter still lists the model but no host serves it, so every
+  // pick of it was a guaranteed dead turn. Offering a model nobody can run is worse than a
+  // shorter list. Re-add when a provider carries it again (weekly audit re-checks).
   { id: "google/gemma-4-31b-it:free", name: "Gemma 4 31B", origin: "Google (open weights)",
     category: "Open & Trainable", vision: true, params: "31B", paramsB: 31, inCost: 0, outCost: 0, ctx: 262144,
     specialty: "Capable FREE baseline to sanity-check everything against" },
