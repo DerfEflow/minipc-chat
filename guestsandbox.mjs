@@ -32,6 +32,7 @@ import {
   realpathSync, rmSync, renameSync,
 } from "node:fs";
 import { join, resolve, dirname, sep, normalize } from "node:path";
+import { packGz, unpackGz, safeEntryPath } from "./tarlite.mjs";
 
 const MAX_READ_BYTES = 2_000_000;
 const MAX_ENTRIES = 500;
@@ -63,7 +64,7 @@ function contain(root, raw) {
   return { ok: true, path: abs };
 }
 
-export function createGuestSandbox({ rootDir, log = () => {} } = {}) {
+export function createGuestSandbox({ rootDir, log = () => {}, runner = null } = {}) {
   if (!rootDir) throw new Error("createGuestSandbox needs a rootDir");
   /*
    * No dots. A uid is hex in production, so nothing legitimate is lost, and allowing them meant a
@@ -84,9 +85,13 @@ export function createGuestSandbox({ rootDir, log = () => {} } = {}) {
   }
 
   function nodeInfo(root) {
+    const canRun = !!(runner && runner.available());
     return {
-      ok: true, node: "workshop", host: "dominion-workshop", platform: process.platform,
-      roots: [root], sandbox: true, shell: false, protectedDirs: 0,
+      ok: true, node: "workshop", host: "dominion-workshop",
+      // A workshop that CAN run commands runs them on Linux, whatever this server happens to be, so
+      // callers writing shell (ideengine's snapshot and verify) must not read Windows into it.
+      platform: canRun ? "linux" : process.platform,
+      roots: [root], sandbox: true, shell: canRun, protectedDirs: 0,
       // Named so a model reading its own environment description cannot mistake this for the
       // owner's machine and promise things it has no way to do here.
       note: "A server-side workshop for this account. Files are real; there is no shell, no preview host, and no access to the visitor's own computer.",
@@ -294,7 +299,22 @@ export function createGuestSandbox({ rootDir, log = () => {} } = {}) {
           // Everything that needs a real machine. Named individually so the message can be specific
           // about what is missing instead of the old "your node is asleep or off", which described
           // a node the visitor never had.
-          case "shell_run": return refuse(NO_SHELL);
+          /*
+           * A command runs in a THROWAWAY machine, never here. The project is carried out, the
+           * command runs somewhere expendable, whatever it changed is carried back, and the machine
+           * is destroyed (flyrunner.mjs). With no runner configured this is the honest refusal it
+           * has always been, so the feature is dark until Fred provisions it.
+           */
+          case "shell_run": {
+            if (!runner || !runner.available()) return refuse(NO_SHELL);
+            const cwd = a.cwd || a.path || root;
+            const c = contain(root, cwd);
+            if (!c.ok) return refuse(c.error);
+            // root travels explicitly: runRemote is a sibling of dispatch(), not a closure inside
+            // it, and the first draft read a `root` that was not in its scope.
+            const out = await runRemote(root, c.path, String(a.command || ""), Number(a.timeoutMs) || 0);
+            return out;
+          }
           case "preview_fetch":
           case "browser_control":
           case "desktop_control":
@@ -310,6 +330,75 @@ export function createGuestSandbox({ rootDir, log = () => {} } = {}) {
         return { ok: false, error: String((e && e.message) || e) };
       }
     };
+  }
+
+  /*
+   * Carry a project out to a throwaway machine, run one command, carry the changes back.
+   *
+   * The write-back is the delicate half: those bytes were produced by a machine that just executed
+   * a stranger's code, so every path is re-checked against BOTH the archive rule (no absolute, no
+   * traversal) and the workshop's own containment before a single byte lands. Deletions are not
+   * mirrored: a command that removes a file leaves it here, because letting remote output delete
+   * local work is a much worse failure than a stale file, and the snapshot exists for the rest.
+   */
+  async function runRemote(root, cwd, command, timeoutMs) {
+    if (!command.trim()) return { ok: false, error: "empty command" };
+    let entries;
+    try { entries = collect(cwd); }
+    catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+
+    const r = await runner.run({
+      projectBase64: packGz(entries).toString("base64"),
+      command,
+      timeoutMs: timeoutMs || undefined,
+    });
+    if (!r || r.ok === false) {
+      return { ok: false, error: (r && r.error) || "The build machine could not be reached.",
+               timedOut: !!(r && r.timedOut), stdout: "", stderr: "" };
+    }
+
+    let wrote = 0, rejected = 0;
+    if (r.resultBase64) {
+      let back = [];
+      try { back = unpackGz(Buffer.from(r.resultBase64, "base64")); }
+      catch (e) { log(`[workshop] unreadable result archive: ${e && e.message}`); }
+      for (const ent of back) {
+        if (ent.dir) continue;
+        const rel = safeEntryPath(ent.name);
+        if (!rel) { rejected++; continue; }
+        const dest = contain(root, join(cwd, rel));
+        if (!dest.ok) { rejected++; continue; }
+        try { mkdirSync(dirname(dest.path), { recursive: true }); writeFileSync(dest.path, ent.data); wrote++; }
+        catch { rejected++; }
+      }
+      if (rejected) log(`[workshop] ${rejected} result path(s) refused on the way back in`);
+    }
+    // shell_run's established shape, so callers that read code/stdout/stderr need no special case.
+    return { ok: r.exitCode === 0, code: r.exitCode, stdout: r.stdout || "", stderr: r.stderr || "",
+             ms: r.ms, filesWritten: wrote, filesRejected: rejected, sandboxRun: true };
+  }
+
+  // The project as tar entries, skipping what should never ride the wire.
+  function collect(dir) {
+    const SKIP = new Set([".dominion-snapshots", "node_modules", ".git", ".next", "dist", "build"]);
+    const MAX_FILES = 4000, MAX_BYTES = 48 * 1024 * 1024;
+    const out = [];
+    let bytes = 0;
+    const walk = (from, rel) => {
+      let ents; try { ents = readdirSync(from, { withFileTypes: true }); } catch { return; }
+      for (const e of ents) {
+        if (SKIP.has(e.name)) continue;
+        const src = join(from, e.name), r = rel ? rel + "/" + e.name : e.name;
+        if (e.isDirectory()) { out.push({ name: r, dir: true }); walk(src, r); continue; }
+        if (!e.isFile()) continue;
+        let st; try { st = statSync(src); } catch { continue; }
+        bytes += st.size;
+        if (out.length > MAX_FILES || bytes > MAX_BYTES) throw new Error("project is too large to run in the workshop");
+        out.push({ name: r, data: readFileSync(src) });
+      }
+    };
+    walk(dir, "");
+    return out;
   }
 
   function listDirs(dir, root) {

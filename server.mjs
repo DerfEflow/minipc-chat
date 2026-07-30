@@ -118,6 +118,7 @@ import {
 } from "./execution-policy.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
 import { createGuestSandbox } from "./guestsandbox.mjs";
+import { createFlyRunner } from "./flyrunner.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS, PRIVATE_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createUsersStore } from "./tenancy.mjs";
@@ -1231,9 +1232,25 @@ const handsHub = createHandsHub({
  * survives a redeploy exactly like the chats and the corpus do. See guestsandbox.mjs for what it
  * deliberately refuses to do.
  */
+/*
+ * The build runner. Dark until FLY_API_TOKEN and FLY_APP are both set, and when it is dark the
+ * workshop refuses shell exactly as it did before, so provisioning is the only switch. Idle cost is
+ * zero by design: no volume, no always-on worker, machines exist only while a command runs.
+ */
+const flyRunner = createFlyRunner({
+  token: cfgGet("FLY_API_TOKEN", ""),
+  app: cfgGet("FLY_APP", ""),
+  region: cfgGet("FLY_REGION", "iad"),
+  image: cfgGet("FLY_RUNNER_IMAGE", "docker.io/library/node:24-slim"),
+  cpus: Number(cfgGet("FLY_RUNNER_CPUS", "1")) || 1,
+  memoryMb: Number(cfgGet("FLY_RUNNER_MEMORY_MB", "1024")) || 1024,
+  log: (m) => console.log("[dominion-ai] " + m),
+});
+
 const guestSandbox = createGuestSandbox({
   rootDir: dataPath("workshops"),
   log: (m) => console.log("[dominion-ai] " + m),
+  runner: flyRunner,
 });
 
 // Wire the model's machine tools (forge_read/write/run) to the hands hub -> the connected node,
