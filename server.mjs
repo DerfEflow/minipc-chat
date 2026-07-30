@@ -8280,8 +8280,21 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (path === "/api/version" && req.method === "GET") {
+      /*
+       * `runner` answers a question that could not be answered from outside before (Fred, 2026-07-30:
+       * "are we up and running?"). The Fly token is read ONCE at boot, so a variable sitting in the
+       * Railway dashboard proves nothing about the container currently serving traffic: if it was
+       * added after that container started, the stored value is right and the live process is still
+       * dark. This is the running process reporting on itself.
+       *
+       * It is a boolean and an app NAME. No token, no length, no prefix, nothing that narrows a
+       * secret. This endpoint is deliberately outside Cloudflare Access (the PWA update check needs
+       * it), so nothing that would matter to an attacker may ever be added here.
+       */
+      let runner = false, runnerApp = "";
+      try { runner = !!(flyRunner && flyRunner.available()); runnerApp = runner ? String(flyRunner.app || "") : ""; } catch {}
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ build: BUILD_ID }));
+      return res.end(JSON.stringify({ build: BUILD_ID, runner, runnerApp }));
     }
 
     // The live cloud-model catalog (single source of truth). The picker fetches this and renders the
