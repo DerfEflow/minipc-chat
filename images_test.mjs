@@ -33,12 +33,23 @@ const mockOllama = http.createServer((req, res) => { let b = ""; req.on("data", 
 await new Promise((r) => mockOllama.listen(MOCK_OLLAMA, "127.0.0.1", r));
 
 // ---- mock OpenAI: /v1/images/generations, /v1/files, /v1/batches, batch output download
-const seen = { generations: [], edits: [], refines: [], uploadedJsonl: "", batchCreates: [], batchPolls: 0 };
+// ---- also serves the mock NVIDIA genai draft endpoint (ARSENAL Wave 3) at /nvidia-genai/*
+const seen = { generations: [], edits: [], refines: [], uploadedJsonl: "", batchCreates: [], batchPolls: 0, draftCalls: [] };
 let batchStatus = "in_progress";
+let draftFailNth = 0;   // 0 = never fail; N = fail the Nth draft call (1-indexed) once
 const mockOpenAI = http.createServer((req, res) => {
   let b = ""; req.on("data", (d) => b += d);
   req.on("end", () => {
     const send = (o, code = 200, raw = false) => { res.writeHead(code, { "content-type": raw ? "application/octet-stream" : "application/json" }); res.end(raw ? o : JSON.stringify(o)); };
+    if (req.url === "/nvidia-genai/black-forest-labs/flux.1-dev" && req.method === "POST") {
+      const body = JSON.parse(b);
+      seen.draftCalls.push(body);
+      if (draftFailNth && seen.draftCalls.length === draftFailNth) {
+        draftFailNth = 0;
+        return send({ artifacts: [{ base64: "", finishReason: "CONTENT_FILTERED", seed: 1 }] });
+      }
+      return send({ artifacts: [{ base64: PNG, finishReason: "SUCCESS", seed: 1 }] });
+    }
     if (req.url === "/v1/images/generations" && req.method === "POST") {
       const body = JSON.parse(b);
       seen.generations.push(body);
@@ -90,6 +101,8 @@ const env = { ...process.env, PORT: String(PORT), OLLAMA_URL: "http://127.0.0.1:
   MULTI_TENANT: "1", OWNER_EMAIL: OWNER,
   OPEN_AI_DOMINION_UI_APIKEY: "test-key-not-real",
   OPENAI_IMAGES_BASE: "http://127.0.0.1:" + MOCK_OPENAI,
+  NVIDIA_API_KEY: "test-nvidia-key-not-real",
+  NVIDIA_GENAI_URL: "http://127.0.0.1:" + MOCK_OPENAI + "/nvidia-genai/",
   OPENROUTER_API_KEY: "", ANTHROPIC_API_KEY: "", STRIPE_SECRET_KEY: "" };
 const child = spawn(process.execPath, [join(HERE, "server.mjs")], { env, cwd: HERE, stdio: ["ignore", "pipe", "pipe"] });
 let bootLog = ""; child.stdout.on("data", (d) => bootLog += d); child.stderr.on("data", (d) => bootLog += d);
@@ -122,6 +135,40 @@ await t("config publishes the OpenAI tables (tokens, prices, batch discount)", a
   if (r.body.model !== "gpt-image-2") throw new Error("model: " + r.body.model);
   if (r.body.tokens.high.portrait !== 5500 || r.body.prices.low.square !== 0.006) throw new Error("published tables wrong");
   if (r.body.batch.discount !== 0.5) throw new Error("batch discount wrong");
+});
+
+await t("config publishes the free draft lane (ARSENAL Wave 3)", async () => {
+  const r = await req("GET", "/api/images/config");
+  if (r.status !== 200) throw new Error("HTTP " + r.status);
+  if (!r.body.draft || !r.body.draft.available) throw new Error("draft not available with NVIDIA key set: " + JSON.stringify(r.body.draft));
+  if (r.body.draft.model !== "black-forest-labs/flux.1-dev") throw new Error("draft model: " + r.body.draft.model);
+  if (r.body.draft.refs !== false) throw new Error("draft refs should be false");
+});
+
+await t("draft generation rides the NVIDIA lane at $0", async () => {
+  const r = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "a brass lighthouse, draft", quality: "medium", aspect: "square", n: 1, draft: true } });
+  if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
+  if (r.body.images.length !== 1 || r.body.images[0].b64 !== PNG) throw new Error("images wrong: " + JSON.stringify(r.body).slice(0, 200));
+  if (r.body.costUsd !== 0 || !r.body.draft) throw new Error("draft response shape wrong: " + JSON.stringify(r.body));
+  if (r.body.model !== "black-forest-labs/flux.1-dev") throw new Error("draft model in response: " + r.body.model);
+  const call = seen.draftCalls.at(-1);
+  if (call.width !== 1024 || call.height !== 1024 || call.steps !== 30) throw new Error("draft payload wrong: " + JSON.stringify(call));
+});
+
+await t("draft with reference plates is refused (no free edits endpoint yet)", async () => {
+  const r = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "match this", draft: true, refs: ["data:image/png;base64," + PNG] } });
+  if (r.status !== 400) throw new Error("expected 400, got " + r.status + " " + JSON.stringify(r.body));
+});
+
+await t("draft n=2 fans out to 2 NVIDIA calls; a partial failure still returns the survivor", async () => {
+  const callsBefore = seen.draftCalls.length;
+  draftFailNth = 2;   // the 2nd of the 2 upcoming parallel calls fails
+  const r = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "two studies", quality: "high", aspect: "landscape", n: 2, draft: true } });
+  if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
+  if (seen.draftCalls.length - callsBefore !== 2) throw new Error("expected 2 NVIDIA calls, saw " + (seen.draftCalls.length - callsBefore));
+  if (r.body.images.length !== 1 || !r.body.partial) throw new Error("expected 1 image + partial:true, got " + JSON.stringify({ n: r.body.images.length, partial: r.body.partial }));
+  const call = seen.draftCalls.at(-1);
+  if (call.width !== 1536 || call.height !== 1024 || call.steps !== 40) throw new Error("landscape/high draft payload wrong: " + JSON.stringify(call));
 });
 
 await t("anon is refused (no_identity)", async () => {
@@ -204,6 +251,14 @@ await t("credit user is METERED: balance drops by ceil(costUsd*100)", async () =
   const after = await balanceOf(USER);
   const expectCredits = Math.max(1, Math.ceil(r.body.costUsd * 100));
   if (before - after !== expectCredits) throw new Error(`balance ${before}->${after}, expected -${expectCredits}`);
+});
+
+await t("a credit user's draft generation does NOT touch their balance", async () => {
+  const before = await balanceOf(USER);
+  const r = await req("POST", "/api/images/generate", { email: USER, body: { prompt: "a free copper gear city", quality: "low", aspect: "square", n: 1, draft: true } });
+  if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
+  if (r.body.costUsd !== 0) throw new Error("draft costUsd not zero: " + r.body.costUsd);
+  if ((await balanceOf(USER)) !== before) throw new Error("draft charged a metered user's balance");
 });
 
 await t("batch: too-expensive submission is refused up front (needs_credits)", async () => {

@@ -336,6 +336,22 @@ body.dfi-open #dfi-root .scene { transform: none; }
 #dfi-root .shape.portrait { width: 17px; height: 24px; }
 #dfi-root .shape.landscape { width: 28px; height: 19px; }
 
+/* ---------- draft (ARSENAL Wave 3: free NVIDIA lane) ---------- */
+#dfi-root .draft-module { position: relative; z-index: 1; display: grid; grid-template-columns: 44px 1fr auto; gap: 14px; align-items: center; padding: 15px; margin-bottom: 15px; border: 1px solid rgba(121,255,82,.28); background: linear-gradient(100deg, rgba(121,255,82,.07), rgba(2,11,8,.68) 62%); clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); transition: border-color .25s, box-shadow .25s, background .25s, opacity .25s; }
+#dfi-root .draft-module.active { border-color: rgba(121,255,82,.55); background: linear-gradient(100deg, rgba(121,255,82,.12), rgba(2,11,8,.76) 62%); box-shadow: 0 0 22px rgba(121,255,82,.09); }
+#dfi-root .draft-module.unavailable { opacity: .45; }
+#dfi-root .draft-module.unavailable .power-toggle { cursor: not-allowed; }
+#dfi-root .draft-icon { position: relative; width: 40px; height: 40px; display: grid; place-items: center; }
+#dfi-root .draft-icon i { position: absolute; width: 6px; height: 6px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 6px var(--lime); opacity: .35; }
+#dfi-root .draft-icon i:nth-child(1) { left: 3px; top: 17px; }
+#dfi-root .draft-icon i:nth-child(2) { left: 17px; top: 3px; }
+#dfi-root .draft-icon i:nth-child(3) { left: 31px; top: 17px; }
+#dfi-root .draft-module.active .draft-icon i { opacity: 1; }
+#dfi-root .draft-module > div:nth-child(2) { display: grid; gap: 6px; min-width: 0; }
+#dfi-root .draft-module span { color: #bacec8; font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .17em; }
+#dfi-root .draft-module b { color: var(--lime); font: 700 var(--t-value)/1 var(--font-mono); letter-spacing: .08em; }
+#dfi-root .draft-module small { color: #7d938c; font: 500 var(--t-micro)/1.5 var(--font-mono); }
+
 /* ---------- batch + telemetry + ignite ---------- */
 #dfi-root .batch-module { position: relative; z-index: 1; display: grid; grid-template-columns: 44px 1fr auto; gap: 14px; align-items: center; padding: 15px; margin-bottom: 15px; border: 1px solid rgba(199,124,66,.28); background: linear-gradient(100deg, rgba(199,124,66,.08), rgba(2,11,8,.68) 62%); clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); transition: border-color .25s, box-shadow .25s, background .25s; }
 #dfi-root .batch-module.active { border-color: rgba(121,255,82,.42); background: linear-gradient(100deg, rgba(121,255,82,.09), rgba(2,11,8,.74) 62%); box-shadow: 0 0 22px rgba(121,255,82,.06); }
@@ -681,8 +697,8 @@ body.dfi-open #dfi-root .scene { transform: none; }
   #dfi-root #dfi-clear { flex: none; }
   #dfi-root .segment { min-height: 76px; padding: 10px 4px; }
   #dfi-root .segment b { font-size: 11.5px; letter-spacing: .08em; }
-  #dfi-root .batch-module { grid-template-columns: 1fr auto; gap: 12px; }
-  #dfi-root .batch-icon { display: none; }
+  #dfi-root .batch-module, #dfi-root .draft-module { grid-template-columns: 1fr auto; gap: 12px; }
+  #dfi-root .batch-icon, #dfi-root .draft-icon { display: none; }
   /* thumb-sized switch on touch: 26px tall is a miss target on a phone */
   #dfi-root .power-toggle { width: 56px; height: 32px; }
   #dfi-root .power-toggle i { width: 22px; height: 22px; }

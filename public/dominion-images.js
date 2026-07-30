@@ -23,6 +23,7 @@
   let CFG = {
     available: true,
     syncMaxN: 4,
+    draft: { available: false, model: "", refs: false, brand: "Free Draft (NVIDIA)" },
     tokens: {
       low: { square: 200, portrait: 167, landscape: 167 },
       medium: { square: 1767, portrait: 1367, landscape: 1367 },
@@ -42,6 +43,7 @@
     quality: "medium",
     aspect: "square",
     batch: false,
+    draft: false,              // ARSENAL Wave 3: free NVIDIA lane, mutually exclusive with batch
     refs: [],                 // staged reference plates [{dataUrl, name}]
     queue: [],                // foundry directives [{prompt, quality, aspect}]
     jobs: [],
@@ -474,14 +476,28 @@
   // ---------- estimates (published OpenAI tables) ----------
   const tokensFor = () => (CFG.tokens[state.quality] || {})[state.aspect] || 0;
   const priceFor = (batch) => ((CFG.prices[state.quality] || {})[state.aspect] || 0) * (batch ? CFG.batch.discount : 1);
+  // Reflects CFG.draft.available (known only after refreshConfig resolves) and state.draft.
+  function syncDraftToggle(root) {
+    const toggle = $("#draft-toggle", root || document);
+    const mod = $("#draft-module", root || document);
+    const note = $("#draft-note", root || document);
+    if (!toggle) return;
+    toggle.disabled = !CFG.draft.available;
+    toggle.setAttribute("aria-checked", String(state.draft));
+    if (mod) mod.classList.toggle("active", state.draft);
+    if (mod) mod.classList.toggle("unavailable", !CFG.draft.available);
+    if (note) note.textContent = CFG.draft.available
+      ? "Same picture, a faster free engine. No reference images yet — turn this off to use your own photos."
+      : "Not configured on the server yet.";
+  }
   function renderEstimate() {
-    $("#token-estimate").textContent = tokensFor().toLocaleString();
-    $("#cost-estimate").textContent = fmtUsd(priceFor(state.batch));
-    $("#route-estimate").textContent = state.batch ? "BATCH · <24H" : "IMMEDIATE";
+    $("#token-estimate").textContent = state.draft ? "—" : tokensFor().toLocaleString();
+    $("#cost-estimate").textContent = state.draft ? "FREE" : fmtUsd(priceFor(state.batch));
+    $("#route-estimate").textContent = state.draft ? "IMMEDIATE · FREE" : state.batch ? "BATCH · <24H" : "IMMEDIATE";
     $("#size-label").textContent = SIZES[state.aspect];
     const lit = { low: 3, medium: 6, high: 10 }[state.quality] || 6;
     $$("#dfi-root .energy-meter i").forEach((bar, i) => bar.classList.toggle("lit", i < lit));
-    $("b", $("#forge-button")).textContent = state.batch ? "ADD TO BATCH" : "GENERATE";
+    $("b", $("#forge-button")).textContent = state.batch ? "ADD TO BATCH" : state.draft ? "GENERATE (FREE)" : "GENERATE";
   }
 
   /* ---------- the deck-side working state ----------------------------------------------------
@@ -658,6 +674,12 @@
           </div>
         </section>
 
+        <section class="draft-module" id="draft-module">
+          <div class="draft-icon" aria-hidden="true"><i></i><i></i><i></i></div>
+          <div><span>FREE DRAFT</span><b>$0 · NVIDIA</b><small id="draft-note">Same picture, a faster free engine. No reference images yet — turn this off to use your own photos.</small></div>
+          <button id="draft-toggle" class="power-toggle" type="button" role="switch" aria-checked="false" aria-label="Use the free draft engine"><i></i></button>
+        </section>
+
         <section class="batch-module" id="batch-module">
           <div class="batch-icon" aria-hidden="true"><i></i><i></i><i></i></div>
           <div><span>MAKE SEVERAL AT ONCE</span><b>HALF PRICE</b><small>Optional. Queue several pictures and they are made within a day. You pay when you send the batch.</small></div>
@@ -747,10 +769,26 @@
     const batchToggle = $("#batch-toggle", root);
     batchToggle.addEventListener("click", () => {
       state.batch = !state.batch;
+      if (state.batch) { state.draft = false; syncDraftToggle(root); }
       batchToggle.setAttribute("aria-checked", String(state.batch));
       $("#batch-module", root).classList.toggle("active", state.batch);
       renderEstimate();
     });
+
+    const draftToggle = $("#draft-toggle", root);
+    draftToggle.addEventListener("click", () => {
+      if (!CFG.draft.available) return;
+      if (!state.draft && state.refs.length) return showFault("Your own images only work with the paid engine. Remove them, or leave Free Draft off.");
+      state.draft = !state.draft;
+      if (state.draft) {
+        state.batch = false;
+        batchToggle.setAttribute("aria-checked", "false");
+        $("#batch-module", root).classList.remove("active");
+      }
+      syncDraftToggle(root);
+      renderEstimate();
+    });
+    syncDraftToggle(root);
 
     const prompt = $("#prompt", root);
     const count = $("#prompt-count", root);
@@ -911,6 +949,7 @@
   async function onIgnite() {
     const prompt = $("#prompt").value.trim();
     if (!prompt) return showFault("Describe the picture you want first.");
+    if (state.draft && state.refs.length) return showFault("Your own images only work with the paid engine. Remove them, or turn off Free Draft.");
     if (state.batch) {
       if (state.refs.length) return showFault("Your own images only work on a single picture made right now. Turn off the batch, or remove your images.");
       const maxItems = CFG.batch.maxItemsOwner || 200;
@@ -939,7 +978,11 @@
       const r = await apiJson(API.generate, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt, quality: state.quality, aspect: state.aspect, n: 1, refs: state.refs.map((x) => x.dataUrl) }),
+        body: JSON.stringify({
+          prompt, quality: state.quality, aspect: state.aspect, n: 1,
+          refs: state.draft ? [] : state.refs.map((x) => x.dataUrl),
+          draft: state.draft,
+        }),
       });
       let wrote = 0, made = 0, unsaved = 0;
       for (const img of r.images || []) {
@@ -949,7 +992,7 @@
         // vault write throws, keep the image in memory and show it anyway, honestly labelled, so
         // it can still be opened and saved by hand. A paid-for image is never invisible.
         try {
-          const rec = await vaultSave(img.b64, { prompt, quality: r.quality, aspect: r.aspect, source: "sync" });
+          const rec = await vaultSave(img.b64, { prompt, quality: r.quality, aspect: r.aspect, source: r.draft ? "draft" : "sync" });
           made++;
           if (folderArmed && folderReady() && (await writeToFolder(rec))) wrote++;
         } catch (saveErr) {
@@ -1192,7 +1235,7 @@
       card.dataset.kind = rec.favorite ? "favorite" : rec.source === "batch" ? "batch" : "all";
       card.innerHTML = `
         <div class="creation-art"><img class="creation-img" loading="lazy" alt="${esc(rec.prompt.slice(0, 80))}"></div>
-        <div class="card-chrome"><span>${rec.source === "batch" ? "BATCH" : "STANDARD"} · ${pad4(rec.seq || 0)}${rec.savedAt ? " · SAVED" : ""}</span></div>
+        <div class="card-chrome"><span>${rec.source === "batch" ? "BATCH" : rec.source === "draft" ? "FREE DRAFT" : "STANDARD"} · ${pad4(rec.seq || 0)}${rec.savedAt ? " · SAVED" : ""}</span></div>
         <div class="creation-meta"><div><b>${esc(rec.prompt.toUpperCase().slice(0, 60) || "UNTITLED")}</b><small>${esc(cap(rec.quality))} · ${esc(cap(rec.aspect))} · ${SIZES[rec.aspect] || ""}</small></div></div>`;
       card.querySelector(".creation-img").src = url;
       const fav = document.createElement("button");
@@ -1250,7 +1293,7 @@
       <img src="${url}" alt="${esc(rec.prompt || "Generated image")}">
       <div class="dfi-viewer-meta">
         <p>${esc(rec.prompt || "(no description saved)")}</p>
-        <small>${esc(cap(rec.quality))} · ${SIZES[rec.aspect] || ""} · ${new Date(rec.ts).toLocaleString()} · ${rec.source === "batch" ? "FROM A BATCH" : "MADE NOW"}</small>
+        <small>${esc(cap(rec.quality))} · ${SIZES[rec.aspect] || ""} · ${new Date(rec.ts).toLocaleString()} · ${rec.source === "batch" ? "FROM A BATCH" : rec.source === "draft" ? "FREE DRAFT" : "MADE NOW"}</small>
         <div class="dfi-viewer-actions"></div>
       </div>`;
     const actions = card.querySelector(".dfi-viewer-actions");
@@ -1455,6 +1498,8 @@
     try {
       const c = await apiJson(API.config);
       if (c && c.tokens) CFG = c;
+      if (!CFG.draft) CFG.draft = { available: false, model: "", refs: false, brand: "Free Draft (NVIDIA)" };
+      syncDraftToggle();
       renderEstimate();
       renderFoundry();
       if (!CFG.available) showFault("Image generation is not configured on the server yet (missing OpenAI key).");

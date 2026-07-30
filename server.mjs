@@ -4662,6 +4662,11 @@ const imagesFeature = createImagesFeature({
   apiBase: cfgGet("OPENAI_IMAGES_BASE", "https://api.openai.com"),
   model: cfgGet("DOMINION_IMAGE_MODEL", "gpt-image-2"),
   refineModel: cfgGet("DOMINION_IMAGE_REFINE_MODEL", "gpt-5.6-luna"),
+  // ARSENAL Wave 3 (Fred, 2026-07-28): "the exact same features, just for free" — a free draft
+  // lane on NVIDIA's flux.1-dev, live-probed working 2026-07-29 (image_probe.mjs). $0 transport.
+  nvidiaKey: () => NVIDIA_KEY,
+  nvidiaBase: cfgGet("NVIDIA_GENAI_URL", "https://ai.api.nvidia.com/v1/genai"),
+  draftModel: cfgGet("DOMINION_DRAFT_IMAGE_MODEL", "black-forest-labs/flux.1-dev"),
   dataDir: dataPath("images"),
   resolveTenant,
   screenContent,

@@ -22,14 +22,22 @@ const mock = http.createServer((req, res) => {
 });
 await new Promise((r) => mock.listen(MOCK_OLLAMA, "127.0.0.1", r));
 
-if (!process.env.OPEN_AI_DOMINION_UI_APIKEY) {
+if (!process.env.OPEN_AI_DOMINION_UI_APIKEY || !process.env.NVIDIA_API_KEY) {
   try {
     const wallet = readFileSync(join(homedir(), ".app-secrets.env"), "utf8");
-    const m = /^OPEN_AI_DOMINION_UI_APIKEY=(.+)$/m.exec(wallet);
-    if (m) process.env.OPEN_AI_DOMINION_UI_APIKEY = m[1].trim();
+    if (!process.env.OPEN_AI_DOMINION_UI_APIKEY) {
+      const m = /^OPEN_AI_DOMINION_UI_APIKEY=(.+)$/m.exec(wallet);
+      if (m) process.env.OPEN_AI_DOMINION_UI_APIKEY = m[1].trim();
+    }
+    if (!process.env.NVIDIA_API_KEY) {
+      const m = /^NVIDIA_API_KEY=(.+)$/m.exec(wallet);
+      if (m) process.env.NVIDIA_API_KEY = m[1].trim();
+    }
   } catch {}
 }
 console.log("[devboot-images] OpenAI key " + (process.env.OPEN_AI_DOMINION_UI_APIKEY ? "loaded from wallet (live generation WILL spend)" : "absent (generation will 503)"));
+// The free draft lane is genuinely $0 transport (NVIDIA flux.1-dev) — safe to leave on for dev.
+console.log("[devboot-images] NVIDIA key " + (process.env.NVIDIA_API_KEY ? "loaded from wallet (free draft lane live, $0)" : "absent (draft lane will 503)"));
 
 const data = join(HERE, ".devdata", "images-dev");
 mkdirSync(data, { recursive: true });

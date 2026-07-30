@@ -140,6 +140,13 @@ export function createImagesFeature(deps) {
     apiBase = "https://api.openai.com",
     model = "gpt-image-2",
     refineModel = "gpt-5.6-luna",
+    // ARSENAL Wave 3 (Fred, 2026-07-28): a free draft lane, same panel and controls, $0 transport.
+    // Live-probed 2026-07-29 (image_probe.mjs): NVIDIA serves black-forest-labs/flux.1-dev at
+    // {nvidiaBase}/{draftModel} with a Stability-shaped body ({prompt, width, height, cfg_scale,
+    // steps}) and returns { artifacts: [{ base64, finishReason, seed }] } — NOT the OpenAI shape.
+    nvidiaKey = () => "",
+    nvidiaBase = "https://ai.api.nvidia.com/v1/genai",
+    draftModel = "black-forest-labs/flux.1-dev",
     dataDir,                // spool + batch-job records live here
     resolveTenant,          // (req) => T   — the tenancy resolver from server.mjs
     screenContent,          // (text, {isOwner}) => { blocked, reason } — the content wall
@@ -209,7 +216,32 @@ export function createImagesFeature(deps) {
       refCap: REF_MAX,
       refine: true,
       batch: { discount: BATCH_DISCOUNT, window: "24h", maxItemsGuest: BATCH_MAX_GUEST, maxItemsOwner: BATCH_MAX_OWNER },
+      // Draft lane: same prompt/aspect/n controls, $0, no reference plates (flux.1-dev has no
+      // edits endpoint on the free tier) — disabled with the reason, never hidden, same rule OCR
+      // and paid generation already follow for a provider with no key.
+      draft: { available: !!nvidiaKey(), model: draftModel, refs: false, brand: "Free Draft (NVIDIA)" },
     });
+  }
+
+  // One request to NVIDIA's flux.1-dev genai endpoint. Returns { b64 } or { error }.
+  // apiRequest resolves `path` against `base` with new URL(path, base) — a leading "/" on path
+  // would discard nvidiaBase's own /v1/genai segment, so base carries a trailing slash and path
+  // is the bare model id (a relative reference, not absolute).
+  async function draftOne(prompt, size, quality) {
+    const [width, height] = size.split("x").map(Number);
+    const steps = quality === "high" ? 40 : quality === "low" ? 20 : 30;
+    const payload = JSON.stringify({ prompt, mode: "base", width, height, cfg_scale: 3.5, steps, seed: 0 });
+    const base = nvidiaBase.endsWith("/") ? nvidiaBase : nvidiaBase + "/";
+    const r = await apiRequest(base, nvidiaKey(), {
+      method: "POST", path: draftModel,
+      headers: { accept: "application/json", "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
+      body: payload, timeout: 120000,
+    });
+    if (r.status !== 200) return { error: apiErrorMessage(r, "Draft image generation failed") };
+    let j; try { j = JSON.parse(r.buf.toString("utf8")); } catch { return { error: "Unreadable response from NVIDIA." }; }
+    const b64 = j.artifacts?.[0]?.base64;
+    if (!b64) return { error: (j.artifacts?.[0]?.finishReason && j.artifacts[0].finishReason !== "SUCCESS") ? "NVIDIA: " + j.artifacts[0].finishReason : "NVIDIA returned no image." };
+    return { b64 };
   }
 
   // Validate the staged reference plates (dataURLs). Returns { error } or { refs: [{mime, buf}] }.
@@ -229,27 +261,55 @@ export function createImagesFeature(deps) {
 
   // ---- POST /api/images/generate — synchronous generation, 1-4 images. With reference
   // plates the call rides /v1/images/edits (multipart, image[] entries); without, the plain
-  // JSON /v1/images/generations. Same response shape either way.
+  // JSON /v1/images/generations. Same response shape either way. body.draft=true routes to the
+  // free NVIDIA lane instead (ARSENAL Wave 3) — same prompt/aspect/n controls, no references yet.
   async function handleGenerate(req, res) {
-    if (!key()) return json(res, 503, { error: "Image generation needs the OpenAI key (OPEN_AI_DOMINION_UI_APIKEY)." });
     const raw = await readRawBody(req, 96 * 1024 * 1024);
     if (raw === null) return json(res, 413, { error: "request too large" });
     let body; try { body = JSON.parse(raw.toString("utf8") || "{}"); } catch { return json(res, 400, { error: "bad json" }); }
+    const isDraft = !!body.draft;
+    if (isDraft ? !nvidiaKey() : !key()) {
+      return json(res, 503, { error: isDraft
+        ? "The free draft lane needs the NVIDIA key."
+        : "Image generation needs the OpenAI key (OPEN_AI_DOMINION_UI_APIKEY)." });
+    }
 
-    const T = gate(req, res, "image generation");
+    const T = gate(req, res, isDraft ? "free draft image generation" : "image generation");
     if (!T) return;
     const item = normalizeItem(body, { maxN: SYNC_MAX_N });
     if (item.error) return json(res, 400, { error: item.error });
     const parsedRefs = parseRefs(body.refs);
     if (parsedRefs.error) return json(res, 400, { error: parsedRefs.error });
+    if (isDraft && parsedRefs.refs.length) {
+      return json(res, 400, { error: "Draft images do not support reference plates yet — turn off Draft to use references." });
+    }
 
     const screen = screenContent(item.prompt, { isOwner: T.isOwner });
     if (screen.blocked) {
-      await logUsage({ ts: new Date().toISOString(), model, mode: "image", status: "blocked", reason: screen.category, uid: T.uid });
+      await logUsage({ ts: new Date().toISOString(), model: isDraft ? draftModel : model, mode: isDraft ? "image_draft" : "image", status: "blocked", reason: screen.category, uid: T.uid });
       return json(res, 403, { error: screen.reason, code: "content_blocked" });
     }
 
     const startedAt = new Date().toISOString();
+
+    if (isDraft) {
+      const attempts = await Promise.all(Array.from({ length: item.n }, () => draftOne(item.prompt, item.size, item.quality)));
+      const images = attempts.filter((a) => a.b64).map((a) => ({ b64: a.b64, format: "png" }));
+      if (!images.length) {
+        const msg = attempts.find((a) => a.error)?.error || "Draft generation returned no images.";
+        await logUsage({ ts: startedAt, model: draftModel, mode: "image_draft", status: "error", error: msg.slice(0, 200), uid: T.uid });
+        return json(res, 502, { error: msg });
+      }
+      // No meter() call: billing.chargeTurn floors every charge at 1 credit (Math.max(1, ...)),
+      // which would quietly bill a "free" feature. $0 transport means skip the charge entirely.
+      await logUsage({ ts: startedAt, model: draftModel, mode: "image_draft", status: "completed", images: images.length, quality: item.quality, aspect: item.aspect, costUsd: 0, uid: T.uid });
+      log(`draft image gen: ${images.length}/${item.n} ${item.quality}/${item.aspect} · $0 (NVIDIA) · ${T.isOwner ? "owner" : T.email || T.uid}`);
+      return json(res, 200, {
+        images, model: draftModel, quality: item.quality, aspect: item.aspect, size: item.size,
+        usage: null, costUsd: 0, draft: true, partial: images.length < item.n,
+      });
+    }
+
     let r;
     if (parsedRefs.refs.length) {
       const boundary = "----dominionimages" + randomUUID().replace(/-/g, "");
