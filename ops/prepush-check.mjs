@@ -22,23 +22,32 @@ async function probe() {
   return r.json();
 }
 
-for (;;) {
-  let v;
-  try { v = await probe(); }
-  catch (e) {
-    console.error("prepush-check: cannot reach production (" + (e && e.message) + ") — treat as UNSAFE.");
-    process.exit(2);
+/*
+ * Verdict via process.exitCode + return, never process.exit() from inside the async loop: on
+ * Windows that aborts the process with a libuv assertion instead of exiting, and a guard whose
+ * exit status is garbage is worse than no guard at all (caught on its first real use).
+ */
+async function verdict() {
+  for (;;) {
+    let v;
+    try { v = await probe(); }
+    catch (e) {
+      console.error("prepush-check: cannot reach production (" + (e && e.message) + ") — treat as UNSAFE.");
+      return 2;
+    }
+    const running = Number(v.runningChatJobs);
+    if (!Number.isFinite(running)) {
+      console.error("prepush-check: production does not report runningChatJobs yet (build " + (v.build || v.sha || "unknown") + "). Deploy this build once, then the guard works. Treat as UNKNOWN.");
+      return 3;
+    }
+    if (running === 0) {
+      console.log("prepush-check: 0 running chat jobs on " + BASE + " — safe to push.");
+      return 0;
+    }
+    console.log("prepush-check: " + running + " running chat job(s) on " + BASE + " — a push now would execute them.");
+    if (!WAIT || Date.now() > DEADLINE) return 1;
+    await new Promise((res) => setTimeout(res, 20000));
   }
-  const running = Number(v.runningChatJobs);
-  if (!Number.isFinite(running)) {
-    console.error("prepush-check: production does not report runningChatJobs yet (build " + (v.build || v.sha || "unknown") + "). Deploy this build once, then the guard works. Treat as UNKNOWN.");
-    process.exit(3);
-  }
-  if (running === 0) {
-    console.log("prepush-check: 0 running chat jobs on " + BASE + " — safe to push.");
-    process.exit(0);
-  }
-  console.log("prepush-check: " + running + " running chat job(s) on " + BASE + " — a push now would execute them.");
-  if (!WAIT || Date.now() > DEADLINE) process.exit(1);
-  await new Promise((res) => setTimeout(res, 20000));
 }
+
+process.exitCode = await verdict();
