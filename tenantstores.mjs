@@ -63,9 +63,9 @@ export function filterToolDefs(defs, role, extra = null) {
   return (defs || []).filter((d) => { const n = d && d.function && d.function.name; return SAFE_TOOLS.has(n) || !!(extra && extra.has(n)); });
 }
 
-export function createTenantStores({ baseDir, uid, embed }) {
+export function createTenantStores({ baseDir, uid, embed, embedQuery }) {
   const root = join(baseDir, "users", uid);
-  const memory = createMemoryStore({ dir: join(root, "memory"), gating: "lax", embed });
+  const memory = createMemoryStore({ dir: join(root, "memory"), gating: "lax", embed, embedQuery });
   const chatlog = createChatLog({ dir: join(root, "chatlog") });
   // Cross-device chat sync: the faithful copy of this user's conversations (chatlog above is the
   // lossy retrieval index). Per-uid directory = a user's chats are reachable only through their own
@@ -87,10 +87,10 @@ export function createTenantStores({ baseDir, uid, embed }) {
 // A resolver caches per-user store bundles and returns a tenant view for a request.
 //   globals  = { memory, chatlog, artifacts, flywheel, sandboxDir, ctx, persona }  (the owner's)
 //   users    = the tenancy users store (identify())
-export function createTenantResolver({ baseDir, embed, globals, users }) {
+export function createTenantResolver({ baseDir, embed, embedQuery, globals, users }) {
   const cache = new Map();   // uid -> stores bundle
   function storesFor(id) {
-    if (!cache.has(id.uid)) cache.set(id.uid, createTenantStores({ baseDir, uid: id.uid, embed }));
+    if (!cache.has(id.uid)) cache.set(id.uid, createTenantStores({ baseDir, uid: id.uid, embed, embedQuery }));
     return cache.get(id.uid);
   }
   function resolve(req) {

@@ -127,6 +127,7 @@ import { shapeCloudParams, paramRetryAdjust, TOOL_CAP } from "./cloudparams.mjs"
 import { createChatSync } from "./chatsync.mjs";
 import { unkeptIntent, intentNudge } from "./intentguard.mjs";
 import { featureIndex, featureHelp } from "./features.mjs";
+import { createFreeRetriever, applyRerank } from "./retriever.mjs";
 import { createGoogleProvider } from "./google.mjs";
 import { createBilling, creditsForUsd, creditsForCostUsd } from "./billing.mjs";
 import { createSessionBudgets } from "./sessionbudget.mjs";
@@ -208,11 +209,35 @@ const CTX = {
   serpKey: cfgGet("SERP_API_KEY", ""),   // live web search (SerpApi) — web_search tool
 };
 
-// Embeddings for hybrid retrieval (Phase 2 "vector search"). Uses Ollama /api/embed with a small
-// dedicated embedding model; if the model isn't pulled or the call fails, retrieval degrades to
-// lexical automatically — nothing blocks on this.
+// Embeddings for hybrid retrieval (Phase 2 "vector search"). ARSENAL Wave 5 (2026-07-30): the
+// PRIMARY embedder is now NVIDIA's free nemotron-3-embed-1b (2048 dims, $0, always reachable
+// from the cloud), with the local Ollama nomic-embed-text path as the offline fallback — which
+// fixes the production reality that embeddings only worked when the hands node happened to be
+// connected ("0 embedded" in the boot log). Vector spaces never mix: memory.mjs scores a stored
+// vector only when its dimensions match the query vector, so old nomic vectors simply behave as
+// unembedded until they re-embed in the new space. PERSONA deliberately stays on the Ollama
+// embedder (ollamaEmbedText below): its 14,696 healthy nomic-space vectors are a working index,
+// and re-embedding that corpus is its own decision for another day.
 const EMBED_MODEL = cfgGet("EMBED_MODEL", "nomic-embed-text");
+const freeRetriever = createFreeRetriever({
+  key: () => NVIDIA_KEY,
+  embedBase: cfgGet("NVIDIA_EMBED_BASE", "https://integrate.api.nvidia.com"),
+  rerankUrl: cfgGet("NVIDIA_RERANK_URL", ""),   // "" = the module's probed default
+  log: (m) => console.log("[dominion-ai] " + m),
+});
 async function embedText(text) {
+  const v = await freeRetriever.embed(text, { inputType: "passage" });
+  if (v) return v;
+  return ollamaEmbedText(text);
+}
+// The query side of the same space: nemotron-3-embed is retrieval-tuned and asymmetric, so a
+// QUESTION must embed as input_type "query" to land near its "passage"-embedded answers.
+async function embedQueryText(text) {
+  const v = await freeRetriever.embed(text, { inputType: "query" });
+  if (v) return v;
+  return ollamaEmbedText(text);
+}
+async function ollamaEmbedText(text) {
   // Fix C: embeddings also ride the node when configured, so retrieval and the persona vec cache
   // work from the cloud. A single quick call, no streaming. Defined before handsHub in file order,
   // but only invoked at runtime, by which point handsHub is initialized.
@@ -240,7 +265,7 @@ async function embedText(text) {
 // Legacy MEMORY_AUTO_APPROVE=0 still flips to spec mode. The never-save list blocks in BOTH modes.
 const MEMORY_DIR = cfgGet("MEMORY_DIR", dataPath("memory"));
 const MEMORY_GATING = String(cfgGet("MEMORY_GATING", String(cfgGet("MEMORY_AUTO_APPROVE", "1")) === "0" ? "spec" : "lax")).toLowerCase() === "spec" ? "spec" : "lax";
-const memory = createMemoryStore({ dir: MEMORY_DIR, gating: MEMORY_GATING, embed: embedText });
+const memory = createMemoryStore({ dir: MEMORY_DIR, gating: MEMORY_GATING, embed: embedText, embedQuery: embedQueryText });
 CTX.memory = memory;
 
 // Server-side rolling chat transcripts (retrieval index for search_chats + episodic summaries).
@@ -287,7 +312,9 @@ const PERSONA_STAGING = cfgGet("PERSONA_STAGING", process.platform === "win32" ?
 // Deploy step 4: if a verified corpus was uploaded (incoming.db + incoming.ok), swap it into place
 // BEFORE the store opens its handle — no open-handle corruption window. See corpusrestore.mjs.
 try { const sw = swapIncomingIfPresent(PERSONA_DIR, (m) => console.log("[dominion-ai] " + m)); if (sw.error) console.log("[dominion-ai] corpus-restore: " + sw.error); } catch (e) { console.log("[dominion-ai] corpus-restore boot hook error: " + e.message); }
-const persona = createPersonaStore({ dir: PERSONA_DIR, staging: PERSONA_STAGING, embed: embedText });
+// Persona stays on the LOCAL embedder: 14,696 healthy nomic-space vectors (see the Wave 5 note
+// above embedText). Its retrieval still gains the free rerank stage where its results are used.
+const persona = createPersonaStore({ dir: PERSONA_DIR, staging: PERSONA_STAGING, embed: ollamaEmbedText });
 CTX.persona = persona;
 
 // Continuous background embedder: drains the unembedded-chunk queue at a gentle pace so a bulk dump
@@ -1322,7 +1349,7 @@ CTX.internal = { startWorkOrder: (a) => startDominionWorkOrder(a), workOrderStat
 const MULTI_TENANT = String(cfgGet("MULTI_TENANT", "0")) === "1";
 const OWNER_EMAIL = cfgGet("OWNER_EMAIL", "fredwolfe@gmail.com");
 const usersStore = createUsersStore({ dir: dataPath("tenants"), ownerEmail: OWNER_EMAIL });
-const tenants = createTenantResolver({ baseDir: DATA_DIR, embed: embedText,
+const tenants = createTenantResolver({ baseDir: DATA_DIR, embed: embedText, embedQuery: embedQueryText,
   globals: { memory, chatlog, chatsync, artifacts, flywheel, longrun, sandboxDir: CTX.sandboxDir, ctx: CTX, persona }, users: usersStore });
 const OWNER_T = { role: "owner", isOwner: true, uid: "owner", email: OWNER_EMAIL, status: "active",
   memory, chatlog, chatsync, artifacts, flywheel, longrun, sandboxDir: CTX.sandboxDir, persona, ctxBase: CTX };
@@ -4498,18 +4525,47 @@ async function buildContext(lastUserText, chatId, { skipRetrieval = false, mode 
   // only in tool contexts, model-scoped only on the matching model. Global always loads.
   const scopeCtx = { chatId, mode, model };
   const pinned = mem.alwaysLoaded({ limit: 6, scopeCtx });
-  const retrieved = skipRetrieval ? [] : await mem.retrieveHybrid(lastUserText || "", { limit: 4, scopeCtx });
+  // ARSENAL Wave 5: retrieve WIDE, rerank PRECISELY, feed fewer better tokens. When the free
+  // reranker is reachable, each source over-fetches (memory 10, chats 6, artifacts 6) and the
+  // reranker cuts each back to its old budget by actual relevance to the question. When it is
+  // not, the old limits apply verbatim — precision degrades, availability never does. Pinned
+  // memory is deliberately NOT reranked: pinned means "always in the room", not "if relevant".
+  const wide = freeRetriever.available() && !skipRetrieval && lastUserText;
+  let retrieved = skipRetrieval ? [] : await mem.retrieveHybrid(lastUserText || "", { limit: wide ? 10 : 4, scopeCtx });
+  let artifactsUsed = [], chatsUsed = [];
+  if (!skipRetrieval && lastUserText) {
+    artifactsUsed = arts.list({ q: lastUserText }).slice(0, wide ? 6 : 2);
+    chatsUsed = log.search(lastUserText, { limit: wide ? 6 : 2, excludeId: chatId });
+  }
+  if (wide && (retrieved.length + artifactsUsed.length + chatsUsed.length) > 2) {
+    // One rerank call over all three sources; each bucket keeps its own budget after the cut.
+    const cand = [
+      ...retrieved.map((c) => ({ bucket: "mem", item: c, text: c.content })),
+      ...artifactsUsed.map((a) => ({ bucket: "art", item: a, text: a.title + " " + (a.type || "") })),
+      ...chatsUsed.map((h) => ({ bucket: "chat", item: h, text: h.title + " " + (h.snippet || "") })),
+    ];
+    const rankings = await freeRetriever.rerank(lastUserText, cand.map((c) => c.text));
+    if (rankings) {
+      const ordered = applyRerank(cand, rankings, cand.length);
+      retrieved = ordered.filter((c) => c.bucket === "mem").slice(0, 4).map((c) => c.item);
+      artifactsUsed = ordered.filter((c) => c.bucket === "art").slice(0, 2).map((c) => c.item);
+      chatsUsed = ordered.filter((c) => c.bucket === "chat").slice(0, 2).map((c) => c.item);
+    } else {
+      retrieved = retrieved.slice(0, 4);
+      artifactsUsed = artifactsUsed.slice(0, 2);
+      chatsUsed = chatsUsed.slice(0, 2);
+    }
+  } else if (wide) {
+    retrieved = retrieved.slice(0, 4);
+    artifactsUsed = artifactsUsed.slice(0, 2);
+    chatsUsed = chatsUsed.slice(0, 2);
+  }
   const seen = new Set(), used = [];
   for (const c of [...pinned, ...retrieved]) { if (seen.has(c.id)) continue; seen.add(c.id); used.push(c); }
   const parts = [];
   if (used.length) parts.push("Relevant saved memory about Fred (use it when helpful; don't recite it verbatim unless asked):\n" + used.map((c) => `- (${c.title}) ${c.content}`).join("\n"));
-  let artifactsUsed = [], chatsUsed = [];
-  if (!skipRetrieval && lastUserText) {
-    artifactsUsed = arts.list({ q: lastUserText }).slice(0, 2);
-    if (artifactsUsed.length) parts.push("Possibly relevant saved artifacts (open with read_artifact if needed):\n" + artifactsUsed.map((a) => `- [${a.id.slice(0, 8)}] ${a.title} (${a.type}, v${a.version})`).join("\n"));
-    chatsUsed = log.search(lastUserText, { limit: 2, excludeId: chatId });
-    if (chatsUsed.length) parts.push("From earlier conversations with Fred:\n" + chatsUsed.map((h) => `- "${h.title}": ${h.snippet.slice(0, 220)}`).join("\n"));
-  }
+  if (artifactsUsed.length) parts.push("Possibly relevant saved artifacts (open with read_artifact if needed):\n" + artifactsUsed.map((a) => `- [${a.id.slice(0, 8)}] ${a.title} (${a.type}, v${a.version})`).join("\n"));
+  if (chatsUsed.length) parts.push("From earlier conversations with Fred:\n" + chatsUsed.map((h) => `- "${h.title}": ${h.snippet.slice(0, 220)}`).join("\n"));
   const retrievalRules = fly.activeRules("retrieval").filter((r) => r.scope === "retrieval");
   if (retrievalRules.length) parts.push("Retrieval guidance — follow these when deciding what to look up:\n" + retrievalRules.map((r) => "- " + r.content).join("\n"));
   return { used, artifactsUsed, chatsUsed, block: parts.join("\n\n") };
@@ -8400,7 +8456,7 @@ server.listen(PORT, HOST, () => {
   console.log(`[dominion-ai] privacy: modes ${PRIVACY_MODES.join("/")} (default ${DEFAULT_PRIVACY_MODE})  ·  trusted providers: local+${[...TRUSTED_PROVIDERS].join("+")}  ·  refuse-not-substitute  ·  providers keyed: openrouter=${!!OPENROUTER_KEY} openai=${!!OPENAI_KEY} deepseek=${!!DEEPSEEK_KEY} anthropic=${!!ANTHROPIC_KEY} moonshot=${!!MOONSHOT_KEY} nvidia=${!!NVIDIA_KEY}`);
   console.log(`[dominion-ai] router: heuristic+classifier  ·  light=${LIGHT_MODEL}  ·  main=${MAIN_MODEL}  ·  modes: auto/fast/normal/draft/deep_think/long_context  ·  needs_* consumed (retrieval skip + tool-def gating)  ·  post-retrieval long-context re-check  ·  usage log=${LOG_DIR}`);
   const ms = memory.stats();
-  console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  gating=${ms.gating}${ms.gatedLax ? " (" + ms.gatedLax + " lax-auto-approved)" : ""}${ms.unverified ? " · " + ms.unverified + " unverified mentor claim(s) pending" : ""}  ·  scope-filtered retrieval  ·  vectors=${EMBED_MODEL} (${ms.embedded} embedded)  ·  dir=${MEMORY_DIR}`);
+  console.log(`[dominion-ai] memory: ${ms.total} item(s) (${JSON.stringify(ms.byStatus)})  ·  gating=${ms.gating}${ms.gatedLax ? " (" + ms.gatedLax + " lax-auto-approved)" : ""}${ms.unverified ? " · " + ms.unverified + " unverified mentor claim(s) pending" : ""}  ·  scope-filtered retrieval  ·  vectors=${NVIDIA_KEY ? freeRetriever.embedModel + " (free) -> " + EMBED_MODEL + " fallback" : EMBED_MODEL} (${ms.embedded} embedded)  ·  rerank=${NVIDIA_KEY ? freeRetriever.rerankModel + " (free)" : "off"}  ·  dir=${MEMORY_DIR}`);
   console.log(`[dominion-ai] chatlog: ${chatlog.stats().chats} conversation(s) indexed  ·  episodic summaries via /memory/summarize-session`);
   const js = jobStore.stats();
   console.log(`[dominion-ai] chatjobs: durable (${JSON.stringify(js.byStatus)})  ·  ${js.uncollected} uncollected result(s) waiting  ·  ${jobStore.orphanedAtBoot} orphaned this boot  ·  max-running/user=${CHATJOBS_MAX_RUNNING}  ·  survives restart+redeploy`);

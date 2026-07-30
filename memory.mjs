@@ -114,6 +114,10 @@ export function createMemoryStore(opts = {}) {
   const gating = opts.gating === "spec" || opts.autoApprove === false ? "spec" : "lax";
   const autoApprove = gating === "lax";                     // back-compat surface for stats/logs
   const embed = typeof opts.embed === "function" ? opts.embed : null;
+  // ARSENAL Wave 5: retrieval-tuned embedders are asymmetric (query vs passage input types), so
+  // the QUERY side may ride its own function. Defaults to the item embedder, which preserves the
+  // old symmetric behavior exactly.
+  const embedQuery = typeof opts.embedQuery === "function" ? opts.embedQuery : embed;
   const MAX_ITEMS = opts.maxItems || 2000;
   const MAX_LEN = opts.maxLen || 2000;
   let items = [];
@@ -281,14 +285,23 @@ export function createMemoryStore(opts = {}) {
   }
 
   // Hybrid retrieval: 0.5*lexical + 0.5*cosine when embeddings are available; pure lexical otherwise.
+  // Vector-space safety (Wave 5): a stored vector only participates when its DIMENSIONS match the
+  // query vector — an item embedded in a different space (e.g. old 768-dim nomic next to new
+  // 2048-dim nemotron) scores as if unembedded rather than being half-buried by a guaranteed-zero
+  // cosine. Such items re-embed naturally through embedItem/backfill and rejoin the vector side.
   async function retrieveHybrid(query, { limit = 4, minScore = 0.15, scopeCtx = null } = {}) {
     sweep();
     const q = tokenize(query); if (!q.length) return [];
     let qvec = null;
-    if (embed) { try { const v = await embed(String(query).slice(0, 2000)); if (Array.isArray(v) && v.length) qvec = v; } catch {} }
+    if (embedQuery) { try { const v = await embedQuery(String(query).slice(0, 2000)); if (Array.isArray(v) && v.length) qvec = v; } catch {} }
     if (!qvec) return retrieve(query, { limit, minScore, scopeCtx });
     return eligible(scopeCtx)
-      .map((m) => { const lex = lexScore(q, m); const cos = m.vec ? cosine(qvec, m.vec) : 0; const s = (m.vec ? 0.5 * lex + 0.5 * cos : lex) * boost(m); return { m, s }; })
+      .map((m) => {
+        const lex = lexScore(q, m);
+        const sameSpace = !!(m.vec && m.vec.length === qvec.length);
+        const s = (sameSpace ? 0.5 * lex + 0.5 * cosine(qvec, m.vec) : lex) * boost(m);
+        return { m, s };
+      })
       .filter((x) => x.s >= minScore).sort((a, b) => b.s - a.s).slice(0, limit).map(({ m, s }) => toCtx(m, s));
   }
 
