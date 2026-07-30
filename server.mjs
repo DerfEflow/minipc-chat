@@ -161,6 +161,7 @@ import { helpVoice } from "./idehelp.mjs";
 import { escalationFor, sendWakeups } from "./idepush.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
+import { createVolumeBackup } from "./volumebackup.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
 import { createChatJobs, coalesceEvents } from "./chatjobs.mjs";
 import { createLongRun } from "./longrun.mjs";
@@ -1535,6 +1536,31 @@ const toolWallFor = (source) => (source === "service-owner" ? DECK_ORCHESTRATOR_
 const cxCrypto = connectorCrypto({ dir: DATA_DIR, cfgGet });
 const googleProvider = createGoogleProvider({ dir: DATA_DIR, cfgGet, baseUrl: () => APP_BASE_URL, enc: cxCrypto.enc, dec: cxCrypto.dec });
 const connectors = createConnectors({ dir: DATA_DIR, cfgGet, providers: { google: googleProvider } });
+
+/*
+ * ---- WHOLE-VOLUME backup to the owner's Google Drive (Fred, 2026-07-30).
+ *
+ * cloudBackup above covers the persona corpus and nothing else: 93MB of a 1.03GB volume, pushed to
+ * the laptop's Drive folder, and only while the laptop is awake to receive it. Every artifact,
+ * every chat, every guest workshop, and both money databases sat on a single Railway volume that
+ * Railway does not back up, with no off-box copy at all.
+ *
+ * This one goes straight from the container to Drive over the API, so it does not care whether any
+ * machine of Fred's is switched on. It uses the OWNER's existing Google connector, which means no
+ * new credential and no service account: whatever Fred can see in Drive, this writes into.
+ */
+const volumeBackup = createVolumeBackup({
+  dataDir: DATA_DIR,
+  drive: (T) => googleProvider.drive(T),
+  folderName: cfgGet("VOLUME_BACKUP_FOLDER", "Dominion Volume Backups"),
+  keep: Number(cfgGet("VOLUME_BACKUP_KEEP", "7")) || 7,
+  // Unset by default and that is deliberate: this lands in Fred's own private Drive, and for a
+  // non-technical owner a lost key turns every backup into noise, which is a worse expected
+  // outcome than the risk encryption removes. Set it and the archive becomes AES-256-GCM.
+  encryptionKey: cfgGet("BACKUP_KEY", ""),
+  log: (m) => console.log("[dominion-ai] " + m),
+});
+
 // Billing (SaaS layer, SOW item 2). Stripe uses the sandbox keys; billing's auto-recharge charge is
 // wired to Stripe. Both are inert until MULTI_TENANT is on and a user is a non-owner. The app base URL
 // is used to build Checkout return links.
@@ -4291,6 +4317,37 @@ async function handleAccount(req, res, u) {
   }
   if (req.method === "POST" && p === "/account/tutorial-seen") { usersStore.markTutorialSeen(T.email); return sjson(res, 200, { ok: true }); }
   return sjson(res, 404, { error: "not found" });
+}
+
+/*
+ * WHOLE-VOLUME BACKUP, owner only.
+ *
+ *   GET  /volume-backup/status   what happened last, and whether the job has gone quiet
+ *   POST /volume-backup/now      run one immediately instead of waiting for the nightly timer
+ *   POST /volume-backup/verify   the restore DRILL: pull a real backup back out of Drive, unpack
+ *                                it, open the databases inside and integrity-check them
+ *
+ * The drill is a separate endpoint from the run on purpose. "It uploaded" and "it can be restored"
+ * are different claims, and only the second one is the claim a backup actually makes. Anyone can
+ * write the first; the second is the one worth being able to press.
+ *
+ * These were first written inside handlePersona, which only ever receives /persona/* paths, so
+ * every one of them answered 404. Caught by calling them rather than by reading them.
+ */
+async function handleVolumeBackup(req, res, u) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const T = resolveTenant(req);
+  if (T.role === "anon") return json(401, { error: "sign in" });
+  // The archive contains every tenant's data, so its controls are the owner's alone.
+  if (!T.isOwner) return json(403, { error: "The volume backup is an owner control." });
+  const p = u.pathname;
+  if (req.method === "GET" && (p === "/volume-backup" || p === "/volume-backup/status")) return json(200, volumeBackup.status());
+  if (req.method === "POST" && p === "/volume-backup/now") return json(200, await volumeBackup.runOnce());
+  if (req.method === "POST" && p === "/volume-backup/verify") {
+    const body = (await readJsonBody(req)) || {};
+    return json(200, await volumeBackup.verify({ fileId: String(body.fileId || "") }));
+  }
+  return json(404, { error: "not found" });
 }
 
 // Credit top-ups (hosted Stripe Checkout), the return handler, and auto-recharge settings.
@@ -8971,6 +9028,7 @@ const server = http.createServer(async (req, res) => {
     if (path === "/mentor/reject" && req.method === "POST") return handleMentorReject(req, res);
     if (["/ledger", "/evals", "/rules", "/prompts", "/finetune", "/reviews", "/pipeline", "/tool-overlays"].some((b) => path === b || path.startsWith(b + "/"))) return handleFlywheel(req, res, u);
     if (path === "/persona" || path.startsWith("/persona/")) return handlePersona(req, res, u);
+    if (path === "/volume-backup" || path.startsWith("/volume-backup/")) return handleVolumeBackup(req, res, u);
 
     if (path === "/ide" || path.startsWith("/ide/")) return handleIde(req, res, u);
 
@@ -9075,6 +9133,21 @@ server.listen(PORT, HOST, () => {
     const bms = Number(cfgGet("CLOUD_BACKUP_INTERVAL_MS", "86400000")) || 86400000;   // daily
     const r = cloudBackup.start(bms);
     console.log(`[dominion-ai] cloud-backup: ON  ·  every ${Math.round(r.intervalMs / 3600000 * 10) / 10}h  ·  off-box ${cloudBackup.configured ? "configured" : "UNCONFIGURED (local volume snapshots only until CLOUD_BACKUP_NODE+DIR set)"}`);
+  }
+  /*
+   * Whole-volume backup to Drive. Same default shape as the corpus job above: ON in the cloud,
+   * where the volume is the only copy of every customer's work, and OFF on Windows dev boxes.
+   */
+  if (String(cfgGet("VOLUME_BACKUP_ENABLED", backupDefault)) !== "0") {
+    const vms = Number(cfgGet("VOLUME_BACKUP_INTERVAL_MS", "86400000")) || 86400000;
+    volumeBackup.start(vms);
+    const st = volumeBackup.status();
+    /*
+     * Said at boot, every boot, while it is true. The way this feature fails is by going quiet, so
+     * the absence of a recent success has to be as loud as an error would be. Silence is the bug.
+     */
+    if (st.stale) console.log(`[dominion-ai] volume-backup: NO SUCCESSFUL BACKUP YET${st.lastError ? "  ·  last error: " + st.lastError : ""}`);
+    else console.log(`[dominion-ai] volume-backup: last success ${st.ageHours}h ago  ·  ${st.lastName}  ·  ${(st.lastBytes / 1e6).toFixed(1)}MB`);
   }
   // Warm the persona vector cache in the background so the FIRST As-Fred query doesn't pay the
   // full 14k-vector SQLite load inside an interactive request.

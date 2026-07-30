@@ -32,6 +32,15 @@ function checksum(header) {
   return sum;
 }
 
+/*
+ * Exported so the STREAMING packer (tarstream.mjs) can reuse this exact header, including the
+ * long-path split below that took a live failure to get right. Two implementations of ustar in one
+ * codebase is two chances to write an archive that only one of them can read.
+ */
+export function tarHeader({ name, size, mode = 0o644, type = "0", mtime = 0 }) { return header({ name, size, mode, type, mtime }); }
+export const TAR_BLOCK = BLOCK;
+export const tarPadding = (size) => (size % BLOCK === 0 ? 0 : BLOCK - (size % BLOCK));
+
 function header({ name, size, mode = 0o644, type = "0", mtime = 0 }) {
   /*
    * ustar splits a long path at a "/" into prefix (<=155) + name (<=100). A valid split is any

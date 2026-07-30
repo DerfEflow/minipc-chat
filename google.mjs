@@ -203,9 +203,111 @@ export function createGoogleProvider({ dir, cfgGet, baseUrl, enc, dec }) {
   ];
   const byName = new Map(TOOLS.map((t) => [t.name, t]));
 
+  /*
+   * DRIVE FILE OPERATIONS, for the volume backup (Fred, 2026-07-30: "What about using my google
+   * drive? I have about 500G used out of 20 TB").
+   *
+   * Kept out of TOOLS on purpose. These are not things a chat model should be able to invoke: a
+   * model that can create and delete Drive files on the owner's account, driven by text it read in
+   * a document somewhere, is a prompt-injection hole with no upside. The backup job calls them
+   * directly. `drive_search` and `drive_read` remain the only Drive verbs a model can reach.
+   *
+   * Upload is RESUMABLE, which is not optional here: a simple upload buffers the whole body, and
+   * the whole point of the backup pipeline is that a gigabyte never sits in memory at once.
+   */
+  const drive = (T) => ({
+    // The backup folder, made once and found by name thereafter. `spaces=drive` and the trashed
+    // filter matter: a folder the owner deleted must not be silently reused from the bin.
+    async ensureFolder(name, parentId = "root") {
+      const q = `name='${String(name).replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`;
+      const found = await g(T, "GET", "https://www.googleapis.com/drive/v3/files?spaces=drive&fields=files(id,name)&q=" + encodeURIComponent(q));
+      if (found.files && found.files.length) return found.files[0].id;
+      const made = await g(T, "POST", "https://www.googleapis.com/drive/v3/files?fields=id",
+        { name, mimeType: "application/vnd.google-apps.folder", parents: [parentId] });
+      return made.id;
+    },
+
+    async list(folderId, { fields = "files(id,name,size,md5Checksum,createdTime)" } = {}) {
+      const q = `'${folderId}' in parents and trashed=false`;
+      const d = await g(T, "GET", `https://www.googleapis.com/drive/v3/files?spaces=drive&orderBy=createdTime desc&pageSize=100&fields=${encodeURIComponent(fields)}&q=` + encodeURIComponent(q));
+      return d.files || [];
+    },
+
+    async remove(fileId) { await g(T, "DELETE", "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(fileId), null, true); return { ok: true }; },
+
+    async meta(fileId, fields = "id,name,size,md5Checksum") {
+      return g(T, "GET", `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=${encodeURIComponent(fields)}`);
+    },
+
+    // Returns a fetch Response so the caller can stream the body rather than buffer it.
+    async download(fileId) {
+      const tok = await accessToken(T);
+      return fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, { headers: { authorization: "Bearer " + tok } });
+    },
+
+    /*
+     * Resumable upload of a readable stream of UNKNOWN length. Google wants each chunk's byte range
+     * up front, so chunks are accumulated to `chunkBytes` and sent one at a time; only the final
+     * chunk may declare the total size. Chunk size must be a multiple of 256KB per Google's spec,
+     * and a chunk that is not gets accepted-then-silently-misassembled, which is exactly the kind
+     * of corruption a backup must never have.
+     */
+    async uploadStream(stream, { name, parentId, mimeType = "application/octet-stream", chunkBytes = 8 * 1024 * 1024, onProgress = () => {} }) {
+      const UNIT = 256 * 1024;
+      const chunk = Math.max(UNIT, Math.floor(chunkBytes / UNIT) * UNIT);
+      const tok = await accessToken(T);
+      const start = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size,md5Checksum", {
+        method: "POST",
+        headers: { authorization: "Bearer " + tok, "content-type": "application/json; charset=UTF-8" },
+        body: JSON.stringify({ name, parents: [parentId], mimeType }),
+      });
+      if (!start.ok) throw new Error("Drive upload could not start: HTTP " + start.status + " " + (await start.text()).slice(0, 200));
+      const session = start.headers.get("location");
+      if (!session) throw new Error("Drive did not return an upload session URL");
+
+      let offset = 0, pending = [], pendingBytes = 0, finalBody = null;
+      const sendChunk = async (buf, total) => {
+        const end = offset + buf.length - 1;
+        const range = `bytes ${offset}-${end}/${total == null ? "*" : total}`;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const r = await fetch(session, { method: "PUT", headers: { "content-length": String(buf.length), "content-range": range }, body: buf });
+          if (r.status === 308) { offset += buf.length; onProgress(offset); return null; }        // more expected
+          if (r.ok) { offset += buf.length; onProgress(offset); return r.json(); }                 // finished
+          // 5xx is retryable per Google's guidance; 4xx is ours to fix and must surface loudly.
+          if (r.status < 500) throw new Error("Drive upload rejected: HTTP " + r.status + " " + (await r.text()).slice(0, 200));
+          await new Promise((s) => setTimeout(s, 800 * (attempt + 1)));
+        }
+        throw new Error("Drive upload failed after retries at byte " + offset);
+      };
+
+      for await (const c of stream) {
+        pending.push(c); pendingBytes += c.length;
+        while (pendingBytes >= chunk) {
+          const buf = Buffer.concat(pending, pendingBytes);
+          await sendChunk(buf.subarray(0, chunk), null);
+          const rest = buf.subarray(chunk);
+          pending = rest.length ? [rest] : []; pendingBytes = rest.length;
+        }
+      }
+      const tail = Buffer.concat(pending, pendingBytes);
+      const total = offset + tail.length;
+      // A zero-byte stream still needs this one request, or Drive never finalises the session.
+      finalBody = await sendChunk(tail, total);
+      /*
+       * The last chunk declares the total, so Drive must answer 200 with the file resource. A 308
+       * here means it is still expecting bytes we do not have, and returning a cheerful undefined
+       * would record a successful backup that does not exist. Fail loudly instead.
+       */
+      if (!finalBody || !finalBody.id) throw new Error("Drive never finalised the upload; it still expects more bytes at " + offset + " of " + total);
+      return finalBody;
+    },
+  });
+
   return {
     id: "google",
     ready, connected, authUrl, handleCallback, disconnect,
+    drive,
+    accessToken,
     toolDefs() { return TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.parameters })); },
     async call(T, name, args, _signal) {
       const t = byName.get(name);
