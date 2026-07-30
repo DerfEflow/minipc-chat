@@ -1117,11 +1117,15 @@ function paceMeasured(key) {
 
 function renderPace() {
   if (!paceWarn) return;
-  // Dismissible, once per session (Fred, 2026-07-25): the ✕ hides the slow-settings warning for
-  // the rest of THIS browser session; a fresh visit gets one fresh warning. sessionStorage, not
-  // localStorage, on purpose — the warning exists to save beginners from a silent wait, so it may
-  // return tomorrow, but never nags twice in one sitting.
-  try { if (sessionStorage.getItem("dominion.pace.dismissed.v1") === "1") { paceWarn.hidden = true; paceWarn.innerHTML = ""; return; } } catch {}
+  // Dismissed FOR GOOD, per setup (Fred, 2026-07-30: "on by default and it has not changed no
+  // matter what the settings are"). The old sessionStorage dismissal resurrected the banner every
+  // visit, which read as an unkillable nag. The ✕ now records the exact setup it was dismissed on
+  // (model|mode|dial) in localStorage: that combination never warns again on this device, while a
+  // DIFFERENT slow combination still gets its one honest warning.
+  try {
+    const dismissed = JSON.parse(localStorage.getItem("dominion.pace.dismissed.v2") || "{}");
+    if (dismissed[paceKey(paceSetup())]) { paceWarn.hidden = true; paceWarn.innerHTML = ""; return; }
+  } catch {}
   const s = paceSetup();
   const read = paceRead(s);
   if (!read.slow) { paceWarn.hidden = true; paceWarn.innerHTML = ""; paceOpen = false; return; }
@@ -1139,7 +1143,7 @@ function renderPace() {
       '<span>SLOW SETTINGS · this reply will take a while. It is working the whole time.</span>' +
       '<span class="pace-caret">' + (paceOpen ? "hide" : "why?") + '</span>' +
     '</button>' +
-    '<button type="button" id="pace-dismiss" title="Dismiss for this session" aria-label="Dismiss the slow-settings warning for this session" ' +
+    '<button type="button" id="pace-dismiss" title="Dismiss for these settings" aria-label="Dismiss the slow-settings warning for these settings" ' +
       'style="position:absolute;top:2px;right:4px;background:none;border:0;color:inherit;font-size:15px;line-height:1;cursor:pointer;padding:4px;opacity:.8">×</button>' +
     (paceOpen
       ? '<div class="pace-body">' +
@@ -1152,7 +1156,14 @@ function renderPace() {
   const t = document.getElementById("pace-toggle");
   if (t) t.onclick = () => { paceOpen = !paceOpen; renderPace(); };
   const dx = document.getElementById("pace-dismiss");
-  if (dx) dx.onclick = () => { try { sessionStorage.setItem("dominion.pace.dismissed.v1", "1"); } catch {} paceWarn.hidden = true; paceWarn.innerHTML = ""; };
+  if (dx) dx.onclick = () => {
+    try {
+      const dismissed = JSON.parse(localStorage.getItem("dominion.pace.dismissed.v2") || "{}");
+      dismissed[paceKey(paceSetup())] = 1;
+      localStorage.setItem("dominion.pace.dismissed.v2", JSON.stringify(dismissed));
+    } catch {}
+    paceWarn.hidden = true; paceWarn.innerHTML = "";
+  };
 }
 
 // Record what a finished turn actually cost in wall-clock, per exact setup. A rolling mean, capped
