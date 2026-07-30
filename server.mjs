@@ -33,7 +33,8 @@ import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./ro
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
-import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL } from "./models.catalog.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL, BATTALION_COPY, BATTALION_ROSTER } from "./models.catalog.mjs";
+import { createBattalion } from "./battalion.mjs";
 import { continuationContext, createLoopWatch, contextExceeded, emptyResponseInstruction, reasoningOnlyPause, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
 import { TOOLBOX_OPEN_NAME, withToolbox, openToolbox } from "./toolbox.mjs";
 import { modelToolResult, toolResultFailed, toolMutationSucceeded } from "./toolresult.mjs";
@@ -5870,6 +5871,18 @@ function dominionWorkOrderStatus(woId) {
     tools: (r && r.tools) || [], errors: (r && r.errors) || [], costUsd: meta && meta.costUsd, text: text.slice(-6000) };
 }
 
+// BATTALION (ARSENAL Wave 6): the swarm orchestrator, wired to the same cloudChatStream every
+// chat turn rides — so the free-lane transports, the account-death fallback, and the transport-
+// aware $0 cost math all apply to every seat without a second code path.
+const battalion = createBattalion({
+  callSeat: (id, msgs, opts, onDelta) => cloudChatStream(id, msgs, opts, onDelta),
+  roster: BATTALION_ROSTER,
+  // isSmallAsk returns { small, why } — the battalion gate needs the verdict itself. (The Wave 6
+  // e2e caught the truthy-object version of this line routing EVERY turn to the single seat.)
+  isSimple: (q) => { try { return !!(isSmallAsk(q) || {}).small; } catch { return false; } },
+  log: (m) => console.log("[dominion-ai] " + m),
+});
+
 async function handleChat(req, res) {
   // Capped read: picture attachments make multi-MB bodies normal, but a hostile client must not
   // be able to stream unbounded data at the box. Over-cap destroys the socket and answers 413.
@@ -6066,6 +6079,58 @@ async function handleChat(req, res) {
   }
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   const totalInputChars = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 0), 0);
+
+  /* BATTALION (ARSENAL Wave 6): an execution mode, not a model id. Everything above this branch
+   * still applied — identity, invite, credit, and budget gates — and everything below it belongs
+   * to single-engine turns. The swarm spends $0 by construction (free-lane seats only), so it
+   * never touches the meter; the manifest in the done event is the receipt. */
+  if (forced === "battalion") {
+    if (privacyMode !== "normal") {
+      sse({ type: "error", code: "privacy_mode_block", mode: privacyMode, model: "battalion",
+        message: "BATTALION rides free community lanes, which " + privacyMode + " mode refuses. Switch privacy to Normal, or pick a trusted model." });
+      sse({ type: "stopped", reason: "privacy_mode_block" }); return endStream();
+    }
+    if (!(NVIDIA_KEY || OPENROUTER_KEY)) {
+      sse({ type: "error", code: "battalion_down", message: "BATTALION needs the NVIDIA (or OpenRouter) key configured on the server." });
+      sse({ type: "stopped", reason: "battalion_down" }); return endStream();
+    }
+    const hasImages = !!(lastUser && Array.isArray(lastUser.attachments) && lastUser.attachments.some((a) => a.kind === "image"));
+    if (hasImages) {
+      sse({ type: "error", code: "vision_refused", message: "BATTALION works in text for now. For this picture, pick a vision model (" + visionModelNames(4).join(", ") + ") and resend." });
+      sse({ type: "stopped", reason: "vision_refused" }); return endStream();
+    }
+    const lastUserText = lastUser && typeof lastUser.content === "string" ? lastUser.content : "";
+    // Text-file attachments still ride: they inline exactly as the single-engine path inlines them.
+    const question = lastUserText + (lastUser ? attachmentTextBlocks(lastUser) : "");
+    sse({ type: "route", model: "battalion", mode: "battalion", route: "battalion (free swarm)", reason: BATTALION_COPY });
+    working("battalion: assembling");
+    let ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" };
+    try { ctxInfo = await buildContext(lastUserText, chatId, { mode: "battalion", model: "battalion" }, T); } catch {}
+    const r = await battalion.run({
+      question, history, contextBlock: ctxInfo.block, personaStyle,
+      onToken: (delta) => { if (delta) sse({ type: "token", delta }); },
+      working, signal: ac.signal, isAborted: () => aborted,
+    });
+    workStop();
+    if (aborted) { sse({ type: "stopped", reason: "stopped" }); return endStream(); }
+    if (!r.ok) {
+      // The SOW's promise: if the free lane is down, SAY so and offer the normal model. Never
+      // quietly bill a paid swarm.
+      sse({ type: "error", code: "battalion_down",
+        message: "BATTALION's free lane is not answering right now (" + String(r.error || "no answer").slice(0, 160) + "). Nothing was billed. Pick your normal model from the dropdown and resend." });
+      sse({ type: "stopped", reason: "battalion_down" }); return endStream();
+    }
+    const mf = r.manifest;
+    sse({ type: "done", meta: {
+      model: "battalion", mode: "battalion", provider: "nvidia (free)",
+      memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length,
+      tools: 0, runIds: [], inputTokens: 0, outputTokens: 0, costUsd: 0,
+      battalion: { mode: mf.mode, parts: mf.parts, models: mf.models, ms: mf.ms, notes: mf.notes },
+      completionVerified: false, quality: { confidence: 0.6, hallucinationRisk: "normal", needsReview: false }, warnings: [],
+    } });
+    console.log(`[dominion-ai] battalion: ${mf.mode} · ${mf.models.length} model(s) · ${mf.parts} part(s) · ${Math.round(mf.ms / 1000)}s · $0${mf.notes.length ? " · " + mf.notes.join("; ") : ""}`);
+    return endStream();
+  }
 
   // Vision gate (refuse, never substitute): pictures on THIS turn need a model that can see them.
   // Local tiers have no vision, and non-vision cloud models would 400 or silently ignore — both
@@ -8045,6 +8110,15 @@ const server = http.createServer(async (req, res) => {
       // exists (resolveProviderCfg): the picker must not grey out a model that would answer fine.
       payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY,
         moonshot: !!(MOONSHOT_KEY || OPENROUTER_KEY), nvidia: !!(NVIDIA_KEY || OPENROUTER_KEY) };
+      // BATTALION (Wave 6): an execution mode wearing a picker row. It rides the existing group
+      // rendering (provider nvidia = free lane, blocked outside Normal privacy like every free
+      // seat), with Fred's line as the meta column. Free by construction, so no price.
+      if (NVIDIA_KEY || OPENROUTER_KEY) {
+        payload.groups = [{ category: "BATTALION — the free swarm", models: [{
+          id: "battalion", name: "BATTALION", provider: "nvidia", inCost: 0, outCost: 0,
+          ctx: 0, toolCapable: false, vision: false, params: BATTALION_COPY, orchestratorOk: false,
+        }] }, ...(payload.groups || [])];
+      }
       // Phase 2: tell the UI the privacy modes + which providers each mode permits, so the picker can
       // filter and the switch can render. The server ALSO enforces (privacy.mjs) — this is display only.
       payload.privacy = { modes: PRIVACY_MODES, default: DEFAULT_PRIVACY_MODE, trustedProviders: [...TRUSTED_PROVIDERS] };

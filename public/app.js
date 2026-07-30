@@ -702,6 +702,16 @@ function renderMsg(m, i, isLastAi, mount = wrap) {
       const label = ["⚡ " + (toks || "tokens n/a"), cost].filter(Boolean).join(" · ");
       bit(label, "Tokens and cost for this exchange");
     }
+    // BATTALION manifest (Wave 6): which crew worked, how many parts, how long, and that it was
+    // free — this line IS the product. Fallbacks/replacements live in the hover title, announced.
+    if (m.meta.battalion) {
+      const b = m.meta.battalion;
+      const n = (b.models && b.models.length) || 1;
+      const secs = Math.max(1, Math.round((b.ms || 0) / 1000));
+      const time = secs >= 90 ? Math.round(secs / 60) + " min" : secs + "s";
+      const label = "⚔ " + n + " model" + (n === 1 ? "" : "s") + (b.parts ? " · " + b.parts + " parts" : "") + " · " + time + " · free";
+      bit(label, (b.models || []).join(", ") + (b.notes && b.notes.length ? " — " + b.notes.join("; ") : ""));
+    }
     turn.appendChild(mm);
   }
   const acts = document.createElement("div"); acts.className = "acts" + (m.role === "user" ? " me" : "");

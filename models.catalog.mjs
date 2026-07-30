@@ -391,6 +391,28 @@ export function outLimitFor(id, mode) {
 // Cheap fast model for internal utility calls (chat titles, short summaries) so they never block.
 export const UTILITY_MODEL = "mistralai/mistral-nemo";
 
+/* BATTALION (ARSENAL Wave 6, docs/BATTALION-SOW.md). Fred's copy, verbatim, no quality
+ * qualifier. The roster is the "handpicked" in his sentence: free-lane seats ONLY, each admitted
+ * by the Wave 2 live probe (answers + tools verified on the NVIDIA free endpoint), reviewed at
+ * the weekly audit like the Wildfire roster above. No model rides in because it is merely free. */
+export const BATTALION_COPY = "a handpicked swarm of AI models to do more work in less time- for free";
+export const BATTALION_ROSTER = {
+  assess: "openai/gpt-oss-20b",                          // fast free reasoner: the war-council gate
+  orchestrator: "nvidia/nemotron-3-ultra-550b-a55b",     // 550B free flagship: plans the split
+  synthesizer: "nvidia/nemotron-3-ultra-550b-a55b",      // and merges the parts into one voice
+  single: "nvidia/nemotron-3-super-120b-a12b:free",      // simple turns: one strong fast seat
+  workers: [                                             // the parallel bench, round-robin
+    "nvidia/nemotron-3-super-120b-a12b:free",            //   reasoning
+    "z-ai/glm-5.2",                                      //   code (355B coder, free lane)
+    "openai/gpt-oss-20b",                                //   fast general
+    "minimax/minimax-m3",                                //   long-context + vision seat
+  ],
+};
+// Every roster seat must exist in the catalog — a rename in MODELS must break loudly, not
+// silently bench a specialist. Covered by battalion_test.mjs.
+export const battalionRosterIds = () => [BATTALION_ROSTER.assess, BATTALION_ROSTER.orchestrator,
+  BATTALION_ROSTER.synthesizer, BATTALION_ROSTER.single, ...BATTALION_ROSTER.workers];
+
 // Pretty context window: 262144 -> "256K", 1000000 -> "1M", 2000000 -> "2M".
 export function fmtCtx(n) {
   if (!n) return "?";

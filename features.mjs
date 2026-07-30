@@ -70,7 +70,7 @@ export const FEATURES = [
     brief: "make Word/PDF/Excel files",
     aliases: ["document", "word", "docx", "pdf", "excel", "xlsx", "csv", "downloadable document", "create a document", "download a document", "export"],
     name: "Documents and downloads",
-    where: "ask in chat; finished files appear as a Download button under the answer, and live in Artifacts",
+    where: "ask in chat; finished files appear as a Download button under the answer",
     what: "Creates real Word, PDF, Excel and CSV files from a conversation.",
     how: [
       "Ask for a document, for example: make that a Word document, or turn this into a PDF.",
@@ -117,7 +117,7 @@ export const FEATURES = [
   },
   {
     id: "chat-sync",
-    brief: "chats on every device",
+    brief: "sync",
     aliases: ["chat sync", "sync", "across devices", "phone and laptop", "continue on another device", "history sync"],
     name: "Chats across devices",
     where: "automatic, no control needed",
@@ -142,6 +142,21 @@ export const FEATURES = [
       "Still owner-only, ★ marks the shorter Wildfire roster: models trusted to run broad multi-step work once the Wildfire switch on the Forge dial is armed. Red says CAN reach the machines; ★ says trusted to be turned loose on them.",
       "Privacy: Normal allows every provider, Trusted restricts to OpenAI and Anthropic direct plus local, Private uses the local model only.",
       "A privacy setting is never silently overridden. A disallowed choice is refused and explained.",
+    ],
+  },
+  {
+    id: "battalion",
+    brief: "free swarm",
+    aliases: ["battalion", "swarm", "free swarm", "crew", "many models", "model team"],
+    name: "BATTALION",
+    where: "the Model picker: top row",
+    what: "A handpicked swarm of AI models to do more work in less time- for free.",
+    how: [
+      "Pick BATTALION in the Model picker and send your request like any other message.",
+      "A small question gets one strong free model. A big job is split by an orchestrator, worked by several free models in parallel, and merged into one answer by an editor model.",
+      "Under the finished answer, the ⚔ line reports the crew: how many models worked, how many parts, how long it took, and that it was free. Hover it for the model names.",
+      "If a model fails mid-job, another takes its part over and the ⚔ line's hover says so. If the free lane is down entirely, BATTALION says so and asks you to pick your normal model — it never quietly bills a paid one.",
+      "BATTALION works in text and needs Normal privacy (its free lanes are community providers). Pictures and the Trusted/Private modes get an honest refusal naming what to pick instead.",
     ],
   },
   {
@@ -215,7 +230,7 @@ export const FEATURES = [
     brief: "hours-long background jobs",
     aliases: ["job", "jobs", "long job", "long-run", "long run", "overnight", "background task", "36 hours", "keep working", "big task"],
     name: "Long-run jobs",
-    where: "in the conversation itself: ask for the big thing and the assistant offers to run it as a job (no button yet)",
+    where: "ask in chat for the big thing; the assistant offers to run it as a job (no button yet)",
     what: "Work too big for one reply runs on the server for hours, in small verified units, with a budget fuse: spending pauses at each approved tranche and never runs away. It keeps going with the app closed and survives restarts; every finished unit is saved.",
     how: [
       "Ask for the big thing (review this whole app, write ten chapters). The assistant proposes a mission, a plan of units, a model, and the budget, then starts it after you agree.",
