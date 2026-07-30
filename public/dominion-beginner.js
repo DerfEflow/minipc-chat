@@ -456,11 +456,13 @@
     waiting.textContent = "Starting your app…";
     wrap.append(waiting);
     let j = null;
+    window.ideFlame.show("Starting your app…");
     try {
       const r = await fetch("/ide/preview/start", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ workspaceId: b.workspaceId() }) });
       j = await r.json();
     } catch { j = { error: "I could not start it just then." }; }
+    finally { window.ideFlame.hide(); }
     wrap.textContent = "";
     if (!j || j.error) {
       const bad = document.createElement("p");

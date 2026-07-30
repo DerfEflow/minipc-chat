@@ -131,7 +131,8 @@
 .bgb-pic { display: block; max-width: 100%; margin-top: 8px; border-radius: 10px; }
 .bgb-thinking { display: flex; gap: 6px; align-items: center; }
 .bgb-thinking i {
-  width: 9px; height: 9px; border-radius: 50%; background: var(--copper-hot, #d4823c);
+  width: 9px; height: 9px; border-radius: 50%; background: #79ff52;
+  box-shadow: 0 0 5px 1px rgba(121, 255, 82, .7);
   animation: bg-blink 1.2s infinite;
 }
 .bgb-thinking i:nth-child(2) { animation-delay: .18s; }

@@ -616,6 +616,7 @@
     const go = $("#vb-adopt-go");
     go.disabled = true;
     adoptNote("Reading what is actually there…");
+    window.ideFlame.show("Reading your app…");
     try {
       adoptNote("Reading what is actually there, then Claude Opus 4.8 does the deep read — this can take a minute…");
       const r = await fetch("/ide/adopt", { method: "POST", headers: { "content-type": "application/json" },
@@ -656,7 +657,7 @@
       const input = $("#vb-in-main"); if (input) input.focus();
     } catch {
       adoptNote("The workshop could not be reached. Try again.", true);
-    } finally { go.disabled = false; }
+    } finally { go.disabled = false; window.ideFlame.hide(); }
   }
 
   /* ================= 4. Plan with AI ========================================================= */

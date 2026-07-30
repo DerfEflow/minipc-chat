@@ -545,31 +545,37 @@ body.ide-open #ide-root { transform: none; }
   opacity: 0; pointer-events: none; transition: opacity 0.2s ease, transform 0.3s cubic-bezier(0.32, 0.72, 0.28, 1);
 }
 #ide-flame.on { opacity: 1; transform: translateX(-50%) translateY(0); }
-#ide-flame .if-inner { width: 32px; height: 32px; position: relative; display: grid; place-items: center; }
-#ide-flame .if-fire {
-  width: 20px; height: 28px; background: linear-gradient(180deg, rgba(255, 160, 80, .9), rgba(255, 100, 40, .7));
-  border-radius: 50% 50% 40% 40%; position: relative; animation: ide-flame-flicker 0.9s ease-in-out infinite;
+/* The KITT scanner (Fred, 2026-07-29): a neon-green light sweeping back and forth in a black
+   housing, Knight-Rider style. Green + moving means "actively working, burning tokens now" —
+   the same rule the rail badge already keeps (see the "waiting is not running" note above), so
+   this widget must only ever be shown/hidden bracketing real in-flight work, never a paused wait. */
+#ide-flame .if-inner { width: 52px; height: 32px; position: relative; display: grid; place-items: center; }
+#ide-flame .if-scanner {
+  width: 48px; height: 12px; border-radius: 6px; position: relative; overflow: hidden;
+  background: linear-gradient(180deg, #051a0c, #0a2613);
+  border: 1px solid rgba(121, 255, 82, .3);
+  box-shadow: inset 0 1px 4px rgba(0, 0, 0, .7), inset 0 0 8px rgba(121, 255, 82, .08);
 }
-#ide-flame .if-fire::before, #ide-flame .if-fire::after {
-  content: ""; position: absolute; background: radial-gradient(circle, rgba(255, 200, 100, .6), transparent 70%);
-  border-radius: 50%;
+#ide-flame .if-scanner::before {
+  content: ""; position: absolute; inset: 0;
+  background: repeating-linear-gradient(90deg, rgba(121, 255, 82, .08) 0 2px, transparent 2px 8px);
 }
-#ide-flame .if-fire::before { width: 24px; height: 16px; top: -6px; left: -2px; animation: ide-flame-glow 0.9s ease-in-out infinite; }
-#ide-flame .if-fire::after { width: 14px; height: 12px; bottom: 2px; left: 3px; animation: ide-flame-inner 0.9s ease-in-out infinite; }
-#ide-flame .if-label { font-weight: 700; font-size: 13px; color: var(--copper-hot, #d4823c); white-space: nowrap; }
+#ide-flame .if-led {
+  position: absolute; top: 2px; bottom: 2px; width: 15px; border-radius: 4px;
+  background: radial-gradient(circle, #d4ffc4 0%, #79ff52 45%, #1c8f3c 100%);
+  box-shadow: 0 0 6px 2px rgba(121, 255, 82, .95), 0 0 18px 7px rgba(121, 255, 82, .55);
+  animation: ide-kitt-scan 1.15s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+#ide-flame .if-label { font-weight: 700; font-size: 13px; color: var(--lime-hot, #d4ffc4); white-space: nowrap; }
 #ide-flame .if-timer { font-size: 12px; color: var(--muted, #8ba0ae); letter-spacing: .05em; min-width: 40px; text-align: right; }
-@keyframes ide-flame-flicker {
-  0%, 100% { transform: scaleY(1); opacity: 0.85; }
-  50% { transform: scaleY(0.95); opacity: 0.75; }
+@keyframes ide-kitt-scan {
+  0%, 100% { left: 2px; }
+  50% { left: calc(100% - 17px); }
 }
-@keyframes ide-flame-glow {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 0.3; }
+@media (prefers-reduced-motion: reduce) {
+  #ide-flame .if-led { animation: ide-kitt-glow 1.8s ease-in-out infinite; left: 2px; }
 }
-@keyframes ide-flame-inner {
-  0%, 100% { opacity: 0.8; }
-  50% { opacity: 0.6; }
-}
+@keyframes ide-kitt-glow { 0%, 100% { opacity: .6; } 50% { opacity: 1; } }
 
 /* ---------- the intro card and the language picker ------------------------------------- */
 .ide-intro {

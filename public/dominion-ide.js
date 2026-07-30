@@ -396,6 +396,7 @@
     const btn = $("#af-divide"), box = $("#af-sections");
     if (!goal) { if (box) box.innerHTML = '<p class="af-section-empty">' + L("af_need_brief") + "</p>"; return; }
     if (btn) { btn.disabled = true; btn.textContent = L("af_planning"); }
+    window.ideFlame.show(L("af_planning"));
     try {
       const r = await fetch("/ide/tasks", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ prompt: goal, mode: state.mode, register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }) });
@@ -407,6 +408,7 @@
       if (box) box.innerHTML = '<p class="af-section-empty">' + L("af_plan_failed") + "</p>";
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = L("af_plan_tasks"); }
+      window.ideFlame.hide();
     }
   }
 
@@ -1705,7 +1707,7 @@
       if (!flame) {
         flame = document.createElement("div");
         flame.id = "ide-flame";
-        flame.innerHTML = '<div class="if-inner"><div class="if-fire"></div></div><strong class="if-label"></strong><div class="if-timer"></div>';
+        flame.innerHTML = '<div class="if-inner"><div class="if-scanner"><span class="if-led"></span></div></div><strong class="if-label"></strong><div class="if-timer"></div>';
         document.body.append(flame);
       }
       flame.querySelector(".if-label").textContent = label || L("flame_working");

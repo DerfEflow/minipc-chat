@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v125-command-rail";
+const CACHE = "dominion-ai-v126-kitt-scanner";
 const SHELL = [
   "/",
   "/index.html",
