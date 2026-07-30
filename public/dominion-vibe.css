@@ -450,3 +450,16 @@
   .vb-win-main .vb-log { height: 260px; }
   .vb-army-grid { grid-template-columns: minmax(160px, 2fr) minmax(130px, 1.3fr) auto auto auto; font-size: 11.5px; }
 }
+
+/* ---- Phones (Fred, 2026-07-30): the advisor windows LOOKED chat-less. The rank subtitle pushed
+   the Open toggle 15px past the window frame (title carries nowrap, so the top row could not
+   shrink), and the Send destination stack extended DOWNWARD from a composer that sits just above
+   the on-screen keyboard, i.e. straight behind it. Subtitle folds away, the top row is allowed to
+   shrink, and the destinations open UPWARD where the eye and the thumb already are. ---- */
+@media (max-width: 620px) {
+  .vb-win-title .vb-rank-sub { display: none; }
+  .vb-win-head-col .vb-win-toprow { min-width: 0; }
+  .vb-win-head-col .vb-win-toprow .vb-win-title { min-width: 0; overflow: hidden; }
+  .vb-sendto { top: auto; bottom: calc(100% + 4px); }
+  @keyframes vb-drop { from { opacity: 0; transform: translateY(4px); } }
+}

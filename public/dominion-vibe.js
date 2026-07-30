@@ -228,7 +228,7 @@
             // Fresh start (Fred, 2026-07-26): wipe THIS advisor's conversation mid-planning for an
             // unbiased second opinion. Main never carries it — the General's thread is the plan.
             '<button type="button" class="vb-win-fresh" data-win="' + w + '" title="Clear this conversation and start ' + WNAME[w] + ' from scratch">Fresh start</button>' +
-            '<button type="button" class="vb-win-toggle" data-win="' + w + '" aria-expanded="false">Open</button>' +
+            '<button type="button" class="vb-win-toggle" data-win="' + w + '" aria-expanded="false">Open chat</button>' +
           '</div>' + picker +
         '</header>';
     return (
@@ -240,7 +240,9 @@
           '<div class="vb-row">' +
             '<textarea id="vb-in-' + w + '" rows="1" placeholder="Type here…" aria-label="Message for ' + WNAME[w] + '"></textarea>' +
             '<div class="vb-sendstack" id="vb-sendstack-' + w + '">' +
-              '<button type="button" class="vb-send" id="vb-send-' + w + '">Send</button>' +
+              // The chevron says out loud that Send opens the destination stack (Fred, 2026-07-30:
+              // "no obvious control to send those chat portions to any of the AIs").
+              '<button type="button" class="vb-send" id="vb-send-' + w + '">Send &#9662;</button>' +
               '<div class="vb-sendto" id="vb-sendto-' + w + '" hidden></div>' +
             '</div>' +
           '</div>' +
@@ -911,7 +913,7 @@
     const body = $("#vb-body-" + w);
     const btn = document.querySelector('.vb-win-toggle[data-win="' + w + '"]');
     if (body) body.hidden = !c.open;
-    if (btn) { btn.textContent = c.open ? "Close" : "Open"; btn.setAttribute("aria-expanded", String(c.open)); }
+    if (btn) { btn.textContent = c.open ? "Close" : "Open chat"; btn.setAttribute("aria-expanded", String(c.open)); }
     saveDraft();
   }
 
