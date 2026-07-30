@@ -39,7 +39,13 @@
   #dock-nav .rail-dest b{font-size:8.5px;letter-spacing:.08em}
   #dock-nav .rail-dest small{font-size:7px}
   #dock-nav .glyph{width:19px;height:19px}
-  /* The page keeps its footing above the dock. */
-  body{padding-bottom:calc(58px + env(safe-area-inset-bottom))}
+  /* The page keeps its footing above the dock. `html body` (two-element specificity) because
+     dominion-cinematic-05.css loads AFTER this file and its 900px mobile block resets body
+     padding-bottom to 7px — the plain-`body` version of this rule lost that fight, which put
+     the dock ON TOP of the composer (send/attach unusable on phones, Fred 2026-07-30). */
+  html body{padding-bottom:calc(58px + env(safe-area-inset-bottom))}
+  /* Bottom-anchored floating widgets step up over the dock instead of colliding with it. */
+  html body .voice-bar{bottom:calc(66px + env(safe-area-inset-bottom))}
+  html body #ide-flame{bottom:calc(70px + env(safe-area-inset-bottom))}
 }
 @media (max-width:720px){#dock-nav .rail-dest{min-width:0}#dock-nav .rail-dest small{white-space:nowrap}}
