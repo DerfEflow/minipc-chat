@@ -291,4 +291,36 @@ test("completion evidence blocks missing work, remaining work, and failed checks
   });
   assert.equal(complete.canClaimComplete, true);
   assert.equal(complete.status, "completed");
+
+  const commonAlias = evaluateCompletionEvidence(contract, {
+    status: "complete",
+    changes: ["parser fixed", "regression test added"],
+    validation: [{ name: "targeted tests", status: "passed" }],
+    remaining: [],
+    criteria: [{ name: "regression test passes", status: "passed" }],
+  });
+  assert.equal(commonAlias.canClaimComplete, true, "provider status alias should normalize to completed");
+  assert.equal(commonAlias.status, "completed");
+
+  const partialStatus = evaluateCompletionEvidence(contract, {
+    status: "partial",
+    changes: ["parser fixed", "regression test added"],
+    validation: [{ name: "targeted tests", status: "passed" }],
+    remaining: [],
+    criteria: [{ name: "regression test passes", status: "passed" }],
+  });
+  assert.equal(partialStatus.canClaimComplete, false);
+  assert.match(partialStatus.contradictions.join(" "), /status is partial/i,
+    "a non-completed status must never produce a reasonless rejection");
+
+  const invalidStatus = evaluateCompletionEvidence(contract, {
+    status: "almost",
+    changes: ["parser fixed"],
+    validation: [{ name: "targeted tests", status: "passed" }],
+    remaining: [],
+    criteria: [{ name: "regression test passes", status: "passed" }],
+  });
+  assert.equal(invalidStatus.canClaimComplete, false);
+  assert.match(invalidStatus.contradictions.join(" "), /status must be completed/i,
+    "a status-only rejection must explain the real reason");
 });

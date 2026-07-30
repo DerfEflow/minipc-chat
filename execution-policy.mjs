@@ -538,9 +538,25 @@ export function evaluateCompletionEvidence(contract, evidence = {}) {
     throw new TypeError("a current execution task contract is required");
   }
   const required = contract.completion.requiredEvidence;
-  const missing = required.filter((field) => !Object.hasOwn(evidence, field) || !hasEvidenceValue(field, evidence[field]));
+  const rawStatus = String(evidence.status || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  // Tool-call schema enforcement varies by provider, so normalize the common completion spellings.
+  // The explicit non-completed-status contradiction below separately guarantees that every
+  // rejection has a real reason instead of "Missing: none. Contradictions: none."
+  const status = ["complete", "done", "finished", "success", "succeeded"].includes(rawStatus)
+    ? "completed"
+    : rawStatus;
+  const allowedStatuses = ["completed", "partial", "blocked", "paused"];
+  const missing = required.filter((field) => {
+    if (!Object.hasOwn(evidence, field)) return true;
+    if (field === "status") return !allowedStatuses.includes(status);
+    return !hasEvidenceValue(field, evidence[field]);
+  });
   const contradictions = [];
-  const status = String(evidence.status || "").toLowerCase();
+  if (!allowedStatuses.includes(status)) {
+    contradictions.push(`status must be completed, partial, blocked, or paused (received ${rawStatus || "empty"})`);
+  } else if (status !== "completed") {
+    contradictions.push(`status is ${status}; only completed evidence can close the task contract`);
+  }
 
   if (status === "completed" && listHasItems(evidence.remaining)) {
     contradictions.push("status is completed but remaining work is listed");

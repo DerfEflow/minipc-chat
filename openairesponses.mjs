@@ -11,7 +11,16 @@
  */
 
 const DEFAULT_ENDPOINT = "https://api.openai.com/v1/responses";
-const DEFAULT_TIMEOUT_MS = 180_000;
+// Timeout policy (Fred, 2026-07-30). The old value here was a single 180s WALL-CLOCK kill per
+// attempt, which executed actively-streaming reasoning rounds at exactly 3:00 and re-billed the
+// whole prompt on every retry. Replaced by two timers with different jobs:
+//   idle  — fires only after this much TOTAL SILENCE from the wire; any received byte re-arms it.
+//           An actively streaming response is never killed by it.
+//   hard  — a pathological-stream fuse (a wire trickling one byte a minute), sized for real work,
+//           never a work limit. Round-level brakes (budget ledger, supervisor, loop watch) own
+//           runaway protection; these timers only detect dead or wedged transport.
+const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
+const DEFAULT_HARD_TIMEOUT_MS = 2_700_000;
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_RETRY_BASE_MS = 400;
 const DEFAULT_MAX_BACKOFF_MS = 8_000;
@@ -339,20 +348,34 @@ function abortableDelay(ms, signal, sleepImpl) {
   });
 }
 
-function attemptAbort(parentSignal, timeoutMs) {
+function attemptAbort(parentSignal, idleMs, hardMs) {
   const controller = new AbortController();
-  let timedOut = false;
+  let timedOut = "";   // "" | "idle" | "hard"
   const onParentAbort = () => controller.abort(parentSignal.reason);
   if (parentSignal) parentSignal.addEventListener("abort", onParentAbort, { once: true });
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort(new DOMException("Request timed out", "TimeoutError"));
-  }, timeoutMs);
+  const fire = (kind, message) => {
+    timedOut = kind;
+    controller.abort(new DOMException(message, "TimeoutError"));
+  };
+  const armIdle = () => setTimeout(
+    () => fire("idle", `No stream activity for ${Math.round(idleMs / 1000)}s`), idleMs);
+  let idleTimer = armIdle();
+  const hardTimer = setTimeout(
+    () => fire("hard", `Request exceeded the ${Math.round(hardMs / 60000)}-minute attempt fuse`), hardMs);
   return {
     signal: controller.signal,
-    timedOut: () => timedOut,
+    // Any bytes from the provider re-arm the idle window. An actively streaming response is
+    // NEVER killed by the watchdog; only the hard fuse and the caller's own signal remain.
+    touch() {
+      if (controller.signal.aborted) return;
+      clearTimeout(idleTimer);
+      idleTimer = armIdle();
+    },
+    timedOut: () => !!timedOut,
+    timedOutKind: () => timedOut,
     cleanup() {
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
+      clearTimeout(hardTimer);
       if (parentSignal) parentSignal.removeEventListener("abort", onParentAbort);
     },
   };
@@ -456,7 +479,7 @@ function statusFinishReason(status, response, hasToolCalls) {
   return hasToolCalls ? "tool_calls" : "stop";
 }
 
-function createStreamState(onDelta) {
+function createStreamState(onDelta, handlers = {}) {
   const calls = callAccumulator();
   let content = "";
   let refusal = "";
@@ -513,8 +536,10 @@ function createStreamState(onDelta) {
       } else if (type === "response.refusal.done") {
         finishRefusal(event.refusal ?? event.text);
       } else if (type === "response.reasoning_summary_text.delta") {
-        reasoning += String(event.delta || "");
+        const delta = String(event.delta || "");
+        reasoning += delta;
         meaningfulOutput = true;
+        try { if (delta && handlers.onReasoning) handlers.onReasoning(delta); } catch {}
       } else if (type === "response.function_call_arguments.delta") {
         calls.argumentsDelta(event, event.delta);
         meaningfulOutput = true;
@@ -550,6 +575,9 @@ function createStreamState(onDelta) {
       }
     },
     hasMeaningfulOutput() { return meaningfulOutput; },
+    // Deliverable = visible text a resumed round can continue FROM. Reasoning summaries and
+    // half-streamed tool calls are progress signals, never resumable output.
+    hasDeliverableContent() { return content.length > 0; },
     result() {
       const finalContent = outputText(response) || content;
       const finalReasoning = outputReasoning(response) || reasoning;
@@ -623,7 +651,7 @@ function frameData(frame) {
   return data.join("\n");
 }
 
-async function consumeResponsesSse(response, state, signal) {
+async function consumeResponsesSse(response, state, signal, touch) {
   if (!response.body) throw new Error("OpenAI returned an empty response stream.");
   const decoder = new TextDecoder();
   let buffer = "";
@@ -645,6 +673,7 @@ async function consumeResponsesSse(response, state, signal) {
         if (signal.aborted) throw signal.reason || Object.assign(new Error("stopped"), { name: "AbortError" });
         const { value, done } = await reader.read();
         if (done) break;
+        if (touch) touch();   // any bytes at all re-arm the idle watchdog, comments included
         buffer = consumeSseChunk(buffer, decoder.decode(value, { stream: true }), onFrame);
       }
       buffer = consumeSseChunk(buffer, decoder.decode(), onFrame);
@@ -654,6 +683,7 @@ async function consumeResponsesSse(response, state, signal) {
   } else {
     for await (const value of response.body) {
       if (signal.aborted) throw signal.reason || Object.assign(new Error("stopped"), { name: "AbortError" });
+      if (touch) touch();   // any bytes at all re-arm the idle watchdog, comments included
       buffer = consumeSseChunk(buffer, decoder.decode(value, { stream: true }), onFrame);
     }
     buffer = consumeSseChunk(buffer, decoder.decode(), onFrame);
@@ -768,16 +798,35 @@ export async function openAIResponsesStream(model, messages, opts = {}, onDelta)
   if (typeof fetchImpl !== "function") return emptyResult({ error: `${label} transport is unavailable.` });
   let payload = buildResponsesPayload(model, messages, opts);
   const maxRetries = Math.max(0, Math.min(5, Number.isFinite(opts.maxRetries) ? Math.floor(opts.maxRetries) : DEFAULT_MAX_RETRIES));
-  const timeoutMs = Math.max(1, Number.isFinite(opts.timeoutMs) ? Math.floor(opts.timeoutMs) : DEFAULT_TIMEOUT_MS);
+  // opts.timeoutMs kept for callers/tests: it now means the IDLE window (silence budget), since
+  // wall-clock kills of active streams are exactly the defect this rewrite removes.
+  const idleMs = Math.max(1, Number.isFinite(opts.idleTimeoutMs) ? Math.floor(opts.idleTimeoutMs)
+    : Number.isFinite(opts.timeoutMs) ? Math.floor(opts.timeoutMs) : DEFAULT_IDLE_TIMEOUT_MS);
+  const hardMs = Math.max(idleMs, Number.isFinite(opts.hardTimeoutMs) ? Math.floor(opts.hardTimeoutMs) : DEFAULT_HARD_TIMEOUT_MS);
   const retryBaseMs = Math.max(0, Number.isFinite(opts.retryBaseMs) ? opts.retryBaseMs : DEFAULT_RETRY_BASE_MS);
   const maxBackoffMs = Math.max(retryBaseMs, Number.isFinite(opts.maxBackoffMs) ? opts.maxBackoffMs : DEFAULT_MAX_BACKOFF_MS);
   let transientRetries = 0;
   let parameterRepairUsed = false;
+  // Reasoning made visible (Fred, 2026-07-30): with emitReasoningAsThink, summary deltas ride the
+  // SAME onDelta wire wrapped in <think> tags, exactly the local models' convention, so the client
+  // shows live thinking with zero new event types and the SSE connection carries steady traffic.
+  const emitThink = opts.emitReasoningAsThink === true && typeof onDelta === "function";
+  let thinkOpen = false;
+  const closeThink = () => { if (thinkOpen) { thinkOpen = false; try { onDelta("</think>"); } catch {} } };
+  const visibleDelta = emitThink
+    ? (delta) => { closeThink(); onDelta(delta); }
+    : onDelta;
+  const reasoningDelta = (delta) => {
+    if (typeof opts.onReasoningDelta === "function") { try { opts.onReasoningDelta(delta); } catch {} }
+    if (!emitThink) return;
+    if (!thinkOpen) { thinkOpen = true; try { onDelta("<think>"); } catch {} }
+    try { onDelta(delta); } catch {}
+  };
 
   while (true) {
     if (opts.signal && opts.signal.aborted) return emptyResult({ aborted: true, error: "stopped" });
-    const attemptSignal = attemptAbort(opts.signal, timeoutMs);
-    const state = createStreamState(onDelta);
+    const attemptSignal = attemptAbort(opts.signal, idleMs, hardMs);
+    const state = createStreamState(visibleDelta, { onReasoning: reasoningDelta });
     let response = null;
     try {
       response = await fetchImpl(endpoint, {
@@ -826,7 +875,8 @@ export async function openAIResponsesStream(model, messages, opts = {}, onDelta)
         continue;
       }
 
-      await consumeResponsesSse(response, state, attemptSignal.signal);
+      await consumeResponsesSse(response, state, attemptSignal.signal, attemptSignal.touch);
+      closeThink();
       const result = state.result();
       if (!result.ok && !result.partial && transientRetries < maxRetries && /stream ended|empty response stream/i.test(result.error)) {
         const delayMs = Math.min(retryBaseMs * (2 ** transientRetries), maxBackoffMs);
@@ -841,10 +891,36 @@ export async function openAIResponsesStream(model, messages, opts = {}, onDelta)
       }
       return result;
     } catch (error) {
+      closeThink();
       if (opts.signal && opts.signal.aborted) return emptyResult({ aborted: true, error: "stopped" });
       const timedOut = attemptSignal.timedOut();
-      const partial = state.hasMeaningfulOutput();
-      if (!partial && transientRetries < maxRetries) {
+      const partialResult = state.result();
+      const deliverable = state.hasDeliverableContent();
+      /*
+       * Timeout with delivered text: return it as a resumable checkpoint (finishReason "length"),
+       * so the caller's existing continuation machinery resumes from the exact cut instead of
+       * re-buying the whole attempt. Tool calls are DROPPED here on purpose: without the terminal
+       * event there are no native response items, and replaying a tool result without its
+       * encrypted reasoning item is a provider error. The model re-issues the call after resume.
+       */
+      if (timedOut && deliverable) {
+        return {
+          ok: true,
+          content: partialResult.content,
+          reasoning: partialResult.reasoning,
+          usage: partialResult.usage,
+          finishReason: "length",
+          toolCalls: [],
+          error: "",
+          partial: true,
+          timedOutPartial: attemptSignal.timedOutKind() || "idle",
+          responseId: "",
+          responseItems: [],
+        };
+      }
+      // Nothing resumable arrived. Retry only for genuine silence/network death; each retry is a
+      // fresh bill, so the idle watchdog (not a stopwatch) is what makes this rare.
+      if (!deliverable && transientRetries < maxRetries) {
         const delayMs = Math.min(retryBaseMs * (2 ** transientRetries), maxBackoffMs);
         notifyRetry(opts, { attempt: transientRetries + 1, delayMs, reason: timedOut ? "timeout" : "network" });
         transientRetries++;
@@ -855,15 +931,16 @@ export async function openAIResponsesStream(model, messages, opts = {}, onDelta)
         }
         continue;
       }
-      const suffix = timedOut ? "timed out." : `couldn't be reached: ${String(error && error.message || error)}.`;
-      const partialResult = state.result();
+      const suffix = timedOut
+        ? `timed out (${attemptSignal.timedOutKind() === "hard" ? "attempt fuse" : "no stream activity"}).`
+        : `couldn't be reached: ${String(error && error.message || error)}.`;
       return emptyResult({
         content: partialResult.content,
         reasoning: partialResult.reasoning,
         usage: partialResult.usage,
-        finishReason: partial ? "error" : "",
+        finishReason: state.hasMeaningfulOutput() ? "error" : "",
         toolCalls: partialResult.toolCalls,
-        partial,
+        partial: state.hasMeaningfulOutput(),
         error: `${label} ${suffix}`,
       });
     } finally {

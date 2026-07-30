@@ -21,6 +21,7 @@
 <link rel="stylesheet" href="/dominion-beginner.css?v=4" />
 <link rel="stylesheet" href="/dominion-vibe.css?v=11" />
 <link rel="stylesheet" href="/dominion-tour.css?v=3" />
+<link rel="stylesheet" href="/dominion-markdown.css?v=1" />
 <style>
   /* Session budget window (Fred, 2026-07-25): opaque black, clear white text — money is never ambient. */
   .budgetbox{display:flex;align-items:center;gap:10px;background:#000;color:#fff;border:1px solid rgba(255,255,255,.28);border-radius:8px;padding:6px 12px;margin:4px 0 6px;font:600 13px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;width:max-content;max-width:100%;position:relative;z-index:5}
@@ -374,18 +375,8 @@
               <path fill="#ffe9c4" d="M12 10c.9 3 4 4.5 4 8a4 4 0 0 1-8 0c0-2.7 2.4-3.4 2.4-6 0-1 .6-1.6 1.6-2z"/>
             </svg>
           </button>
-          <!--
-            FIRE ALARM. Stops everything at once: every live turn and every job running on every
-            connected machine, with a process-tree kill node-side. Available to every account, not
-            just Fred: an emergency brake only one person can reach is not an emergency brake. A
-            guest's pull is scoped server-side to their own sessions and their own node.
-          -->
-          <button id="fire-alarm" class="fire-alarm" type="button" title="Fire Alarm — stop everything, everywhere, now" aria-label="Fire Alarm: stop all work on all machines">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path fill="currentColor" d="M12 2a6 6 0 0 0-6 6v3.6l-1.4 2.6a1 1 0 0 0 .9 1.5h13a1 1 0 0 0 .9-1.5L18 11.6V8a6 6 0 0 0-6-6z"/>
-              <path fill="currentColor" d="M9.5 18a2.5 2.5 0 0 0 5 0z"/>
-            </svg>
-          </button>
+          <!-- Fire Alarm button removed from the command rail (Fred, 2026-07-30). The server
+               endpoint POST /chat/fire-alarm remains as an API escape hatch. -->
         </div>
         <textarea id="input" rows="1" placeholder="Type your input here" autocomplete="off"></textarea>
         <!-- Send to Crucible (Fred, 2026-07-30): the open space at the bottom left of the chat
@@ -568,7 +559,8 @@
   <script src="/dominion-lenses.js?v=15" defer></script>
   <script src="/dominion-beginner.js?v=3" defer></script>
   <script src="/dominion-vibe.js?v=12" defer></script>
-  <script src="/app.js?v=64"></script>
+  <script src="/dominion-markdown.js?v=1"></script>
+  <script src="/app.js?v=65"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=5" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>

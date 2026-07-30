@@ -68,7 +68,11 @@ const EXECUTION_COMPLETE_DEF = Object.freeze({
     parameters: {
       type: "object",
       properties: {
-        status: { type: "string", enum: ["completed", "partial", "blocked", "paused"] },
+        status: {
+          type: "string",
+          enum: ["completed", "partial", "blocked", "paused"],
+          description: "Use exactly 'completed' only when all requested work is done. Do not use 'complete'.",
+        },
         result: { type: "string" },
         changes: { type: "array", items: { type: "string" } },
         validation: {
@@ -629,6 +633,12 @@ const PROVIDER_CFG = {
  * native branches keep their explicit no-key errors (those models never had an OpenRouter row).
  */
 const OPENROUTER_FALLBACK_PROVIDERS = new Set(["moonshot", "nvidia"]);
+// Live-learned parameter quirks (Fred, 2026-07-30). A provider's 400-with-a-named-parameter used
+// to be repaired for ONE resend and forgotten, so every fresh attempt re-earned the same 400
+// (kimi-k3: three identical "temperature" rejections in one 14:13 turn, live log). The rejection
+// message is now remembered per provider+model and pre-applied to every later payload for the
+// life of the process; rules proven stable get promoted into shapeCloudParams permanently.
+const PARAM_REPAIR_MEMORY = new Map();   // `${provider}·${directId}` -> [raw 400 messages], cap 4
 function resolveProviderCfg(provider) {
   const cfg = PROVIDER_CFG[provider] || PROVIDER_CFG.openrouter;
   if (OPENROUTER_FALLBACK_PROVIDERS.has(provider) && !cfg.key()) {
@@ -698,6 +708,12 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
       // therefore return an opaque encrypted reasoning item that is replayed
       // with the next tool result instead of relying on provider-side storage.
       include: openAIReasoningFamily ? ["reasoning.encrypted_content"] : undefined,
+      // Thinking made visible (Fred, 2026-07-30): summaries stream as <think> deltas, so long
+      // reasoning shows live progress and keeps the SSE wire warm instead of minutes of silence.
+      reasoningSummary: openAIReasoningFamily ? "auto" : undefined,
+      emitReasoningAsThink: openAIReasoningFamily,
+      idleTimeoutMs: Number(cfgGet("OPENAI_IDLE_TIMEOUT_MS", "120000")) || 120000,
+      hardTimeoutMs: Number(cfgGet("OPENAI_HARD_TIMEOUT_MS", "2700000")) || 2700000,
       maxRetries: 2,
     }, onDelta);
   }
@@ -869,6 +885,11 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
               const adj = paramRetryAdjust(body, raw);
               if (adj) {
                 console.log(`[dominion-ai] param retry (${providerLabel} · ${directId}): ${adj.note}`);
+                // Remember the rejection so every later call to this model pre-applies the fix
+                // instead of re-earning the same 400 (see PARAM_REPAIR_MEMORY).
+                const memKey = provider + "·" + directId;
+                const mem = PARAM_REPAIR_MEMORY.get(memKey) || [];
+                if (!mem.includes(raw) && mem.length < 4) PARAM_REPAIR_MEMORY.set(memKey, [...mem, raw]);
                 send(adj.payload, false);
                 return;
               }
@@ -982,6 +1003,14 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     req.write(data); req.end();
     };
     if (opts.signal) opts.signal.addEventListener("abort", () => { try { currentReq && currentReq.destroy(); } catch {} done({ ok: false, aborted: true, error: "stopped" }); }, { once: true });
+    // Pre-apply every remembered 400 rule for this wire+model before the first byte leaves.
+    for (const remembered of PARAM_REPAIR_MEMORY.get(provider + "·" + directId) || []) {
+      const learned = paramRetryAdjust(payload, remembered);
+      if (learned) {
+        payload = learned.payload;
+        console.log(`[dominion-ai] pre-applied learned param rule (${providerLabel} · ${directId}): ${learned.note}`);
+      }
+    }
     send(payload, true);
   });
 }
@@ -6221,6 +6250,32 @@ async function handleChat(req, res) {
   }
   const confirmTools = CONFIRM_TOOLS_ENV || input.confirmTools === true;   // Phase 3: default OFF (LAX)
   const chatId = typeof input.chatId === "string" ? input.chatId.slice(0, 80) : "";
+  // Continue-an-interrupted-run (Fred, 2026-07-30): the client's Continue button names the sealed
+  // job; its verified progress is folded into context below so the model resumes instead of
+  // starting over — and never silently redoes mutations that already succeeded.
+  const resumeFromJob = typeof input.resumeFromJob === "string" ? input.resumeFromJob.slice(0, 80) : "";
+  let resumeBlock = "";
+  if (resumeFromJob) {
+    try {
+      const resumeRow = jobStore.get(resumeFromJob);
+      if (resumeRow && jobAuthOk(req, resumeRow.email)) {
+        const evs = jobStore.replayRows(resumeFromJob, 0).map((r) => r.ev);
+        const lastCk = [...evs].reverse().find((e) => e && e.type === "checkpoint");
+        const toolLines = evs.filter((e) => e && e.type === "tool" && e.status && e.status !== "run")
+          .slice(-30).map((e) => `- ${e.name}: ${e.status}${e.summary ? " — " + String(e.summary).slice(0, 160) : ""}`);
+        resumeBlock = "RESUME CONTEXT — a prior run of this request was interrupted (job " + resumeFromJob +
+          (resumeRow.status ? ", " + resumeRow.status : "") + ").\n" +
+          (lastCk && lastCk.goal ? "Original goal: " + String(lastCk.goal).slice(0, 600) + "\n" : "") +
+          (lastCk && Array.isArray(lastCk.evidence) && lastCk.evidence.length
+            ? "Verified activity before the interruption:\n" + lastCk.evidence.slice(-30).map((x) => "- " + String(x).slice(0, 200)).join("\n") + "\n"
+            : (toolLines.length ? "Tool activity before the interruption:\n" + toolLines.join("\n") + "\n" : "")) +
+          "Continue from the verified state: inspect before acting, never repeat a mutation that already succeeded, and finish with real completion evidence.";
+        sse({ type: "supervisor", supervisor: "resume", decision: "resume_context_attached",
+              reason: "continuing interrupted job " + resumeFromJob });
+        console.log(`[dominion-ai] resume: attached context from interrupted job ${resumeFromJob} (${evs.length} events)`);
+      }
+    } catch (e) { console.log("[dominion-ai] resume context failed: " + String(e && e.message || e).slice(0, 160)); }
+  }
   job.chatId = chatId;
   try { jobStore.bindMeta(job.id, { chatId }); } catch {}
   // Long-run concurrency cap (replaces the old buffer cap): a user may have several turns generating
@@ -6314,6 +6369,24 @@ async function handleChat(req, res) {
       sse({ type: "stopped", reason: "vision_refused" }); return endStream();
     }
     const lastUserText = lastUser && typeof lastUser.content === "string" ? lastUser.content : "";
+    /*
+     * HONESTY GATE (Fred, 2026-07-30). The swarm has no hands: a build or long-run ask (or an
+     * audit that names real files/repos) dropped into a text-only swarm produces prose cosplaying
+     * as work — "it never even started" from the user's chair, which is exactly what happened to
+     * the TruSignal test. Those turns are handed to a real tool-capable engine, out loud, and the
+     * swarm keeps doing what it is actually good at: parallel text.
+     */
+    const swarmIntent = classifyTaskIntent(lastUserText || "");
+    const needsHands = swarmIntent.baseKind === "build" || swarmIntent.baseKind === "long-run" ||
+      (swarmIntent.baseKind === "audit" && /\b(?:repo(?:sitory)?|codebase|folder|file|drive\s+[a-z]\b|[a-z]:[\\/])/i.test(lastUserText));
+    if (needsHands) {
+      const engine = cloudModel || defaultModelFor(T.isOwner);
+      sse({ type: "battalion_detour", model: engine,
+            text: "BATTALION is a text swarm and cannot touch files or machines. This request needs real work done, so it is running on " +
+                  ((modelById(engine) && modelById(engine).name) || engine) + " with full tools instead. The swarm remains available for research and writing." });
+      console.log(`[dominion-ai] battalion detour: ${swarmIntent.baseKind} ask -> ${engine} with tools`);
+      cloudModel = engine;
+    } else {
     // Text-file attachments still ride: they inline exactly as the single-engine path inlines them.
     const question = lastUserText + (lastUser ? attachmentTextBlocks(lastUser) : "");
     sse({ type: "route", model: "battalion", mode: "battalion", route: "battalion (free swarm)", reason: BATTALION_COPY });
@@ -6344,6 +6417,7 @@ async function handleChat(req, res) {
     } });
     console.log(`[dominion-ai] battalion: ${mf.mode} · ${mf.models.length} model(s) · ${mf.parts} part(s) · ${Math.round(mf.ms / 1000)}s · $0${mf.notes.length ? " · " + mf.notes.join("; ") : ""}`);
     return endStream();
+    }   // needsHands turns fall through here and run below on `cloudModel` with full tools
   }
 
   // Vision gate (refuse, never substitute): pictures on THIS turn need a model that can see them.
@@ -6644,6 +6718,7 @@ async function handleChat(req, res) {
       "Small deck-data edits (notes, next steps, proofs, capture) are still yours to do directly." });
   }
   if (ctxInfo.block) messages.push({ role: "system", content: ctxInfo.block });
+  if (resumeBlock) messages.push({ role: "system", content: resumeBlock });
   // As-Fred mode: inject the distilled Fred Profile + real writing exemplars retrieved for this prompt.
   let personaInfo = null;
   if (mode === "as_fred") {
@@ -7044,6 +7119,11 @@ async function handleChat(req, res) {
       const CONTINUE_NUDGE = "[Dominion system notice — not Fred] Your reply was cut off at the output-length limit before it finished. Continue from the EXACT point you stopped. Do not repeat any earlier text, do not add a preface, recap, or apology, do not restate the last line — resume mid-sentence if that is where you stopped and write straight through to the natural end of the full response.";
       const EMPTY_RECOVERY_MAX = 2;
       let emptyRetries = 0, intentNudged = false, sawReasoning = false, reasoningOnlyPaused = false, promisePrefix = "";
+      // Same-model rescue lane state (Fred, 2026-07-30): once a Moonshot/NVIDIA outage forces this
+      // turn onto OpenRouter, every later call in the SAME turn stays there — the model id never
+      // changes, only the road, and re-fighting a down wire every round would re-spend the whole
+      // backoff schedule each time.
+      let usedOverloadReroute = false, forcedTransport = "";
 
       for (let round = 0; !aborted; round++) {
         if (round >= cloudRoundLimit) {
@@ -7194,28 +7274,63 @@ async function handleChat(req, res) {
           { temperature: opts.temperature, num_predict: roundOutputCap, signal: ac.signal,
             tools: concludePhase ? cloudTools : toolsThisRound, toolChoice: concludePhase ? "none" : undefined,
             parallelToolCalls: completionRequired ? false : undefined,
-            executionPolicy, sessionId: chatId || job.id },
+            executionPolicy, sessionId: chatId || job.id,
+            __forceProvider: forcedTransport || undefined },
           onDelta);
+        const retryableProviderError = (r) => !!r && (r.retryable || [408, 409, 429].includes(r.status) || r.status >= 500 ||
+          /timed out|couldn't reach|network|socket|ECONN|stream ended|overload|capacity|unavailable|insufficient[_\s-]*system/i.test(String(r.error || "")));
+        /*
+         * Patience scaled to the job (Fred, 2026-07-30). The old policy retried twice inside 1.5
+         * seconds and killed the turn — aimed at a provider having a bad MINUTE, that is no retry
+         * policy at all (the 14:13 kimi turn died exactly this way). Build/long-run turns now wait
+         * out a bad window on a real schedule; conversational turns keep short patience so a dead
+         * provider is still reported quickly. The working heartbeat ticks through every wait.
+         */
+        const RETRY_SCHEDULE = completionRequired ? [2000, 8000, 30000, 90000, 180000] : [1000, 4000, 10000];
         for (let providerRetry = 0;
-             !or.ok && !or.partial && providerRetry < 2 &&
-             (or.retryable || [408, 409, 429].includes(or.status) || or.status >= 500 ||
-              /timed out|couldn't reach|network|socket|ECONN|stream ended/i.test(String(or.error || "")));
+             !or.ok && !or.partial && !aborted && providerRetry < RETRY_SCHEDULE.length && retryableProviderError(or);
              providerRetry++) {
           // Failed/partial provider attempts can still consume billable input or output tokens.
           // Account them before replacing the response object with the retry.
           bumpUsage(or && or.usage);
-          const delayMs = 500 * (2 ** providerRetry);
+          const delayMs = RETRY_SCHEDULE[providerRetry];
           sse({
             type: "supervisor", monitored: cloudModel, supervisor: "provider recovery",
-            decision: "retry", attempt: providerRetry + 1,
+            decision: "retry", attempt: providerRetry + 1, waitSec: Math.round(delayMs / 1000),
             reason: String(or.error || "transient provider failure").slice(0, 180),
           });
           recordSteeringLesson("provider_retry", or.error || "transient provider failure", "retry the same selected model after bounded backoff");
+          working(`waiting ${Math.round(delayMs / 1000)}s to retry ${cloudModel}`);
           await sleep(delayMs);
+          workStop();
+          if (aborted) break;
           or = await cloudChatStream(cloudModel, messages,
             { temperature: opts.temperature, num_predict: roundOutputCap, signal: ac.signal,
               tools: toolsThisRound, parallelToolCalls: completionRequired ? false : undefined,
-              executionPolicy, sessionId: chatId || job.id },
+              executionPolicy, sessionId: chatId || job.id,
+              __forceProvider: forcedTransport || undefined },
+            onDelta);
+        }
+        /*
+         * Same-model rescue lane: Moonshot/NVIDIA outages strand a model whose exact catalog id is
+         * also served by OpenRouter. Account-death already reroutes at the wire (W2); overload,
+         * capacity, and timeout classes now reroute here too — once per turn, out loud, only after
+         * the same-wire schedule above is spent. The MODEL never changes, only the road.
+         */
+        if (!or.ok && !aborted && !usedOverloadReroute && !forcedTransport && OPENROUTER_KEY &&
+            OPENROUTER_FALLBACK_PROVIDERS.has(cloudProvider) && retryableProviderError(or)) {
+          usedOverloadReroute = true;
+          forcedTransport = "openrouter";
+          bumpUsage(or && or.usage);
+          sse({ type: "supervisor", monitored: cloudModel, supervisor: "provider recovery",
+                decision: "reroute", reason: `${cloudProvider} stayed unavailable (${String(or.error || "").slice(0, 120)}); running the same model via OpenRouter for the rest of this turn` });
+          console.log(`[dominion-ai] ${cloudProvider} unavailable after the retry schedule — rerouting ${cloudModel} via OpenRouter`);
+          recordSteeringLesson("provider_reroute", or.error || "provider unavailable", "carry the same catalog model over OpenRouter for the rest of this turn");
+          or = await cloudChatStream(cloudModel, messages,
+            { temperature: opts.temperature, num_predict: roundOutputCap, signal: ac.signal,
+              tools: toolsThisRound, parallelToolCalls: completionRequired ? false : undefined,
+              executionPolicy, sessionId: chatId || job.id,
+              __forceProvider: "openrouter" },
             onDelta);
         }
         // Safety net for catalog drift: if THIS request carried tools and the provider refused because
@@ -7233,7 +7348,8 @@ async function handleChat(req, res) {
           bumpUsage(or && or.usage);
           or = await cloudChatStream(cloudModel, messages,
             { temperature: opts.temperature, num_predict: roundOutputCap, signal: ac.signal, tools: null, toolChoice: "none",
-              executionPolicy, sessionId: chatId || job.id },
+              executionPolicy, sessionId: chatId || job.id,
+              __forceProvider: forcedTransport || undefined },
             onDelta);
           await logUsage({ ts: startedAt, model: cloudModel, mode, reason: "tools_unsupported_fallback", route: routeInfo, provider: cloudProvider, status: "tools_fallback" });
         }
@@ -7262,6 +7378,14 @@ async function handleChat(req, res) {
           return endStream();
         }
         bumpUsage(or.usage);
+        // Watchdog resume, said out loud: the wire died mid-write, the delivered text was kept,
+        // and the continuation machinery below re-enters from that exact point at no re-bill.
+        if (or.timedOutPartial) {
+          sse({ type: "supervisor", monitored: cloudModel, supervisor: "stream watchdog",
+                decision: "resume_partial",
+                reason: `the stream went quiet mid-write (${or.timedOutPartial}); resuming from the delivered text` });
+          console.log(`[dominion-ai] ${cloudModel}: timeout-partial (${or.timedOutPartial}) — resuming from ${String(or.content || "").length} delivered chars`);
+        }
 
         // A provider can loop inside one completion. Stop the duplicate stream, preserve what was
         // useful, then recover with a fresh call and a changed strategy instead of ending the task.
@@ -7345,7 +7469,7 @@ async function handleChat(req, res) {
               completionApproved = assessment.canClaimComplete && completionContradictions.length === 0;
               const detail = completionApproved
                 ? "Completion evidence accepted. Return the concise final report now; do not call more tools unless you discover a contradiction."
-                : `Completion evidence rejected. ${assessment.instruction} Missing: ${assessment.missing.join(", ") || "none"}. Contradictions: ${completionContradictions.join("; ") || "none"}.`;
+                : `Completion evidence rejected. ${assessment.instruction} Missing: ${assessment.missing.join(", ") || "none"}. Contradictions: ${completionContradictions.join("; ") || "none"}. This is internal supervisor feedback: correct the evidence and retry task_complete; do not report a platform bug to the user.`;
               toolMsg(detail);
               toolSummaries.push(`completion gate · ${completionApproved ? "accepted" : "rejected"}`);
               sse({
@@ -7545,7 +7669,8 @@ async function handleChat(req, res) {
             let contVisible = "", contOutputLoop = null;
             const cont = await cloudChatStream(cloudModel, messages,
               { temperature: opts.temperature, num_predict: continuationOutputCap, signal: ac.signal, tools: null, toolChoice: "none",
-                executionPolicy, sessionId: chatId || job.id },
+                executionPolicy, sessionId: chatId || job.id,
+                __forceProvider: forcedTransport || undefined },
               (delta) => {
                 if (aborted || contOutputLoop) return;
                 const candidate = answer + contVisible + String(delta || "");
@@ -7907,7 +8032,7 @@ async function handleChat(req, res) {
               role: "tool", tool_name: name,
               content: localCompletionApproved
                 ? "Completion evidence accepted. Return the concise final report now."
-                : `Completion evidence rejected. ${assessment.instruction} Missing: ${assessment.missing.join(", ") || "none"}. Contradictions: ${completionContradictions.join("; ") || "none"}.`,
+                : `Completion evidence rejected. ${assessment.instruction} Missing: ${assessment.missing.join(", ") || "none"}. Contradictions: ${completionContradictions.join("; ") || "none"}. This is internal supervisor feedback: correct the evidence and retry task_complete; do not report a platform bug to the user.`,
             });
             toolSummaries.push(`completion gate · ${localCompletionApproved ? "accepted" : "rejected"}`);
             sse({
@@ -8293,8 +8418,12 @@ const server = http.createServer(async (req, res) => {
        */
       let runner = false, runnerApp = "";
       try { runner = !!(flyRunner && flyRunner.available()); runnerApp = runner ? String(flyRunner.app || "") : ""; } catch {}
+      // runningChatJobs: a COUNT, no identities — the pre-push guard (ops/prepush-check.mjs)
+      // refuses to deploy over someone's live run. Same no-secrets rule as everything here.
+      let runningChatJobs = 0;
+      try { for (const j of CHAT_JOBS.values()) if (!j.done) runningChatJobs++; } catch {}
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ build: BUILD_ID, runner, runnerApp }));
+      return res.end(JSON.stringify({ build: BUILD_ID, runner, runnerApp, runningChatJobs }));
     }
 
     // The live cloud-model catalog (single source of truth). The picker fetches this and renders the
@@ -8764,6 +8893,36 @@ server.listen(PORT, HOST, () => {
   // Retention sweep: running jobs are never touched; collected results shed events after
   // CHATJOBS_COLLECTED_TTL_MS, uncollected after CHATJOBS_UNCOLLECTED_TTL_MS (0 = keep forever).
   setInterval(() => { try { jobStore.gcRetention({ collectedTtlMs: CHATJOBS_COLLECTED_TTL_MS, uncollectedTtlMs: CHATJOBS_UNCOLLECTED_TTL_MS }); } catch {} }, 3600000).unref?.();
+  /*
+   * Deploy drain (Fred, 2026-07-30). Railway swaps containers with SIGTERM; nineteen same-day
+   * deploys executed two of his live builds at the 14:18 and 15:43 cutovers, and the screen kept
+   * looking alive for 16 minutes afterward. The cutover itself now tells every running job the
+   * truth, seals it cleanly (attach listeners get a real ending + a Continue path), and only then
+   * lets the process go. The boot-time orphan sweep remains the backstop for hard kills.
+   */
+  let drainStarted = false;
+  process.on("SIGTERM", () => {
+    if (drainStarted) return;
+    drainStarted = true;
+    let running = 0;
+    try {
+      for (const j of CHAT_JOBS.values()) {
+        if (j.done) continue;
+        running++;
+        try {
+          jobEmit(j, { type: "error", code: "server_restart",
+            message: "A deploy replaced the server mid-run — everything generated so far is preserved. Tap Continue to pick up where it left off." });
+          jobEmit(j, { type: "checkpoint", state: "interrupted_deploy", complete: false,
+            reason: "deploy cutover", nextAction: "tap Continue to resume this run on the new server" });
+          jobEmit(j, { type: "stopped", reason: "server_restart" });
+        } catch {}
+        try { j.stop(); } catch {}
+        try { finishJob(j); } catch {}
+      }
+      console.log(`[dominion-ai] SIGTERM: ${running} running turn(s) checkpointed and sealed for the deploy cutover`);
+    } catch (e) { console.log("[dominion-ai] SIGTERM drain failed: " + String(e && e.message || e).slice(0, 200)); }
+    setTimeout(() => process.exit(0), 1200).unref?.();
+  });
   console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed (incl. 6 formatting on the light model)  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON (interactive)" : "auto-approve (LAX, recorded)"}  ·  9-state lifecycle persisted  ·  ${flywheel.stats().activeToolOverlays} active description overlay(s)  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl (${toolRunTail.length} reloaded)`);
   const as = artifacts.stats();
   console.log(`[dominion-ai] artifacts: ${as.total} (${JSON.stringify(as.byStatus)})  ·  dir=${ARTIFACT_DIR}  ·  native exports: docx/pdf/xlsx/csv (Forge = docx/pdf fallback only)  ·  export gate: ${EXPORT_SAFETY_LAX ? "LAX (warn+proceed, sensitive blocks)" : "SPEC (confirm on warnings)"}  ·  9 review triggers server-side  ·  endpoints: /artifacts[/get|content|diff|version|update|delete|export|review|duplicate|transform]`);

@@ -1,0 +1,138 @@
+/* Readable, native-feeling model output. The renderer creates these elements without innerHTML. */
+.bubble.markdown {
+  white-space: normal;
+}
+
+.bubble.markdown .md-block {
+  max-width: 100%;
+}
+
+.bubble.markdown p {
+  margin: .62em 0;
+}
+
+.bubble.markdown h1,
+.bubble.markdown h2,
+.bubble.markdown h3,
+.bubble.markdown h4,
+.bubble.markdown h5,
+.bubble.markdown h6 {
+  margin: 1.15em 0 .5em;
+  color: #effaff;
+  line-height: 1.25;
+  letter-spacing: .015em;
+}
+
+.bubble.markdown h1 { font-size: 1.5em; }
+.bubble.markdown h2 { font-size: 1.32em; }
+.bubble.markdown h3 { font-size: 1.17em; }
+.bubble.markdown h4,
+.bubble.markdown h5,
+.bubble.markdown h6 { font-size: 1em; }
+
+.bubble.markdown strong {
+  color: #f4fbff;
+  font-weight: 750;
+}
+
+.bubble.markdown em {
+  color: #d5e4ec;
+}
+
+.bubble.markdown ul,
+.bubble.markdown ol {
+  margin: .65em 0 .8em;
+  padding-left: 1.55em;
+}
+
+.bubble.markdown li {
+  margin: .28em 0;
+  padding-left: .16em;
+}
+
+.bubble.markdown li::marker {
+  color: var(--energy, #76ff68);
+}
+
+.bubble.markdown blockquote {
+  margin: .8em 0;
+  padding: .55em .85em;
+  border-left: 3px solid rgba(118, 255, 104, .6);
+  color: #c1d2dc;
+  background: rgba(118, 255, 104, .055);
+}
+
+.bubble.markdown code {
+  padding: .12em .34em;
+  border: 1px solid rgba(143, 208, 244, .18);
+  border-radius: 4px;
+  color: #d8f5ff;
+  background: rgba(0, 5, 9, .72);
+  font: .92em/1.45 "Cascadia Mono", "Consolas", monospace;
+}
+
+.bubble.markdown pre {
+  max-width: 100%;
+  margin: .85em 0;
+  padding: 13px 14px;
+  overflow: auto;
+  border: 1px solid rgba(143, 208, 244, .24);
+  background: rgba(0, 5, 9, .84);
+  white-space: pre;
+  -webkit-overflow-scrolling: touch;
+}
+
+.bubble.markdown pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  white-space: pre;
+}
+
+.bubble.markdown a {
+  color: #8edcff;
+  text-decoration: underline;
+  text-decoration-color: rgba(142, 220, 255, .46);
+  text-underline-offset: 2px;
+}
+
+.bubble.markdown hr {
+  height: 1px;
+  margin: 1em 0;
+  border: 0;
+  background: linear-gradient(90deg, rgba(118, 255, 104, .7), rgba(142, 220, 255, .35), transparent);
+}
+
+.bubble.markdown .md-table-wrap {
+  max-width: 100%;
+  margin: .85em 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.bubble.markdown table {
+  width: 100%;
+  min-width: 420px;
+  border-collapse: collapse;
+  font-size: .94em;
+}
+
+.bubble.markdown th,
+.bubble.markdown td {
+  padding: 8px 10px;
+  border: 1px solid rgba(143, 208, 244, .18);
+  vertical-align: top;
+}
+
+.bubble.markdown th {
+  color: #effaff;
+  background: rgba(118, 255, 104, .085);
+}
+
+.bubble.markdown tr:nth-child(even) td {
+  background: rgba(143, 208, 244, .035);
+}
+
+.bubble.markdown > .md-block:first-child {
+  margin-top: 0;
+}

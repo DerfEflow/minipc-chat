@@ -653,7 +653,14 @@ async function copyText(t) { try { await navigator.clipboard.writeText(t); } cat
 function renderMsg(m, i, isLastAi, mount = wrap) {
   const turn = document.createElement("div"); turn.className = "turn";
   const row = document.createElement("div"); row.className = "msg " + (m.role === "user" ? "me" : "ai");
-  const b = document.createElement("div"); b.className = "bubble"; b.textContent = m.content; row.appendChild(b); turn.appendChild(row);
+  const b = document.createElement("div"); b.className = "bubble";
+  if (m.role === "assistant" && window.DominionMarkdown) {
+    b.classList.add("markdown");
+    window.DominionMarkdown.renderInto(b, m.content);
+  } else {
+    b.textContent = m.content;
+  }
+  row.appendChild(b); turn.appendChild(row);
   // Per-answer speak buttons (Fred, 2026-07-18): top-right and bottom-right of every AI bubble,
   // for speaking THIS answer on demand. The composer's big toggle is the auto-speak master.
   if (m.role === "assistant" && m.content) {
@@ -698,8 +705,17 @@ function renderMsg(m, i, isLastAi, mount = wrap) {
       const b = bit("⏸ checkpointed", "The task is unfinished and can resume from this saved checkpoint");
       b.style.color = "#9ee6ad";
     } else if (m.meta.interrupted) {
-      const b = bit("⏸ interrupted", "You stopped this answer before it finished");
+      const b = bit("⏸ interrupted", m.meta.stopReason === "server_restart"
+        ? "A server restart interrupted this run before it finished"
+        : "You stopped this answer before it finished");
       b.style.color = "#e8b07c";
+    }
+    // The Continue the orphan tail has always promised (Fred, 2026-07-30: it named a button that
+    // did not exist). Offered on the newest AI message of an unfinished run only.
+    if ((m.meta.checkpoint || m.meta.interrupted) && m.meta.jobId && isLastAi) {
+      const r = bit("▶ Continue this run", "Resume from the verified progress; finished work is never redone");
+      r.style.color = "#9ee6ad"; r.style.fontWeight = "700";
+      r.onclick = () => resumeInterruptedRun(m.meta.jobId);
     }
     // Context chips are individually gated on settings (all OFF by default — Fred, 2026-07-25;
     // System Settings has a restore checkbox for each). Split from the old single fused span so
@@ -1640,6 +1656,13 @@ function processEvent(st, ev) {
     note.textContent = "⚠ " + (ev.text || "");
     inner.insertBefore(note, tools);
     scroll();
+  } else if (ev.type === "battalion_detour") {
+    // The swarm has no hands; real work was handed to a tool-capable engine, and the user is told.
+    const note = document.createElement("div");
+    note.className = "ctx wildfire-note";
+    note.textContent = "⚔ " + (ev.text || "");
+    inner.insertBefore(note, tools);
+    scroll();
   } else if (ev.type === "mentor_full") {
     st.mentorCritique = ev.critique || null;
   } else if (ev.type === "done") {
@@ -1787,8 +1810,8 @@ function finalizeSession(st) {
     c.messages.push({
       role: "assistant", content: final, modelId: st.modelId || c.model || "local",
       meta: st.checkpoint
-        ? { interrupted: true, checkpoint: st.checkpoint, stopReason: st.stopReason || st.checkpoint.state || "" }
-        : { interrupted: true, stopReason: st.stopReason || "" },
+        ? { interrupted: true, checkpoint: st.checkpoint, stopReason: st.stopReason || st.checkpoint.state || "", jobId: st.jobId || "" }
+        : { interrupted: true, stopReason: st.stopReason || "", jobId: st.jobId || "" },
     });
     c.activityAt = touchChatComponent(c, "transcriptUpdatedAt"); save();
   } else if (st.errMsg) {
@@ -1832,6 +1855,14 @@ function finalizeSession(st) {
   }
 }
 
+let RESUME_JOB = "";   // set by the Continue button, consumed by exactly one send
+function resumeInterruptedRun(jobId) {
+  if (busyFor(curId)) { showErr("A run is already in flight in this chat — let it finish or stop it first."); return; }
+  RESUME_JOB = String(jobId || "");
+  input.value = "Continue the interrupted run exactly where it left off. Do not redo work that already succeeded; verify current state, complete what remains, and finish properly.";
+  send();
+}
+
 async function streamReply(c) {
   const st = liveSession = newSession(c);
   const wildfireForTurn = !!(window.wildfireValue && window.wildfireValue());
@@ -1857,6 +1888,9 @@ async function streamReply(c) {
         temperature: settings.temperature,
         confirmTools: !!settings.confirmTools,
         chatId: c.id,
+        // Resume of an interrupted run: the server pulls that job's verified progress into
+        // context so the model continues instead of starting over. One-shot, cleared below.
+        ...(RESUME_JOB ? { resumeFromJob: RESUME_JOB } : {}),
         // The dial controls reasoning effort. The side switch independently engages Forge Mode's
         // special tool/agent logic; neither control impersonates the other.
         // Send effort ONLY when raised above Ember: the server treats an explicit wolfeTier as final
@@ -1870,6 +1904,7 @@ async function streamReply(c) {
         ...(wildfireForTurn ? { wildfire: true } : {}),
       }),
     });
+    RESUME_JOB = "";   // one-shot: the resume context belongs to exactly this send
     // Wildfire is a one-turn override. The ordinary toolbox now expands only as needed and closes
     // automatically; broad up-front authority must never leak into the next unrelated message.
     if (wildfireForTurn && window.setWildfire) window.setWildfire(false);
@@ -2984,13 +3019,26 @@ tempInput.addEventListener("input", () => { tempVal.textContent = tempInput.valu
 // throttled so a rapid visible/hidden flicker doesn't spam /chat/jobs.
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { maybeReattach(); if (Date.now() - lastReconcile > 10000) reconcileJobs(); } });
 window.addEventListener("pageshow", () => { maybeReattach(); reconcileJobs(); });
+// Heartbeat reconcile (Fred, 2026-07-30): a run the server sealed (deploy cutover, restart) must
+// read as DEAD within seconds even when the tab never changed visibility — he pulled the alarm on
+// a chat that had been dead 16 minutes while the screen still looked alive. Cheap when idle.
+setInterval(() => {
+  try { if (Object.keys(liveJobs || {}).length) { maybeReattach(); if (Date.now() - lastReconcile > 15000) reconcileJobs(); } } catch {}
+}, 20000);
 
 load(); renderAll(); fetchBudget(); loadModels().then(() => { renderPace(); renderAll(); }, renderPace); autosize();
 // Re-measure the vertical tracks after the real typeface arrives and whenever the chat field
 // changes height. Skip active streams so a resize never removes their in-progress bubble.
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (!busyFor(curId)) renderTranscript(); });
 let modelLedgerResizeTimer = null;
+let modelLedgerViewportWidth = window.innerWidth;
 window.addEventListener("resize", () => {
+  // Opening or closing a phone keyboard changes viewport HEIGHT many times during its animation.
+  // Rebuilding the transcript on every one of those frames made the page jump under the focused
+  // composer. The ledger only needs a new measurement when its available WIDTH actually changes.
+  const nextWidth = window.innerWidth;
+  if (Math.abs(nextWidth - modelLedgerViewportWidth) < 2) return;
+  modelLedgerViewportWidth = nextWidth;
   clearTimeout(modelLedgerResizeTimer);
   modelLedgerResizeTimer = setTimeout(() => { if (!busyFor(curId)) renderTranscript(); }, 120);
 });
@@ -3191,40 +3239,8 @@ async function micTap() {
 }
 if (micBtn) micBtn.addEventListener("click", micTap);
 
-/*
- * FIRE ALARM. No confirmation dialog, on purpose. Fred asked to be able to cut its legs off, and a
- * "are you sure?" in the middle of a model doing something you did not expect is exactly the wrong
- * moment to add a click. The cost of a mis-click is a stopped turn, which is recoverable. The cost
- * of hesitating is not.
- *
- * The server scopes it: owner pulls every turn and every machine, a guest pulls only their own.
- */
-const fireAlarmBtn = $("fire-alarm");
-if (fireAlarmBtn) {
-  fireAlarmBtn.addEventListener("click", async () => {
-    fireAlarmBtn.classList.add("firing");
-    fireAlarmBtn.disabled = true;
-    let msg = "";
-    try {
-      const r = await fetch("/chat/fire-alarm", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) msg = "Fire Alarm failed: " + (j.error || r.status);
-      else if (!j.turns && !j.machineJobs) msg = "Fire Alarm pulled. Nothing was running.";
-      else msg = `Fire Alarm pulled. Stopped ${j.turns} turn${j.turns === 1 ? "" : "s"} and ${j.machineJobs} machine job${j.machineJobs === 1 ? "" : "s"}${(j.nodes || []).length ? " on " + j.nodes.join(", ") : ""}.`;
-    } catch (e) {
-      msg = "Fire Alarm could not reach the server: " + (e && e.message || e);
-    }
-    // Also abort anything this client is still streaming, so the UI matches reality immediately.
-    try { if (aborter) aborter.abort(); } catch {}
-    const note = document.createElement("div");
-    note.className = "ctx fire-alarm-note";
-    note.textContent = "🔔 " + msg;
-    const host = document.getElementById("msgs") || document.body;
-    host.appendChild(note);
-    try { note.scrollIntoView({ block: "end" }); } catch {}
-    setTimeout(() => { fireAlarmBtn.classList.remove("firing"); fireAlarmBtn.disabled = false; }, 900);
-  });
-}
+// FIRE ALARM button removed from the command rail (Fred, 2026-07-30). The server endpoint
+// POST /chat/fire-alarm stays as an owner API escape hatch; per-turn Stop remains in the UI.
 
 // ---------- the voice player (Fred, 2026-07-19) ----------
 // Three complaints, one object. (1) Hitting speak felt like the app hung: generating a minute of

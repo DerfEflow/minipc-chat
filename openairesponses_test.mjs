@@ -468,5 +468,89 @@ await t("mid-stream failure after visible output is not retried", async () => {
   assert(!result.ok && result.partial && result.content === "visible" && calls === 1, "partial stream was retried or lost");
 });
 
+// ---- Watchdog rewrite (2026-07-30): activity re-arms the idle window; stopwatch kills are gone.
+const encoderW = new TextEncoder();
+const sseLine = (event) => encoderW.encode(`data: ${JSON.stringify(event)}\n\n`);
+// A body that stays open and silent until the fetch signal aborts it, like real fetch does.
+function stallingBody(signal, prelude = []) {
+  return new ReadableStream({
+    start(controller) {
+      for (const event of prelude) controller.enqueue(sseLine(event));
+      if (signal) signal.addEventListener("abort", () => {
+        try { controller.error(Object.assign(new DOMException("aborted", "AbortError"))); } catch {}
+      }, { once: true });
+    },
+  });
+}
+
+await t("an actively streaming response outlives the idle window many times over", async () => {
+  const fetchImpl = async () => {
+    let sent = 0;
+    const body = new ReadableStream({
+      start(controller) {
+        const timer = setInterval(() => {
+          sent++;
+          if (sent <= 10) controller.enqueue(sseLine({ type: "response.output_text.delta", delta: "t" + sent + " " }));
+          else {
+            clearInterval(timer);
+            controller.enqueue(sseLine(completed([{ type: "message", role: "assistant", content: [{ type: "output_text", text: "t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 ", annotations: [] }] }])));
+            controller.close();
+          }
+        }, 40);
+      },
+    });
+    return new Response(body, { status: 200 });
+  };
+  const result = await openAIResponsesStream("gpt-5.6-sol", [{ role: "user", content: "go" }], {
+    apiKey: "k", fetchImpl, maxRetries: 0, timeoutMs: 150,   // wall clock here is ~480ms, 3x the idle window
+  });
+  assert(result.ok && /t10/.test(result.content), "a healthy slow stream was killed by the watchdog: " + JSON.stringify({ ok: result.ok, error: result.error }));
+});
+
+await t("dead silence trips the idle watchdog with a named reason", async () => {
+  const fetchImpl = async (_url, init) => new Response(stallingBody(init && init.signal), { status: 200 });
+  const result = await openAIResponsesStream("gpt-5.6-sol", [{ role: "user", content: "go" }], {
+    apiKey: "k", fetchImpl, maxRetries: 0, timeoutMs: 120,
+  });
+  assert(!result.ok && /timed out/i.test(result.error) && /no stream activity/i.test(result.error),
+    "silent stream did not report an idle timeout: " + result.error);
+});
+
+await t("timeout after delivered text returns a resumable length checkpoint, not a retry", async () => {
+  let calls = 0;
+  const fetchImpl = async (_url, init) => {
+    calls++;
+    return new Response(stallingBody(init && init.signal, [
+      { type: "response.output_text.delta", delta: "Half of the answer" },
+    ]), { status: 200 });
+  };
+  const result = await openAIResponsesStream("gpt-5.6-sol", [{ role: "user", content: "go" }], {
+    apiKey: "k", fetchImpl, maxRetries: 3, retryBaseMs: 0, sleepImpl: async () => {}, timeoutMs: 130,
+  });
+  assert(calls === 1, "delivered text was thrown away and re-bought: calls=" + calls);
+  assert(result.ok && result.finishReason === "length" && result.partial === true, "timeout-partial is not a resumable checkpoint: " + JSON.stringify({ ok: result.ok, fr: result.finishReason }));
+  assert(result.timedOutPartial === "idle" && result.content === "Half of the answer", "partial content lost");
+  assert(Array.isArray(result.toolCalls) && result.toolCalls.length === 0, "half-streamed tool calls must be dropped");
+});
+
+await t("reasoning summaries stream as think-wrapped deltas while content stays clean", async () => {
+  const seen = [];
+  const fetchImpl = async () => sseResponse([
+    { type: "response.created", response: { id: "resp_t", status: "in_progress" } },
+    { type: "response.reasoning_summary_text.delta", delta: "Weighing options." },
+    { type: "response.output_text.delta", delta: "Final " },
+    { type: "response.output_text.delta", delta: "answer." },
+    completed([
+      { type: "reasoning", summary: [{ type: "summary_text", text: "Weighing options." }] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Final answer.", annotations: [] }] },
+    ]),
+  ]);
+  const result = await openAIResponsesStream("gpt-5.6-sol", [{ role: "user", content: "go" }], {
+    apiKey: "k", fetchImpl, maxRetries: 0, emitReasoningAsThink: true,
+  }, (delta) => seen.push(delta));
+  assert(seen.join("") === "<think>Weighing options.</think>Final answer.", "think wrapping wrong: " + JSON.stringify(seen.join("")));
+  assert(result.ok && result.content === "Final answer." && result.reasoning === "Weighing options.", "content polluted by think stream");
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

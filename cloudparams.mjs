@@ -28,12 +28,19 @@ export const TOOL_CAP = 128;
 // default is served): the gpt-5 family and the o-series reasoning models.
 const OPENAI_FIXED_TEMP = /^(gpt-5|o\d)/;
 
+// Moonshot's mandatory-reasoning models reject explicit sampling the same way. Proven live
+// 2026-07-30: kimi-k3 earned three identical 400 "temperature" rejections in one turn while the
+// one-resend repair kept forgetting. K2.6 (no forced reasoning) keeps its temperature.
+const MOONSHOT_FIXED_TEMP = /^kimi-k3/;
+
 export function shapeCloudParams({ provider, directId, temperature, tools }) {
   const out = { temperature: undefined, tools: null, toolsDropped: 0 };
 
   if (typeof temperature === "number" && Number.isFinite(temperature)) {
     if (provider === "openai" && OPENAI_FIXED_TEMP.test(String(directId || ""))) {
       out.temperature = undefined;                       // fixed-temp family: omit entirely
+    } else if (provider === "moonshot" && MOONSHOT_FIXED_TEMP.test(String(directId || ""))) {
+      out.temperature = undefined;                       // reasoning-locked family: omit entirely
     } else if (provider === "anthropic") {
       out.temperature = Math.min(1, Math.max(0, temperature));
     } else {

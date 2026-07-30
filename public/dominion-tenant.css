@@ -718,23 +718,20 @@
   /* !important: these triggers carry state classes (#ide-trigger.on beats any plain selector),
      and on a phone the dock owns these three destinations unconditionally. */
   html body #forge-trigger, html body #dfi-trigger, html body #ide-trigger { display: none !important; }
-  html body .bar { display: grid; grid-template-columns: 44px 44px 1fr 44px 44px 55px; grid-template-rows: auto auto; gap: 8px; align-items: center; }
+  html body .bar { display: grid; grid-template-columns: 44px 1fr 44px 44px 55px; grid-template-rows: auto auto; gap: 8px; align-items: center; }
   html body #input { grid-column: 1 / -1; grid-row: 1; }
   html body #bar-left { display: contents; }
   html body #bar-mid { display: none; }
   html body #attach { grid-column: 1; grid-row: 2; }
-  html body #fire-alarm { grid-column: 2; grid-row: 2; }
-  html body #speak { grid-column: 4; grid-row: 2; display: flex; }
-  html body #mic { grid-column: 5; grid-row: 2; }
-  html body #send { grid-column: 6; grid-row: 2; justify-self: end; }
-  html body #attach, html body #speak, html body #mic, html body #fire-alarm {
+  html body #speak { grid-column: 3; grid-row: 2; display: flex; }
+  html body #mic { grid-column: 4; grid-row: 2; }
+  html body #send { grid-column: 5; grid-row: 2; justify-self: end; }
+  html body #attach, html body #speak, html body #mic {
     box-sizing: border-box; width: 44px; height: 44px; margin: 0; padding: 0; border-radius: 10px;
     border: 1px solid rgba(212, 130, 60, .45); background: rgba(10, 6, 2, .55);
     display: flex; align-items: center; justify-content: center;
   }
   html body #attach svg, html body #speak svg, html body #mic svg { width: 21px; height: 21px; }
-  html body #fire-alarm { border-color: rgba(255, 96, 62, .55); color: #ff8a6a; }
-  html body #fire-alarm svg { width: 20px; height: 20px; }
   html body #send { width: 55px; height: 55px; margin: 0; }
 }
 

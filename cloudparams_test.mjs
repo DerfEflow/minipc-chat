@@ -216,6 +216,14 @@ await t("e2e: a 400 naming 'temperature' is retried ONCE without it and the turn
   if (!r.answer.includes("shaped ok")) throw new Error("turn did not complete: " + JSON.stringify(r));
 });
 
+await t("kimi-k3 sheds temperature at the shaping layer, permanently", async () => {
+  const { shapeCloudParams } = await import("./cloudparams.mjs");
+  const shaped = shapeCloudParams({ provider: "moonshot", directId: "kimi-k3", temperature: 0.7, tools: null });
+  if (shaped.temperature !== undefined) throw new Error("kimi-k3 temperature must be omitted");
+  const k26 = shapeCloudParams({ provider: "moonshot", directId: "kimi-k2.6", temperature: 0.7, tools: null });
+  if (k26.temperature !== 0.7) throw new Error("kimi-k2.6 must keep its temperature");
+});
+
 console.log(`\ncloudparams: ${passed} passed, ${failed} failed`);
 child.kill();
 mockOllama.close();
