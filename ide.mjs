@@ -19,6 +19,7 @@ import { routeMove, CLASS_INFO, TASK_CLASSES, DEFAULT_ASSIGNMENTS, IMAGE_ENGINE,
 import { createPushStore } from "./idepush.mjs";
 import { normalizeRegister, DEFAULT_REGISTER } from "./idelang.mjs";
 import { normalizeMode } from "./idemodes.mjs";
+import { normalizeBuildWhere } from "./buildlane.mjs";
 
 export const IDE_MODE_DEFAULT = "owner";
 // Large adopted-project briefs can legitimately contain a roadmap plus source
@@ -118,7 +119,7 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
   mkdirSync(home, { recursive: true });
 
   // mode "" means "never chosen": the client shows the three-cards picker exactly once.
-  const blank = () => ({ prefs: { engaged: false, language: DEFAULT_REGISTER, mode: "" }, workspaces: [], subs: [] });
+  const blank = () => ({ prefs: { engaged: false, language: DEFAULT_REGISTER, mode: "", buildWhere: "mine" }, workspaces: [], subs: [] });
 
   function read() {
     if (!existsSync(file)) return blank();
@@ -137,6 +138,11 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
           // Model assignments made before the first workspace exists, so the board is usable on
           // day one and the first workspace inherits them.
           assignments: (j && j.prefs && j.prefs.assignments && typeof j.prefs.assignments === "object") ? j.prefs.assignments : {},
+          // WHERE NEW BUILDS RUN (Fred, 2026-07-30): "mine" is your own computer through the
+          // helper, "cloud" is Dominion's throwaway workshop machine. Only the choice for NEW
+          // work lives here — an existing project always runs where its files already are, so
+          // flipping this can never point a project at a folder that does not exist.
+          buildWhere: normalizeBuildWhere(j && j.prefs && j.prefs.buildWhere),
         },
         workspaces: Array.isArray(j && j.workspaces) ? j.workspaces : [],
         subs: Array.isArray(j && j.subs) ? j.subs : [],
@@ -189,6 +195,9 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
       if (patch && typeof patch.engaged === "boolean") s.prefs.engaged = patch.engaged;
       if (patch && patch.assignments && typeof patch.assignments === "object") { const a = capObj(patch.assignments, 20000); if (a) s.prefs.assignments = a; }
       if (patch && typeof patch.language === "string") s.prefs.language = normalizeRegister(patch.language);
+      // Only two lanes are choosable. An absent field leaves the stored choice alone; a present
+      // one is normalized, so a typo lands on "mine" instead of quietly becoming a third state.
+      if (patch && typeof patch.buildWhere === "string") s.prefs.buildWhere = normalizeBuildWhere(patch.buildWhere);
       // "" stays "": that is the never-chosen state that makes the picker appear exactly once.
       if (patch && typeof patch.mode === "string") s.prefs.mode = patch.mode === "" ? "" : normalizeMode(patch.mode);
       write(s);
@@ -379,6 +388,7 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
         engaged: !!(body && body.engaged),
         assignments: body && body.assignments,
         language: body && body.language,
+        buildWhere: body && body.buildWhere,
         ...(mode !== undefined ? { mode } : {}),
       }) });
     },
@@ -410,6 +420,16 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
     listWorkspaces(T) {
       const blocked = wall(T); if (blocked) return blocked;
       return ok({ workspaces: storeFor(T).list() });
+    },
+
+    /*
+     * The raw preferences, with no wall and no payload assembly. Build routing consults these on
+     * EVERY tool call, and state() builds the whole Assignment Board to answer, which is far too
+     * much work to do per file read. Never returns null: a caller deciding where to run code must
+     * always get a lane, and the safe default is the one that matches today's behavior.
+     */
+    prefsFor(T) {
+      try { return storeFor(T).prefs() || {}; } catch { return {}; }
     },
 
     createWorkspace(T, body) {

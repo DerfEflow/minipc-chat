@@ -894,6 +894,18 @@
           '<button type="button" id="st-workshop-new" hidden>New project folder</button>' +
         '</div>' +
         '<p class="st-workshop-note" id="st-workshop-note" hidden></p>' +
+        // The lane choice, shown ONLY to an account that actually has both (Fred, 2026-07-30).
+        // Someone with a computer attached may still prefer the throwaway cloud machine, and
+        // "I would rather not have this run on my work laptop" is a completely reasonable thing
+        // to want. It governs NEW projects; every existing one keeps running where its files are.
+        '<div class="st-lane" id="st-lane" hidden>' +
+          '<label for="st-lane-pick">Where new builds run</label>' +
+          '<select id="st-lane-pick">' +
+            '<option value="mine">On my computer</option>' +
+            '<option value="cloud">In Dominion\'s cloud workshop</option>' +
+          '</select>' +
+          '<span class="st-lane-note" id="st-lane-note"></span>' +
+        '</div>' +
         '<div class="st-new" id="st-new" hidden>' +
           '<input id="st-new-path" type="text" autocomplete="off" spellcheck="false" />' +
           '<input id="st-new-name" type="text" autocomplete="off" />' +
@@ -1189,9 +1201,28 @@
     if (note) {
       note.hidden = !workshop;
       note.textContent = workshop
-        ? "Your projects are built in a workshop on Dominion's server. Files here are real and yours to download. To build straight onto your own computer instead, install a Dominion node from Setup."
+        ? (state.canChooseLane
+            ? "New projects are built in a workshop on Dominion's server, in a machine that exists only while a command runs. Files here are real and yours to download. Switch back above to build straight onto your own computer."
+            : "Your projects are built in a workshop on Dominion's server. Files here are real and yours to download. To build straight onto your own computer instead, install a Dominion node from Setup.")
         : "";
     }
+    paintLaneChoice();
+  }
+
+  /*
+   * The lane control appears only when there is a genuine choice: a machine attached AND a cloud
+   * workshop available. With no machine the cloud is not a preference, it is the only thing there
+   * is, and a toggle that cannot be moved is worse than no toggle. The note says out loud that the
+   * choice governs new work, because the one thing a user could reasonably fear is that flipping it
+   * strands the project they already have.
+   */
+  function paintLaneChoice() {
+    const box = $("#st-lane"), pick = $("#st-lane-pick"), n = $("#st-lane-note");
+    if (!box || !pick) return;
+    box.hidden = state.canChooseLane !== true;
+    if (box.hidden) return;
+    pick.value = state.buildWhere === "cloud" ? "cloud" : "mine";
+    if (n) n.textContent = "Applies to new projects. Anything you already started keeps building where its files are.";
   }
 
   function renderStarter() {
@@ -1286,6 +1317,42 @@
      * so all this asks for is what to call the project — and it accepts an empty answer, because a
      * person who just wants to start should not be stopped by a naming ceremony.
      */
+    /*
+     * The lane switch. It writes to the ACCOUNT, not the device, because where a build runs is a
+     * fact about the build and not about the screen you happen to be holding. The optimistic paint
+     * is reverted on failure: a control that shows "cloud" while the server still says "mine" would
+     * send someone's next build to a machine they thought they had opted out of.
+     */
+    const lanePick = $("#st-lane-pick");
+    if (lanePick) lanePick.addEventListener("change", async () => {
+      const want = lanePick.value === "cloud" ? "cloud" : "mine";
+      const was = state.buildWhere;
+      state.buildWhere = want;
+      lanePick.disabled = true;
+      try {
+        const r = await fetch("/ide/prefs", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ engaged: state.engaged, buildWhere: want }) });
+        if (!r.ok) throw new Error("save failed");
+        // Re-read rather than trust the optimistic paint: the server is the authority on which
+        // lane the account is actually in, and the folder row's whole shape hangs off that answer.
+        const s = await fetch("/ide/state", { headers: { accept: "application/json" } }).then((x) => (x.ok ? x.json() : null));
+        if (s) {
+          state.workshop = s.workshop === true;
+          state.hasNode = s.hasNode === true;
+          state.canChooseLane = s.canChooseLane === true;
+          state.buildWhere = s.buildWhere === "cloud" ? "cloud" : "mine";
+        }
+        renderStarter();
+        status(want === "cloud"
+          ? "New projects will be built in Dominion's cloud workshop."
+          : "New projects will be built on your own computer.");
+      } catch {
+        state.buildWhere = was;
+        paintLaneChoice();
+        status("That setting could not be saved. Nothing changed.", true);
+      } finally { lanePick.disabled = false; }
+    });
+
     const mkWorkshop = $("#st-workshop-new");
     if (mkWorkshop) mkWorkshop.addEventListener("click", async () => {
       mkWorkshop.disabled = true;
@@ -2832,6 +2899,10 @@
       // promise (Fred, 2026-07-30).
       state.workshop = s.workshop === true;
       state.hasNode = s.hasNode === true;
+      // Both come from the server on every sync rather than being inferred here, so a node that
+      // connects or drops mid-session moves the control without a reload.
+      state.canChooseLane = s.canChooseLane === true;
+      state.buildWhere = s.buildWhere === "cloud" ? "cloud" : "mine";
       state.workspaces = s.workspaces || [];
       const ws = state.workspaces[0] || null;
       state.workspaceId = ws ? ws.id : "";
