@@ -4784,9 +4784,42 @@ const VOICE_TTS_INSTRUCTIONS = cfgGet("VOICE_TTS_INSTRUCTIONS",
 // Confirmed working on this account, newest and most natural first.
 const VOICE_TTS_VOICES = ["cedar", "marin", "ash", "sage", "verse", "ballad", "coral", "alloy", "echo", "fable", "nova", "shimmer", "onyx"];
 
+/* ARSENAL Wave 4 (2026-07-29). The wave's order was "NVIDIA speech primary, OpenAI backup", and
+ * the probe answered it: NVIDIA's free speech models (magpie TTS, parakeet/canary/whisper ASR)
+ * are ACTIVE on the account but served over gRPC ONLY — every HTTP surface (integrate
+ * /v1/audio/*, ai.api genai paths, NVCF pexec in every payload shape) returns 404/500
+ * (speech_probe.mjs / speech_probe2.mjs / speech_probe3.mjs, committed as evidence). A zero-dep
+ * server does not speak gRPC, so the FREE lane that actually exists is the user's own device:
+ * the browser's built-in speech synthesis and recognition. The wave's real mission — "voice
+ * dies when OpenAI quota dries up" dies — is delivered as: OpenAI stays primary (better
+ * voices), the DEVICE is the announced backup, and these handlers return structured error
+ * codes + a classified reason so the client can engage that backup and say so out loud.
+ * Overridable base so tests can mock the OpenAI side (same pattern as OPENAI_IMAGES_BASE). */
+const VOICE_API_BASE = new URL(cfgGet("OPENAI_VOICE_BASE", "https://api.openai.com"));
+const voiceRequestOpts = (path, headers) => ({
+  method: "POST",
+  protocol: VOICE_API_BASE.protocol,
+  hostname: VOICE_API_BASE.hostname,
+  port: VOICE_API_BASE.port || undefined,
+  path,
+  headers,
+  timeout: 60000,
+});
+const voiceHttpMod = () => (VOICE_API_BASE.protocol === "http:" ? http : https);
+// The standing diagnosis rule (2026-07): when voice fails, the cause is OpenAI quota until
+// proven otherwise. Classify the upstream error so the client can SAY the reason.
+function voiceFailReason(status, text) {
+  const t = String(text || "");
+  if (/quota|billing|insufficient/i.test(t)) return "OpenAI quota/billing";
+  if (status === 401 || status === 403 || /invalid api key|incorrect api key/i.test(t)) return "OpenAI key rejected";
+  if (status === 429 || /rate limit/i.test(t)) return "OpenAI rate limit";
+  if (status === 0) return "network";
+  return "OpenAI error";
+}
+
 async function handleVoiceTranscribe(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
-  if (!OPENAI_KEY) return json(503, { error: "Voice needs the OpenAI key in the box's .env (OPEN_AI_DOMINION_UI_APIKEY)." });
+  if (!OPENAI_KEY) return json(503, { error: "Voice needs the OpenAI key in the box's .env (OPEN_AI_DOMINION_UI_APIKEY).", code: "stt_down", reason: "no key", fallback: "device" });
   const audio = await readRawBody(req);
   if (!audio || audio.length < 200) return json(400, { error: "No audio received." });
   const mime = String(req.headers["content-type"] || "audio/webm").split(";")[0];
@@ -4798,9 +4831,9 @@ async function handleVoiceTranscribe(req, res) {
   const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
   const body = Buffer.concat([head, audio, tail]);
   const r = await new Promise((resolve) => {
-    const rq = https.request(
-      { method: "POST", hostname: "api.openai.com", path: "/v1/audio/transcriptions",
-        headers: { authorization: "Bearer " + OPENAI_KEY, "content-type": "multipart/form-data; boundary=" + boundary, "content-length": body.length }, timeout: 60000 },
+    const rq = voiceHttpMod().request(
+      voiceRequestOpts("/v1/audio/transcriptions",
+        { authorization: "Bearer " + OPENAI_KEY, "content-type": "multipart/form-data; boundary=" + boundary, "content-length": body.length }),
       (resp) => { let b = ""; resp.on("data", (d) => (b += d)); resp.on("end", () => resolve({ status: resp.statusCode || 0, text: b })); }
     );
     rq.on("error", (e) => resolve({ status: 0, text: String(e.message) }));
@@ -4810,8 +4843,9 @@ async function handleVoiceTranscribe(req, res) {
   if (r.status !== 200) {
     let msg = "Transcription failed (HTTP " + r.status + ").";
     try { const j = JSON.parse(r.text); if (j.error && j.error.message) msg = "OpenAI: " + j.error.message; } catch {}
-    console.log(`[dominion-ai] voice/transcribe FAILED ${r.status}`);
-    return json(502, { error: msg });
+    const reason = voiceFailReason(r.status, r.text);
+    console.log(`[dominion-ai] voice/transcribe FAILED ${r.status} (${reason})`);
+    return json(502, { error: msg, code: "stt_down", reason, fallback: "device" });
   }
   let text = "";
   try { text = String(JSON.parse(r.text).text || "").trim(); } catch {}
@@ -4828,7 +4862,7 @@ function handleVoiceConfig(req, res) {
 
 async function handleVoiceTts(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
-  if (!OPENAI_KEY) return json(503, { error: "Voice needs the OpenAI key in the box's .env (OPEN_AI_DOMINION_UI_APIKEY)." });
+  if (!OPENAI_KEY) return json(503, { error: "Voice needs the OpenAI key in the box's .env (OPEN_AI_DOMINION_UI_APIKEY).", code: "tts_down", reason: "no key", fallback: "device" });
   const b = await readJsonBody(req);
   // 4000 is a guard on ONE REQUEST (OpenAI's speech endpoint takes 4096), not a limit on how much
   // of an answer can be spoken. The client sends a long answer as a queue of ~450-character chunks,
@@ -4843,21 +4877,26 @@ async function handleVoiceTts(req, res) {
   const instructions = (typeof b.instructions === "string" && b.instructions.trim())
     ? b.instructions.trim().slice(0, 800) : VOICE_TTS_INSTRUCTIONS;
   const payload = JSON.stringify({ model: VOICE_TTS_MODEL, voice, input: text, response_format: "mp3", instructions });
-  const rq = https.request(
-    { method: "POST", hostname: "api.openai.com", path: "/v1/audio/speech",
-      headers: { authorization: "Bearer " + OPENAI_KEY, "content-type": "application/json", "content-length": Buffer.byteLength(payload) }, timeout: 60000 },
+  const rq = voiceHttpMod().request(
+    voiceRequestOpts("/v1/audio/speech",
+      { authorization: "Bearer " + OPENAI_KEY, "content-type": "application/json", "content-length": Buffer.byteLength(payload) }),
     (resp) => {
       if ((resp.statusCode || 0) !== 200) {
         let eb = ""; resp.on("data", (d) => (eb += d));
-        resp.on("end", () => { let msg = "TTS failed (HTTP " + resp.statusCode + ")."; try { const j = JSON.parse(eb); if (j.error && j.error.message) msg = "OpenAI: " + j.error.message; } catch {} json(502, { error: msg }); });
+        resp.on("end", () => {
+          let msg = "TTS failed (HTTP " + resp.statusCode + ")."; try { const j = JSON.parse(eb); if (j.error && j.error.message) msg = "OpenAI: " + j.error.message; } catch {}
+          const reason = voiceFailReason(resp.statusCode || 0, eb);
+          console.log(`[dominion-ai] voice/tts FAILED ${resp.statusCode} (${reason})`);
+          json(502, { error: msg, code: "tts_down", reason, fallback: "device" });
+        });
         return;
       }
       res.writeHead(200, { "content-type": "audio/mpeg", "cache-control": "no-store" });
       resp.pipe(res);   // stream the mp3 straight through — no buffering
     }
   );
-  rq.on("error", (e) => json(502, { error: "Couldn't reach OpenAI TTS: " + String(e.message) }));
-  rq.on("timeout", () => { rq.destroy(); json(502, { error: "OpenAI TTS timed out." }); });
+  rq.on("error", (e) => json(502, { error: "Couldn't reach OpenAI TTS: " + String(e.message), code: "tts_down", reason: "network", fallback: "device" }));
+  rq.on("timeout", () => { rq.destroy(); json(502, { error: "OpenAI TTS timed out.", code: "tts_down", reason: "network", fallback: "device" }); });
   rq.write(payload); rq.end();
 }
 

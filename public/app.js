@@ -2942,10 +2942,60 @@ function micStatus(label, withClock) {
   if (withClock) { micT0 = Date.now(); paint(); micTimer = setInterval(paint, 1000); } else paint();
 }
 
+/* ARSENAL Wave 4: when the server's transcription lane dies (OpenAI quota being the standing
+ * cause), the device's own speech recognition takes over for the rest of the session — free,
+ * on-device, announced in the status chip as "(device)". If the device lane itself errors, the
+ * next tap goes back to the server, which may have recovered. Never silent either way. */
+let sttDevice = false;      // sticky for the session once the server lane fails
+let deviceRec = null;       // live SpeechRecognition handle (second tap stops it)
+function deviceRecognizerAvailable() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
+function deviceMicTap() {
+  if (deviceRec) { try { deviceRec.stop(); } catch {} return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const r = new SR();
+  deviceRec = r;
+  r.lang = navigator.language || "en-US";
+  r.interimResults = true;
+  r.continuous = true;
+  let finalText = "";
+  const oldPlaceholder = input.placeholder;
+  r.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalText += t; else interim += t;
+    }
+    input.value = (finalText + " " + interim).trim();
+    autosize();
+  };
+  r.onerror = (e) => {
+    // not-allowed/no-speech etc.: report, and let the SERVER lane try again next tap.
+    sttDevice = false;
+    showErr("Device transcription failed (" + (e.error || "error") + "). Next tap uses the server again.");
+  };
+  r.onend = () => {
+    deviceRec = null;
+    micBtn.classList.remove("rec");
+    micStatus("");
+    input.placeholder = oldPlaceholder;
+    input.value = finalText.trim() || input.value;
+    captureChatDraft(); autosize();
+    if (input.value.trim() && !busyFor(curId)) send();
+  };
+  try { r.start(); } catch { deviceRec = null; sttDevice = false; showErr("Device transcription could not start."); return; }
+  micBtn.classList.add("rec");
+  micStatus("Listening (device)… tap to finish", true);
+  input.placeholder = "Listening on your device… tap the mic again to finish.";
+}
+
 async function micTap() {
   if (!micBtn) return;
+  if (sttDevice && deviceRecognizerAvailable()) { deviceMicTap(); return; }
   if (rec && rec.state === "recording") { rec.stop(); return; }   // second tap = stop -> transcribe -> send
-  if (!navigator.mediaDevices || !window.MediaRecorder) { showErr("Voice input isn't supported in this browser."); return; }
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    if (deviceRecognizerAvailable()) { sttDevice = true; deviceMicTap(); return; }
+    showErr("Voice input isn't supported in this browser."); return;
+  }
   try { recStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
   catch { showErr("Microphone permission denied — allow the mic for this site."); return; }
   // Chrome/Android = webm+opus; iOS Safari = mp4. The server forwards whatever mime it gets.
@@ -2969,7 +3019,16 @@ async function micTap() {
       if (blob.size < 1000) { showErr("Didn't catch that — recording was too short."); return; }
       const r = await fetch("/api/voice/transcribe", { method: "POST", headers: { "content-type": blob.type || "audio/webm" }, body: blob });
       const j = await r.json().catch(() => null);
-      if (!r.ok || !j || !j.text) { showErr((j && j.error) || "Transcription failed — try again."); return; }
+      if (!r.ok || !j || !j.text) {
+        // Server lane down: flip this session to the device's own recognition, and SAY so.
+        if (j && j.fallback === "device" && deviceRecognizerAvailable()) {
+          sttDevice = true;
+          showErr("Server transcription is down (" + (j.reason || "OpenAI error") + "). Tap the mic again — your device will transcribe on its own, free.");
+          return;
+        }
+        showErr((j && j.error) || "Transcription failed — try again.");
+        return;
+      }
       input.value = j.text; captureChatDraft(); autosize();
       if (!busyFor(curId)) send();   // straight through the normal flow: picked model, tools, the works
     } finally { micBtn.classList.remove("busy"); micStatus(""); rec = null; input.placeholder = oldPlaceholder; }
@@ -3038,6 +3097,9 @@ const voice = (() => {
   let currentText = "";
   let queue = [], queueAt = 0; // chunk texts, and which one is sounding
   let truncated = false;       // only when an answer exceeds CHUNK_CEILING, and it is announced
+  let device = false;          // ARSENAL Wave 4: true while the DEVICE's own voice is reading
+                               // (server TTS down) — announced on the bar, never silent
+  let deviceUtter = null;      // the utterance currently sounding, for pause/resume state
 
   // Synthesis latency is LINEAR in characters: measured on this account at ~9.4ms/char, so a
   // 4000-character answer is ~37 seconds of silence before the first word. A spinner does not fix
@@ -3091,7 +3153,16 @@ const voice = (() => {
       state: bar.querySelector(".vb-state"), time: bar.querySelector(".vb-time"),
       fill: bar.querySelector(".vb-track i"),
     };
-    els.play.onclick = () => { if (!audio) return; if (audio.paused) audio.play().catch(() => {}); else audio.pause(); paint(); };
+    els.play.onclick = () => {
+      if (device) {
+        try { if (speechSynthesis.paused) speechSynthesis.resume(); else speechSynthesis.pause(); } catch {}
+        paint();
+        return;
+      }
+      if (!audio) return;
+      if (audio.paused) audio.play().catch(() => {}); else audio.pause();
+      paint();
+    };
     els.stop.onclick = () => stop();
   }
 
@@ -3099,11 +3170,14 @@ const voice = (() => {
 
   function paint(state) {
     build();
-    const s = state || (!audio ? "preparing" : audio.paused ? "paused" : "speaking");
+    const s = state || (device
+      ? ((() => { try { return speechSynthesis.paused ? "paused" : "speaking"; } catch { return "speaking"; } })())
+      : (!audio ? "preparing" : audio.paused ? "paused" : "speaking"));
     bar.hidden = false;
     bar.dataset.state = s;
     const many = queue.length > 1;
     els.state.textContent = (s === "preparing" ? "PREPARING VOICE" : s === "paused" ? "PAUSED" : "SPEAKING")
+      + (device ? "  · DEVICE VOICE" : "")
       + (many ? "  " + (queueAt + 1) + "/" + queue.length : "")
       + (truncated ? "  LONG ANSWER" : "");
     els.play.innerHTML = s === "speaking" ? "&#10074;&#10074;" : "&#9654;";
@@ -3132,6 +3206,8 @@ const voice = (() => {
 
   function teardown() {
     dropAudio();
+    if (device) { try { speechSynthesis.cancel(); } catch {} }
+    device = false; deviceUtter = null;
     queue = []; queueAt = 0; currentText = ""; truncated = false;
     if (source) { source.classList.remove("bspeak-active"); source = null; }
     if (bar) { bar.hidden = true; bar.dataset.state = ""; }
@@ -3162,11 +3238,50 @@ const voice = (() => {
     if (mine !== token) return "";
     if (!r.ok) {
       const j = await r.json().catch(() => null);
-      throw new Error((j && j.error) || ("HTTP " + r.status));
+      const e = new Error((j && j.error) || ("HTTP " + r.status));
+      e.reason = (j && j.reason) || "";
+      e.deviceFallback = !!(j && j.fallback === "device");
+      throw e;
     }
     const blob = await r.blob();
     if (mine !== token) return "";
     return URL.createObjectURL(blob);
+  }
+
+  /* ARSENAL Wave 4: the free backup lane. NVIDIA's free speech models turned out to be
+   * gRPC-only (probed 2026-07-29), so the free voice that actually exists everywhere is the
+   * device's own speech synthesis: no key, no quota, no network. When the server's TTS fails,
+   * the remaining chunks are read by the device, the bar says DEVICE VOICE, and a one-time
+   * note names the reason. Never silent, never stacked (same token discipline). */
+  let deviceNoteShown = false;
+  function playDeviceChunk(text, mine) {
+    return new Promise((resolve) => {
+      const u = new SpeechSynthesisUtterance(text);
+      deviceUtter = u;
+      u.onend = () => resolve(true);
+      u.onerror = () => resolve(false);
+      try { speechSynthesis.speak(u); } catch { resolve(false); return; }
+      if (mine === token) paint("speaking");
+    });
+  }
+  async function deviceFallback(mine, reason) {
+    if (!("speechSynthesis" in window)) return false;
+    device = true;
+    if (!deviceNoteShown) {
+      deviceNoteShown = true;
+      showErr("Server voice is down (" + (reason || "OpenAI error") + "). Your device's built-in voice is reading instead — free, and it says so on the bar.");
+    }
+    try { speechSynthesis.cancel(); } catch {}
+    for (let i = queueAt; i < queue.length; i++) {
+      if (mine !== token) return true;
+      queueAt = i;
+      paint();
+      const finished = await playDeviceChunk(queue[i], mine);
+      if (mine !== token) return true;
+      if (!finished) return false;
+    }
+    if (mine === token) teardown();
+    return true;
   }
 
   // Play one chunk to its end. Resolves early (false) if the player was stopped mid-chunk.
@@ -3217,6 +3332,10 @@ const voice = (() => {
       if (mine === token) teardown();
     } catch (e) {
       if (mine !== token) return;
+      // The server lane died mid-answer. Before giving up, hand the REST of the answer to the
+      // device's own voice (free, no quota), announced on the bar and in a one-time note.
+      const handled = await deviceFallback(mine, (e && e.reason) || "");
+      if (handled) return;
       teardown();
       showErr("Voice failed: " + (e && e.message ? e.message : "could not reach the box") + ".");
     }
