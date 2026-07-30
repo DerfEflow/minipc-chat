@@ -888,7 +888,12 @@
         '<div class="st-row" id="st-ws-row">' +
           '<select id="st-ws" aria-label="Which project folder to build in"></select>' +
           '<button type="button" id="st-add" data-lex="add_folder"></button>' +
+          // Workshop accounts (no machine attached) get a one-tap folder instead of a demand for an
+          // absolute path they could not possibly know (Fred, 2026-07-30). Hidden for anyone whose
+          // account reaches a real computer, where the typed path is the honest input.
+          '<button type="button" id="st-workshop-new" hidden>New project folder</button>' +
         '</div>' +
+        '<p class="st-workshop-note" id="st-workshop-note" hidden></p>' +
         '<div class="st-new" id="st-new" hidden>' +
           '<input id="st-new-path" type="text" autocomplete="off" spellcheck="false" />' +
           '<input id="st-new-name" type="text" autocomplete="off" />' +
@@ -1167,10 +1172,33 @@
     }
   }
 
+  /*
+   * The folder row has two honest shapes. An account with a real computer attached types a real
+   * path and browses its real drives. A WORKSHOP account has neither, and asking it for "a full
+   * path, for example C:\Projects\my-app" was asking for a fact it could not have — which is why
+   * the folder never got chosen and the build button appeared to do nothing (Fred, 2026-07-30).
+   * The workshop shape asks for a NAME and makes the folder server-side in one tap.
+   */
+  function paintFolderShape() {
+    const mk = $("#st-workshop-new"), add = $("#st-add"), note = $("#st-workshop-note"), typed = $("#st-new");
+    if (!mk) return;
+    const workshop = state.workshop === true;
+    mk.hidden = !workshop;
+    if (add) add.hidden = workshop;                 // the typed-path opener has nothing to offer here
+    if (workshop && typed) typed.hidden = true;
+    if (note) {
+      note.hidden = !workshop;
+      note.textContent = workshop
+        ? "Your projects are built in a workshop on Dominion's server. Files here are real and yours to download. To build straight onto your own computer instead, install a Dominion node from Setup."
+        : "";
+    }
+  }
+
   function renderStarter() {
     const sel = $("#st-ws");
     if (!sel) return;
     paintLexicon();
+    paintFolderShape();
     paintEngineerLaunchGate();
     sel.textContent = "";
     if (!state.workspaces.length) {
@@ -1178,7 +1206,10 @@
       o.value = "";
       o.textContent = L("no_folder_yet");
       sel.append(o);
-      if (state.mode === "beginner") {
+      // A beginner on a real machine gets the typed-path box opened for them. A workshop account
+      // must NOT: that box demands a path they cannot supply, and opening it is what made the
+      // starter look broken.
+      if (state.mode === "beginner" && !state.workshop) {
         const newEl = $("#st-new");
         if (newEl) newEl.hidden = false;
       }
@@ -1250,6 +1281,31 @@
   function wireStarter() {
     const status = (msg, bad) => { const el = $("#st-status"); if (el) { el.textContent = msg || ""; el.classList.toggle("bad", !!bad); } };
     $("#st-add").addEventListener("click", () => { const n = $("#st-new"); n.hidden = !n.hidden; if (!n.hidden) $("#st-new-path").focus(); });
+    /*
+     * One tap, one folder. The server names the path (it is inside a sandbox the guest cannot see),
+     * so all this asks for is what to call the project — and it accepts an empty answer, because a
+     * person who just wants to start should not be stopped by a naming ceremony.
+     */
+    const mkWorkshop = $("#st-workshop-new");
+    if (mkWorkshop) mkWorkshop.addEventListener("click", async () => {
+      mkWorkshop.disabled = true;
+      window.ideFlame.show("Making your project folder…");
+      try {
+        const suggested = ($("#st-new-name") && $("#st-new-name").value.trim())
+          || ($("#st-prompt") && $("#st-prompt").value.trim().split(/\s+/).slice(0, 4).join("-"))
+          || "my-app";
+        const r = await fetch("/ide/workspace/new", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: suggested }) });
+        const j = await r.json();
+        if (!r.ok || j.error) { status((j && j.error) || "The folder could not be created.", true); return; }
+        state.workspaces.push(j.workspace);
+        state.workspaceId = j.workspace.id;
+        renderStarter();
+        status("Ready. Your project folder is " + j.workspace.name + ".");
+        document.dispatchEvent(new CustomEvent("dominion-ide-workspace"));
+      } catch { status("The server could not be reached.", true); }
+      finally { mkWorkshop.disabled = false; window.ideFlame.hide(); }
+    });
     $("#st-lang").addEventListener("change", async () => {
       const reg = $("#st-lang").value;
       if (window.DominionLexicon) window.DominionLexicon.set(reg);
@@ -2727,6 +2783,11 @@
       ]);
       if (!s) return;
       state.routing = s.routing || null;
+      // Where this account's files actually live. `workshop` means the server-side sandbox, which
+      // changes what the folder row asks for and what the machine-only surfaces are allowed to
+      // promise (Fred, 2026-07-30).
+      state.workshop = s.workshop === true;
+      state.hasNode = s.hasNode === true;
       state.workspaces = s.workspaces || [];
       const ws = state.workspaces[0] || null;
       state.workspaceId = ws ? ws.id : "";

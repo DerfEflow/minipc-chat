@@ -409,6 +409,23 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
   async function snapshot(job, workspace) {
     const root = workspace.root;
     try {
+      /*
+       * A workshop account (guestsandbox.mjs) has no command line, so git and PowerShell copies are
+       * both out. It offers fs_snapshot instead, which is a real tree copy and therefore a real
+       * rollback path — the thing this function's rule actually demands. Without this branch the
+       * refusal below would abort every guest build before a single file was written, which is a
+       * worse failure than the missing shell (Fred, 2026-07-30).
+       */
+      let info = null;
+      try { info = await hands("node_info", {}); } catch {}
+      if (info && info.sandbox === true) {
+        const stamp = String(job.id).replace(/[^a-z0-9_]/gi, "");
+        const snap = await hands("fs_snapshot", { path: root, stamp });
+        if (!snap || snap.ok === false) return { ok: false, error: (snap && snap.error) || "The workshop could not make a restore point." };
+        jobs.emit(job.id, { type: "snapshot", kind: "copy", path: snap.path,
+          message: "Copied the project to a restore point before writing." });
+        return { ok: true, kind: "copy", path: snap.path };
+      }
       const isRepo = await hands("shell_run", { command: "git -C \"" + root + "\" rev-parse --is-inside-work-tree", timeoutMs: 20000 });
       const inRepo = /true/i.test(String((isRepo && (isRepo.stdout || isRepo.output)) || ""));
       if (inRepo) {
@@ -465,6 +482,20 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       jobs.emit(job.id, { type: "run", skipped: true, message: "Nothing to verify: " + why + "." });
       return { ran: false, ok: true, output: "", cmd: "", commands: [], failed: [] };
     }
+    /*
+     * A workshop has no command line, so the checks cannot run. Say that plainly and count the work
+     * as unverified rather than failed: an honest "nobody ran the tests" is the truth, while a red
+     * failure would blame the code for the absence of a shell (Fred, 2026-07-30).
+     */
+    try {
+      const info = await hands("node_info", {});
+      if (info && info.sandbox === true) {
+        jobs.emit(job.id, { type: "run", skipped: true,
+          message: "The files are written, but nothing could be RUN to check them: this account builds in a workshop with no command line. "
+            + "Install a Dominion node on your own computer to run " + commands.map((c) => c.name).join(", ") + " here." });
+        return { ran: false, ok: true, unverified: true, output: "", cmd: "", commands: [], failed: [] };
+      }
+    } catch {}
 
     const results = [];
     for (const check of commands) {

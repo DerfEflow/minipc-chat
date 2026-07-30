@@ -117,6 +117,7 @@ import {
   executionManagerPrompt, forgeFrameworkPrompt, normalizeForgeTier, evaluateCompletionEvidence,
 } from "./execution-policy.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
+import { createGuestSandbox } from "./guestsandbox.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS, PRIVATE_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createUsersStore } from "./tenancy.mjs";
@@ -1224,6 +1225,17 @@ const handsHub = createHandsHub({
     }
   },
 });
+/*
+ * The guest workshop: a per-account folder tree on this server, standing in for the hands node that
+ * a visitor does not have (Fred, 2026-07-30). It lives beside the rest of the persistent data so it
+ * survives a redeploy exactly like the chats and the corpus do. See guestsandbox.mjs for what it
+ * deliberately refuses to do.
+ */
+const guestSandbox = createGuestSandbox({
+  rootDir: dataPath("workshops"),
+  log: (m) => console.log("[dominion-ai] " + m),
+});
+
 // Wire the model's machine tools (forge_read/write/run) to the hands hub -> the connected node,
 // replacing the RETIRED Command Deck bridge. The node is picked at call time (connections change);
 // the node itself enforces the carve-outs (D:/backups/customer-DBs). Multi-tenant later scopes this
@@ -1589,7 +1601,21 @@ async function handleIde(req, res, u) {
     return res.end(buf);
   }
 
-  if (req.method === "GET" && path === "/ide/state") return send(ideFeature.state(T));
+  if (req.method === "GET" && path === "/ide/state") {
+    const st = ideFeature.state(T);
+    /*
+     * Tell the client WHERE its files will live, so the starter can stop demanding a typed absolute
+     * path from someone who has no machine attached (Fred, 2026-07-30). "workshop" means this
+     * account is served by the server-side sandbox: one tap makes a folder, and the surfaces that
+     * need a real machine say so specifically instead of blaming an absent node.
+     */
+    if (st && st.body && st.body.allowed) {
+      st.body.workshop = !T.isOwner && !guestNodeLive(T);
+      st.body.hasNode = T.isOwner ? handsHub.nodeNames().length > 0 : guestNodeLive(T);
+    }
+    return send(st);
+  }
+
   if (req.method === "GET" && path === "/ide/jobs") return send(ideFeature.listJobs(T));
   if (req.method === "GET" && path === "/ide/workspaces") return send(ideFeature.listWorkspaces(T));
   if (req.method === "GET" && path === "/ide/push/key") return send(ideFeature.pushKey(T));
@@ -1602,6 +1628,30 @@ async function handleIde(req, res, u) {
   }
 
   const body = (await readJsonBody(req)) || {};
+
+  /*
+   * One-tap project folder for a workshop account. The guest supplies a NAME; the server picks the
+   * path, because the path is inside a sandbox they cannot see and should never have to guess.
+   * An account with a real node keeps the typed-path flow, which is the honest one for a machine
+   * whose folders only they can enumerate.
+   *
+   * Placed AFTER `body` deliberately: the first draft of this handler sat above that declaration
+   * and crashed the whole request on the temporal dead zone — the identical mistake that once
+   * shipped a broken chat turn to production. Body-reading routes live below the line.
+   */
+  if (req.method === "POST" && path === "/ide/workspace/new") {
+    const blocked = ideFeature.wall(T);
+    if (blocked) return send(blocked);
+    if (T.isOwner || guestNodeLive(T)) {
+      return send({ status: 400, body: { error: "Pick a folder on your computer instead — this account reaches a real machine.", code: "has_node" } });
+    }
+    const name = String(body.name || "").trim().slice(0, 60);
+    const made = guestSandbox.newProjectDir(T.uid, name || "my-app");
+    if (!made.ok) return send({ status: 500, body: { error: made.error || "The folder could not be created." } });
+    const r = ideFeature.createWorkspace(T, { name: name || made.name, root: made.path, node: "workshop" });
+    return send(r);
+  }
+
   if (req.method === "POST" && path === "/ide/prefs") return send(ideFeature.setPrefs(T, body));
   // Engineer gate: the one-click Automatic Top-Off arm (Fred, 2026-07-25). Disarming lives in
   // billing settings only; the gate re-reads live billing state on every Engineer entry.
@@ -2162,10 +2212,30 @@ function ideRateGate(who, path) {
   return null;
 }
 
+/*
+ * Whose hands, and what to do when there are none (Fred, 2026-07-30: "in guest mode, in crucible
+ * and vibe coder, there is no working path to choose a folder to save to... this user is not
+ * connected and the hands node is asleep or off").
+ *
+ * The owner reaches his own machines. A guest reaches THEIR node if they installed one, which is
+ * still the better experience and stays first in line. A guest who has not — which is every guest
+ * — used to hit an error describing the absence of a program they were never told to install.
+ * They now land in the server-side workshop (guestsandbox.mjs), which speaks the same tool surface
+ * for everything that touches files and refuses, specifically and by name, the things that genuinely
+ * need a machine (running commands, hosting a preview).
+ *
+ * The node check is per CALL rather than cached, because a guest can install one mid-session and
+ * should be promoted to it on the next move without reloading anything.
+ */
+function guestNodeLive(T) {
+  try { return handsHub.nodeNames().includes("user:" + String(T.uid || "").toLowerCase()); } catch { return false; }
+}
 function ideHandsFor(T) {
-  return T.isOwner
-    ? (tool, args, opts = {}) => CTX.hands.dispatch(tool, args, opts)
-    : (tool, args, opts = {}) => handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000, ...opts });
+  if (T.isOwner) return (tool, args, opts = {}) => CTX.hands.dispatch(tool, args, opts);
+  return (tool, args, opts = {}) => {
+    if (guestNodeLive(T)) return handsHub.dispatch("user:" + T.uid, tool, args || {}, { timeoutMs: 60000, ...opts });
+    return guestSandbox.dispatch(T.uid)(tool, args || {});
+  };
 }
 
 /*
