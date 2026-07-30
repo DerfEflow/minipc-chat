@@ -11,6 +11,13 @@
     linear-gradient(180deg, rgba(235, 249, 255, .09), transparent 7%),
     linear-gradient(90deg, #0b1a22, #010709 78%, #071418); overflow-y: auto; }
   #overlay { z-index: 1150; }
+  /* THE "blurry pane" ROOT CAUSE (Fred, since the early builds; pinned 2026-07-30): index.html's
+     inline `#sidebar.open{z-index:35}` (specificity 1,1,0, and the inline sheet loads after the
+     links) beat the plain #sidebar rule above, so the OPEN drawer sat at 35 while the blur scrim
+     sat at 1150 — the scrim painted over the whole drawer and all the user ever saw was frosted
+     glass. Every drawer child was present and laid out underneath it the entire time. The open
+     state must outrank the scrim with room to spare. */
+  html body #sidebar.open { z-index: 1200; }
   /* Android repaint trap (Fred's phone, 2026-07-30: hamburger = "just a blurry pane" on a CLEAN
      cache — the scrim shows, the drawer never arrives; desktop at phone width renders fine).
      The drawer carried backdrop-filter + clip-path + a compositor transform slide, and that trio

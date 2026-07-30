@@ -361,6 +361,10 @@ async function syncNow() {
         else {
           try { localStorage.setItem(LS_CHATS, serializeChats(false)); localStorage.setItem(LS_CUR, curId || ""); } catch {}
           if (moved.changedCur || goneIds.length) renderAll(); else renderSidebar();
+          // The first sync after a fresh install restores history WITHOUT touching the open (new,
+          // empty) chat, so the renderSidebar() path above never re-evaluated the fold — the
+          // header stayed at full height until the next full render. Re-evaluate it every sync.
+          try { updateFocusMode(); } catch {}
         }
       }
       const more = chats.some((c) => (c.updatedAt || 0) !== (syncState.pushed[c.id] || 0)) || syncState.deletes.length > 0;
@@ -2114,8 +2118,17 @@ try { wireBudgetUi(); fetchBudget(); } catch {}
  * All visual gating lives in CSS behind a max-width media query — desktop never changes.
  */
 function chatHasUserMsg() { const c = chats.find((x) => x.id === curId); return !!(c && c.messages && c.messages.some((m) => m.role === "user")); }
+/*
+ * The fold used to follow only the OPEN chat, so a site-data clear (or reinstall) left the header
+ * at full height forever: boot creates an empty chat, sync restores the history behind it, and the
+ * empty chat never folds anything (Fred, 2026-07-30: "the header minimizing feature was working a
+ * short time ago"). A returning user with ANY history is not a first-timer — the chrome folds for
+ * them everywhere, and the handles bring any control back. Full chrome now greets only a genuinely
+ * blank slate: no messages in any chat.
+ */
+function anyChatHasUserMsg() { return chats.some((c) => c && c.messages && c.messages.some((m) => m.role === "user")); }
 function updateFocusMode() {
-  const on = chatHasUserMsg();
+  const on = chatHasUserMsg() || anyChatHasUserMsg();
   document.body.classList.toggle("chat-focus", on);
   if (!on) document.body.classList.remove("reveal-controls", "reveal-actions");
   const h1 = document.getElementById("focus-controls-handle"), h2 = document.getElementById("focus-actions-handle");

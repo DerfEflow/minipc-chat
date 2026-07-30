@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v133-vibe-rank-chat-mobile";
+const CACHE = "dominion-ai-v134-drawer-scrim-and-fold";
 const SHELL = [
   "/",
   "/index.html",
