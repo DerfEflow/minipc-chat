@@ -756,3 +756,47 @@
   html body #bar-mid:empty, html body #bar-mid:has(> #to-crucible[hidden]) { display: none; }
   html body #to-crucible { width: 100%; justify-content: center; margin: 0 0 6px; padding: 9px 12px; font-size: 12px; }
 }
+
+/* ---- Reclaiming the phone screen (Fred, 2026-07-30: "there is an awful lot of screen taken up by
+   the feature icons. can we lay this out better?").
+
+   MEASURED, not guessed. On a 393x852 phone with a conversation running, the chat itself had 258px
+   and the surrounding controls had 573px. Two thirds of the screen was chrome.
+
+   The cause was structural rather than decorative. The strip above is a six-column grid whose third
+   column is `1fr`, which on a 393px screen is 72px of deliberately empty space between the two
+   left tiles and the three right ones. The GUIDE pill is a .bar-left child, .bar-left is
+   display:contents here, so the pill auto-placed straight PAST that empty cell and opened a fourth
+   row of its own to sit in alone. A 43px row plus its gap, spent on one small button, directly
+   beside a 72px hole.
+
+   So the pill is given the hole explicitly. Nothing is hidden, renamed, or moved out of reach: the
+   same seven controls remain one tap away, in one fewer row. The rest is trimming that costs
+   nothing anyone can feel, and the numbers are in the commit message. ---- */
+@media (max-width: 720px) {
+  /* The empty middle cell, now occupied. Explicit placement also means adding a future control to
+     .bar-left cannot silently open another orphan row: it will land in a named cell or overlap
+     visibly, and a visible collision gets fixed. */
+  html body .dt-guide-pill.dt-guide-docked {
+    grid-column: 3; grid-row: 2; justify-self: center; align-self: center;
+    height: 44px; width: 40px; min-width: 40px;
+  }
+  /* An empty single-line box does not need to look like a paragraph field. It still grows with
+     what is typed, so nothing is lost above one line. */
+  html body #input { min-height: 50px; }
+}
+
+/* ---- The dock, phones. "VIDEO GENERATION" wrapped to two lines and dragged "SOON" down with it,
+   which made the whole dock 91px on Fred's phone against 69px in the rig. The labels are set to
+   fit on one line at every phone width instead of being allowed to grow the bar they sit in. ---- */
+@media (max-width: 720px) {
+  html body #dock-nav { padding: 4px 6px calc(4px + env(safe-area-inset-bottom)); }
+  html body #dock-nav .rail-dest { padding: 5px 1px; gap: 2px; }
+  html body #dock-nav .rail-dest b { font-size: 8px; letter-spacing: .04em; white-space: nowrap; }
+  html body #dock-nav .rail-dest small { font-size: 6.5px; letter-spacing: .03em; }
+  html body #dock-nav .glyph { width: 17px; height: 17px; }
+  /* The reserve must match the bar it reserves for. It was 58px against a dock that measured 69px,
+     so the last 11px of the page was already sliding under the dock before any of this. The dock
+     is 60px now and the page keeps 64px, which is the first time these two numbers have agreed. */
+  html body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+}
