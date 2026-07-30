@@ -100,6 +100,39 @@ Both apps verified working in a real browser through the preview relay:
 - **Daily Encouragement** (`beginner-build`): clicking "Inspire Me" changes the quote and the
   attribution (Arthur Ashe -> Nelson Mandela).
 
+## 7. The rejection death-loop, and the measured proof it is gone
+
+Repairing the broken page through CHAT exposed the worst defect of the night, and it is Fred's
+complaint in its purest form: **the work was done and the app refused to admit it.**
+
+The completion gate rejected its own worker 100+ times across **172 tool calls** and died with the
+file already fixed. Two independent causes, both now fixed:
+
+1. **Word sense.** The folder was named `crucible-build`. The gate's validation test read the whole
+   objective string, so the word "build" INSIDE A PATH made it demand a validation step — and a
+   static HTML page has no test command to run. The demand was unsatisfiable from the first round.
+   Paths, drive letters and filenames are now stripped before any intent word is read. (The test
+   written for that scrub then caught a second, older bug: the word list matched "test" but not
+   "tests", so the most natural phrasing of all silently skipped the requirement. Fixed too.)
+2. **Path sense.** The request named `index.html`; the tool reported
+   `Z:\dominion-livetest\crucible-build\index.html`. Containment alone could not relate them, so the
+   gate said "the cited mutation does not touch any file named in the request" about an edit to
+   exactly that file. Suffix and whole-segment matching now count; two unrelated folders both
+   called `src` still do not.
+
+And the structural fix that makes this class of failure survivable forever: **the unsatisfiable
+demand breaker.** Three identical rejections in a row release the work as completed WITH THE UNMET
+CONDITION NAMED, in the final report and in the done-event. A demand nobody can satisfy now ends
+the turn honestly instead of spending the budget proving it cannot be satisfied.
+
+Measured on the identical prompt, three times:
+
+| Run | Tool calls | Gate outcome | Result |
+|---|---|---|---|
+| Before the fixes | **172** | 100+ rejections | never finished, work already done |
+| With the breaker only | **15** | released with limitation | finished, limitation stated plainly |
+| With word + path sense | **4** | verified on the first check | finished clean |
+
 ## Rig-only limitations (not product defects)
 
 - The vision fidelity audit could not photograph the page: the test hands node runs with

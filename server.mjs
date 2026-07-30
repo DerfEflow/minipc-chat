@@ -6878,10 +6878,25 @@ async function handleChat(req, res) {
   };
   const normalizeEvidencePath = (value) =>
     String(value || "").trim().replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "").toLowerCase();
+  /*
+   * A request names a file the way a person writes it ("index.html", "the crucible-build folder");
+   * a tool reports the way a machine writes it ("Z:\crucible-build\index.html"). Containment alone
+   * therefore missed every fully-qualified path — the live repair run was told its edit "does not
+   * touch any file or target explicitly named in the request" while it was editing exactly that
+   * file, because the drive prefix broke the prefix test. Suffix and basename count too.
+   */
   const evidencePathRelated = (a, b) => {
     const left = normalizeEvidencePath(a), right = normalizeEvidencePath(b);
     if (!left || !right || left === "." || right === ".") return false;
-    return left === right || left.startsWith(right + "/") || right.startsWith(left + "/");
+    if (left === right || left.startsWith(right + "/") || right.startsWith(left + "/")) return true;
+    if (left.endsWith("/" + right) || right.endsWith("/" + left)) return true;
+    // A named folder can sit in the MIDDLE of the machine's path ("crucible-build" inside
+    // "z:/dominion-livetest/crucible-build/index.html"), so whole-segment containment counts.
+    if (left.includes("/" + right + "/") || right.includes("/" + left + "/")) return true;
+    const leftBase = left.split("/").pop(), rightBase = right.split("/").pop();
+    // Basenames only count when they carry an extension, so two folders both called "src" on
+    // unrelated trees are never treated as the same target.
+    return !!leftBase && leftBase === rightBase && /\.[a-z0-9]{1,10}$/.test(leftBase);
   };
   const objectivePathTargets = [...new Set(
     (String(taskContract.objective || "").match(/(?:[\w@-]+[\\/])+[\w@.-]+|[\w@-]+\.[a-z0-9]{1,10}\b/gi) || [])
@@ -6962,13 +6977,30 @@ async function handleChat(req, res) {
       contradictions.push("the cited mutation has no observed relationship to the request's distinguishing terms");
     }
     const objective = String(taskContract.objective || "");
-    const validationWasRequested = /\b(?:test|typecheck|check|lint|build|verify|validate)\b/i.test(objective);
+    /*
+     * PROSE ONLY (live catch 2026-07-30). These word tests must read the user's REQUEST, never the
+     * incidental spelling of a path. A repair aimed at "Z:\dominion-livetest\crucible-build" was
+     * judged to require a validation step purely because the FOLDER NAME contains "build" — and a
+     * static HTML page has no test command to run, so the demand was unsatisfiable and the turn
+     * rejected its own completion 100+ times across 172 tool calls before dying. Paths, drive
+     * letters, and filenames are stripped before any intent word is read.
+     */
+    const objectiveProse = objective
+      .replace(/[a-z]:[\\/][^\s"'`,;]*/gi, " ")        // Z:\folder\file, C:/x/y
+      .replace(/(?:[\w@.-]+[\\/])+[\w@.-]*/g, " ")      // any other multi-segment path
+      .replace(/\b[\w@-]+\.[a-z0-9]{1,10}\b/gi, " ");   // bare filenames like index.html
+    // Inflections count (found by the test that covered the scrub): the original word list matched
+    // "test" but not "tests", so "fix the parser and run the tests" never actually required
+    // validation. The demand now hears the way people write, and the breaker above keeps a wider
+    // net from ever becoming a trap.
+    const validationWasRequested =
+      /\b(?:tests?|testing|typecheck(?:s|ing)?|check(?:s|ing|ed)?|lint(?:s|ing|ed)?|build(?:s|ing)?|verif(?:y|ies|ied|ication)|validate[sd]?|validation)\b/i.test(objectiveProse);
     if (taskContract.task.baseKind === "build" && validationWasRequested && !cited.some((entry) => entry.validation)) {
       contradictions.push("the request requires validation, but no cited evidence id belongs to an observed validation action");
     }
     const broadRepositoryScope =
-      /\b(?:all|every|entire|whole|complete(?:ly)?)\b[\s\S]{0,80}\b(?:repo(?:sitory)?|codebase|bugs?|issues?|files?)\b/i.test(objective) ||
-      /\b(?:scan|audit|review|inspect|find)\b[\s\S]{0,60}\b(?:repo(?:sitory)?|codebase)\b/i.test(objective);
+      /\b(?:all|every|entire|whole|complete(?:ly)?)\b[\s\S]{0,80}\b(?:repo(?:sitory)?|codebase|bugs?|issues?|files?)\b/i.test(objectiveProse) ||
+      /\b(?:scan|audit|review|inspect|find)\b[\s\S]{0,60}\b(?:repo(?:sitory)?|codebase)\b/i.test(objectiveProse);
     if (broadRepositoryScope && !cited.some((entry) => entry.inspection)) {
       contradictions.push("the request covers a repository broadly, but no cited evidence id belongs to an observed inspection");
     }
@@ -7110,6 +7142,9 @@ async function handleChat(req, res) {
       let answer = "", streamedAny = false,
         completionApproved = !completionRequired && !requiredToolsUnavailable,
         completionNudges = 0;
+      // Unsatisfiable-demand breaker state (see the gate below): identical rejections are counted,
+      // and the conditions that could not be met ride out to the user instead of looping.
+      let repeatedRejections = 0, lastRejectionSig = "", completionCaveats = [];
       // Per-model, per-mode output ceiling for a single round (replaces the old hardcoded 4096 that
       // truncated long docs on every model). This is only the CHUNK size — the continuation loop below
       // resumes past finish_reason "length" until the whole answer is written, on ANY model.
@@ -7533,7 +7568,38 @@ async function handleChat(req, res) {
               const observedContradictions = observedCompletionContradictions(args || {});
               const completionContradictions = [...assessment.contradictions, ...observedContradictions];
               completionApproved = assessment.canClaimComplete && completionContradictions.length === 0;
-              const detail = completionApproved
+              /*
+               * THE UNSATISFIABLE-DEMAND BREAKER (live catch 2026-07-30). A gate that repeats the
+               * SAME complaint after the worker has changed its evidence is not steering, it is a
+               * trap: one repair run rejected itself 100+ times across 172 tool calls and died
+               * with the work already done. A demand nobody can satisfy has to end the turn
+               * honestly, not spend the budget proving it cannot be satisfied.
+               *
+               * Three identical rejections in a row = the gate stops demanding. The work is
+               * released as COMPLETED WITH A NAMED LIMITATION: the unmet condition rides into the
+               * final report and the done-event, so the user reads exactly what was not proven.
+               * That is honest AND finite, where looping was neither.
+               */
+              const contradictionSig = completionContradictions.slice().sort().join(" | ");
+              if (!completionApproved && contradictionSig && contradictionSig === lastRejectionSig) repeatedRejections++;
+              else repeatedRejections = completionApproved ? 0 : 1;
+              lastRejectionSig = completionApproved ? "" : contradictionSig;
+              let releasedWithCaveat = false;
+              if (!completionApproved && repeatedRejections >= 3) {
+                releasedWithCaveat = true;
+                completionApproved = true;
+                completionCaveats = completionContradictions.slice(0, 6);
+                sse({ type: "supervisor", monitored: cloudModel, supervisor: "execution evidence gate",
+                      decision: "released_with_limitation",
+                      reason: "the same condition was demanded three times in a row and could not be satisfied; the work is finished with that limitation named rather than looping" });
+                console.log(`[dominion-ai] completion gate released with limitation after ${repeatedRejections} identical rejections: ${contradictionSig.slice(0, 200)}`);
+                recordSteeringLesson("false_completion", "unsatisfiable completion demand: " + contradictionSig,
+                  "release the work with the unmet condition named, and narrow the demand that could not be met");
+              }
+              const detail = releasedWithCaveat
+                ? "Completion accepted WITH A LIMITATION. These conditions could not be satisfied and will be reported to the user verbatim: "
+                  + completionCaveats.join("; ") + ". Write the final report now, state that limitation plainly in your own words, and call no more tools."
+                : completionApproved
                 ? "Completion evidence accepted. Return the concise final report now; do not call more tools unless you discover a contradiction."
                 : `Completion evidence rejected. ${assessment.instruction} Missing: ${assessment.missing.join(", ") || "none"}. Contradictions: ${completionContradictions.join("; ") || "none"}. This is internal supervisor feedback: correct the evidence and retry task_complete; do not report a platform bug to the user.`;
               toolMsg(detail);
@@ -7955,7 +8021,10 @@ async function handleChat(req, res) {
         sse({ type: "stopped", reason: executionPause.decision, complete: false });
         return endStream();
       }
-      sse({ type: "done", meta: { model: cloudModel, mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo, completionVerified: completionApproved, quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: [] } });
+      sse({ type: "done", meta: { model: cloudModel, mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo, completionVerified: completionApproved && !completionCaveats.length,
+        // Named limitations travel with the answer: "finished, except this was never proven".
+        completionLimitations: completionCaveats.length ? completionCaveats : undefined,
+        quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: completionCaveats.length ? completionCaveats : [] } });
       return endStream();
     }
 
