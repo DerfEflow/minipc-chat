@@ -14,10 +14,71 @@ import { DatabaseSync } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { zipBuffer } from "./docwriters.mjs";
 
 export const MAX_ROOTS = 20;               // Fred: "one or 20, up to them"
 const sha = (s) => createHash("sha256").update(String(s)).digest("hex");
 const mkToken = () => "dfk_" + randomBytes(24).toString("hex");   // Dominion ForKe (per-user hands token)
+
+/*
+ * Beginner installer zip — one download, token baked in, nothing to type. No Cloudflare Access
+ * fields: the split documented in server.mjs's /forge/token handler means a bare HANDS_URL +
+ * HANDS_TOKEN is the whole story for a per-user node.
+ */
+export function buildInstallerZip({ url, token, nodeName, handsSrc, snapshotSrc }) {
+  const bat = [
+    "@echo off",
+    "setlocal",
+    "title Connect this computer to Dominion Forge",
+    "where node >nul 2>nul",
+    "if errorlevel 1 (",
+    "  echo.",
+    "  echo   This computer does not have Node yet. Node is a free program",
+    "  echo   Dominion needs in order to run on your computer.",
+    "  echo.",
+    "  echo   1. Go to https://nodejs.org",
+    "  echo   2. Click the big green button to download it",
+    "  echo   3. Run the installer it downloads, click Next through it",
+    "  echo   4. Come back here and double-click this file again",
+    "  echo.",
+    "  pause",
+    "  exit /b 1",
+    ")",
+    "set HANDS_URL=" + url,
+    "set HANDS_TOKEN=" + token,
+    "set HANDS_NODE=" + nodeName,
+    "echo.",
+    "echo   Connecting this computer to Dominion...",
+    "echo   Leave this window open. Minimize it if you like.",
+    "echo   To disconnect, just close this window.",
+    "echo.",
+    "node \"%~dp0hands.mjs\"",
+    "echo.",
+    "echo   Disconnected.",
+    "pause",
+    "",
+  ].join("\r\n");
+  const readme = [
+    "HOW TO CONNECT YOUR COMPUTER TO DOMINION FORGE",
+    "",
+    "1. Right-click this zip file (the one you downloaded) and choose \"Extract All\"",
+    "2. Open the new folder it creates",
+    "3. Double-click \"Connect Me To Dominion.bat\"",
+    "4. A black window opens. Leave it open, that means it is working.",
+    "5. Go back to Dominion and pick which folders it may use.",
+    "",
+    "To stop, just close the black window. Nothing runs on your computer while it is closed.",
+    "This file is yours alone. If you ever lose it, download a fresh one from Dominion; the old one",
+    "stops working the moment you do.",
+    "",
+  ].join("\r\n");
+  return zipBuffer([
+    { name: "Connect Me To Dominion.bat", data: bat },
+    { name: "READ ME FIRST.txt", data: readme },
+    { name: "hands.mjs", data: handsSrc },
+    { name: "snapshot.mjs", data: snapshotSrc },
+  ]);
+}
 
 export function createForgeStore({ dir, now = () => new Date().toISOString() }) {
   mkdirSync(dir, { recursive: true });

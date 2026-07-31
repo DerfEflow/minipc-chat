@@ -142,7 +142,7 @@ import { createBilling, creditsForUsd, creditsForCostUsd, roundCredits } from ".
 import { createSessionBudgets } from "./sessionbudget.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
-import { createForgeStore } from "./forge.mjs";
+import { createForgeStore, buildInstallerZip } from "./forge.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_PROMPT_MAX_CHARS, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs } from "./idejobs.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages } from "./ideengine.mjs";
@@ -4723,19 +4723,47 @@ async function handleForge(req, res, u) {
   const body = (await readJsonBody(req)) || {};
   if (req.method === "POST" && p === "/forge/enable") return sjson(res, 200, forgeStore.setEnabled(uid, body.on !== false));
   if (req.method === "POST" && p === "/forge/token") {
-    // Mint the per-user node token and return the config the user drops into their node installer.
+    /*
+     * Mint the per-user node token for someone who wants to wire it up by hand (a Mac/Linux user, or
+     * anyone who already knows what an env var is). CF Access used to gate this whole surface, so this
+     * used to also hand back a shared Cloudflare service-token id/secret with a literal "ask Fred"
+     * placeholder — no guest could ever finish connecting without pinging him first. As of 2026-07-31
+     * the Access application in front of /hands/* was split (see docs/GUEST-FORGE-NODE.md): /hands/run
+     * and /hands/nodes (the two endpoints that can reach ANY named machine, gated by the shared owner
+     * secret) kept Access; /hands/stream, /hands/result, /hands/chunk (all a per-user token can ever
+     * touch, and hub.mjs already forces that token into its own user:<uid> sandbox, never another
+     * user's node, never the owner's) now bypass Access entirely and stand on the token alone. So the
+     * CF fields are simply gone — there is nothing left to ask Fred for.
+     */
     const token = forgeStore.generateToken(uid);
     return sjson(res, 200, {
       token,
-      config: {
-        HANDS_URL: APP_BASE_URL,
-        HANDS_TOKEN: token,
-        HANDS_NODE: "my-forge",
-        HANDS_CF_CLIENT_ID: "<ask Fred for the shared Dominion node service-token id>",
-        HANDS_CF_CLIENT_SECRET: "<ask Fred for the shared Dominion node service-token secret>",
-      },
-      note: "Run the Dominion hands installer with this token. Then use the folder picker to choose which folders Dominion may touch. Forge tools work only when you turn on Forge Mode.",
+      config: { HANDS_URL: APP_BASE_URL, HANDS_TOKEN: token, HANDS_NODE: "my-computer" },
+      note: "Run the Dominion hands node with this token (HANDS_URL + HANDS_TOKEN are all it needs). Then use the folder picker to choose which folders Dominion may touch. Forge tools work only when Forge Mode is on.",
     });
+  }
+  if (req.method === "POST" && p === "/forge/installer") {
+    // The beginner path: one zip, one token baked in, nothing to type. See /forge/token's note above
+    // for why no Cloudflare fields are needed here either. Zip contents built in forge.mjs
+    // (buildInstallerZip) so the templating is unit-testable without booting the whole server.
+    const token = forgeStore.generateToken(uid);
+    const nodeName = "forge-" + String(uid).replace(/[^a-z0-9]/gi, "").slice(0, 8).toLowerCase();
+    let zip;
+    try {
+      zip = buildInstallerZip({
+        url: APP_BASE_URL,
+        token,
+        nodeName,
+        handsSrc: readFileSync(join(HERE, "hands", "hands.mjs")),
+        snapshotSrc: readFileSync(join(HERE, "hands", "snapshot.mjs")),
+      });
+    } catch (e) { return sjson(res, 500, { error: "could not build the installer: " + (e && e.message) }); }
+    res.writeHead(200, {
+      "content-type": "application/zip",
+      "content-disposition": 'attachment; filename="dominion-forge-connect.zip"',
+      "cache-control": "no-store",
+    });
+    return res.end(zip);
   }
   if (req.method === "POST" && p === "/forge/roots") {
     const saved = forgeStore.setRoots(uid, body.roots);

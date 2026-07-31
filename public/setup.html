@@ -268,6 +268,17 @@
     .dt-cx-cred .dt-stack { margin-top: 9px; }
     .dt-cx-guest { margin-top: 9px; }
     .dt-owner-block h3, .dt-forge-browser h3 { margin: 0 0 9px; color: #d7e9f4; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+    .dt-forge-steps { display: grid; gap: 16px; margin-top: 14px; }
+    .dt-forge-step { padding: 14px; border: 1px solid rgba(139,202,239,.12); background: rgba(0,8,15,.4); }
+    .dt-forge-step-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+    .dt-forge-step-head strong { color: #d7e9f4; }
+    .dt-node-pill { padding: 3px 10px; border: 1px solid rgba(255,183,105,.35); border-radius: 999px; color: var(--dt-copper-hot); font-size: 11px; letter-spacing: .04em; }
+    .dt-node-pill-on { border-color: rgba(118,255,104,.35); color: var(--dt-success); }
+    .dt-forge-howto { margin: 10px 0 0; padding-left: 20px; color: #b7cedc; font-size: 13px; line-height: 1.7; }
+    .dt-forge-howto li { margin-bottom: 2px; }
+    .dt-forge-advanced { margin-top: 12px; }
+    .dt-forge-advanced summary { cursor: pointer; color: #a9cde2; font-size: 11px; letter-spacing: .06em; }
+    .dt-forge-advanced .dt-copy, .dt-forge-advanced .dt-inline, .dt-forge-advanced #dt-token-output { margin-top: 9px; }
     .dt-mint-output { margin-top: 11px; }
     .dt-browser-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
     .dt-browser-path { flex: 1 1 180px; min-width: 0; padding: 8px 9px; border-left: 1px solid rgba(123,217,255,.28); color: #b7cedc; background: rgba(1,7,13,.5); font: 600 10px/1.4 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
@@ -426,37 +437,55 @@
 
       <section class="dt-panel dt-span-all" id="dt-forge-panel" aria-labelledby="dt-forge-title">
         <div class="dt-panel-head">
-          <div><div class="dt-kicker">Local execution boundary</div><h2 class="dt-panel-title" id="dt-forge-title">Forge, your machine</h2></div>
+          <div><div class="dt-kicker">Save straight to your own computer</div><h2 class="dt-panel-title" id="dt-forge-title">Connect your computer</h2></div>
           <span class="dt-panel-index">05</span>
         </div>
         <div id="dt-forge-warning" class="dt-banner" hidden></div>
-        <div class="dt-grid-two">
-          <div class="dt-stack">
-            <div class="dt-switch-row">
-              <div class="dt-switch-copy"><strong>Forge access</strong><span>Allow Dominion to use your connected machine</span></div>
-              <label class="dt-switch"><input id="dt-forge-toggle" type="checkbox" aria-label="Enable Forge"><span></span></label>
-            </div>
-            <div class="dt-kv"><span>Node</span><strong id="dt-node-state">Checking</strong></div>
-            <div class="dt-kv"><span>Token</span><strong id="dt-token-state">Checking</strong></div>
-          </div>
-          <div class="dt-stack">
-            <p class="dt-copy">Issue a node token when connecting this account to a machine. The token is shown once.</p>
-            <div class="dt-inline"><button class="dt-button dt-button-copper" id="dt-token-button" type="button">Issue node token</button></div>
-            <div id="dt-token-output"></div>
-          </div>
+        <div class="dt-switch-row">
+          <div class="dt-switch-copy"><strong>Step 1 — turn this on</strong><span>Let Dominion save files onto your own computer, in folders you choose</span></div>
+          <label class="dt-switch"><input id="dt-forge-toggle" type="checkbox" aria-label="Enable Forge"><span></span></label>
         </div>
-        <div class="dt-owner-block dt-forge-browser">
-          <h3>Allowed folders</h3>
-          <div id="dt-root-list" class="dt-root-list"></div>
-          <div class="dt-browser-head">
-            <button class="dt-button dt-button-secondary dt-button-small" id="dt-drives-button" type="button">Drives</button>
-            <button class="dt-button dt-button-secondary dt-button-small" id="dt-up-button" type="button">Up</button>
-            <div class="dt-browser-path" id="dt-browser-path">Drives</div>
-            <button class="dt-button dt-button-small" id="dt-add-current" type="button">Add this folder</button>
+
+        <div class="dt-forge-steps" id="dt-forge-steps" hidden>
+          <div class="dt-forge-step">
+            <div class="dt-forge-step-head">
+              <strong>Step 2 — connect this computer</strong>
+              <span id="dt-node-pill" class="dt-node-pill">Not connected</span>
+            </div>
+            <p class="dt-copy">One download. Nothing to type, nothing to configure.</p>
+            <div class="dt-inline"><button class="dt-button dt-button-copper" id="dt-install-button" type="button">Download and connect this computer</button></div>
+            <ol class="dt-forge-howto" id="dt-forge-howto" hidden>
+              <li>Open the file you just downloaded (check your Downloads folder)</li>
+              <li>Right-click it and choose "Extract All", then open the new folder</li>
+              <li>Double-click <strong>Connect Me To Dominion.bat</strong></li>
+              <li>A black window opens — leave it open, that means it is working</li>
+            </ol>
+            <div class="dt-message" id="dt-install-message" aria-live="polite"></div>
+            <details class="dt-forge-advanced">
+              <summary>Advanced (Mac, Linux, or you already know what an env var is)</summary>
+              <p class="dt-copy">Issue a raw node token instead. The token is shown once.</p>
+              <div class="dt-inline"><button class="dt-button dt-button-secondary dt-button-small" id="dt-token-button" type="button">Issue node token</button></div>
+              <div id="dt-token-output"></div>
+            </details>
           </div>
-          <div class="dt-dir-list" id="dt-dir-list"><div class="dt-empty">Connect a node to browse folders</div></div>
-          <div class="dt-inline" style="margin-top:9px"><button class="dt-button" id="dt-save-roots" type="button">Save folders</button><span class="dt-copy" id="dt-root-count">0 of 20 selected</span></div>
-          <div class="dt-message" id="dt-forge-message" aria-live="polite"></div>
+
+          <div class="dt-forge-step" id="dt-forge-folders-step">
+            <div class="dt-forge-step-head"><strong>Step 3 — pick which folders it can use</strong></div>
+            <p class="dt-copy">Dominion can only see and save inside the folders you add below. Nothing else on your computer.</p>
+            <div class="dt-owner-block dt-forge-browser">
+              <h3>Allowed folders</h3>
+              <div id="dt-root-list" class="dt-root-list"></div>
+              <div class="dt-browser-head">
+                <button class="dt-button dt-button-secondary dt-button-small" id="dt-drives-button" type="button">Drives</button>
+                <button class="dt-button dt-button-secondary dt-button-small" id="dt-up-button" type="button">Up</button>
+                <div class="dt-browser-path" id="dt-browser-path">Drives</div>
+                <button class="dt-button dt-button-small" id="dt-add-current" type="button">Add this folder</button>
+              </div>
+              <div class="dt-dir-list" id="dt-dir-list"><div class="dt-empty">Connect your computer first (step 2), then come back here</div></div>
+              <div class="dt-inline" style="margin-top:9px"><button class="dt-button" id="dt-save-roots" type="button">Save folders</button><span class="dt-copy" id="dt-root-count">0 of 20 selected</span></div>
+              <div class="dt-message" id="dt-forge-message" aria-live="polite"></div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -494,7 +523,7 @@
         redeemPanel: byId("dt-redeem-panel"), redeemForm: byId("dt-redeem-form"), redeemButton: byId("dt-redeem-button"), redeemMessage: byId("dt-redeem-message"),
         billingPanel: byId("dt-billing-panel"), billingState: byId("dt-billing-state"), billingCopy: byId("dt-billing-copy"), tierGrid: byId("dt-tier-grid"), buyButton: byId("dt-buy-button"), cardState: byId("dt-card-state"), autoWrap: byId("dt-auto-wrap"), autoToggle: byId("dt-auto-toggle"), autoCopy: byId("dt-auto-copy"), billingMessage: byId("dt-billing-message"),
         ownerPanel: byId("dt-owner-panel"), mintForm: byId("dt-mint-form"), mintType: byId("dt-mint-type"), mintCredits: byId("dt-mint-credits"), mintCap: byId("dt-mint-cap"), mintCreditField: byId("dt-mint-credit-field"), mintCapField: byId("dt-mint-cap-field"), mintButton: byId("dt-mint-button"), mintOutput: byId("dt-mint-output"), codesOutput: byId("dt-codes-output"), usersOutput: byId("dt-users-output"), auditRun: byId("dt-audit-run"), auditOutput: byId("dt-audit-output"),
-        forgeWarning: byId("dt-forge-warning"), forgeToggle: byId("dt-forge-toggle"), nodeState: byId("dt-node-state"), tokenState: byId("dt-token-state"), tokenButton: byId("dt-token-button"), tokenOutput: byId("dt-token-output"), rootList: byId("dt-root-list"), browserPath: byId("dt-browser-path"), dirList: byId("dt-dir-list"), upButton: byId("dt-up-button"), addCurrent: byId("dt-add-current"), saveRoots: byId("dt-save-roots"), rootCount: byId("dt-root-count"), forgeMessage: byId("dt-forge-message"), toastZone: byId("dt-toast-zone")
+        forgeWarning: byId("dt-forge-warning"), forgeToggle: byId("dt-forge-toggle"), forgeSteps: byId("dt-forge-steps"), nodePill: byId("dt-node-pill"), installButton: byId("dt-install-button"), installMessage: byId("dt-install-message"), forgeHowto: byId("dt-forge-howto"), tokenButton: byId("dt-token-button"), tokenOutput: byId("dt-token-output"), rootList: byId("dt-root-list"), browserPath: byId("dt-browser-path"), dirList: byId("dt-dir-list"), upButton: byId("dt-up-button"), addCurrent: byId("dt-add-current"), saveRoots: byId("dt-save-roots"), rootCount: byId("dt-root-count"), forgeMessage: byId("dt-forge-message"), toastZone: byId("dt-toast-zone")
       };
 
       async function api(path, options = {}) {
@@ -660,19 +689,36 @@
       function renderForgeStatus() {
         const forge = state.forge || {};
         ui.forgeToggle.checked = Boolean(forge.enabled);
-        ui.nodeState.textContent = forge.nodeConnected ? "Connected" : "Not connected";
-        ui.nodeState.style.color = forge.nodeConnected ? "var(--dt-success)" : "var(--dt-copper-hot)";
-        ui.tokenState.textContent = forge.hasToken ? "Issued" : "Not issued";
+        ui.forgeSteps.hidden = !forge.enabled;
+        ui.nodePill.textContent = forge.nodeConnected ? "Connected" : "Not connected";
+        ui.nodePill.classList.toggle("dt-node-pill-on", Boolean(forge.nodeConnected));
         ui.tokenButton.textContent = forge.hasToken ? "Issue new node token" : "Issue node token";
         state.roots = Array.isArray(forge.roots) ? forge.roots.slice(0, 20) : [];
         renderRoots();
-        if (forge.nodeConnected) browse(state.browsePath || "");
-        else {
+        if (forge.nodeConnected) {
+          ui.forgeHowto.hidden = true;
+          setMessage(ui.installMessage, "Connected. Pick your folders below.", "success");
+          browse(state.browsePath || "");
+        } else {
           clear(ui.dirList);
-          ui.dirList.append(node("div", "dt-empty", "Install and start your Dominion node, then return here to browse folders."));
+          ui.dirList.append(node("div", "dt-empty", "Connect your computer first (step 2), then come back here"));
           ui.addCurrent.disabled = true;
           ui.upButton.disabled = true;
         }
+        pollForgeConnection(forge.enabled && !forge.nodeConnected);
+      }
+
+      // Beginner hand-holding: once the guest has downloaded the installer, they should never have to
+      // hit refresh to see it connect. Poll quietly until connected, then stop; also stops if Forge
+      // gets turned back off. A fresh 30s poll id per call means only the latest render loop is live.
+      let forgePollTimer = null;
+      function pollForgeConnection(shouldPoll) {
+        if (forgePollTimer) { clearTimeout(forgePollTimer); forgePollTimer = null; }
+        if (!shouldPoll) return;
+        forgePollTimer = window.setTimeout(async () => {
+          try { state.forge = await api("/forge/status"); renderForgeStatus(); }
+          catch { forgePollTimer = window.setTimeout(() => pollForgeConnection(true), 4000); }
+        }, 4000);
       }
 
       function renderRoots() {
@@ -1006,10 +1052,33 @@
           });
           actions.append(copy, download); ui.tokenOutput.append(actions);
           if (state.forge) state.forge.hasToken = true;
-          ui.tokenState.textContent = "Issued";
           toast("Node token issued. Store it now.", "success");
         } catch (error) { toast(errorLabel(error), "error"); }
         finally { setBusy(ui.tokenButton, false); }
+      }
+
+      // The beginner path: one click, one file, token baked in. api() always tries response.json(),
+      // so this bypasses it for the binary zip body.
+      async function downloadInstaller() {
+        setBusy(ui.installButton, true, "Preparing your download");
+        setMessage(ui.installMessage, "");
+        try {
+          const response = await fetch("/forge/installer", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+          if (!response.ok) {
+            let msg = `Request failed (${response.status})`;
+            try { const data = await response.json(); if (data && data.error) msg = data.error; } catch {}
+            throw new Error(msg);
+          }
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a"); link.href = url; link.download = "dominion-forge-connect.zip"; link.click();
+          window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+          ui.forgeHowto.hidden = false;
+          setMessage(ui.installMessage, "Downloaded. Follow the steps below, then this page will update itself.", "success");
+          if (state.forge) state.forge.hasToken = true;
+          pollForgeConnection(true);
+        } catch (error) { setMessage(ui.installMessage, errorLabel(error), "error"); }
+        finally { setBusy(ui.installButton, false); }
       }
 
       async function saveRoots() {
@@ -1052,6 +1121,7 @@
           if (button) saveUser(button.closest("tr"), button);
         });
         ui.forgeToggle.addEventListener("change", toggleForge);
+        ui.installButton.addEventListener("click", downloadInstaller);
         ui.tokenButton.addEventListener("click", issueToken);
         byId("dt-drives-button").addEventListener("click", () => browse(""));
         ui.upButton.addEventListener("click", () => browse(parentPath(state.browsePath)));

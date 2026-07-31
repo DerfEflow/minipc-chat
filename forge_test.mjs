@@ -8,8 +8,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createForgeStore, MAX_ROOTS } from "./forge.mjs";
+import { createForgeStore, MAX_ROOTS, buildInstallerZip } from "./forge.mjs";
 import { createHandsHub } from "./hands/hub.mjs";
+import { listZip } from "./docwriters.mjs";
 
 let passed = 0, failed = 0;
 const t = async (n, f) => { try { await f(); passed++; console.log("  ok  " + n); } catch (e) { failed++; console.error("FAIL  " + n + "\n      " + e.message); } };
@@ -43,6 +44,51 @@ await t("enable toggles and status reflects it", () => {
   assert.equal(store.status("uidA").enabled, true);
   store.setEnabled("uidA", false);
   assert.equal(store.status("uidA").enabled, false);
+});
+
+// ---- beginner installer zip ----
+// Minimal local zip reader (name -> content) for verification only; listZip in docwriters.mjs only
+// reads names. Mirrors the same central-directory walk, then inflates/copies per entry's method.
+function readZipEntries(buf) {
+  const { inflateRawSync } = require("node:zlib");
+  const out = {};
+  const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  const count = buf.readUInt16LE(eocd + 10);
+  let p = buf.readUInt32LE(eocd + 16);
+  for (let i = 0; i < count; i++) {
+    const nameLen = buf.readUInt16LE(p + 28), extraLen = buf.readUInt16LE(p + 30), commentLen = buf.readUInt16LE(p + 32);
+    const offset = buf.readUInt32LE(p + 42);
+    const name = buf.toString("utf8", p + 46, p + 46 + nameLen);
+    const lhNameLen = buf.readUInt16LE(offset + 26), lhExtraLen = buf.readUInt16LE(offset + 28);
+    const method = buf.readUInt16LE(offset + 8);
+    const compSize = buf.readUInt32LE(offset + 18);
+    const dataStart = offset + 30 + lhNameLen + lhExtraLen;
+    const comp = buf.subarray(dataStart, dataStart + compSize);
+    out[name] = method === 8 ? inflateRawSync(comp) : Buffer.from(comp);
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+const { createRequire } = await import("node:module");
+const require = createRequire(import.meta.url);
+
+await t("installer zip: contains all four files, token baked in, no CF fields anywhere", () => {
+  const zip = buildInstallerZip({
+    url: "https://app.dominion.tools", token: "dfk_deadbeef", nodeName: "forge-abc12345",
+    handsSrc: "// hands.mjs body", snapshotSrc: "// snapshot.mjs body",
+  });
+  const names = listZip(zip);
+  assert.deepEqual(names.sort(), ["Connect Me To Dominion.bat", "READ ME FIRST.txt", "hands.mjs", "snapshot.mjs"].sort());
+  const entries = readZipEntries(zip);
+  const bat = entries["Connect Me To Dominion.bat"].toString("utf8");
+  assert.match(bat, /HANDS_URL=https:\/\/app\.dominion\.tools/);
+  assert.match(bat, /HANDS_TOKEN=dfk_deadbeef/);
+  assert.match(bat, /HANDS_NODE=forge-abc12345/);
+  assert.doesNotMatch(bat, /CF_CLIENT|cloudflare/i);
+  assert.equal(entries["hands.mjs"].toString("utf8"), "// hands.mjs body");
+  assert.equal(entries["snapshot.mjs"].toString("utf8"), "// snapshot.mjs body");
+  const readme = entries["READ ME FIRST.txt"].toString("utf8");
+  assert.match(readme, /Extract All/);
 });
 
 // ---- hub cross-user isolation ----
