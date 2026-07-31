@@ -2572,11 +2572,47 @@ function mergeIdeUsage(total, next) {
   return Object.keys(out).length ? out : null;
 }
 
+/*
+ * A provider that has run OUT OF MONEY is not having a bad minute. OpenAI reports an exhausted
+ * budget as 429 with insufficient_quota, which sat in the same bucket as timeouts and overloads, so
+ * a build burned its retries against an account that could not possibly recover and then died
+ * without picking back up (Fred, 2026-07-31). Retrying is not just useless here, it is the reason
+ * the failure looked transient right up until the job ended.
+ */
+const QUOTA_DEAD_RX = /insufficient_quota|exceeded your current quota|billing_hard_limit|billing hard limit|quota exceeded|not enough credit|insufficient (?:balance|funds|credits)|payment required/i;
+function ideProviderOutOfFunds(r) {
+  return QUOTA_DEAD_RX.test(String((r && r.error) || "")) || Number(r && r.status) === 402;
+}
 function ideRetryableFailure(r) {
+  if (ideProviderOutOfFunds(r)) return false;   // permanent for this provider: reroute, never retry
   const status = Number(r && r.status) || 0;
   const error = String(r && r.error || "");
   return !!(r && r.retryable) || [408, 409, 429].includes(status) || status >= 500 ||
     /timeout|timed out|network|socket|stream error|connection|temporar|rate limit|overload|unavailable/i.test(error);
+}
+
+/*
+ * A replacement engine for a step whose provider has run out of money. Requirements, in order:
+ * a DIFFERENT provider (the same account is just as broke on the next call), that provider's key
+ * actually present, tool capability preserved when the dying model had it (a build step that can
+ * no longer read the workspace is a downgrade that shows up as mystery failures), and cheapest
+ * first so a funding failure never becomes an expensive surprise. Free seats therefore win, which
+ * is the right instinct when the last thing that happened was a bill that could not be paid.
+ */
+function altKeyedModelFor(model) {
+  const dead = providerOf(model) || "";
+  const needTools = isToolCapable(model);
+  const keyed = (p) => { const cfg = PROVIDER_CFG[p]; try { return !!(cfg && cfg.key && cfg.key()); } catch { return false; } };
+  const cost = (m) => (Number(m.inCost) || 0) + (Number(m.outCost) || 0);
+  const candidates = CATALOG_MODELS.filter((m) => {
+    if (!m || m.id === model || m.id === "battalion") return false;
+    const p = providerOf(m.id) || "openrouter";
+    if (p === dead) return false;
+    if (!keyed(p)) return false;
+    if (needTools && !isToolCapable(m.id)) return false;
+    return true;
+  }).sort((a, b) => cost(a) - cost(b));
+  return candidates.length ? candidates[0].id : "";
 }
 
 function ideLengthStop(reason) {
@@ -2624,9 +2660,16 @@ async function ideChatOnce(model, messages, { signal, executionPolicy, maxContin
     costUsd += ideCloudCost(model, r);
     usage = mergeIdeUsage(usage, r && r.usage);
     if (!r || !r.ok) {
+      /*
+       * outOfFunds is surfaced rather than handled here: this function knows a model and a message
+       * list and nothing about the job, the catalog, or which other providers hold keys. The
+       * reroute belongs to the caller that has all three. What matters at this level is that the
+       * condition stops being indistinguishable from a timeout.
+       */
       return {
         ok: false, content, error: lastError || "The model call did not finish.",
         costUsd: +costUsd.toFixed(6), usage, ms: Date.now() - startedAt, model,
+        outOfFunds: ideProviderOutOfFunds(r),
         aborted: !!(r && r.aborted), finishReason: (r && r.finishReason) || "",
       };
     }
@@ -3354,7 +3397,7 @@ async function runIdeBuild(job, {
       recordIdeSteering(kind, model, lastInstruction, "Diagnose the evidence, change approach, regenerate a complete atomic result, and verify it.");
     }
 
-    return ideChatWithWorkspaceTools(model, managed, {
+    const opts = {
       root: workspace && workspace.root,
       hands: handsFor,
       signal: ac.signal,
@@ -3364,7 +3407,29 @@ async function runIdeBuild(job, {
       sessionId: job.id,
       budgetGuard: ideBudgetGuard,
       resumeState,
-    });
+    };
+    const first = await ideChatWithWorkspaceTools(model, managed, opts);
+    /*
+     * OUT OF FUNDS: hand the step to another engine instead of dying on it. Fred's OpenAI account
+     * hit its budget mid-build; the step failed and the build never picked back up, because
+     * nothing connected "this provider cannot be paid" to "another provider is configured and
+     * idle". One hop only, and never silently: a build that changes engine mid-flight changes the
+     * cost and the character of its own output, so it says so in the run log.
+     */
+    if (first && !first.ok && first.outOfFunds) {
+      const alt = altKeyedModelFor(model);
+      if (alt && alt !== model) {
+        try {
+          ideJobs.emit(job.id, { type: "run", ok: false, command: "provider",
+            output: ((modelById(model) || {}).name || model) + " reports no remaining balance on its account, so this step continues on "
+              + ((modelById(alt) || {}).name || alt) + ". The build did not stop." });
+        } catch {}
+        const second = await ideChatWithWorkspaceTools(alt, managed, opts);
+        if (second) second.costUsd = (Number(second.costUsd) || 0) + (Number(first.costUsd) || 0);
+        return second;
+      }
+    }
+    return first;
   };
 
   const engine = createIdeEngine({
@@ -3683,7 +3748,7 @@ async function runIdeBuild(job, {
 
       // Budget freeze for the whole roadmap before any task runs.
       const wmRec = modelById(workerModel) || {};
-      const est = estimateMove({ manifestBytes: 8000, inCost: wmRec.inCost || 0, outCost: wmRec.outCost || 0 });
+      const est = estimateMove({ manifestBytes: 8000, files: (mv && mv.files && mv.files.length) || 1, inCost: wmRec.inCost || 0, outCost: wmRec.outCost || 0 });
       const b = budgetCheck({ spentUsd: budget.spentUsd, capUsd: budget.capUsd, nextEstUsd: est.usd * tasks.length });
       if (b.stop) {
         const answer = await ask("budget", phrase("budget_question", reg, money(budget.capUsd), money(budget.spentUsd)), [phrase("budget_keep", reg), phrase("budget_stop", reg)]);
@@ -3923,7 +3988,7 @@ async function runIdeBuild(job, {
       // 2. The whole worker batch is estimated BEFORE any worker starts; the freeze is the seatbelt.
       const workerAssign = afAssignFor(afSpec.workers[0].model || "") || resolved;
       const wmRec = modelById(afSpec.workers[0].model || resolved.build_code) || {};
-      const est = estimateMove({ manifestBytes: 8000, inCost: wmRec.inCost || 0, outCost: wmRec.outCost || 0 });
+      const est = estimateMove({ manifestBytes: 8000, files: (mv && mv.files && mv.files.length) || 1, inCost: wmRec.inCost || 0, outCost: wmRec.outCost || 0 });
       const b = budgetCheck({ spentUsd: budget.spentUsd, capUsd: budget.capUsd, nextEstUsd: est.usd * parts.length });
       if (b.stop) {
         const answer = await ask("budget", phrase("budget_question", reg, money(budget.capUsd), money(budget.spentUsd)),
@@ -4045,7 +4110,7 @@ async function runIdeBuild(job, {
       if (ac.signal.aborted) return;
 
       // Stop BEFORE the move that would break the budget. Stopping after is an apology.
-      const est = estimateMove({ manifestBytes: 8000, inCost: (modelById(resolved.build_code) || {}).inCost || 0, outCost: (modelById(resolved.build_code) || {}).outCost || 0 });
+      const est = estimateMove({ manifestBytes: 8000, files: (move && move.files && move.files.length) || 1, inCost: (modelById(resolved.build_code) || {}).inCost || 0, outCost: (modelById(resolved.build_code) || {}).outCost || 0 });
       const b = budgetCheck({ spentUsd: budget.spentUsd, capUsd: budget.capUsd, nextEstUsd: est.usd });
       if (b.stop) {
         const answer = await ask("budget",
@@ -4216,7 +4281,25 @@ async function runIdeBuild(job, {
       repairBatches.push(repairFiles.slice(offset, offset + MAX_FILES_PER_MOVE));
     }
     let finalVerification = await engine.verify(job, workspace);
-    if (finalVerification.ran && !finalVerification.ok && repairBatches.length) {
+    /*
+     * A repair loop that can only WRITE FILES must never be pointed at a failure no file can fix.
+     * Fred's build failed four checks with 'tsc'/'eslint'/'vitest' not recognized, which is a
+     * missing toolchain, and the gate handed it "diagnose the root cause, repair it" anyway. The
+     * model spent a 17-file rewrite attempt on a project that was not broken, returned a partial
+     * answer, and the atomic rule discarded all of it. That is the stall he watched.
+     *
+     * Now the tooling failure is reported as itself: an honest blocker naming the missing programs,
+     * with the code left alone because the code was never the problem.
+     */
+    if (finalVerification.ran && !finalVerification.ok && finalVerification.toolingBroken) {
+      ideJobs.emit(job.id, { type: "run", ok: false, command: "verification",
+        output: "The checks could not run because the tools they call are not installed on this machine, so the code was not touched. "
+          + "This is a setup problem, not a fault in what was built.\n\n" + String(finalVerification.output || "").slice(-2000) });
+      recordIdeSteering("verification_tooling", resolved.review || resolved.build_code || planModel,
+        "The final checks failed on missing executables, not on code.",
+        "Report the missing toolchain; do not attempt a code repair.",
+        String(finalVerification.output || "").slice(-1600));
+    } else if (finalVerification.ran && !finalVerification.ok && repairBatches.length) {
       for (let attempt = 0; attempt < repairBatches.length && !finalVerification.ok; attempt++) {
         const batch = repairBatches[attempt];
         recordIdeSteering(

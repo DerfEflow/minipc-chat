@@ -100,3 +100,33 @@
   .vp-frame { max-height: 84dvh; }
   .readout-pop { max-width: calc(100vw - 24px); }
 }
+
+/* ---- The desktop rail must scroll (Fred, 2026-07-31: "guest can't see the whole left sidebar in
+   desktop mode. no scroller or ability to scroll").
+
+   dominion-cinematic-02.css sets `overflow:hidden` on #sidebar while the body grid in
+   dominion-cinematic-01.css pins that row to 100vh minus 190px, so the rail is a rigid clipped
+   box. Only #chatlist scrolls inside it, and it is capped at 42%, which leaves the vault, Prime,
+   the guides, work orders and the Setup door in a column with nowhere to go. body{overflow:hidden}
+   means the page cannot scroll to reveal them either, so anything past the fold is genuinely
+   unreachable rather than merely awkward.
+
+   The <=900px block above already fixed exactly this for the phone drawer. This is its desktop
+   twin, which never existed, and that is the whole "fine on my phone, broken on the desktop" story.
+
+   NOT a guest-only fault, despite how it presents: the one role-gated row here (#sb-ide) is
+   OWNER-only, so a guest renders one row FEWER than Fred does. What decides who loses the Setup
+   button is viewport height and display scaling, which is why a laptop at 125% hits it and a large
+   monitor does not. Fixing it at the container repairs it for everyone.
+
+   Two scrollers on purpose: #chatlist keeps its own so a long conversation history stays a
+   contained list instead of pushing the Setup door off the bottom of a very tall rail. ---- */
+@media (min-width: 901px) {
+  #sidebar {
+    overflow-y: auto;
+    overflow-x: hidden;              /* keeps the clip-path corner clean */
+    overscroll-behavior: contain;    /* the rail's own scroll never becomes the page's */
+    scrollbar-width: thin;
+    scrollbar-color: rgba(102, 255, 91, .25) transparent;
+  }
+}

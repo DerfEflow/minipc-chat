@@ -238,13 +238,17 @@
     const picker = '<select class="vb-win-model" id="vb-model-' + w + '" aria-label="Model for ' + WNAME[w] + '"></select>';
     // The General keeps the picker beside the title (the drawing's upper-left note). The Captain
     // and the Sergeant carry theirs just BELOW the title (Fred, 2026-07-26): rank first, seat under.
+    // Copy this whole conversation. Every window gets one, the General included: the General's
+    // thread IS the plan, and it is the one most worth lifting out of the app.
+    const copyBtn = '<button type="button" class="vb-win-copy" data-win="' + w + '" title="Copy this whole conversation">Copy chat</button>';
     const head = w === "main"
-      ? '<header class="vb-win-head">' + picker + title + '</header>'
+      ? '<header class="vb-win-head">' + picker + title + copyBtn + '</header>'
       : '<header class="vb-win-head vb-win-head-col">' +
           '<div class="vb-win-toprow">' + title +
             // Fresh start (Fred, 2026-07-26): wipe THIS advisor's conversation mid-planning for an
             // unbiased second opinion. Main never carries it — the General's thread is the plan.
             '<button type="button" class="vb-win-fresh" data-win="' + w + '" title="Clear this conversation and start ' + WNAME[w] + ' from scratch">Fresh start</button>' +
+            copyBtn +
             '<button type="button" class="vb-win-toggle" data-win="' + w + '" aria-expanded="false">Open chat</button>' +
           '</div>' + picker +
         '</header>';
@@ -681,6 +685,64 @@
 
   /* ================= 4. Plan with AI ========================================================= */
 
+  /*
+   * COPY (Fred, 2026-07-31: "add a copy feature for each of the chats in general, captain and
+   * sergeant"). The main Dominion chat has had per-message Copy since long ago; these three
+   * windows had no way to lift text at all, which is where the actual plan gets written.
+   *
+   * Per bubble AND per window: one to take a single answer, one to take the whole thread, because
+   * a plan worth keeping is usually the conversation rather than one reply.
+   */
+  async function copyToClipboard(text) {
+    const t = String(text || "");
+    if (!t) return false;
+    try { await navigator.clipboard.writeText(t); return true; } catch {}
+    // Clipboard API needs a secure context and permission; this path is the one that works when it
+    // is refused, and it is why copy still works over a plain-http node.
+    try {
+      const a = document.createElement("textarea");
+      a.value = t; a.setAttribute("readonly", ""); a.style.position = "fixed"; a.style.opacity = "0";
+      document.body.appendChild(a); a.select();
+      const ok = document.execCommand("copy");
+      a.remove();
+      return ok;
+    } catch { return false; }
+  }
+  /*
+   * When the clipboard is refused (a browser can deny the permission outright, which the rig does),
+   * SELECT the text before saying "Press Ctrl+C". Saying it without selecting anything is a broken
+   * promise: the keystroke would copy whatever happened to be highlighted, or nothing at all.
+   */
+  function selectElementText(el) {
+    if (!el || !window.getSelection || !document.createRange) return false;
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel.removeAllRanges(); sel.addRange(range);
+      return true;
+    } catch { return false; }
+  }
+  function flashCopied(btn, ok, fallbackEl) {
+    if (!btn) return;
+    const selected = ok ? false : selectElementText(fallbackEl);
+    const was = btn.textContent;
+    btn.textContent = ok ? "Copied" : (selected ? "Selected: press Ctrl+C" : "Copy failed");
+    btn.classList.toggle("is-done", !!ok);
+    setTimeout(() => { btn.textContent = was; btn.classList.remove("is-done"); }, 1800);
+  }
+  // The whole thread, attributed, so a pasted plan still says who proposed what.
+  function threadText(w) {
+    const c = state.chats[w];
+    if (!c || !c.messages.length) return "";
+    return c.messages.map((m) => {
+      const who = m.from === "user" ? "You" : (WNAME[m.from] || m.from);
+      const text = typeof m.content === "string" ? m.content
+        : (m.content.find((p) => p.type === "text") || { text: "(picture)" }).text;
+      return who + ": " + text;
+    }).join("\n\n");
+  }
+
   function bubble(w, cls, content, pics) {
     const log = $("#vb-log-" + w);
     if (!log) return null;
@@ -691,6 +753,17 @@
     if (text) { const p = document.createElement("p"); p.textContent = text; b.append(p); }
     for (const src of pics || []) {
       const img = document.createElement("img"); img.className = "vpb-pic"; img.src = src; img.alt = "picture"; b.append(img);
+    }
+    // Thinking placeholders and errors carry no text worth lifting, so they get no button.
+    if (text && !/vpb-thinking/.test(cls)) {
+      const copy = document.createElement("button");
+      copy.type = "button"; copy.className = "vpb-copy"; copy.textContent = "Copy";
+      copy.title = "Copy this message";
+      copy.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        flashCopied(copy, await copyToClipboard(text), b.querySelector("p"));
+      });
+      b.append(copy);
     }
     log.append(b);
     log.scrollTop = log.scrollHeight;
@@ -1082,8 +1155,21 @@
         const total = $("#vb-army-total");
         if (total && j.plan) {
           total.hidden = false;
-          const tmin = j.plan.seconds >= 90 ? Math.round(j.plan.seconds / 60) + " min" : j.plan.seconds + "s";
-          total.textContent = "Whole plan: ~" + tmin + " · ~" + Math.round(j.plan.tokens / 1000) + "k tokens · " + money().cost(j.plan.usd, { approx: true }) + "  (estimates; * = little data yet)";
+          /*
+           * A RANGE, with the high end shown, because the single number used to be the luckiest
+           * possible build: one clean model call per step, nothing re-read, nothing retried. Fred
+           * was quoted ~10 min and ~$0.30 for a plan that ran past 30 minutes and $9. The upper
+           * figure is the one to set the spend limit against, so it is the one that gets said.
+           */
+          const fmtT = (s) => (s >= 90 ? Math.round(s / 60) + " min" : s + "s");
+          const hiUsd = Number(j.plan.usdHigh) || j.plan.usd;
+          const hiSec = Number(j.plan.secondsHigh) || j.plan.seconds;
+          const timePart = hiSec > j.plan.seconds ? fmtT(j.plan.seconds) + " to " + fmtT(hiSec) : "~" + fmtT(j.plan.seconds);
+          const costPart = hiUsd > j.plan.usd
+            ? money().cost(j.plan.usd) + " to " + money().cost(hiUsd)
+            : money().cost(j.plan.usd, { approx: true });
+          total.textContent = "Whole plan: " + timePart + " · " + costPart
+            + "  (estimate; builds that retry land nearer the higher figure" + (j.plan.basis === "prior" ? "; little data yet" : "") + ")";
         }
       } catch {}
     }, 280);
@@ -1218,6 +1304,15 @@
       renderLog(w);
       saveDraft();
       status(WNAME[w] + " has a clean slate — ask for a fresh opinion.");
+    });
+    // Copy this whole conversation, attributed by rank so a pasted plan still reads as a dialogue.
+    for (const c of document.querySelectorAll(".vb-win-copy")) c.addEventListener("click", async () => {
+      const w = c.dataset.win;
+      const text = threadText(w);
+      if (!text) { status(WNAME[w] + " has nothing to copy yet."); return; }
+      const ok = await copyToClipboard(text);
+      flashCopied(c, ok, document.getElementById("vb-log-" + w));
+      if (ok) status(WNAME[w] + "'s conversation is on your clipboard.");
     });
     for (const g of document.querySelectorAll(".vb-grab")) wireGrab(g);
     $("#vb-orch-model").addEventListener("change", (e) => { if (state.army) { state.army.orchestrator = e.target.value; persistArmy(); } orchNote(""); });

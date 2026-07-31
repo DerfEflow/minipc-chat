@@ -25,6 +25,23 @@
  */
 
 export const MAX_FILES_PER_MOVE = 24;
+/*
+ * Above this many files, a move that came back incomplete is SPLIT rather than discarded.
+ *
+ * The threshold is the honest boundary of a real trade. Whole-move atomicity is a genuine
+ * protection: writing half a change leaves a project in a state nobody asked for. But it was being
+ * enforced by throwing away everything the model produced, and the chance of returning every file
+ * complete in one reply collapses as the list grows, so a large move could fail forever and write
+ * nothing (Fred watched a 17-file repair do exactly that, twice, and read it as the build refusing
+ * to try).
+ *
+ * So small moves keep the strict guarantee, where a plain retry is cheap and a partial write is
+ * the worse outcome. Large moves, which are the ones that never converge, are halved into moves
+ * that each keep the guarantee on their own scope. It is a deliberate exchange of one big
+ * all-or-nothing for several small ones, made only where all-or-nothing was reliably yielding
+ * nothing.
+ */
+export const SPLITTABLE_MOVE_FILES = 4;
 export const MAX_FILE_BYTES = 120000;      // one manifest page; large files are paged below
 export const MAX_MANIFEST_FILE_BYTES = 600000; // disaster/context guard, disclosed whenever reached
 export const MAX_MOVES = 40;
@@ -228,10 +245,27 @@ export function budgetCheck({ spentUsd = 0, capUsd = 0, nextEstUsd = 0 } = {}) {
 
 // Deterministic pre-move estimate from catalog prices. No model call: an estimate that costs
 // money to produce is not an estimate.
-export function estimateMove({ manifestBytes = 0, inCost = 0, outCost = 0, expectOutTokens = 1800 } = {}) {
+/*
+ * The pre-move estimate that the spend limit is checked against.
+ *
+ * It assumed 1,800 output tokens for any move and one model call to produce them. A move writes
+ * whole files (nearer 2,500 tokens EACH), and the engine may take three attempts with three
+ * inspection windows apiece before a move lands. Under-estimating here is not a cosmeticproblem now
+ * that a real cap exists: the gate's job is to stop BEFORE the move that would break the budget,
+ * and it cannot do that while it believes every move is the cheapest one possible.
+ *
+ * `files` scales the output guess; RETRY_ALLOWANCE covers the attempts. The result is deliberately
+ * on the generous side, because the failure modes are not symmetric: quoting high pauses a build
+ * and asks, quoting low spends money nobody agreed to.
+ */
+export const OUT_TOKENS_PER_FILE = 2500;
+export const RETRY_ALLOWANCE = 2.2;
+export function estimateMove({ manifestBytes = 0, inCost = 0, outCost = 0, files = 1, expectOutTokens = 0 } = {}) {
+  const fileCount = Math.max(1, Number(files) || 1);
+  const outTok = expectOutTokens > 0 ? expectOutTokens : fileCount * OUT_TOKENS_PER_FILE;
   const inTok = Math.ceil(manifestBytes / 3.6) + 700;      // prefix + instructions overhead
-  const usd = (inTok * inCost + expectOutTokens * outCost) / 1e6;
-  return { inTok, outTok: expectOutTokens, usd: Math.round(usd * 1e6) / 1e6 };
+  const usd = ((inTok * inCost + outTok * outCost) / 1e6) * RETRY_ALLOWANCE;
+  return { inTok, outTok, usd: Math.round(usd * 1e6) / 1e6 };
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -239,6 +273,33 @@ export function estimateMove({ manifestBytes = 0, inCost = 0, outCost = 0, expec
  * check can call a broken project complete. Build a deterministic plan from every relevant script.
  * ------------------------------------------------------------------------------------------- */
 const VERIFY_SCRIPT_ORDER = ["typecheck", "check", "lint", "test", "build"];
+
+/*
+ * The hands node runs PowerShell 5.1, where a native command's stderr comes back wrapped in
+ * serialized CLIXML: a "#< CLIXML" marker, an <Objs> document, and a "Preparing modules for first
+ * use" progress record per invocation. In a real failure Fred pasted, that noise was most of the
+ * text and the actual signal was three words. It reached the model's context too, so every repair
+ * turn paid tokens to read XML and had the diagnosis buried inside it. Strip it at the boundary.
+ */
+export function cleanShellOutput(s) {
+  let t = String(s == null ? "" : s);
+  if (!t) return "";
+  t = t.replace(/#<\s*CLIXML\s*/gi, "");
+  t = t.replace(/<Objs[\s\S]*?<\/Objs>/gi, "");
+  t = t.replace(/<Obj\b[\s\S]*?<\/Obj>/gi, "");
+  t = t.replace(/^.*Preparing modules for first use\..*$/gim, "");
+  return t.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/*
+ * A check that failed because its PROGRAM is missing is not a code defect, and must never be sent
+ * to a repair loop whose only power is writing files: no TypeScript edit makes `tsc` exist. Fred's
+ * build spent a 17-file rewrite attempt on exactly this before giving up.
+ */
+const MISSING_BINARY_RX = /is not recognized as an internal or external command|command not found|: not found|ENOENT|no such file or directory.*(?:tsc|eslint|vitest|jest|npm|node)|'[^']+' is not recognized/i;
+export function isMissingToolFailure(output) {
+  return MISSING_BINARY_RX.test(String(output || ""));
+}
 
 export function verificationPlanFor(packageJsonText) {
   let scripts = null;
@@ -471,6 +532,36 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
     }
   }
 
+  /*
+   * INSTALL BEFORE CHECKING (Fred, 2026-07-31). A build wrote a correct project, ran `npm run
+   * typecheck`, and was told 'tsc' is not recognized. All four checks failed the same way, because
+   * the toolchain those scripts invoke lives in node_modules/.bin and NOTHING EVER INSTALLED IT.
+   * ensureDeps existed the whole time in idesee.mjs, wired only into the preview path, so every
+   * build that reached its own verification failed it on a fresh project, every time.
+   *
+   * Mirrors that function rather than importing it, because the engine is deliberately built from
+   * `hands` alone and takes no module dependencies.
+   */
+  async function installDeps(job, root, pkgText) {
+    let deps = null;
+    try { const p = JSON.parse(pkgText || "{}"); deps = { ...(p.dependencies || {}), ...(p.devDependencies || {}) }; } catch {}
+    if (!deps || !Object.keys(deps).length) return { ok: true, skipped: "no dependencies declared" };
+    try {
+      const ls = await hands("fs_list", { path: root });
+      const names = ((ls && ls.entries) || []).map((e) => (typeof e === "string" ? e : e.name));
+      if (names.includes("node_modules")) return { ok: true, skipped: "already installed" };
+    } catch { /* if the listing fails, attempt the install rather than skip it */ }
+    jobs.emit(job.id, { type: "run", command: "npm install", ok: true,
+      output: "Installing what the project needs before checking it. This can take a few minutes the first time." });
+    let r = null;
+    try { r = await hands("shell_run", { command: "cd \"" + root + "\"; npm install --no-audit --no-fund", timeoutMs: 480000 }); } catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+    const code = (r && (r.code ?? r.exitCode));
+    const ok = code == null ? r && r.ok !== false : Number(code) === 0;
+    const out = cleanShellOutput(String((r && (r.stdout || r.output)) || "") + String((r && r.stderr) || ""));
+    jobs.emit(job.id, { type: "run", command: "npm install", ok: !!ok, output: out.slice(-2500) });
+    return { ok: !!ok, output: out };
+  }
+
   async function verify(job, workspace) {
     let pkg = "";
     try {
@@ -497,6 +588,19 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       }
     } catch {}
 
+    /*
+     * The install runs once, here, before the first check. If it fails, the checks are not run at
+     * all: four red "not recognized" lines blame the code for the absence of a toolchain, and that
+     * is the confusion this whole path produced.
+     */
+    const dep = await installDeps(job, workspace.root.replace(/[\\/]+$/, ""), pkg);
+    if (!dep.ok) {
+      jobs.emit(job.id, { type: "run", ok: false, command: "npm install",
+        output: "The project's dependencies did not install, so its checks could not run." });
+      return { ran: false, ok: false, toolingBroken: true, output: dep.output || "npm install failed",
+               cmd: "npm install", commands: [], failed: [{ name: "install", cmd: "npm install", ok: false, output: dep.output || "" }] };
+    }
+
     const results = [];
     for (const check of commands) {
       let result;
@@ -513,7 +617,7 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         const code = hasCode ? Number(rawCode) : null;
         const hasExplicitOk = !!r && typeof r.ok === "boolean";
         const ok = !!r && r.ok !== false && (hasCode ? code === 0 : r.ok === true);
-        let output = String((r && (r.stdout || r.output)) || "") + String((r && r.stderr) || "");
+        let output = cleanShellOutput(String((r && (r.stdout || r.output)) || "") + String((r && r.stderr) || ""));
         if (!hasCode && !hasExplicitOk) {
           output += (output ? "\n" : "") + "Verification command returned no success status or exit code.";
         } else if (r && r.ok === false && !output) {
@@ -540,11 +644,18 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
     }
 
     const failed = results.filter((r) => !r.ok);
+    /*
+     * If every failure is a missing PROGRAM, the code is not implicated and a file-writing repair
+     * loop has nothing it can do. Flag it so the caller reports the real blocker instead of asking
+     * a model to fix a project that is not broken.
+     */
+    const toolingBroken = failed.length > 0 && failed.every((r) => isMissingToolFailure(r.output));
     const output = results.map((r) =>
       "[" + r.name + "] " + (r.ok ? "passed" : "failed") + (r.output ? "\n" + r.output : "")
     ).join("\n\n");
     return {
       ran: true,
+      toolingBroken,
       ok: failed.length === 0,
       output,
       cmd: results.length === 1 ? results[0].cmd : results.map((r) => r.cmd).join("; "),
@@ -557,7 +668,10 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
    * Run one move. Returns { ok, costUsd, blocked }. Metering happens in `finally`, so a move that
    * throws, is stopped, or fails verification still charges for the tokens it actually burned.
    */
-  async function runMove(job, { move, workspace, assignments, goal }) {
+  // `depth` is the split recursion guard: a move that cannot be answered atomically is halved and
+  // re-run through this same path, and three levels turns a 24-file move into 3-file moves, which
+  // is far past the point where the size was the problem.
+  async function runMove(job, { move, workspace, assignments, goal }, depth = 0) {
     let costUsd = 0;
     try {
       let decision = router({ title: move.title, description: move.why, files: move.files }, assignments);
@@ -643,6 +757,38 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         return { ok: false, costUsd };
       }
       if (!coverage.complete) {
+        /*
+         * SPLIT RATHER THAN DISCARD. Atomicity is right: half a move leaves a project in a state
+         * nobody asked for. But it was being enforced by throwing away everything the model DID
+         * produce, and the odds of getting every file in one reply fall off a cliff as the list
+         * grows. Fred watched a 17-file repair move return partial twice and write nothing at all,
+         * which reads as the build refusing to try.
+         *
+         * A move too big to answer atomically is now RE-RUN IN HALVES, each half atomic in its own
+         * right, so the guarantee is kept while the work actually lands. Halving recurses naturally
+         * through this same path, and the floor is a single file: if one file alone cannot be
+         * returned complete, the model genuinely cannot do it and the honest failure stands.
+         */
+        const planned = (move.files || []);
+        if (planned.length > SPLITTABLE_MOVE_FILES && depth < 3) {
+          const mid = Math.ceil(planned.length / 2);
+          const halves = [planned.slice(0, mid), planned.slice(mid)];
+          jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
+            message: "That move was too large to return in one piece, so it is being split into "
+              + halves.length + " smaller moves that each stand on their own." });
+          let splitCost = costUsd, allCovered = [];
+          for (let h = 0; h < halves.length; h++) {
+            const sub = await runMove(job, {
+              move: { ...move, id: move.id + "-part" + (h + 1), files: halves[h],
+                      title: move.title + " (part " + (h + 1) + " of " + halves.length + ")" },
+              workspace, assignments, goal,
+            }, depth + 1);
+            splitCost += Number(sub && sub.costUsd) || 0;
+            if (!sub || !sub.ok) return { ok: false, costUsd: splitCost, missing: (sub && sub.missing) || halves[h] };
+            allCovered = allCovered.concat(sub.covered || []);
+          }
+          return { ok: true, costUsd: splitCost, covered: allCovered };
+        }
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
           message: "The model still omitted planned files: " + coverage.missing.join(", ") +
             ". Nothing was written because a partial move could leave the project inconsistent.",

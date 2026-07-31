@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import {
   isSmallAsk, parseBlueprint, parseFileBlocks, fileCoverage, carveOutReport, budgetCheck, estimateMove,
-  verifyCommandFor, verificationPlanFor, buildMoveMessages, createIdeEngine, SYSTEM_PREFIX, lineDiff,
+  verifyCommandFor, verificationPlanFor, buildMoveMessages, createIdeEngine, SYSTEM_PREFIX, lineDiff, cleanShellOutput, isMissingToolFailure
 } from "./ideengine.mjs";
 
 let passed = 0, failed = 0;
@@ -466,6 +466,81 @@ await t("an image-classed move runs as design code with placeholder art, never a
   assert.match(chatCall.messages[1].content, /placeholder art/i, "the model is told to draw with CSS or SVG");
   const running = events.find((e) => e.type === "move" && e.state === "running");
   assert.match(String(running.routeWhy || ""), /separate step/i, "the card explains the reroute honestly");
+});
+
+
+/* ---- 2026-07-31: the build that failed its own checks -------------------------------------- */
+
+await t("CLIXML noise is stripped, so the real error is what the model reads", () => {
+  const raw = "#< CLIXML\n'tsc' is not recognized as an internal or external command,\noperable program or batch file.\n"
+    + '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0">'
+    + "<MS><AV>Preparing modules for first use.</AV></MS></Obj></Objs>";
+  const clean = cleanShellOutput(raw);
+  assert.match(clean, /'tsc' is not recognized/, "the signal survives");
+  assert.ok(!/CLIXML|<Objs|Preparing modules/.test(clean), "the noise does not: " + clean);
+});
+
+await t("a missing PROGRAM is recognised as tooling, not as broken code", () => {
+  assert.equal(isMissingToolFailure("'tsc' is not recognized as an internal or external command"), true);
+  assert.equal(isMissingToolFailure("eslint: not found"), true);
+  assert.equal(isMissingToolFailure("src/a.ts(3,1): error TS2304: Cannot find name 'x'."), false,
+    "a real type error must still reach the repair loop");
+});
+
+// Exactly the shape the hands node returned on Fred's build: PowerShell CLIXML wrapping the one
+// line that matters.
+const NOISY_TSC_STDERR = [
+  "#< CLIXML",
+  "'tsc' is not recognized as an internal or external command,",
+  "operable program or batch file.",
+  '<Objs Version="1.1.0.1"><Obj S="progress" RefId="0"><MS><AV>Preparing modules for first use.</AV></MS></Obj></Objs>',
+].join("\n");
+
+await t("dependencies install BEFORE any check runs, and a missing toolchain is not code", async () => {
+  const ran = [];
+  const engine = createIdeEngine({
+    jobs: { emit: () => {}, finish: () => {} },
+    chat: async () => ({ ok: false }),
+    router: () => ({ taskClass: "build_code", model: "test/model", why: "t" }),
+    meter: async () => {},
+    hands: async (tool, args) => {
+      if (tool === "fs_read" && String(args.path).endsWith("package.json")) {
+        return { content: '{"dependencies":{"react":"^19"},"scripts":{"typecheck":"tsc --noEmit"}}' };
+      }
+      if (tool === "fs_list") return { entries: ["package.json", "src"] };   // NO node_modules
+      if (tool === "node_info") return { sandbox: false };
+      if (tool === "shell_run") {
+        ran.push(String(args.command || ""));
+        if (/npm install/.test(args.command)) return { code: 0, stdout: "added 1 package" };
+        // the toolchain is still absent, exactly as Fred's build reported it
+        return { code: 1, stdout: "", stderr: NOISY_TSC_STDERR };
+      }
+      return {};
+    },
+  });
+  const out = await engine.verify(JOB, WS);
+  const installAt = ran.findIndex((c) => /npm install/.test(c));
+  const checkAt = ran.findIndex((c) => /npm run typecheck/.test(c));
+  assert.ok(installAt >= 0, "the project's dependencies are installed: " + JSON.stringify(ran));
+  assert.ok(checkAt > installAt, "the install happens BEFORE the first check, not after it");
+  assert.equal(out.toolingBroken, true, "a missing binary is reported as tooling so no repair loop is started");
+  assert.ok(!/CLIXML|<Objs/.test(out.output || ""), "the PowerShell noise never reaches the caller");
+});
+
+await t("an oversized move SPLITS instead of writing nothing", async () => {
+  // Six planned files; the model only ever returns the first three of whatever it is asked for.
+  const five = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts"];
+  const block = (p) => "```path=" + p + "\nx\n```";
+  const r = rig({ chatReplies: [
+    { ok: true, content: five.slice(0, 3).map(block).join("\n"), costUsd: 0.01 },   // partial
+    { ok: true, content: five.slice(0, 3).map(block).join("\n"), costUsd: 0.01 },   // still partial
+    { ok: true, content: five.slice(0, 3).map(block).join("\n"), costUsd: 0.01 },   // half 1 complete
+    { ok: true, content: five.slice(3).map(block).join("\n"), costUsd: 0.01 },      // half 2 complete
+  ] });
+  const out = await r.engine.runMove(JOB, { move: { ...MOVE, files: five }, workspace: WS, assignments: {} });
+  const split = r.events.find((e) => /being split into/.test(e.message || ""));
+  assert.ok(split, "the oversized move announces its split rather than failing silently");
+  assert.equal(out.ok, true, "the work lands instead of being discarded");
 });
 
 console.log("\n" + passed + " passed, " + failed + " failed");

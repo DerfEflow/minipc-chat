@@ -26,13 +26,37 @@ export function priorThroughput(rec) {
   return 110;                     // tiny/local
 }
 
-// A single part's size guess in output tokens, from its file count and contract length. Coarse by
-// design: ~700 output tokens per file plus the contract's own words, floored so a one-file part is
-// never estimated at zero.
+/*
+ * A single part's size in OUTPUT tokens.
+ *
+ * This said 700 tokens per file, which is about twenty lines. A move writes whole files, and a real
+ * source file lands nearer 2,500 tokens. That single number is most of why a twelve-step plan was
+ * quoted at "~22k tokens · ~$0.30" and then cost $9.07 (Fred, 2026-07-31): twelve parts of roughly
+ * two files each multiply out to exactly the 22k he was shown.
+ */
+export const OUT_TOKENS_PER_FILE = 2500;
+/*
+ * What the quote never counted at all.
+ *
+ * INPUT: every attempt re-sends the manifest of the files it may touch, so a move pays for reading
+ * about as much as it writes, and the catalog charges for input separately.
+ *
+ * RETRIES AND REVIEW: the engine is not a single call per part. A move gets up to three attempts,
+ * each with up to three inspection windows, and a failed check earns repair rounds on top, with
+ * reviewer and QC stages after that. An estimate that models one clean call per part is quoting the
+ * luckiest possible build, which is not the number anyone needs before pressing the button.
+ *
+ * So the estimate carries a range: `usd` is a realistic pass, `usdHigh` is the same plan when it
+ * argues with itself. The high number is the one worth reading, and it is what the spend limit
+ * should be set against.
+ */
+export const INPUT_TO_OUTPUT_RATIO = 1.0;
+export const RETRY_OVERHEAD = 2.2;
+
 export function estimatePartTokens(part) {
   const files = Array.isArray(part && part.files) ? part.files.length : 1;
   const contractWords = String((part && part.contract) || "").split(/\s+/).filter(Boolean).length;
-  return Math.max(600, files * 700 + contractWords * 4);
+  return Math.max(900, files * OUT_TOKENS_PER_FILE + contractWords * 4);
 }
 
 export function createTelemetry({ dir, now = Date.now } = {}) {
@@ -95,25 +119,45 @@ export function createTelemetry({ dir, now = Date.now } = {}) {
     const usefulAgents = Math.max(1, Math.min(Number(agents) || 1, files));
     const wallTokens = tokens / usefulAgents;         // each agent handles a share, in parallel
     const seconds = Math.ceil(wallTokens / Math.max(1, tokPerSec)) + 6 * usefulAgents;   // +ramp per agent
-    // catalog outCost is dollars per 1e6 output tokens; convert to this part's total across agents.
-    const totalTokens = tokens;                       // total work is the same; agents split it
-    const usd = measured && m.usdPerKTok.length
-      ? (totalTokens / 1000) * usdPerKTok
-      : (totalTokens / 1e6) * (rec && rec.outCost || 10);
-    return { seconds, tokens: totalTokens, usd: +usd.toFixed(4), basis: measured ? "measured" : "prior", agents: usefulAgents };
+    /*
+     * Cost counts BOTH sides. The old line multiplied total tokens by outCost alone, so a move's
+     * reading was free and its writing was under-counted, on top of the per-file figure being a
+     * quarter of reality. Measured throughput (usdPerKTok, folded from real settled calls) already
+     * reflects whatever a turn truly costs, so it is used as-is and only the retry allowance is
+     * applied on top of it.
+     */
+    const inTokens = Math.round(tokens * INPUT_TO_OUTPUT_RATIO);
+    const totalTokens = tokens + inTokens;
+    const onePass = measured && m.usdPerKTok.length
+      ? (tokens / 1000) * usdPerKTok
+      : (tokens / 1e6) * (rec && typeof rec.outCost === "number" ? rec.outCost : 10)
+        + (inTokens / 1e6) * (rec && typeof rec.inCost === "number" ? rec.inCost : 1);
+    const usdHigh = onePass * RETRY_OVERHEAD;
+    return {
+      seconds, tokens: totalTokens, outTokens: tokens, inTokens,
+      usd: +onePass.toFixed(4),
+      usdHigh: +usdHigh.toFixed(4),
+      secondsHigh: Math.ceil(seconds * RETRY_OVERHEAD),
+      basis: measured ? "measured" : "prior", agents: usefulAgents,
+    };
   }
 
   // Whole-plan roll-up: sum the parts under their chosen models and agent counts.
   function estimatePlan(parts, pick) {
-    let seconds = 0, tokens = 0, usd = 0, anyPrior = false;
+    let seconds = 0, secondsHigh = 0, tokens = 0, usd = 0, usdHigh = 0, anyPrior = false;
     for (let i = 0; i < parts.length; i++) {
       const p = pick(parts[i], i) || {};
       const e = estimatePart(parts[i], p.rec, p.agents || 1);
       // Parts run sequentially at write time (the pipeline's law), so wall seconds ADD.
-      seconds += e.seconds; tokens += e.tokens; usd += e.usd;
+      seconds += e.seconds; secondsHigh += e.secondsHigh || e.seconds;
+      tokens += e.tokens; usd += e.usd; usdHigh += e.usdHigh || e.usd;
       if (e.basis === "prior") anyPrior = true;
     }
-    return { seconds, tokens, usd: +usd.toFixed(4), basis: anyPrior ? "prior" : "measured" };
+    return {
+      seconds, secondsHigh, tokens,
+      usd: +usd.toFixed(4), usdHigh: +usdHigh.toFixed(4),
+      basis: anyPrior ? "prior" : "measured",
+    };
   }
 
   load();

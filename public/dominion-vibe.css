@@ -485,3 +485,33 @@
   .vb-sendto { top: auto; bottom: calc(100% + 4px); }
   @keyframes vb-drop { from { opacity: 0; transform: translateY(4px); } }
 }
+
+/* ---- Copy (Fred, 2026-07-31). The main chat has had per-message Copy for months; these three
+   windows, where the plan is actually written, had no way to lift text at all. Per bubble and per
+   window, because a plan worth keeping is usually the conversation rather than one reply.
+
+   The per-bubble button is quiet until the bubble is touched: a Copy on every line would compete
+   with the words, and the words are the point. Keyboard focus reveals it too, so it is reachable
+   without a pointer. ---- */
+.vpb { position: relative; }
+.vpb-copy {
+  position: absolute; top: 6px; right: 6px;
+  padding: 3px 8px; border-radius: 7px;
+  font: inherit; font-size: 10px; font-weight: 700; letter-spacing: .05em;
+  cursor: pointer; opacity: 0; transition: opacity .13s ease, color .13s ease, border-color .13s ease;
+  color: #cfe4f2; border: 1px solid rgba(139, 205, 244, .35); background: rgba(2, 10, 17, .82);
+}
+.vpb:hover .vpb-copy, .vpb-copy:focus-visible { opacity: 1; }
+.vpb-copy:hover { color: #fff; border-color: rgba(126, 231, 255, .7); }
+.vpb-copy.is-done { opacity: 1; color: #b8ffc4; border-color: rgba(118, 255, 104, .7); }
+/* Coarse pointers get no hover, so the button is simply always there on a phone. */
+@media (pointer: coarse) { .vpb-copy { opacity: .75; } }
+
+.vb-win-copy {
+  margin-left: auto;
+  padding: 5px 10px; border-radius: 8px;
+  font: inherit; font-size: 10px; font-weight: 700; letter-spacing: .05em; cursor: pointer;
+  color: #cfe4f2; border: 1px solid rgba(139, 205, 244, .32); background: rgba(2, 10, 17, .6);
+}
+.vb-win-copy:hover { color: #fff; border-color: rgba(126, 231, 255, .62); }
+.vb-win-copy.is-done { color: #b8ffc4; border-color: rgba(118, 255, 104, .7); }

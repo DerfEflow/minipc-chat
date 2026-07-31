@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v148-project-budget-and-shell-resync";
+const CACHE = "dominion-ai-v149-sidebar-copy-estimates-and-build-repairs";
 const SHELL = [
   "/",
   "/index.html",
@@ -7,19 +7,19 @@ const SHELL = [
   "/dominion-tenant.css?v=17",
   "/dominion-tenant.js?v=5",
   "/dominion-orders.js?v=1",
-  "/dominion-vault.css?v=3",
+  "/dominion-vault.css?v=4",
   "/dominion-images.css?v=9",
   "/dominion-images.js?v=14",
   "/dominion-lexicon.js?v=14",
   "/dominion-lenses.css?v=7",
   "/dominion-beginner.css?v=5",
-  "/dominion-vibe.css?v=12",
+  "/dominion-vibe.css?v=13",
   "/dominion-tour.css?v=3",
   "/dominion-lenses.js?v=15",
   "/dominion-beginner.js?v=3",
-  "/dominion-vibe.js?v=13",
+  "/dominion-vibe.js?v=14",
   "/dominion-ide.css?v=26",
-  "/dominion-ide.js?v=36",
+  "/dominion-ide.js?v=37",
   "/dominion-tour.js?v=6",
   "/app.js?v=69",
   "/dominion-markdown.css?v=1",
