@@ -374,9 +374,8 @@ async function syncNow() {
         else {
           try { localStorage.setItem(LS_CHATS, serializeChats(false)); localStorage.setItem(LS_CUR, curId || ""); } catch {}
           if (moved.changedCur || goneIds.length) renderAll(); else renderSidebar();
-          // The first sync after a fresh install restores history WITHOUT touching the open (new,
-          // empty) chat, so the renderSidebar() path above never re-evaluated the fold — the
-          // header stayed at full height until the next full render. Re-evaluate it every sync.
+          // Kept as a cheap re-assert: the fold is unconditional now, but a sync can rebuild the
+          // header, and re-running this costs nothing and guarantees the handles survive it.
           try { updateFocusMode(); } catch {}
         }
       }
@@ -896,7 +895,7 @@ function renderAll() {
   restoreChatAttachments();
   restoreChatModel();
   try { document.dispatchEvent(new CustomEvent("dominion-chat-changed", { detail: { chatId: curId } })); } catch {}
-  updateFocusMode();   // Chat Focus Mode follows the open chat: first sent message folds the chrome
+  updateFocusMode();   // Chat Focus Mode: the header is folded on every load, handles always available
   try { paintToCrucible(); } catch {}   // the hand-off button follows the same chat
   renderTranscript();  // measure after focus mode settles so names fit the field's real height
   renderSidebar(); renderBudget(); syncComposer(); scroll();
@@ -2347,28 +2346,46 @@ document.addEventListener("dominion-money-ready", () => {
  * The class only ever reflects the OPEN chat, so a fresh chat always starts with full chrome.
  * All visual gating lives in CSS behind a max-width media query — desktop never changes.
  */
-function chatHasUserMsg() { const c = chats.find((x) => x.id === curId); return !!(c && c.messages && c.messages.some((m) => m.role === "user")); }
 /*
- * The fold used to follow only the OPEN chat, so a site-data clear (or reinstall) left the header
- * at full height forever: boot creates an empty chat, sync restores the history behind it, and the
- * empty chat never folds anything (Fred, 2026-07-30: "the header minimizing feature was working a
- * short time ago"). A returning user with ANY history is not a first-timer — the chrome folds for
- * them everywhere, and the handles bring any control back. Full chrome now greets only a genuinely
- * blank slate: no messages in any chat.
+ * FOLDED ON EVERY LOAD (Fred, 2026-07-30 evening): "the header was supposed to minimize
+ * automatically upon load every time."
+ *
+ * The condition used to be earned rather than given: first the OPEN chat needed a sent message,
+ * then any chat did. Both readings kept a state in which the header loads full height, and every
+ * time Fred met that state he read it as the feature having been reverted again. A condition that
+ * has been wrong twice is the wrong shape. The header now folds unconditionally on load, and the
+ * handles are always present to open it, so there is no state left that can look like a
+ * regression. A first-timer sees the same chat-first screen and reaches every control through the
+ * upper-right handle. All visual gating still lives in CSS behind max-width: desktop is untouched.
  */
-function anyChatHasUserMsg() { return chats.some((c) => c && c.messages && c.messages.some((m) => m.role === "user")); }
 function updateFocusMode() {
-  const on = chatHasUserMsg() || anyChatHasUserMsg();
-  document.body.classList.toggle("chat-focus", on);
-  if (!on) document.body.classList.remove("reveal-controls", "reveal-actions");
+  document.body.classList.add("chat-focus");
   const h1 = document.getElementById("focus-controls-handle"), h2 = document.getElementById("focus-actions-handle");
-  if (h1) h1.hidden = !on;
-  if (h2) h2.hidden = !on;
+  if (h1) h1.hidden = false;
+  if (h2) h2.hidden = false;
+}
+/* Closing is one job, so it lives in one place: the handles, the input, and the sheets all call it. */
+function collapseFocusSheets() {
+  document.body.classList.remove("reveal-controls", "reveal-actions");
+  const h1 = document.getElementById("focus-controls-handle"), h2 = document.getElementById("focus-actions-handle");
+  if (h1) h1.setAttribute("aria-expanded", "false");
+  if (h2) h2.setAttribute("aria-expanded", "false");
 }
 (function wireFocusHandles() {
   const h1 = document.getElementById("focus-controls-handle"), h2 = document.getElementById("focus-actions-handle");
   if (h1) h1.addEventListener("click", () => { const on = document.body.classList.toggle("reveal-controls"); document.body.classList.remove("reveal-actions"); h1.setAttribute("aria-expanded", on ? "true" : "false"); });
   if (h2) h2.addEventListener("click", () => { const on = document.body.classList.toggle("reveal-actions"); document.body.classList.remove("reveal-controls"); h2.setAttribute("aria-expanded", on ? "true" : "false"); });
+  /*
+   * Returning to the typing field closes the header again (Fred: "tapping the field where you type
+   * should collapse the header"). pointerdown rather than focus, because the controls sheet hangs
+   * over the top of the chat and the tap that dismisses it should not also have to land twice.
+   * focus is kept as the belt-and-braces path for hardware keyboards and voice entry.
+   */
+  const input = document.getElementById("input");
+  if (input) {
+    input.addEventListener("pointerdown", collapseFocusSheets);
+    input.addEventListener("focus", collapseFocusSheets);
+  }
 })();
 try { updateFocusMode(); } catch {}
 

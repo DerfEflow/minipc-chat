@@ -707,32 +707,66 @@
   .model-era-divider { margin-right: 5px; margin-bottom: 14px; }
 }
 
-/* ---- The composer strip, phones (Fred, 2026-07-30: "be more intentional about the command
-   rail... crowded and overlapping... non-descriptive and various sizes"). Option 1, his pick.
-   The flame (Forge Dial), picture (Foundry) and Dominion Works (Crucible) buttons are DELETED
-   on phones: the dock directly below already carries all three destinations, with labels. What
-   remains is one tile language: 44px squares, copper strokes for controls, red reserved for the
-   Fire Alarm, green reserved for send and for genuinely-active states. `html body` specificity
-   throughout: forge/images/ide .css all load after this file and style their own triggers. ---- */
+/* ---- The composer strip, phones (Fred, 2026-07-30 evening, correcting the Option 1 read):
+   "I never decided to remove all of them. I wanted to remove the fire alarm button and make sure
+   that they were all the same size and didn't overlap each other. That's it."
+
+   So every control comes back. Only the Fire Alarm stays gone (removed from the markup itself;
+   POST /chat/fire-alarm survives as the API escape hatch), and the whole strip is one tile size.
+
+   NO HARD-CODED COLUMNS, deliberately. This layout has been rebuilt four times and has produced
+   the same overlap twice, because every version assigned controls to numbered grid cells: the
+   2026-07-19 fix gave each control its own column, Option 1 then re-cut the grid to five columns,
+   and the pill was later parked in column 3 which is the speaker's cell. Two items, one cell,
+   overlap by definition. The count of controls is also not constant, so numbered cells cannot be
+   right: #ide-trigger only paints when engaged (#ide-trigger.on) and #dfi-trigger arrives from
+   JS, meaning the strip legitimately holds seven or eight tiles at different moments. A fixed
+   grid answers that with a hole or a collision.
+
+   A single flex row with `flex: 1 1 0` gives every tile an identical computed width whatever the
+   count, wraps instead of stacking if it ever runs out of room, and cannot place two controls in
+   one cell. Adding the ninth control later needs no CSS change at all. ---- */
 @media (max-width: 720px) {
-  /* !important: these triggers carry state classes (#ide-trigger.on beats any plain selector),
-     and on a phone the dock owns these three destinations unconditionally. */
-  html body #forge-trigger, html body #dfi-trigger, html body #ide-trigger { display: none !important; }
-  html body .bar { display: grid; grid-template-columns: 44px 1fr 44px 44px 55px; grid-template-rows: auto auto; gap: 8px; align-items: center; }
-  html body #input { grid-column: 1 / -1; grid-row: 1; }
+  html body .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  /* display:contents so #bar-left's children are flex items of the strip itself, not of a nested
+     box that would size them independently and break the shared basis. */
   html body #bar-left { display: contents; }
-  html body #bar-mid { display: none; }
-  html body #attach { grid-column: 1; grid-row: 2; }
-  html body #speak { grid-column: 3; grid-row: 2; display: flex; }
-  html body #mic { grid-column: 4; grid-row: 2; }
-  html body #send { grid-column: 5; grid-row: 2; justify-self: end; }
-  html body #attach, html body #speak, html body #mic {
-    box-sizing: border-box; width: 44px; height: 44px; margin: 0; padding: 0; border-radius: 10px;
-    border: 1px solid rgba(212, 130, 60, .45); background: rgba(10, 6, 2, .55);
-    display: flex; align-items: center; justify-content: center;
+  html body #input { flex: 0 0 100%; order: 1; min-height: 50px; }
+  html body #bar-mid { order: 0; }
+  /* Every tile, one size. flex-basis 0 means the free space is split evenly, so eight tiles are
+     identical and seven tiles are identical-and-slightly-wider. max-width keeps them from growing
+     into slabs on a 720px tablet; the 1/1 ratio derives height so nothing is ever set twice. */
+  html body #attach,
+  html body #forge-trigger,
+  html body #dfi-trigger,
+  html body #ide-trigger,
+  html body .dt-guide-pill.dt-guide-docked,
+  html body #speak,
+  html body #mic,
+  html body #send {
+    order: 2;
+    flex: 1 1 0; min-width: 0; max-width: 54px;
+    box-sizing: border-box; width: auto; height: auto; aspect-ratio: 1 / 1;
+    margin: 0; padding: 0; border-radius: 10px;
+    align-items: center; justify-content: center; place-items: center;
   }
-  html body #attach svg, html body #speak svg, html body #mic svg { width: 21px; height: 21px; }
-  html body #send { width: 55px; height: 55px; margin: 0; }
+  /* Display is left to each control's own rules on purpose: #ide-trigger is display:none until it
+     carries .on, and forcing it visible here would put the Crucible opener on screen while the
+     Crucible is not engaged. Restoring these three is about un-hiding them, not overriding them. */
+  html body #attach, html body #speak, html body #mic {
+    border: 1px solid rgba(212, 130, 60, .45); background: rgba(10, 6, 2, .55);
+    display: flex;
+  }
+  html body #attach svg, html body #speak svg, html body #mic svg,
+  html body #forge-trigger svg, html body #dfi-trigger svg, html body #ide-trigger svg {
+    width: 21px; height: 21px;
+  }
+  /* The pill's text does not fit a square tile, so it uses the compact "?" face already defined
+     for narrow phones below. */
+  html body .dt-guide-pill.dt-guide-docked {
+    padding: 0; min-width: 0; min-height: 0; font-size: 0; justify-content: center;
+  }
+  html body .dt-guide-pill.dt-guide-docked::before { content: "?"; font-size: 15px; font-weight: 800; letter-spacing: 0; }
 }
 
 /* ---- Crucible stage, phones: the dock floats over the stage's last 82px, and the stage's own
@@ -793,17 +827,15 @@
    row of its own to sit in alone. A 43px row plus its gap, spent on one small button, directly
    beside a 72px hole.
 
-   So the pill is given the hole explicitly. Nothing is hidden, renamed, or moved out of reach: the
-   same seven controls remain one tap away, in one fewer row. The rest is trimming that costs
-   nothing anyone can feel, and the numbers are in the commit message. ---- */
+   So the pill was given the hole explicitly, by number: grid-column 3.
+
+   SUPERSEDED 2026-07-30 evening. That number was read off the six-column grid described above,
+   but the grid in force by then was Option 1's five columns, whose column 3 is the SPEAKER. The
+   pill was parked on top of #speak, which is the same collision the 2026-07-19 comment near line
+   382 of this file records and "fixed" the same way, with numbers. Twice is a pattern, so the
+   strip above no longer uses numbered cells at all and the pill needs no placement of its own.
+   Only the input sizing is kept here. ---- */
 @media (max-width: 720px) {
-  /* The empty middle cell, now occupied. Explicit placement also means adding a future control to
-     .bar-left cannot silently open another orphan row: it will land in a named cell or overlap
-     visibly, and a visible collision gets fixed. */
-  html body .dt-guide-pill.dt-guide-docked {
-    grid-column: 3; grid-row: 2; justify-self: center; align-self: center;
-    height: 44px; width: 40px; min-width: 40px;
-  }
   /* An empty single-line box does not need to look like a paragraph field. It still grows with
      what is typed, so nothing is lost above one line. */
   html body #input { min-height: 50px; }
