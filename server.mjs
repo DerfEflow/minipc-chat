@@ -162,6 +162,8 @@ import { escalationFor, sendWakeups } from "./idepush.mjs";
 import { SETUP_HTML } from "./setuppage.mjs";
 import { createCloudBackup } from "./cloudbackup.mjs";
 import { createVolumeBackup } from "./volumebackup.mjs";
+import { createWorkOrders, TASKS as WORK_ORDER_TASKS } from "./workorders.mjs";
+import { createWorkOrderRunner } from "./workorderrunner.mjs";
 import { createInboxIngest } from "./inboxingest.mjs";
 import { createChatJobs, coalesceEvents } from "./chatjobs.mjs";
 import { createLongRun } from "./longrun.mjs";
@@ -1279,6 +1281,15 @@ const handsHub = createHandsHub({
       const roots = forgeStore.getRoots(uid);
       if (roots.length) handsHub.dispatch(nodeKey, "set_roots", { roots }, { timeoutMs: 15000 }).catch(() => {});
     }
+    /*
+     * A machine just came back. Anything parked waiting for it runs now. This is what lets a 3am
+     * work order survive a laptop that was asleep at 3am: the run was never skipped, only parked,
+     * and opening the lid is what releases it. Deferred a few seconds so the node has finished
+     * announcing itself before we start dispatching work at it.
+     */
+    setTimeout(() => {
+      workOrderRunner.onNodeOnline(nodeKey).catch((e) => console.log("[dominion-ai] work-order catch-up: " + e.message));
+    }, 5000);
   },
 });
 /*
@@ -1579,6 +1590,23 @@ const volumeBackup = createVolumeBackup({
   // non-technical owner a lost key turns every backup into noise, which is a worse expected
   // outcome than the risk encryption removes. Set it and the archive becomes AES-256-GCM.
   encryptionKey: cfgGet("BACKUP_KEY", ""),
+  log: (m) => console.log("[dominion-ai] " + m),
+});
+
+/*
+ * ---- SCHEDULED WORK ORDERS (Fred, 2026-07-31). Place an order from the phone, it runs on the
+ * machine you named, and both devices see the same list because the order lives here rather than
+ * on either device.
+ *
+ * No model is involved anywhere in this path. Fred's ruling: a short list of tasks that cannot be
+ * misread beats an agent interpreting a sentence at 3am. Each task is a fixed entry with a fixed
+ * executor, so a run costs nothing, behaves identically every time, and can be undone.
+ */
+const workOrders = createWorkOrders({ dir: DATA_DIR });
+const workOrderRunner = createWorkOrderRunner({
+  store: workOrders,
+  dispatch: (node, tool, args, opts) => handsHub.dispatch(node, tool, args, opts),
+  nodeOnline: () => { try { return handsHub.nodeNames(); } catch { return []; } },
   log: (m) => console.log("[dominion-ai] " + m),
 });
 
@@ -4384,6 +4412,69 @@ async function handleVolumeBackup(req, res, u) {
     const body = (await readJsonBody(req)) || {};
     return json(200, await volumeBackup.verify({ fileId: String(body.fileId || "") }));
   }
+  return json(404, { error: "not found" });
+}
+
+/*
+ * SCHEDULED WORK ORDERS, per account.
+ *
+ *   GET  /work-orders           the task list, this account's orders, and which machines are up
+ *   POST /work-orders           place one: {task, folder, node, cadence, atHour, atMinute, tz}
+ *   POST /work-orders/run       run one right now (used for "run it now" and to force past a dry run)
+ *   POST /work-orders/undo      put a completed run's files back, from its own journal
+ *   POST /work-orders/enable    pause or resume
+ *   POST /work-orders/delete    remove
+ *   POST /work-orders/seen      clear the drawer dot
+ *
+ * Every route resolves the order by id AND uid, so one account can never touch another's schedule.
+ */
+async function handleWorkOrders(req, res, u) {
+  const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
+  const T = resolveTenant(req);
+  if (T.role === "anon") return json(401, { error: "sign in" });
+  const uid = T.isOwner ? "owner" : String(T.uid || "");
+  if (!uid) return json(403, { error: "no account" });
+  const p = u.pathname;
+
+  if (req.method === "GET" && (p === "/work-orders" || p === "/work-orders/list")) {
+    let machines = [];
+    try { machines = handsHub.nodeNames().filter((n) => (T.isOwner ? !n.startsWith("user:") : n === "user:" + uid)); } catch {}
+    return json(200, {
+      tasks: workOrders.tasks(), orders: workOrders.list(uid), machines,
+      unseen: workOrders.unseenCount(uid),
+      // The browser tells the server its zone so "3am" means 3am where the person is standing.
+      serverNow: Date.now(),
+    });
+  }
+
+  const body = (await readJsonBody(req)) || {};
+  const mine = (id) => { const o = workOrders.get(String(id || "")); return o && o.uid === uid ? o : null; };
+
+  if (req.method === "POST" && p === "/work-orders") {
+    const r = workOrders.create(uid, { ...body, createdFrom: String(body.createdFrom || "").slice(0, 40) });
+    if (r.error) return json(400, r);
+    console.log(`[dominion-ai] work-order placed: ${r.order.taskLabel} on ${r.order.node || "any machine"} — ${r.order.schedule}`);
+    return json(200, r);
+  }
+  if (req.method === "POST" && p === "/work-orders/run") {
+    const o = mine(body.id); if (!o) return json(404, { error: "no such work order" });
+    // `force` is how the dashboard turns an approved dry run into the real thing.
+    return json(200, await workOrderRunner.runOne(o, { force: body.force === true }));
+  }
+  if (req.method === "POST" && p === "/work-orders/undo") {
+    const o = mine(body.id); if (!o) return json(404, { error: "no such work order" });
+    return json(200, await workOrderRunner.undo(o));
+  }
+  if (req.method === "POST" && p === "/work-orders/enable") {
+    const o = mine(body.id); if (!o) return json(404, { error: "no such work order" });
+    workOrders.setEnabled(uid, o.id, body.enabled !== false);
+    return json(200, { ok: true, order: workOrders.get(o.id) });
+  }
+  if (req.method === "POST" && p === "/work-orders/delete") {
+    const o = mine(body.id); if (!o) return json(404, { error: "no such work order" });
+    return json(200, workOrders.remove(uid, o.id));
+  }
+  if (req.method === "POST" && p === "/work-orders/seen") return json(200, workOrders.markSeen(uid));
   return json(404, { error: "not found" });
 }
 
@@ -9073,6 +9164,7 @@ const server = http.createServer(async (req, res) => {
     if (["/ledger", "/evals", "/rules", "/prompts", "/finetune", "/reviews", "/pipeline", "/tool-overlays"].some((b) => path === b || path.startsWith(b + "/"))) return handleFlywheel(req, res, u);
     if (path === "/persona" || path.startsWith("/persona/")) return handlePersona(req, res, u);
     if (path === "/volume-backup" || path.startsWith("/volume-backup/")) return handleVolumeBackup(req, res, u);
+    if (path === "/work-orders" || path.startsWith("/work-orders/")) return handleWorkOrders(req, res, u);
 
     if (path === "/ide" || path.startsWith("/ide/")) return handleIde(req, res, u);
 
@@ -9192,6 +9284,19 @@ server.listen(PORT, HOST, () => {
      */
     if (st.stale) console.log(`[dominion-ai] volume-backup: NO SUCCESSFUL BACKUP YET${st.lastError ? "  ·  last error: " + st.lastError : ""}`);
     else console.log(`[dominion-ai] volume-backup: last success ${st.ageHours}h ago  ·  ${st.lastName}  ·  ${(st.lastBytes / 1e6).toFixed(1)}MB`);
+  }
+  /*
+   * The work-order ticker. Every minute, because the finest schedule anyone can set is a minute and
+   * a job that runs at 3:00:40 instead of 3:00:00 is nobody's problem. Anything due whose machine
+   * is asleep gets parked, not skipped; onConnect above releases it.
+   */
+  {
+    const tickMs = Math.max(15000, Number(cfgGet("WORK_ORDER_TICK_MS", "60000")) || 60000);
+    setInterval(() => {
+      workOrderRunner.tick(Date.now()).catch((e) => console.log("[dominion-ai] work-order tick: " + e.message));
+    }, tickMs);
+    const pending = workOrders.due(Date.now() + 24 * 3600 * 1000).length;
+    console.log(`[dominion-ai] work-orders: ticking every ${Math.round(tickMs / 1000)}s  ·  ${pending} order(s) due in the next 24h  ·  tasks: ${Object.keys(WORK_ORDER_TASKS).join(", ")}`);
   }
   // Warm the persona vector cache in the background so the FIRST As-Fred query doesn't pay the
   // full 14k-vector SQLite load inside an interactive request.

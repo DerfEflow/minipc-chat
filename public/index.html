@@ -186,6 +186,16 @@
       <span class="ide-row-label">IDE Mode</span>
       <span class="ide-switch" aria-hidden="true"></span>
     </button>
+    <!-- Scheduled work orders. The same entry on phone and on desktop, because the order lives on
+         the server and either device is only a window onto it. Opens a pop-up layer that exits the
+         moment an order is sent (Fred, 2026-07-31). -->
+    <button id="sb-orders" class="sb-orders" type="button" title="Jobs that run on their own, on a schedule">
+      <svg class="sb-orders-glyph" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M12 7v5.2l3.4 2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <span>Scheduled Work Orders</span>
+    </button>
     <button id="sb-setup" class="sb-setup" type="button" title="Connectors, credits, and account setup">
       <span class="sb-setup-core" aria-hidden="true"></span><span>Setup · Connectors &amp; Credits</span>
     </button>
@@ -572,6 +582,7 @@
   <script src="/app.js?v=67"></script>
   <script src="/dominion-ui.js?v=39"></script>
   <script src="/dominion-tenant.js?v=5" defer></script>
+  <script src="/dominion-orders.js?v=1" defer></script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>
 </body>
 </html>

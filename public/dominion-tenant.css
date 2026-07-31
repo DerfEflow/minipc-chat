@@ -788,6 +788,90 @@
   html body #to-crucible { width: 100%; justify-content: center; margin: 0 0 6px; padding: 9px 12px; font-size: 12px; }
 }
 
+/* ---- SCHEDULED WORK ORDERS (Fred, 2026-07-31). A pop-up layer that is both the dashboard and the
+   order form, appended to <body> rather than the drawer: a fixed-position child of a TRANSFORMED
+   ancestor positions against that ancestor instead of the viewport, and the drawer is transformed.
+   That trap has already cost this app one round of debugging. ---- */
+.sb-orders {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 10px 12px; margin: 4px 0 0; box-sizing: border-box;
+  font: inherit; font-size: 12.5px; letter-spacing: .03em; text-align: left; cursor: pointer;
+  color: var(--ink, #dfe9f0); background: rgba(9, 18, 26, .5);
+  border: 1px solid rgba(185, 107, 50, .3); border-radius: 9px;
+}
+.sb-orders:hover { border-color: rgba(232, 160, 74, .6); }
+.sb-orders-glyph { width: 17px; height: 17px; flex: 0 0 auto; color: #e8a04a; }
+/* The dot: something ran since you last looked. It is the only reason to open the panel unprompted,
+   so it has to be visible without being loud. */
+.sb-orders.has-new { position: relative; }
+.sb-orders.has-new::after {
+  content: ""; position: absolute; top: 8px; right: 10px; width: 7px; height: 7px; border-radius: 50%;
+  background: radial-gradient(circle, #d4ffc4 0%, #79ff52 55%, #1c8f3c 100%);
+  box-shadow: 0 0 7px 1px rgba(121, 255, 82, .8);
+}
+
+.wo-layer { position: fixed; inset: 0; z-index: 4000; display: flex; align-items: center; justify-content: center; }
+.wo-layer[hidden] { display: none; }
+.wo-scrim { position: absolute; inset: 0; background: rgba(2, 5, 9, .72); backdrop-filter: blur(4px); }
+.wo-panel {
+  position: relative; width: min(560px, calc(100vw - 24px)); max-height: min(84vh, 780px);
+  display: flex; flex-direction: column; overflow: hidden;
+  border-radius: 14px; border: 1px solid rgba(185, 107, 50, .45);
+  background: linear-gradient(160deg, rgba(16, 22, 30, .98), rgba(6, 9, 13, .99));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .7), inset 0 1px 0 rgba(255, 220, 170, .1);
+}
+.wo-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 10px; border-bottom: 1px solid rgba(185, 107, 50, .28); }
+.wo-title { font-size: 13px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #e8c9a4; }
+.wo-x { background: none; border: 0; color: var(--muted, #8ba0ae); font-size: 24px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.wo-x:hover { color: #fff; }
+.wo-body { overflow-y: auto; padding: 14px 16px 18px; }
+.wo-h { font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--muted, #8ba0ae); margin: 0 0 8px; }
+.wo-empty { margin: 0 0 16px; font-size: 12.5px; line-height: 1.5; color: var(--muted, #8ba0ae); }
+
+.wo-row { padding: 10px 12px; margin: 0 0 8px; border-radius: 10px; border: 1px solid rgba(185, 107, 50, .26); background: rgba(9, 15, 21, .6); }
+.wo-row.off { opacity: .55; }
+.wo-row-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--ink, #dfe9f0); }
+.wo-row-sub { font-size: 11.5px; color: var(--muted, #8ba0ae); margin-top: 2px; word-break: break-all; }
+.wo-row-last { font-size: 11.5px; color: #cfe6d2; margin-top: 5px; }
+.wo-dim { opacity: .6; }
+.wo-badge { font-size: 9.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 2px 7px; border-radius: 999px; border: 1px solid currentColor; }
+.wo-badge.ok { color: #79ff52; } .wo-badge.dry { color: #e8c9a4; }
+.wo-badge.wait { color: #7fb6ff; } .wo-badge.bad { color: #ff8a6a; }
+.wo-row-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.wo-row-btns button {
+  font: inherit; font-size: 11px; padding: 5px 9px; border-radius: 7px; cursor: pointer;
+  color: #d8ecff; border: 1px solid rgba(139, 205, 244, .34); background: rgba(12, 24, 36, .8);
+}
+.wo-row-btns button:hover { border-color: rgba(157, 255, 146, .5); color: #fff; }
+.wo-row-btns .wo-del { color: #ff9c85; border-color: rgba(255, 120, 90, .38); }
+
+.wo-new { margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(185, 107, 50, .24); }
+.wo-f { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted, #8ba0ae); }
+.wo-f input, .wo-f select {
+  font: inherit; font-size: 13px; text-transform: none; letter-spacing: 0; padding: 8px 10px; border-radius: 8px;
+  color: var(--ink, #dfe9f0); background: rgba(9, 18, 26, .85); border: 1px solid rgba(185, 107, 50, .38);
+}
+.wo-when { display: flex; gap: 10px; flex-wrap: wrap; }
+.wo-when .wo-f { flex: 1 1 140px; min-width: 0; }
+.wo-blurb, .wo-note { margin: -4px 0 10px; font-size: 11.5px; line-height: 1.5; color: var(--muted, #8ba0ae); }
+.wo-note { border-left: 2px solid rgba(185, 107, 50, .45); padding-left: 10px; }
+.wo-actions { display: flex; justify-content: flex-end; }
+.wo-send {
+  font: inherit; font-size: 13px; font-weight: 700; letter-spacing: .05em; padding: 10px 18px; border-radius: 9px; cursor: pointer;
+  color: #eafff0; border: 1px solid rgba(120, 220, 120, .5);
+  background: linear-gradient(145deg, rgba(38, 118, 44, .9), rgba(3, 30, 16, .95));
+  box-shadow: 0 0 16px rgba(100, 255, 90, .16), inset 0 1px 0 rgba(226, 255, 221, .22);
+}
+.wo-send:hover { filter: brightness(1.1); }
+.wo-status { margin: 10px 0 0; font-size: 12px; line-height: 1.5; color: #cfe6d2; min-height: 1em; }
+.wo-status.bad { color: #ff9c85; }
+
+@media (max-width: 720px) {
+  .wo-panel { width: 100vw; max-height: 100vh; height: 100%; border-radius: 0; border-left: 0; border-right: 0; }
+  .wo-layer { align-items: stretch; }
+  .wo-body { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+}
+
 /* ---- The fast lane (OpenAI service_tier "fast", 2026-07-30). Quiet when off, unmistakable when
    armed, because the difference between those two states is the difference between a normal bill
    and a doubled one. Amber rather than green: in this app green means free or safe, and paying

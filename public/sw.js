@@ -1,11 +1,12 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v144-composer-restored-and-header-folds";
+const CACHE = "dominion-ai-v145-work-orders-and-composer";
 const SHELL = [
   "/",
   "/index.html",
   "/setup.html",
   "/dominion-tenant.css?v=17",
   "/dominion-tenant.js?v=4",
+  "/dominion-orders.js?v=1",
   "/dominion-vault.css?v=2",
   "/dominion-images.css?v=8",
   "/dominion-images.js?v=13",
