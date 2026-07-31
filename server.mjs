@@ -124,6 +124,7 @@ import { createHandsHub } from "./hands/hub.mjs";
 import { createGuestSandbox } from "./guestsandbox.mjs";
 import { createFlyRunner } from "./flyrunner.mjs";
 import { laneFor, canChooseLane, normalizeBuildWhere } from "./buildlane.mjs";
+import { sanitizeToolList } from "./toolschema.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS, PRIVATE_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
 import { createUsersStore } from "./tenancy.mjs";
@@ -803,7 +804,16 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     // Phase B: attach this box's tool schemas (already OpenAI function format) so tool-capable
     // cloud models can drive the same tools the local model uses.
     if (shaped.tools) {
-      payload.tools = shaped.tools;
+      /*
+       * LAST LINE BEFORE THE WIRE (Fred, live, 2026-07-31). connectors.mjs repairs the schemas it
+       * forwards, and this catches every other source: overlays, the Forge extras, anything added
+       * later by someone who has never heard of this failure. A malformed schema does not degrade
+       * one tool, it makes the strictest provider refuse the ENTIRE request, so the cheapest place
+       * to be certain is the last place the array is touched. Valid schemas pass through as the
+       * same objects, so this costs nothing on the normal path.
+       */
+      const safe = sanitizeToolList(shaped.tools, { log: (m) => console.log("[dominion-ai] " + m) });
+      payload.tools = safe.tools;
       if (shaped.toolsDropped) console.log(`[dominion-ai] tool defs capped at ${shaped.tools.length} for ${directId} (${shaped.toolsDropped} dropped — provider limit)`);
       // opts.toolChoice="none" = conclusion rounds: schemas stay visible (agent models get confused
       // when tools vanish mid-conversation) but the API hard-blocks further calls.

@@ -18,6 +18,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomBytes, createCipheriv, createDecipheriv, createHash } from "node:crypto";
+import { sanitizeToolParameters } from "./toolschema.mjs";
 import { spawn } from "node:child_process";
 
 // ---- registry ---------------------------------------------------------------------------------
@@ -438,10 +439,25 @@ export function createConnectors({ dir, cfgGet, providers = {} }) {
       const p = providerOf(e);
       try {
         const tools = p ? p.toolDefs() : (await toolsOf(T, e.id)).tools;
-        for (const t of tools) out.push({ type: "function", function: {
-          name: mangle(e.id, t.name),
-          description: `[${e.name} connector] ` + String(t.description || t.name).slice(0, 700),
-          parameters: t.inputSchema || { type: "object", properties: {} } } });
+        for (const t of tools) {
+          /*
+           * REPAIR THE SCHEMA BEFORE IT LEAVES (Fred, live, 2026-07-31). These arrive from
+           * third-party MCP servers and used to be forwarded verbatim. Supabase's migration tools
+           * declare a `required` property they never define, which is malformed JSON Schema.
+           * OpenAI tolerates it; Moonshot rejects the WHOLE request, so one bad tool from one
+           * connector silently cost every Moonshot turn on the account, naming a path in a schema
+           * the user has never seen and cannot fix. A valid schema passes through untouched.
+           */
+          const fixed = sanitizeToolParameters(t.inputSchema);
+          if (fixed.changed) {
+            console.log(`[connectors] ${e.id}: repaired the schema for "${t.name}"` +
+              (fixed.dropped.length ? ` (dropped required ${fixed.dropped.map((d) => `"${d}"`).join(", ")}: named but never defined)` : ""));
+          }
+          out.push({ type: "function", function: {
+            name: mangle(e.id, t.name),
+            description: `[${e.name} connector] ` + String(t.description || t.name).slice(0, 700),
+            parameters: fixed.parameters } });
+        }
       } catch (err) { console.log(`[connectors] ${e.id} tool listing failed for ${T.isOwner ? "owner" : T.uid}: ${String(err.message || err).slice(0, 200)}`); }
     }
     return out;
