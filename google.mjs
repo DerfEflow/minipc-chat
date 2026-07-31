@@ -12,7 +12,7 @@
  *   - Gmail, Calendar, Drive, Sheets, Docs APIs enabled; users added as test users until verified.
  *   - GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET set on the box.
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHmac, randomBytes } from "node:crypto";
 
@@ -39,7 +39,9 @@ export function createGoogleProvider({ dir, cfgGet, baseUrl, enc, dec }) {
   function saveTok(T, t) { const f = tokFile(T); mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, enc(JSON.stringify(t))); }
 
   const ready = () => !!(clientId() && clientSecret());
-  const connected = (T) => !!loadTok(T);
+  // "Connected" means a usable credential exists, never merely that a file parsed. An empty or
+  // gutted token object used to satisfy this and stranded the Setup card on Disconnect forever.
+  const connected = (T) => { const t = loadTok(T); return !!(t && (t.refresh || t.access)); };
 
   // ---- OAuth flow ----
   function signState(uid) {
@@ -74,7 +76,23 @@ export function createGoogleProvider({ dir, cfgGet, baseUrl, enc, dec }) {
     saveTok(T, { refresh: t.refresh_token || prev.refresh, access: t.access_token, exp: Date.now() + (t.expires_in || 3500) * 1000 });
     return { ok: true, uid };
   }
-  function disconnect(T) { try { saveTok(T, {}); } catch {} return { ok: true }; }
+  /*
+   * DISCONNECT MUST ACTUALLY DISCONNECT (Fred, live, 2026-07-30).
+   *
+   * This wrote an EMPTY OBJECT over the token file. `connected()` was `!!loadTok(T)`, and in
+   * JavaScript `!!{}` is true, so a "disconnected" account still reported itself connected: the
+   * Setup card kept offering Test and Disconnect and NEVER offered Connect again. Fred clicked
+   * Disconnect, the tool switched off, he switched it back on, and the card still said Disconnect,
+   * forever. The reconnect path was unreachable from the interface, which is why a Google account
+   * he believed he had reconnected had in fact been impossible to reconnect.
+   *
+   * Delete the file. An absent file is the only honest way to say "no account here".
+   */
+  function disconnect(T) {
+    try { rmSync(tokFile(T), { force: true }); } catch {}
+    try { if (loadTok(T)) writeFileSync(tokFile(T), enc(JSON.stringify({}))); } catch {}   // last-ditch, unreachable in practice
+    return { ok: true };
+  }
 
   async function accessToken(T) {
     const t = loadTok(T);
@@ -85,7 +103,22 @@ export function createGoogleProvider({ dir, cfgGet, baseUrl, enc, dec }) {
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ refresh_token: t.refresh, client_id: clientId(), client_secret: clientSecret(), grant_type: "refresh_token" }) });
     const n = await r.json();
-    if (!n.access_token) throw new Error("Google token refresh failed: " + (n.error_description || n.error || "unknown"));
+    if (!n.access_token) {
+      /*
+       * A refresh that Google refuses PERMANENTLY (revoked consent, expired refresh token, a
+       * client that no longer matches) can never succeed again, so keeping the credential only
+       * makes the app claim a connection it does not have. Tonight's live case: the volume backup
+       * failed every night with "Token has been expired or revoked" while Setup showed Google as
+       * connected. Clearing it drops the card back to "Connect Google Workspace", which is both
+       * true and actionable. Transient failures (network, 5xx) keep the token.
+       */
+      const why = String(n.error_description || n.error || "unknown");
+      if (/invalid_grant|expired|revoked|unauthorized_client|invalid_client/i.test(why)) {
+        try { rmSync(tokFile(T), { force: true }); } catch {}
+        throw new Error("Google access was revoked or expired, so the stored connection was cleared. Reconnect Google in Setup. (" + why + ")");
+      }
+      throw new Error("Google token refresh failed: " + why);
+    }
     saveTok(T, { ...t, access: n.access_token, exp: Date.now() + (n.expires_in || 3500) * 1000 });
     return n.access_token;
   }
