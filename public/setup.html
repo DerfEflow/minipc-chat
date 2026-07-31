@@ -1102,7 +1102,10 @@
           input.setAttribute("aria-label", "Enable " + r.name);
           input.addEventListener("change", async () => {
             try { await api("/connectors/toggle", { method: "POST", body: { id: r.id, on: input.checked } }); toast((input.checked ? "Enabled " : "Disabled ") + r.name, "success"); loadConnectors(); }
-            catch (error) { input.checked = !input.checked; setMessage(cxMessage, errorLabel(error), "error"); }
+            // A refused toggle flips back on its own; if the reason only reaches the message box at
+            // the foot of the panel, the switch appears to move by itself for no stated reason.
+            // Success already toasts, so failure must too.
+            catch (error) { input.checked = !input.checked; toast(r.name + ": " + errorLabel(error), "error"); setMessage(cxMessage, errorLabel(error), "error"); }
           });
           sw.append(input, node("span"));
           head.append(sw);
@@ -1161,23 +1164,39 @@
               line.append(connect);
             }
           } else {
+            /*
+             * The answer goes where the eye already is (Fred, live, 2026-07-30: "Hit test, and
+             * nothing happened"). It DID happen: the result was written to the section's message
+             * box, which sits at the very bottom of the panel below the whole custom-connector
+             * form, usually off-screen. A verdict nobody can see is the same failure as no
+             * verdict, so every result now lands on this connector's own row as well.
+             */
+            const verdict = node("span", "dt-message");
+            verdict.style.marginLeft = "8px";
+            verdict.setAttribute("aria-live", "polite");
+            const say = (text, kind) => {
+              verdict.textContent = text;
+              verdict.className = "dt-message" + (kind ? " dt-message-" + kind : "");
+              setMessage(cxMessage, text, kind);   // the section box keeps its copy for scrollback
+            };
             const test = node("button", "dt-button dt-button-secondary dt-button-small", "Test");
             test.type = "button";
             test.addEventListener("click", async () => {
               setBusy(test, true, "Testing");
+              say("Testing " + r.name + "…", "");
               try {
                 const t = await api("/connectors/test", { method: "POST", body: { id: r.id } });
-                setMessage(cxMessage, r.name + " connected: " + t.tools + " tool(s)" + (t.server ? " as " + t.server : "") + ".", "success");
-              } catch (error) { setMessage(cxMessage, r.name + " test failed: " + errorLabel(error), "error"); }
+                say(r.name + " connected: " + t.tools + " tool(s)" + (t.server ? " as " + t.server : "") + ".", "success");
+              } catch (error) { say(r.name + " test failed: " + errorLabel(error), "error"); }
               setBusy(test, false);
             });
             const disc = node("button", "dt-button dt-button-secondary dt-button-small", "Disconnect");
             disc.type = "button";
             disc.addEventListener("click", async () => {
               try { await api("/connectors/" + r.id + "/disconnect", { method: "POST", body: {} }); toast("Disconnected " + r.name, "success"); loadConnectors(); }
-              catch (error) { setMessage(cxMessage, errorLabel(error), "error"); }
+              catch (error) { say(errorLabel(error), "error"); }
             });
-            line.append(test, disc);
+            line.append(test, disc, verdict);
           }
           if (line.childNodes.length) row.append(line);
         }
@@ -1190,7 +1209,7 @@
           ginput.setAttribute("aria-label", "Allow guests to use " + r.name);
           ginput.addEventListener("change", async () => {
             try { await api("/connectors/guest-flag", { method: "POST", body: { id: r.id, on: ginput.checked } }); toast((ginput.checked ? "Opened " : "Closed ") + r.name + " for guests", "success"); }
-            catch (error) { ginput.checked = !ginput.checked; setMessage(cxMessage, errorLabel(error), "error"); }
+            catch (error) { ginput.checked = !ginput.checked; toast(r.name + ": " + errorLabel(error), "error"); setMessage(cxMessage, errorLabel(error), "error"); }
           });
           gsw.append(ginput, node("span"));
           guestRow.append(gsw);

@@ -506,6 +506,35 @@
   .cw-card { padding: 22px 16px 26px; }
 }
 
+/*
+ * "Return to chat" on the profile chooser (Fred, 2026-07-30: "the exit button is white. Cant see
+ * any text. It does work though."). The markup shipped with NO rule of its own, so it fell back to
+ * the browser's default button chrome: a light box on a dark overlay, with text the same colour as
+ * its own background. It is the quietest control on the screen and should look it, so this is the
+ * card's language at lower contrast rather than another primary button.
+ */
+.cw-exit {
+  margin-top: 18px;
+  padding: 9px 18px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: .04em;
+  color: var(--muted, #8ba0ae);
+  border: 1px solid rgba(151, 200, 235, .22);
+  border-radius: 11px;
+  background: linear-gradient(180deg, rgba(14, 32, 50, .9), rgba(5, 12, 22, .94));
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .08);
+  transition: color .16s ease, border-color .16s ease, box-shadow .16s ease, transform .12s ease;
+}
+.cw-exit:hover, .cw-exit:focus-visible {
+  color: var(--ink, #eaf6ff);
+  border-color: rgba(151, 200, 235, .45);
+  box-shadow: inset 0 1px 0 rgba(225, 247, 255, .14), 0 0 18px rgba(118, 255, 104, .12);
+}
+.cw-exit:active { transform: translateY(1px); }
+
 /* The way out of the Crucible says where it goes, in words. */
 .ide-rail-back { width: auto !important; gap: 8px; padding: 0 14px 0 10px; }
 .ide-back-label {
