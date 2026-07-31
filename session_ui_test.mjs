@@ -16,7 +16,17 @@ assert.match(app, /const legacyModel[\s\S]*c\.model\s*=\s*legacyModel/, "legacy 
 assert.match(app, /b\.activityAt\s*\|\|\s*b\.updatedAt/, "preference changes must not reorder the sidebar");
 assert.doesNotMatch(app, /c\.model\s*=\s*modelSel\.value[\s\S]{0,180}renderSidebar\(\)/, "changing a model must not rebuild and reorder the sidebar under the pointer");
 assert.match(app, /function restoreChatModel\(\)/, "sidebar switches need an explicit model restore");
-assert.match(app, /modelId:\s*modelSel\s*\?\s*modelSel\.value/, "every sent user message must snapshot the dropdown model");
+/*
+ * 2026-07-30: the snapshot now goes through stampedModelId(), which still takes the dropdown value
+ * first. What it can no longer do is record the literal "local" when nothing is resolved yet. That
+ * old fallback stamped turns which really ran on the cloud default as Local Qwen, permanently, and
+ * the ledger rail read it back as an engine the app stopped offering in b6f0b03.
+ */
+assert.match(app, /modelId:\s*stampedModelId\(c\)/, "every sent user message must snapshot the model through stampedModelId");
+assert.match(app, /function stampedModelId\(c\)[\s\S]{0,600}modelSel\.value/, "the stamp must still prefer the dropdown selection");
+assert.doesNotMatch(app, /function stampedModelId\(c\)[\s\S]{0,600}\|\|\s*"local"/, "the stamp must never fall back to the local model");
+assert.doesNotMatch(app, /function transcriptModelPlan\(c\)[\s\S]{0,900}\|\|\s*"local"/, "the ledger must never label an unresolved model as Local Qwen");
+assert.doesNotMatch(app, /if \(!id \|\| id === "local" \|\| id === "auto"\) return "Local Qwen"/, "an empty or auto model id must not display as Local Qwen");
 assert.match(app, /modelHistoryVersion\s*!==\s*1/, "legacy transcripts need a one-time model-history migration");
 assert.match(app, /className\s*=\s*"model-era"/, "the transcript must render model change segments");
 assert.match(app, /function transcriptModelPlan\(c\)/, "model history must be derived from models actually saved on messages");

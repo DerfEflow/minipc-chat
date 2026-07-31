@@ -149,7 +149,7 @@ function load() {
   // Chats created before model/draft became session state must stop borrowing whichever model was
   // changed most recently. activityAt keeps preference-sync revisions from reordering the sidebar.
   let migratedSessionState = false;
-  const legacyModel = localStorage.getItem(LS_MODEL) || "local";
+  const legacyModel = localStorage.getItem(LS_MODEL) || "";   // never "local": unset stays unset and resolves to the cloud default at use time
   const legacyForgeTier = ["ember", "flame", "furnace"].includes(localStorage.getItem("dominion.forgeTier"))
     ? localStorage.getItem("dominion.forgeTier") : "ember";
   const legacyForgeMode = localStorage.getItem("dominion.forgeModeEnabled") === "1";
@@ -803,11 +803,27 @@ async function convertToEval(i) {
   const r = await aApi("/evals", { title: orig.replace(/\s+/g, " ").slice(0, 80), input: orig.slice(0, 4000), expectedBehavior: exp, source: "manual" });
   alert(r.item ? "Eval case saved — run it from Mentor & Improvement." : "Eval: " + (r.error || "failed"));
 }
+/*
+ * The ledger rail: which engine each stretch of the transcript ran on.
+ *
+ * The UNKNOWN-model fallback used to be the literal string "local", left over from when Local Qwen
+ * was the default engine. Since it left the picker (b6f0b03) that fallback has been actively
+ * misleading: a brand new chat has no c.model until the first send, so the rail rendered a "Local
+ * Qwen" chip above a picker plainly reading DeepSeek V4 Pro (Fred, 2026-07-30: "that picked, it
+ * loaded my local Qwen model which should no longer be even available"). Nothing had loaded local.
+ * The server routes these turns to the cloud default correctly; only this label lied, and it named
+ * the one engine most alarming to see.
+ *
+ * Unknown now resolves to the same cloud default the send path uses, so the rail and the picker
+ * cannot disagree. A message that genuinely RAN on local still carries modelId "local" and still
+ * reads Local Qwen, because history stays honest.
+ */
 function transcriptModelPlan(c) {
   const entries = [], slots = [];
+  const unknown = () => defaultCloudModel() || c.model || "";
   let actualModel = "", slot = -1;
   for (const m of c.messages || []) {
-    const id = m.modelId || actualModel || c.model || "local";
+    const id = m.modelId || actualModel || c.model || unknown();
     if (!actualModel || id !== actualModel) {
       actualModel = id;
       if (entries.length < 3) {
@@ -818,7 +834,7 @@ function transcriptModelPlan(c) {
     slots.push(Math.max(0, slot));
   }
   if (!entries.length) {
-    entries.push({ id: c.model || "local", pending: true });
+    entries.push({ id: c.model || unknown(), pending: true });
   } else if (c.model && c.model !== actualModel && entries.length < 3) {
     entries.push({ id: c.model, pending: true });
   }
@@ -930,6 +946,23 @@ function defaultCloudModel() {
   for (const g of catalogGroups) for (const m of g.models || []) if (ok(m) && !m.reasoning) return m.id;
   for (const g of catalogGroups) for (const m of g.models || []) if (ok(m)) return m.id;
   return "";
+}
+/*
+ * The id STAMPED onto a stored message. Its one job is to name the engine the turn actually ran on,
+ * because the ledger rail reads it back forever.
+ *
+ * Every stamp used to end its fallback chain in the literal "local". The send path had already been
+ * taught to resolve local/auto to the cloud default (see the send-model resolution above), so those
+ * turns really ran on DeepSeek while being recorded as Local Qwen: a permanent, and after b6f0b03
+ * an impossible, claim about an engine the app no longer offers. Unknown now records the resolved
+ * cloud default, or "" when the catalog has not loaded yet, because "" is honestly unknown and gets
+ * resolved at display time, whereas "local" is an assertion that happens to be false.
+ */
+function stampedModelId(c) {
+  const picked = modelSel && modelSel.value;
+  if (picked && picked !== "auto" && picked !== "local") return picked;
+  if (c && c.model && c.model !== "auto" && c.model !== "local") return c.model;
+  return defaultCloudModel() || "";
 }
 function fmtPriceShort(m) { return money().rate(m.inCost, m.outCost); }
 /*
@@ -1072,7 +1105,16 @@ const modelTrigger = $("model-trigger"), modelPanel = $("model-panel"), modelCur
 const provLabel = (p) => ({ openrouter: "OpenRouter", openai: "OpenAI", deepseek: "DeepSeek", anthropic: "Anthropic", local: "Local" }[p] || p);
 const findCatalogModel = (id) => { for (const g of catalogGroups) { const m = (g.models || []).find((x) => x.id === id); if (m) return m; } return null; };
 function modelDisplayName(id) {
-  if (!id || id === "local" || id === "auto") return "Local Qwen";
+  // "local" still reads Local Qwen: a turn that genuinely ran there should say so forever. But an
+  // EMPTY or "auto" id means "not resolved yet", which is not the same thing and must never be
+  // labelled with an engine the app no longer offers. Those resolve to the cloud default instead.
+  if (id === "local") return "Local Qwen";
+  if (!id || id === "auto") {
+    const d = defaultCloudModel();
+    if (!d) return "Default";                 // catalog still loading; the re-render fills it in
+    const m = findCatalogModel(d);
+    return (m && m.name) || "Default";
+  }
   const m = findCatalogModel(id);
   if (m && m.name) return m.name;
   const o = modelSel && Array.from(modelSel.options).find((x) => x.value === id);
@@ -1622,7 +1664,7 @@ function newSession(c) {
   const st = { c, inner, tools, live, chips: [], raw: "", ctxEl: null, ctxItems: null, doneMeta: null,
                mentorCritique: null, done: false, stopped: false, gone: false, errMsg: "", warm: 0,
                checkpoint: null, stopReason: "",
-               jobId: "", detached: false, modelId: modelSel ? modelSel.value : (c.model || "local"),
+               jobId: "", detached: false, modelId: stampedModelId(c),
                // Wall-clock for the pace warning: the only duration it will ever quote is one
                // measured here, on this device, for this exact model/mode/dial combination.
                startedAt: Date.now(), paceKey: paceKey(paceSetup()) };
@@ -1858,7 +1900,7 @@ function finalizeSession(st) {
   // reattach after an app reload would each record a duration that means something else.
   if (st.done && st.startedAt && !st.detached) { paceRecord(st.paceKey, Date.now() - st.startedAt); renderPace(); }
   if (st.done) {
-    const msg = { role: "assistant", content: final || "(no response)", modelId: st.modelId || c.model || "local" };
+    const msg = { role: "assistant", content: final || "(no response)", modelId: st.modelId || stampedModelId(c) };
     if (st.doneMeta) { msg.meta = st.doneMeta; if (st.ctxItems) msg.meta.contextItems = st.ctxItems; if (st.doneMeta.mode) c.lastMode = st.doneMeta.mode; }
     // Produced documents belong to the message, so the download survives a reload and a device hop.
     if (st.files && st.files.length) { msg.meta = msg.meta || {}; msg.meta.files = st.files; }
@@ -1866,7 +1908,7 @@ function finalizeSession(st) {
     if (speakOn && final) speakAnswer(final);   // voice: read the finished answer aloud (toggle)
   } else if (final) {
     c.messages.push({
-      role: "assistant", content: final, modelId: st.modelId || c.model || "local",
+      role: "assistant", content: final, modelId: st.modelId || stampedModelId(c),
       meta: st.checkpoint
         ? { interrupted: true, checkpoint: st.checkpoint, stopReason: st.stopReason || st.checkpoint.state || "", jobId: st.jobId || "" }
         : { interrupted: true, stopReason: st.stopReason || "", jobId: st.jobId || "" },
@@ -2072,7 +2114,7 @@ async function reconcileJobs() {
         changed = true;
       }
       if (j.status === "running") {
-        if (!liveJobs[j.chatId]) { liveJobs[j.chatId] = { jobId: j.id, eventIndex: 0, modelId: j.model || (jobChat && jobChat.model) || "local" }; changed = true; }
+        if (!liveJobs[j.chatId]) { liveJobs[j.chatId] = { jobId: j.id, eventIndex: 0, modelId: j.model || (jobChat && jobChat.model) || defaultCloudModel() || "" }; changed = true; }
       } else if (!j.collected) {
         const c = chats.find((x) => x.id === j.chatId);
         if (c) { if (await deliverResult(j.id, c)) changed = true; }
@@ -2093,7 +2135,7 @@ async function deliverResult(jobId, c) {
   const text = stripThink(r.text || "");
   if (text) {
     const interrupted = r.status === "stopped" || r.status === "orphaned" || r.status === "error";
-    const ranModel = (liveJobs[c.id] && liveJobs[c.id].modelId) || (r.meta && r.meta.model) || c.model || "local";
+    const ranModel = (liveJobs[c.id] && liveJobs[c.id].modelId) || (r.meta && r.meta.model) || stampedModelId(c);
     const msg = { role: "assistant", content: text, modelId: ranModel };
     if (r.meta && typeof r.meta === "object") { msg.meta = { ...r.meta }; if (r.meta.mode) c.lastMode = r.meta.mode; }
     if (interrupted) { msg.meta = msg.meta || {}; msg.meta.interrupted = true; }
@@ -2124,7 +2166,7 @@ function send() {
   touchChatComponent(c, "draftUpdatedAt", at);
   autosize(); hideCostChip();
   scroll(true);   // a fresh send always re-engages the follow so the reply starts in view
-  const msg = { role: "user", content: text || "", modelId: modelSel ? modelSel.value : (c.model || "local") };
+  const msg = { role: "user", content: text || "", modelId: stampedModelId(c) };
   if (staged.length) {
     msg.attachments = staged;
     c.pendingAttachments = [];
@@ -2150,7 +2192,7 @@ function regenerate() {
 // Pick up where a (possibly stopped) answer left off (spec: offer continuation after stop).
 function continueLast() {
   if (busyFor(curId)) return; const c = cur(); if (!c) return;
-  c.messages.push({ role: "user", content: "Continue the unfinished work from the prior run now. Resume with the next concrete tool action; do not merely restate what remains. Work until complete unless a safety, context, or funded session-budget guard pauses you.", modelId: modelSel ? modelSel.value : (c.model || "local") });
+  c.messages.push({ role: "user", content: "Continue the unfinished work from the prior run now. Resume with the next concrete tool action; do not merely restate what remains. Work until complete unless a safety, context, or funded session-budget guard pauses you.", modelId: stampedModelId(c) });
   c.activityAt = touchChatComponent(c, "transcriptUpdatedAt"); save(); renderAll(); streamReply(c);
 }
 function editUser(i) {
