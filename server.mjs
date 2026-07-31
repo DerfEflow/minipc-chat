@@ -8766,8 +8766,17 @@ const server = http.createServer(async (req, res) => {
       // refuses to deploy over someone's live run. Same no-secrets rule as everything here.
       let runningChatJobs = 0;
       try { for (const j of CHAT_JOBS.values()) if (!j.done) runningChatJobs++; } catch {}
+      /*
+       * runningBuilds: Crucible builds live in a SEPARATE ledger (ideJobs) that this endpoint never
+       * reported, so the pre-push guard cleared deploys while a build was mid-flight. A restart
+       * does not resume a build, it seals it as interrupted, so that blind spot could throw away
+       * half an hour and several dollars of someone's work. Same rule as the count above: a
+       * number, no identities.
+       */
+      let runningBuilds = 0;
+      try { runningBuilds = ideJobs.runningCount(); } catch {}
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ build: BUILD_ID, runner, runnerApp, runningChatJobs }));
+      return res.end(JSON.stringify({ build: BUILD_ID, runner, runnerApp, runningChatJobs, runningBuilds }));
     }
 
     // The live cloud-model catalog (single source of truth). The picker fetches this and renders the

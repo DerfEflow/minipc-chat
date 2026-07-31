@@ -430,6 +430,28 @@
 .vb-army-total { font-size: 12px; color: var(--ink-soft, #d9c9b8); border-top: 1px solid var(--glass-line, rgba(150, 200, 230, .14)); padding-top: 8px; }
 
 /* ---------- 6. Begin Building ------------------------------------------------------------- */
+/* ---- The spend limit, immediately above the button that starts spending. Deliberately plain and
+   close to BEGIN BUILDING: this is the one control standing between an optimistic estimate and a
+   real bill, so it reads as part of the same decision rather than a setting somewhere else. ---- */
+.vb-budget {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin: 0 0 10px; padding: 10px 12px;
+  border: 1px solid rgba(212, 130, 60, .38); border-radius: 10px;
+  background: rgba(10, 6, 2, .45);
+}
+.vb-budget-label { font-size: 12px; font-weight: 700; letter-spacing: .04em; color: #e8d3ba; }
+.vb-budget-input {
+  width: 110px; min-width: 0; padding: 7px 9px;
+  font: inherit; font-size: 14px; color: #ffe9c4;
+  border: 1px solid rgba(212, 130, 60, .5); border-radius: 8px;
+  background: rgba(0, 0, 0, .45);
+}
+.vb-budget-input:focus { outline: 1px solid rgba(255, 176, 74, .8); outline-offset: 1px; }
+.vb-budget-unit { font-size: 12px; color: #e8d3ba; }
+/* The note carries the consequence, and it is the whole point of the row: a blank field is a
+   legitimate choice and must still say what it means. */
+.vb-budget-note { flex: 1 1 100%; font-size: 11px; color: var(--muted, #8ba0ae); }
+
 .vb-begin {
   width: 100%;
   padding: 18px;

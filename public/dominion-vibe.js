@@ -200,7 +200,22 @@
         '<div class="vb-army-total" id="vb-army-total" hidden></div>' +
       '</div>' +
 
-      // ---- 6. Begin Building ----------------------------------------------------------------
+      /*
+       * ---- 6. The spend limit, then Begin Building ------------------------------------------
+       * Directly above the button that starts spending, because a limit read after the fact is a
+       * receipt. The estimate above it is a best case (one model call per step); the engine
+       * retries, repairs, reviews and re-checks, so the real number can land far above the quote.
+       * A build once ran to $9.07 against a ~$0.30 estimate with nothing to stop it, since a new
+       * project carried no budget and no budget means unlimited. The number is the user's and has
+       * no ceiling of ours; leaving it empty is still allowed and still means no limit, but now it
+       * says so out loud instead of being the silent default.
+       */
+      '<div class="vb-budget" id="vb-budget-row">' +
+        '<label class="vb-budget-label" for="vb-budget">Stop this project at</label>' +
+        '<input id="vb-budget" class="vb-budget-input" type="text" inputmode="decimal" autocomplete="off" placeholder="no limit" />' +
+        '<span class="vb-budget-unit" id="vb-budget-unit"></span>' +
+        '<span class="vb-budget-note" id="vb-budget-note"></span>' +
+      '</div>' +
       '<button type="button" class="vb-begin" id="vb-begin">BEGIN BUILDING</button>' +
       '<div class="vb-status" id="vb-status" role="status"></div>';
 
@@ -298,7 +313,7 @@
       c.className = "vb-card" + (bridge().workspaceId() === ws.id ? " on" : "");
       c.innerHTML = '<span class="vb-card-name"></span><small>project</small>';
       c.querySelector(".vb-card-name").textContent = ws.name || ws.id;
-      c.addEventListener("click", () => { bridge().selectWorkspace(ws.id); renderSlider(); renderSaveTo(); });
+      c.addEventListener("click", () => { bridge().selectWorkspace(ws.id); renderSlider(); renderSaveTo(); renderBudget(); });
       rail.append(c);
     }
     const more = document.createElement("div");
@@ -1127,8 +1142,46 @@
         "[finish]/[fix]/[new] tags in the vision mark work on the existing code.\n\n" + full +
         "\n\nSTATE OF THE APP (scanned before planning):\n" + adopted.brief;
     }
+    /*
+     * Arm the limit BEFORE the first move, and only once the workspace exists (a folder is made
+     * above for a first-timer). Saving it after startBuild would leave the opening moves
+     * unguarded, which is where a runaway does its damage.
+     */
+    const armed = await armBudget(b);
+    if (armed === false) return;   // the field held something that is not a number; say so, do not guess
     status("Starting…");
     b.startBuild(full, (msg, bad) => status(msg || "", bad));
+  }
+
+  /*
+   * The spend limit, in the currency the viewer holds: credits for guests, dollars for the owner.
+   * Empty means no limit, stated rather than assumed. No maximum is imposed (Fred, 2026-07-31:
+   * "with no limit to the budget they can set in credits"), so the only rejection is text that is
+   * not a number, which is refused out loud instead of quietly becoming unlimited.
+   */
+  function budgetIsCredits() { const m = money(); return !!(m.inCredits && m.inCredits()); }
+  function renderBudget() {
+    const row = $("#vb-budget-row"), input = $("#vb-budget"), unit = $("#vb-budget-unit"), note = $("#vb-budget-note");
+    if (!row || !input) return;
+    const credits = budgetIsCredits();
+    if (unit) unit.textContent = credits ? (money().UNIT_NOUN || "credits") : "dollars";
+    const b = bridge();
+    const capUsd = b && b.budgetUsd ? b.budgetUsd() : 0;
+    if (document.activeElement !== input) {
+      input.value = capUsd > 0 ? String(credits ? Math.round(capUsd * 100 * 1e6) / 1e6 : capUsd) : "";
+    }
+    if (note) note.textContent = capUsd > 0 ? "The build pauses and asks before passing this." : "No limit set: the build will not stop itself.";
+  }
+  async function armBudget(b) {
+    const input = $("#vb-budget");
+    if (!input || !b || !b.setBudget) return true;
+    const raw = String(input.value || "").trim().replace(/[$,\s]/g, "");
+    if (!raw) { await b.setBudget(0); renderBudget(); return true; }   // explicit "no limit"
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) { status("That spend limit is not a number. Enter an amount, or clear it for no limit.", true); return false; }
+    await b.setBudget(budgetIsCredits() ? n / 100 : n);                // credits -> dollars on the wire
+    renderBudget();
+    return true;
   }
 
   /* ================= wiring ================================================================== */
@@ -1141,7 +1194,9 @@
     $("#vb-adopt-go").addEventListener("click", runAdopt);
     wireAdoptBrowse();
     $("#vb-startover").addEventListener("click", startOver);
-    $("#vb-saveto").addEventListener("change", (e) => { bridge() && bridge().selectWorkspace(e.target.value); renderSlider(); });
+    $("#vb-saveto").addEventListener("change", (e) => { bridge() && bridge().selectWorkspace(e.target.value); renderSlider(); renderBudget(); });
+    // The limit follows the project, so switching folders never shows another project's number.
+    $("#vb-budget").addEventListener("input", () => { const n = $("#vb-budget-note"); if (n) n.textContent = String($("#vb-budget").value || "").trim() ? "Saved when the build starts." : "No limit set: the build will not stop itself."; });
     for (const b of document.querySelectorAll("#vb-presets button")) {
       b.addEventListener("click", () => {
         pendingModules = (bridge() ? bridge().studioPresets()[b.dataset.preset] : null) || [];
@@ -1180,6 +1235,7 @@
     el.hidden = false;
     renderSlider();
     renderSaveTo();
+    renderBudget();
     renderStudio();
     paintAllModelSelects();
     gateArmy();

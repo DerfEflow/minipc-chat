@@ -3079,6 +3079,31 @@
       state.workspaceId = ws.id;
       renderStarter();
     },
+    /*
+     * The spend limit for ONE project, in dollars on the wire (the UI speaks credits to guests and
+     * converts). capUsd 0 means no limit, which is what budgetCheck already treats as unlimited.
+     *
+     * This is the arming switch for a brake that already existed and was never pulled: a new
+     * project carries no budget, budgetCheck opens with `if (capUsd <= 0) return stop:false`, and
+     * a build quoted at $0.30 ran to $9 with nothing between it and the card (Fred, 2026-07-31).
+     * The limit is the user's number and carries no ceiling of ours.
+     */
+    setBudget: async (capUsd) => {
+      const id = (($("#st-ws") && $("#st-ws").value) || state.workspaceId || "");
+      if (!id) return { error: "no_workspace" };
+      const cap = Math.max(0, Number(capUsd) || 0);
+      const r = await fetch("/ide/workspace/update", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, budget: cap > 0 ? { capUsd: cap } : null }) });
+      const j = await r.json().catch(() => ({}));
+      const w = (state.workspaces || []).find((x) => x.id === id);
+      if (w && j && j.ok) w.budget = cap > 0 ? { capUsd: cap } : null;
+      return j || {};
+    },
+    budgetUsd: () => {
+      const id = (($("#st-ws") && $("#st-ws").value) || state.workspaceId || "");
+      const w = (state.workspaces || []).find((x) => x.id === id);
+      return Number(w && w.budget && w.budget.capUsd) || 0;
+    },
     startBuild: (prompt, status) => startBuild(prompt, status || (() => {})),
     jobs: () => (state.jobs || []).slice(),
     refreshJobs,

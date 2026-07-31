@@ -515,6 +515,18 @@ export function createIdeJobs({
     for (const id of [...FOLLOWERS.keys()]) stopFollowing(id);
   }
 
+  /*
+   * How many builds are running RIGHT NOW, across every account. A count and nothing else, so it
+   * can be published beside runningChatJobs on the deploy guard's endpoint without naming anyone.
+   *
+   * This existed nowhere, and the gap had teeth: the pre-push guard counted only chat jobs, so it
+   * reported "safe to push" while a Crucible build was mid-flight. A deploy restarts the server,
+   * and loadFromDisk seals an unfinished build as INTERRUPTED rather than resuming it, so the
+   * guard was cheerfully clearing the one deploy that destroys 30 minutes of someone's work.
+   */
+  const runningCount = () => { let n = 0; for (const j of INDEX.values()) if (!j.done) n++; return n; };
+
   return { create, emit, finish, stop, get, listFor, activeFor, attach, loadFromDisk, summarize, waitForAnswer, dispose,
+           runningCount,
            get size() { return INDEX.size; } };
 }

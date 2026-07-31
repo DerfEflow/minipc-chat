@@ -40,11 +40,26 @@ async function verdict() {
       console.error("prepush-check: production does not report runningChatJobs yet (build " + (v.build || v.sha || "unknown") + "). Deploy this build once, then the guard works. Treat as UNKNOWN.");
       return 3;
     }
-    if (running === 0) {
-      console.log("prepush-check: 0 running chat jobs on " + BASE + " — safe to push.");
+    /*
+     * Crucible BUILDS are a separate ledger from chat jobs and were never counted here, so this
+     * guard cleared a deploy while a build was mid-flight. A restart does not resume a build, it
+     * seals it as interrupted: the one deploy this check exists to prevent was the one it waved
+     * through. Production older than this field reports undefined, treated as UNKNOWN rather than
+     * zero, because assuming zero is how the gap stayed open in the first place.
+     */
+    const builds = Number(v.runningBuilds);
+    if (!Number.isFinite(builds)) {
+      console.error("prepush-check: production does not report runningBuilds yet (build " + (v.build || v.sha || "unknown") + "). It cannot see Crucible builds, and a push would seal any live build as interrupted. Treat as UNKNOWN.");
+      return 3;
+    }
+    if (running === 0 && builds === 0) {
+      console.log("prepush-check: 0 running chat jobs and 0 running builds on " + BASE + " — safe to push.");
       return 0;
     }
-    console.log("prepush-check: " + running + " running chat job(s) on " + BASE + " — a push now would execute them.");
+    const parts = [];
+    if (running) parts.push(running + " running chat job(s)");
+    if (builds) parts.push(builds + " running Crucible build(s)");
+    console.log("prepush-check: " + parts.join(" and ") + " on " + BASE + " — a push now would interrupt them.");
     if (!WAIT || Date.now() > DEADLINE) return 1;
     await new Promise((res) => setTimeout(res, 20000));
   }
