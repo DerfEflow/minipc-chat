@@ -954,6 +954,57 @@ function relabelModelOptions() {
   applyPrivacyFilter();   // re-applies the "blocked in x" / "key needed" suffixes it owns
 }
 let catalogGroups = [];   // live /api/models groups — the source for the custom model panel
+
+/* ---- THE FAST LANE (OpenAI service_tier "fast", announced 2026-07-30) --------------------------
+ * Up to 2.5x the speed for exactly 2x the price, with no change in intelligence, and offered on
+ * one model. Three rules shape the control:
+ *
+ *   1. It is only DRAWN when the chosen model actually offers it. A switch that silently does
+ *      nothing on most models teaches people to distrust every switch.
+ *   2. It says the price on its face. Doubling a bill is not something to discover afterwards.
+ *   3. It DISARMS after every send. A per-turn decision that quietly persists is how somebody ends
+ *      up paying double for a week, and the whole point of this control is that it be deliberate.
+ */
+let fastArmed = false;
+function catalogRec(id) {
+  for (const g of catalogGroups) for (const m of (g.models || [])) if (m.id === id) return m;
+  return null;
+}
+function fastLaneRec() {
+  /*
+   * Read the PICKER, not the chat state. The first version read st.modelId, which is a local inside
+   * the send path and does not exist at module scope, so this threw and the control never appeared
+   * however the model was set. The picker is the more honest source anyway: it is the model the
+   * person can see they chose.
+   */
+  let id = "";
+  try { id = (modelSel && modelSel.value) || ""; } catch { id = ""; }
+  if (!id || id === "auto" || id === "local") { try { id = defaultCloudModel() || ""; } catch { id = ""; } }
+  const rec = id ? catalogRec(id) : null;
+  return rec && rec.fastTier ? rec : null;
+}
+const fastLaneArmed = () => fastArmed && !!fastLaneRec();
+function paintFastLane() {
+  const el = document.getElementById("fast-lane");
+  if (!el) return;
+  const rec = fastLaneRec();
+  el.hidden = !rec;
+  if (!rec) {
+    // Moved to a seat without the lane. Disarm AND clear the lit styling, so the control cannot
+    // reappear looking armed for a heartbeat if the model changes back.
+    fastArmed = false;
+    el.classList.remove("on");
+    el.setAttribute("aria-pressed", "false");
+    const l = el.querySelector(".fl-label"); if (l) l.textContent = "";
+    return;
+  }
+  const mult = Number(rec.fastMultiplier) || 2;
+  el.classList.toggle("on", fastArmed);
+  el.setAttribute("aria-pressed", fastArmed ? "true" : "false");
+  const label = el.querySelector(".fl-label");
+  if (label) label.textContent = fastArmed ? `Fast lane on · this turn costs ${mult}x` : `Fast lane · ${mult}x price, up to 2.5x faster`;
+}
+function setFastLane(on) { fastArmed = !!on && !!fastLaneRec(); paintFastLane(); }
 async function loadModels() {
   if (!modelSel) return;
   const saved = (cur() && cur().model) || localStorage.getItem(LS_MODEL);
@@ -1246,6 +1297,14 @@ function paceRecord(key, ms) {
 }
 
 if (modelSel) modelSel.addEventListener("change", renderPace);
+// The lane control follows the model: switching to a seat without a fast tier hides it AND
+// disarms it, so an armed switch can never survive onto a model that does not offer the lane.
+if (modelSel) modelSel.addEventListener("change", paintFastLane);
+document.addEventListener("DOMContentLoaded", () => {
+  const fl = document.getElementById("fast-lane");
+  if (fl) fl.addEventListener("click", () => setFastLane(!fastArmed));
+  paintFastLane();
+});
 if (modeSel) modeSel.addEventListener("change", renderPace);
 if (privacyModeSel) privacyModeSel.addEventListener("change", renderPace);
 document.addEventListener("dominion-forge-tier", renderPace);   // the dial fires this on every turn of it
@@ -1885,6 +1944,11 @@ async function streamReply(c) {
         model: (st.modelId && st.modelId !== "local" && st.modelId !== "auto") ? st.modelId : (defaultCloudModel() || "auto"),
         privacyMode: privacyModeSel ? privacyModeSel.value : "normal",
         persona: resolvePersona(),
+        // FAST LANE, one turn only. The switch disarms itself after every send, because it doubles
+        // the price of the turn, and a control somebody flipped last Tuesday and forgot is exactly
+        // the shape of a bill nobody expected. The server re-checks the catalog regardless, so
+        // this can only ever ask for the fast lane, never decide it.
+        ...(fastLaneArmed() ? { fast: true } : {}),
         temperature: settings.temperature,
         confirmTools: !!settings.confirmTools,
         chatId: c.id,
@@ -1905,6 +1969,9 @@ async function streamReply(c) {
       }),
     });
     RESUME_JOB = "";   // one-shot: the resume context belongs to exactly this send
+    // The fast lane is one-shot for the same reason Wildfire is: a per-turn decision that costs
+    // double must never carry silently into the next message.
+    setFastLane(false);
     // Wildfire is a one-turn override. The ordinary toolbox now expands only as needed and closes
     // automatically; broad up-front authority must never leak into the next unrelated message.
     if (wildfireForTurn && window.setWildfire) window.setWildfire(false);
@@ -2270,7 +2337,7 @@ if (toCrucibleBtn) toCrucibleBtn.addEventListener("click", async () => {
 });
 
 document.addEventListener("dominion-money-ready", () => {
-  try { relabelModelOptions(); updateModelTrigger(); renderModelPanel(); renderAll(); renderBudget(); } catch {}
+  try { relabelModelOptions(); updateModelTrigger(); renderModelPanel(); renderAll(); renderBudget(); paintFastLane(); } catch {}
 });
 
 /*

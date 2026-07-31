@@ -619,6 +619,9 @@ function createStreamState(onDelta, handlers = {}) {
         content: finalContent,
         reasoning: finalReasoning,
         usage: response && response.usage || null,
+        // The tier OpenAI ACTUALLY served this on, echoed back. Fast bills at double, so the
+        // billing path has to price what happened rather than what was asked for.
+        serviceTier: (response && (response.service_tier || response.serviceTier)) || "",
         finishReason: statusFinishReason(finalStatus, response, toolCalls.length > 0),
         toolCalls,
         error: "",

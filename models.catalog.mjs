@@ -81,17 +81,33 @@ export const TOOL_CAPABLE_CATEGORIES = new Set([
 // paramsB: total parameters in billions for sorting (MoE = total, not active). null = undisclosed.
 export const MODELS = [
   // ---- Frontier / Flagship ------------------------------------------------------------------
-  // OpenAI GPT-5.6 family: DIRECT to OpenAI (provider:"openai"). Sol=agentic flagship, Terra=mid,
-  // Luna=lightest/cheapest (price-implied tiering; ~1M context each). Fred picks per turn.
+  /*
+   * OpenAI GPT-5.6 family: DIRECT to OpenAI (provider:"openai"). Sol=agentic flagship, Terra=mid,
+   * Luna=lightest/cheapest (~1M context each).
+   *
+   * PRICES CUT 2026-07-30, the day OpenAI announced it. Luna fell 80% and Terra 20%. Both new
+   * numbers reconcile exactly against the rows they replaced (2.50 -> 2.00 and 15 -> 12 is the
+   * announced 20%; 1.00 -> 0.20 and 6.00 -> 1.20 is the announced 80%), which is worth writing
+   * down because it cross-checks the announcement against what was already here. Every one of
+   * these figures is charged to a customer, so models_pricing_test.mjs pins them: a later edit
+   * cannot drift a price without a test saying so out loud.
+   *
+   * `fastTier` marks where OpenAI's Fast mode is offered (service_tier:"fast", which replaces the
+   * old "priority"): up to 2.5x the speed for exactly 2x the price, with no change in intelligence.
+   * Only Sol is marked, because Sol is the only model the announcement gives that guarantee for.
+   * The multiplier lives beside the price it multiplies so the billing path physically cannot
+   * charge standard rates for a call that rode the fast lane.
+   */
   { id: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-sol",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 128000, reasoning: true,
+    fastTier: true, fastMultiplier: 2,
     specialty: "Agentic/terminal-coding flagship: the top 'doing' model" },
   { id: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-terra",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 15.00, ctx: 1050000, maxOut: 128000, reasoning: true,
-    specialty: "Mid-tier GPT-5.6: strong general reasoning at half Sol's cost" },
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.00, outCost: 12.00, ctx: 1050000, maxOut: 128000, reasoning: true,
+    specialty: "Mid-tier GPT-5.6: strong general reasoning, and the value pick for everyday production work" },
   { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-luna",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 6.00, ctx: 1050000, maxOut: 128000, reasoning: true,
-    specialty: "Lightest/cheapest GPT-5.6: fast conversational tier" },
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 0.20, outCost: 1.20, ctx: 1050000, maxOut: 128000, reasoning: true,
+    specialty: "Fastest and cheapest GPT-5.6: high-volume tool use and multi-step workflows at scale" },
   { id: "openai/gpt-5.5", name: "GPT-5.5", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.5",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 32768, reasoning: true,
     specialty: "Prior frontier flagship: reliable heavy knowledge work" },

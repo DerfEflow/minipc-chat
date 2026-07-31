@@ -830,6 +830,15 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
       // rate-limited host then reads as a dead model. The retry loop sets this to reopen routing.
       providerPreferences: opts.__widenProviderPool ? { require_parameters: false, allow_fallbacks: true } : undefined,
     });
+    /*
+     * FAST LANE (OpenAI, 2026-07-30). service_tier:"fast" replaces the old "priority" tier: up to
+     * 2.5x the speed for exactly 2x the price, same intelligence. Requested per turn, never
+     * defaulted, because it is a decision to spend twice as much and nobody should discover that
+     * afterwards. Honoured ONLY where the catalog says the model offers it, so asking for it on a
+     * model without the tier is quietly ignored rather than sent and rejected.
+     */
+    const wantFast = opts.fast === true && provider === "openai" && !!(rec && rec.fastTier);
+    if (wantFast) payload.service_tier = "fast";
     const providerLabel = cfg.label;
     const mod = u.protocol === "https:" ? https : http;
     let settled = false;
@@ -842,7 +851,19 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
         // transport truthfully (the NVIDIA developer lane bills nothing; catalog prices are the
         // OpenRouter lane's). Stamped on usage too: bumpUsage sees only the usage object.
         r.transport = provider;
-        if (r.usage && typeof r.usage === "object") r.usage.__transport = provider;
+        if (r.usage && typeof r.usage === "object") {
+          r.usage.__transport = provider;
+          /*
+           * Bill the lane that actually carried it. OpenAI echoes service_tier with what it really
+           * served, so a request that asked for fast and was served standard is billed standard.
+           * When nothing is echoed the request is taken at its word, which is the only honest
+           * reading available and errs toward Dominion paying OpenAI what it owes.
+           */
+          if (wantFast) {
+            const served = String(r.serviceTier || r.service_tier || "");
+            r.usage.__fast = served ? /^(fast|priority)$/i.test(served) : true;
+          }
+        }
         // W2 recovery: a DIRECT wire refusing the model id itself (unverified directId, or the
         // provider retired it) falls back to OpenRouter exactly once, out loud. Broadened
         // 2026-07-29 after the live probe found Fred's Moonshot ACCOUNT suspended (HTTP 429
@@ -2471,7 +2492,23 @@ function catalogCallCost(rec, u) {
     ?? u.prompt_cache_hit_tokens ?? u.cached_tokens;
   const cached = Math.max(0, Math.min(Number(cachedRaw) || 0, inTok));
   const hitRate = typeof rec.cacheHitCost === "number" ? rec.cacheHitCost : (rec.inCost || 0);
-  return ((inTok - cached) * (rec.inCost || 0) + cached * hitRate + outTok * (rec.outCost || 0)) / 1e6;
+  const base = ((inTok - cached) * (rec.inCost || 0) + cached * hitRate + outTok * (rec.outCost || 0)) / 1e6;
+  /*
+   * FAST LANE (OpenAI service_tier:"fast", 2026-07-30). Twice the price for up to 2.5x the speed.
+   * The multiplier is applied to what the call ACTUALLY rode (`u.__fast`, stamped by the execution
+   * path), never to what was requested, because a fast request that OpenAI served at standard rates
+   * must not be billed as fast. Getting this backwards in either direction is a money bug: charge
+   * standard for a fast call and Dominion eats the difference on every one.
+   */
+  return u.__fast ? base * fastMultiplierFor(rec) : base;
+}
+
+// Defaults to 2 for anything flagged fastTier, so a catalog row that forgets the number cannot
+// silently bill a fast call at standard rates.
+function fastMultiplierFor(rec) {
+  if (!rec || !rec.fastTier) return 1;
+  const m = Number(rec.fastMultiplier);
+  return Number.isFinite(m) && m >= 1 ? m : 2;
 }
 
 function ideCloudCost(model, r) {
@@ -6726,6 +6763,13 @@ async function handleChat(req, res) {
   const executionDirective = executionManagerPrompt(taskContract, executionPolicy) + "\n\n" + forgeFrameworkPrompt(wolfeTier);
   opts.executionPolicy = executionPolicy;
   opts.forgeMode = forgeEnabled;
+  /*
+   * FAST LANE, per turn and never sticky. The client asks with `fast:true`; the catalog decides
+   * whether the chosen model actually offers it, and cloudChatStream ignores the flag otherwise.
+   * Deliberately not a saved preference: it costs twice as much per turn, and a setting somebody
+   * switched on last Tuesday and forgot is the exact shape of a bill nobody expected.
+   */
+  opts.fast = input.fast === true && !!(selectedRec && selectedRec.fastTier);
   const requiredToolsUnavailable = taskContract.requirements.tools && !attachTools;
   const completionRequired = taskIntent.kind !== "simple" && attachTools;
   opts.completionTool = completionRequired;
