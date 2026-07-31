@@ -61,6 +61,9 @@
       third: { messages: [], model: "", busy: false, open: false },
     },
     vision: null,
+    // The plan carried over from the main chat, word for word (Fred, 2026-07-31: it used to
+    // vanish the moment Vibe Coder opened). { name, brief } once a hand-off landed.
+    plan: null,
     army: null,          // { tasks, picks[], orchestrator, fallbackNote } once planned
     armyBusy: false,
     // Adopt Existing Project (docs/ADOPT-EXISTING-SOW.md): { workspaceId, name, brief } once a
@@ -82,7 +85,7 @@
           messages: state.chats[w].messages.map((m) => ({ from: m.from, content: typeof m.content === "string" ? m.content : (m.content.find((p) => p.type === "text") || { text: "(picture)" }).text })).slice(-40),
           model: state.chats[w].model, open: state.chats[w].open,
         }])),
-        vision: state.vision, adopt: state.adopt, at: Date.now(),
+        vision: state.vision, adopt: state.adopt, plan: state.plan, at: Date.now(),
       }));
     } catch {}
   }
@@ -99,6 +102,7 @@
       }
       state.vision = d.vision || null;
       state.adopt = (d.adopt && d.adopt.workspaceId && d.adopt.brief) ? d.adopt : null;
+      state.plan = (d.plan && d.plan.brief) ? d.plan : null;
     } catch {}
   }
 
@@ -154,27 +158,27 @@
       '</div>' +
 
       // ---- 3. Customize Your Workspace ------------------------------------------------------
+      // Four choices (Fred, 2026-07-31): three ready-made setups plus Custom. The tick boxes only
+      // exist under Custom; the explainer tiles are gone, their words folded into the boxes.
       '<div class="vb-box" id="vb-studio">' +
-        '<div class="vb-box-head"><h3 class="vb-h">Customize Your Workspace</h3><span class="vb-note">Preloads</span></div>' +
+        '<div class="vb-box-head"><h3 class="vb-h">Customize Your Workspace</h3></div>' +
         '<div class="vb-presets" id="vb-presets">' +
           '<button type="button" data-preset="minimal">Minimal</button>' +
           '<button type="button" data-preset="design">Design Studio</button>' +
           '<button type="button" data-preset="fullstack">Full Stack</button>' +
+          '<button type="button" data-preset="custom">Custom</button>' +
         '</div>' +
-        '<div class="vb-mods" id="vb-mods"></div>' +
-        '<div class="vb-box-foot"><span class="vb-note">Custom picks make it yours; Apply makes it so.</span><button type="button" class="vb-apply" id="vb-apply">Apply</button></div>' +
+        '<div class="vb-mods" id="vb-mods" hidden></div>' +
+        '<div class="vb-box-foot"><span class="vb-note" id="vb-studio-note"></span><button type="button" class="vb-apply" id="vb-apply">Apply</button></div>' +
       '</div>' +
-
-      // ---- 3b. Active module designations (Fred, 2026-07-25) --------------------------------
-      // Every PICKED module shows a tile here the moment Apply lands. Fix for "Apply does
-      // nothing": most modules' real surfaces (Live Preview, Files/Diffs, Results, History)
-      // only exist once a build runs, so applying them changed nothing visible. The tiles are
-      // normal document flow — they wrap on mobile, never overlap, and are never pinned.
-      '<div class="vb-desig" id="vb-desig" aria-live="polite"></div>' +
 
       // ---- 4. Plan with AI ------------------------------------------------------------------
       '<div class="vb-plan">' +
-        '<h3 class="vb-h">Plan with AI</h3>' +
+        '<div class="vb-plan-head"><h3 class="vb-h">Plan with AI</h3>' +
+          // The plan that rode over from the main chat, word for word, one press away. Hidden
+          // until a hand-off actually happened (Fred, 2026-07-31: the plan used to vanish here).
+          '<button type="button" class="vb-plan-view" id="vb-plan-view" hidden>See the plan from chat</button>' +
+        '</div>' +
         windowHtml("main") +
         '<div class="vb-plan-row">' + windowHtml("second") + windowHtml("third") + '</div>' +
       '</div>' +
@@ -238,33 +242,41 @@
     const picker = '<select class="vb-win-model" id="vb-model-' + w + '" aria-label="Model for ' + WNAME[w] + '"></select>';
     // The General keeps the picker beside the title (the drawing's upper-left note). The Captain
     // and the Sergeant carry theirs just BELOW the title (Fred, 2026-07-26): rank first, seat under.
-    // Copy this whole conversation. Every window gets one, the General included: the General's
-    // thread IS the plan, and it is the one most worth lifting out of the app.
-    const copyBtn = '<button type="button" class="vb-win-copy" data-win="' + w + '" title="Copy this whole conversation">Copy chat</button>';
+    // The old "Copy chat" header button confused (Fred, 2026-07-31); copying now lives on every
+    // bubble and in the Copy all control above the typing field.
     const head = w === "main"
-      ? '<header class="vb-win-head">' + picker + title + copyBtn + '</header>'
+      ? '<header class="vb-win-head">' + picker + title + '</header>'
       : '<header class="vb-win-head vb-win-head-col">' +
           '<div class="vb-win-toprow">' + title +
             // Fresh start (Fred, 2026-07-26): wipe THIS advisor's conversation mid-planning for an
             // unbiased second opinion. Main never carries it — the General's thread is the plan.
             '<button type="button" class="vb-win-fresh" data-win="' + w + '" title="Clear this conversation and start ' + WNAME[w] + ' from scratch">Fresh start</button>' +
-            copyBtn +
             '<button type="button" class="vb-win-toggle" data-win="' + w + '" aria-expanded="false">Open chat</button>' +
           '</div>' + picker +
         '</header>';
+    /*
+     * THE SPLIT SEND (Fred, 2026-07-31). The button is cut in half: the top half is Send, which
+     * always talks to THIS rank and nothing else. The bottom half is Advisors, a toggle. On, two
+     * third-size buttons appear to its left, each wearing the OTHER two ranks' colours and
+     * insignias, and a tick box appears on every message. Tick any number, press an insignia,
+     * and exactly those messages travel to that rank — never the whole chat.
+     */
+    const others = WINDOWS.filter((x) => x !== w);
+    const advisorBtns = others.map((o) =>
+      '<button type="button" class="vb-adv-btn vb-adv-' + o + '" data-from="' + w + '" data-to="' + o + '" title="Send the ticked messages to ' + WNAME[o] + '" aria-label="Send the ticked messages to ' + WNAME[o] + '">' + WRANK_SVG[o] + '</button>').join("");
     return (
       '<section class="vb-win vb-win-' + w + '" id="vb-win-' + w + '" data-win="' + w + '">' +
         head +
         '<div class="vb-win-body" id="vb-body-' + w + '"' + (w === "main" ? "" : " hidden") + '>' +
           '<div class="vb-log" id="vb-log-' + w + '" aria-live="polite"></div>' +
           '<div class="vb-grab" data-win="' + w + '" title="Drag to make this window taller" aria-hidden="true"><i></i></div>' +
+          '<div class="vb-copyall-row"><button type="button" class="vb-copyall" data-win="' + w + '" title="Copy this whole conversation as clean text">Copy all</button></div>' +
           '<div class="vb-row">' +
             '<textarea id="vb-in-' + w + '" rows="1" placeholder="Type here…" aria-label="Message for ' + WNAME[w] + '"></textarea>' +
-            '<div class="vb-sendstack" id="vb-sendstack-' + w + '">' +
-              // The chevron says out loud that Send opens the destination stack (Fred, 2026-07-30:
-              // "no obvious control to send those chat portions to any of the AIs").
-              '<button type="button" class="vb-send" id="vb-send-' + w + '">Send &#9662;</button>' +
-              '<div class="vb-sendto" id="vb-sendto-' + w + '" hidden></div>' +
+            '<div class="vb-adv-btns" id="vb-adv-' + w + '" hidden>' + advisorBtns + '</div>' +
+            '<div class="vb-sendstack vb-split" id="vb-sendstack-' + w + '">' +
+              '<button type="button" class="vb-send vb-send-top" id="vb-send-' + w + '">Send</button>' +
+              '<button type="button" class="vb-send-adv" id="vb-advtoggle-' + w + '" aria-pressed="false">Advisors</button>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -273,10 +285,10 @@
 
   /* ================= models ================================================================= */
 
-  function fillModels(sel, current, { orchestratorOnly = false, allowDefault = true } = {}) {
+  function fillModels(sel, current, { orchestratorOnly = false, allowDefault = true, defaultLabel = "" } = {}) {
     if (!sel || !bridge()) return;
     sel.textContent = "";
-    if (allowDefault) sel.append(new Option(orchestratorOnly ? "Default (recommended)" : "My main model", ""));
+    if (allowDefault) sel.append(new Option(defaultLabel || (orchestratorOnly ? "Default (recommended)" : "My main model"), ""));
     for (const g of bridge().models()) {
       const grp = document.createElement("optgroup");
       grp.label = g.label;
@@ -293,37 +305,111 @@
   }
 
   function paintAllModelSelects() {
-    for (const w of WINDOWS) fillModels($("#vb-model-" + w), state.chats[w].model);
-    fillModels($("#vb-orch-model"), (state.army && state.army.orchestrator) || "", { orchestratorOnly: true });
+    const catalogLoaded = bridge() && bridge().models().length > 0;
+    /*
+     * THE SEATS (Fred, 2026-07-31): the General defaults to GPT-5.6 Luna, universally. The
+     * Captain and the Sergeant have NO default — their pickers open on "Pick a model…" and a
+     * send without a pick is refused out loud (wireSend). The orchestrator's empty value means
+     * "same as the General": planArmy passes the General's model when the seat is left alone.
+     */
+    if (catalogLoaded && !state.chats.main.model) {
+      const luna = "openai/gpt-5.6-luna";
+      const has = bridge().models().some((g) => g.models.some((m) => m.id === luna && !m.unavailable));
+      if (has) state.chats.main.model = luna;
+    }
+    fillModels($("#vb-model-main"), state.chats.main.model);
+    for (const w of ["second", "third"]) fillModels($("#vb-model-" + w), state.chats[w].model, { defaultLabel: "Pick a model…" });
+    fillModels($("#vb-orch-model"), (state.army && state.army.orchestrator) || "", { orchestratorOnly: true, defaultLabel: "Same as the General" });
+    // A saved model that the catalog no longer offers must not linger invisibly: sync state to
+    // what the select actually landed on, but only once the catalog is real.
+    if (catalogLoaded) for (const w of WINDOWS) {
+      const sel = $("#vb-model-" + w);
+      if (sel && sel.value !== state.chats[w].model) state.chats[w].model = sel.value;
+    }
     if (state.army) for (const [i, p] of state.army.picks.entries()) fillModels($("#vb-tmodel-" + i), p.model || "");
   }
 
   /* ================= 1. the slider =========================================================== */
 
+  /*
+   * THE PROJECT ROW (Fred, 2026-07-31). Boxes across the whole page: filled with projects when
+   * they exist, blank with no words otherwise. New highlights a blank box and puts a name field
+   * in it; once the name is entered, the Save to: selector lights up and asks where the project
+   * lives — a folder on this computer, or the Dominion cloud. The Future Project Slot card and
+   * the "what's next" card are gone. Every project carries a quiet × to remove it from the list
+   * (the folder and its files stay on disk).
+   */
+  let staged = null;   // { name, editing } — a named project waiting for its folder
+  const MIN_BOXES = 6;
+
   function renderSlider() {
     const rail = $("#vb-slider");
     if (!rail || !bridge()) return;
     rail.textContent = "";
-    // The Future Project Slot leads: the empty card IS the invitation.
-    const future = document.createElement("button");
-    future.type = "button";
-    future.className = "vb-card vb-card-future";
-    future.innerHTML = "<span>+</span><small>Future Project Slot</small>";
-    future.addEventListener("click", newProject);
-    rail.append(future);
     for (const ws of bridge().workspaces()) {
-      const c = document.createElement("button");
-      c.type = "button";
-      c.className = "vb-card" + (bridge().workspaceId() === ws.id ? " on" : "");
-      c.innerHTML = '<span class="vb-card-name"></span><small>project</small>';
+      const c = document.createElement("div");
+      c.className = "vb-card vb-card-ws" + (bridge().workspaceId() === ws.id ? " on" : "");
+      c.setAttribute("role", "button");
+      c.tabIndex = 0;
+      c.innerHTML = '<span class="vb-card-name"></span><small>project</small><button type="button" class="vb-card-x" title="Remove this project from the list" aria-label="Remove this project from the list">&times;</button>';
       c.querySelector(".vb-card-name").textContent = ws.name || ws.id;
-      c.addEventListener("click", () => { bridge().selectWorkspace(ws.id); renderSlider(); renderSaveTo(); renderBudget(); });
+      const pick = () => { bridge().selectWorkspace(ws.id); renderSlider(); renderSaveTo(); renderBudget(); };
+      c.addEventListener("click", (e) => { if (!e.target.closest(".vb-card-x")) pick(); });
+      c.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+      c.querySelector(".vb-card-x").addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!window.confirm('Remove "' + (ws.name || ws.id) + '" from the project list? The folder and its files stay where they are.')) return;
+        const r = await bridge().removeWorkspace(ws.id);
+        if (r && r.error) { status(r.error, true); return; }
+        renderSlider(); renderSaveTo(); renderBudget();
+        status("Removed. The folder itself was not touched.");
+      });
       rail.append(c);
     }
-    const more = document.createElement("div");
-    more.className = "vb-card vb-card-more";
-    more.innerHTML = "<span>→ ?</span><small>what's next</small>";
-    rail.append(more);
+    if (staged) {
+      const c = document.createElement("div");
+      c.className = "vb-card vb-card-staged";
+      if (staged.editing) {
+        c.innerHTML = '<input class="vb-card-input" type="text" maxlength="48" placeholder="Name it…" aria-label="New project name"><small>new project</small>';
+        const inp = c.querySelector("input");
+        inp.value = staged.name || "";
+        const commit = () => {
+          const name = inp.value.trim();
+          if (!name) return;
+          staged = { name, editing: false };
+          renderSlider();
+          highlightSaveTo();
+        };
+        inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } if (e.key === "Escape") { staged = null; renderSlider(); } });
+        inp.addEventListener("blur", () => { if (inp.value.trim()) commit(); });
+        setTimeout(() => inp.focus(), 0);
+      } else {
+        c.innerHTML = '<span class="vb-card-name"></span><small>pick a folder below</small><button type="button" class="vb-card-x" title="Cancel this new project" aria-label="Cancel this new project">&times;</button>';
+        c.querySelector(".vb-card-name").textContent = staged.name;
+        c.querySelector(".vb-card-x").addEventListener("click", () => { staged = null; renderSlider(); unhighlightSaveTo(); });
+      }
+      rail.append(c);
+    }
+    // Blank boxes fill out the row, wordless by design. Clicking one starts a new project there.
+    const filled = bridge().workspaces().length + (staged ? 1 : 0);
+    for (let i = filled; i < MIN_BOXES; i++) {
+      const blank = document.createElement("button");
+      blank.type = "button";
+      blank.className = "vb-card vb-card-blank";
+      blank.setAttribute("aria-label", "Start a new project here");
+      blank.addEventListener("click", () => newProject());
+      rail.append(blank);
+    }
+  }
+
+  function highlightSaveTo() {
+    const lab = document.querySelector(".vb-saveto");
+    if (lab) { lab.classList.remove("vb-pulse"); void lab.offsetWidth; lab.classList.add("vb-pulse"); }
+    status('Now choose where "' + (staged ? staged.name : "") + '" is saved: a folder on this computer, or the Dominion cloud.');
+  }
+  function unhighlightSaveTo() {
+    const lab = document.querySelector(".vb-saveto");
+    if (lab) lab.classList.remove("vb-pulse");
   }
 
   // Drag left and right, as drawn. Native horizontal scroll does the physics; the pointer drag
@@ -346,27 +432,175 @@
     rail.addEventListener("pointercancel", () => { down = null; });
   }
 
+  const SAVE_CLOUD = "__cloud__";
+  const SAVE_BROWSE = "__browse__";
+
   function renderSaveTo() {
     const sel = $("#vb-saveto");
     if (!sel || !bridge()) return;
     sel.textContent = "";
     sel.append(new Option("(new folder at build time)", ""));
+    // Both homes a project can live in, offered side by side (Fred, 2026-07-31): the Dominion
+    // cloud folder, or a folder on the user's own machine picked through the folder walk.
+    sel.append(new Option("Dominion cloud folder", SAVE_CLOUD));
+    sel.append(new Option("Choose a folder on this computer…", SAVE_BROWSE));
     for (const ws of bridge().workspaces()) sel.append(new Option(ws.name || ws.id, ws.id));
     sel.value = bridge().workspaceId() || "";
   }
 
-  function newProject() {
-    // A new project is a clean slate pointed at no folder: the build makes one when it starts.
-    bridge() && bridge().selectWorkspace("");
+  function newProject(prefName) {
+    // Naming comes FIRST (Fred: "You should be able to name it right away"): the card takes the
+    // name, then the Save to: selector lights up and asks for the folder. Nothing on disk and no
+    // chat is touched until both halves are answered.
+    staged = { name: typeof prefName === "string" ? prefName : "", editing: true };
+    renderSlider();
+  }
+
+  async function createStagedCloud() {
+    const name = staged && staged.name;
+    if (!name) return;
+    try {
+      const r = await fetch("/ide/workspace/new", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, cloud: true }) });
+      const j = await r.json();
+      if (!r.ok || j.error || !j.workspace) { status((j && j.error) || "The cloud folder could not be made.", true); return; }
+      bridge() && bridge().addWorkspace && bridge().addWorkspace(j.workspace);
+      bridge() && bridge().selectWorkspace(j.workspace.id);
+      staged = null;
+      unhighlightSaveTo();
+      renderSlider(); renderSaveTo(); renderBudget();
+      status('"' + j.workspace.name + '" lives in the Dominion cloud now. Plan below, then press BEGIN BUILDING.');
+    } catch { status("The server could not be reached.", true); }
+  }
+
+  async function createStagedAt(parentPath, machine) {
+    const name = staged && staged.name;
+    if (!name) return;
+    const winPath = /^[A-Za-z]:/.test(parentPath) || parentPath.includes("\\");
+    const root = parentPath.replace(/[\\/]+$/, "") + (winPath ? "\\" : "/") + name.replace(/[^A-Za-z0-9 ._-]/g, "").trim();
+    try {
+      const r = await fetch("/ide/workspace", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, root, node: machine || "" }) });
+      const j = await r.json();
+      if (!r.ok || j.error || !j.workspace) { status((j && j.error) || "That folder could not be used.", true); return; }
+      bridge() && bridge().addWorkspace && bridge().addWorkspace(j.workspace);
+      bridge() && bridge().selectWorkspace(j.workspace.id);
+      staged = null;
+      unhighlightSaveTo();
+      renderSlider(); renderSaveTo(); renderBudget();
+      status('"' + j.workspace.name + '" will be saved at ' + root + ". Plan below, then press BEGIN BUILDING.");
+    } catch { status("The server could not be reached.", true); }
+  }
+
+  /*
+   * The folder walk for Save to:, same /ide/browse contract as the adopt walk, in a small modal
+   * so it works identically on the phone. Picking a folder answers the one question this exists
+   * for and the modal leaves.
+   */
+  function openFolderPicker(onPick) {
+    const old = $("#vb-pick-modal"); if (old) old.remove();
+    const overlay = document.createElement("div");
+    overlay.className = "vb-modal"; overlay.id = "vb-pick-modal";
+    overlay.innerHTML =
+      '<div class="vb-modal-card">' +
+        '<div class="vb-modal-head"><h3 class="vb-h">Choose a folder</h3><button type="button" class="vb-modal-x" aria-label="Close">&times;</button></div>' +
+        '<div class="vb-adopt-tree" id="vb-pick-tree"></div>' +
+      '</div>';
+    document.body.append(overlay);
+    const close = () => overlay.remove();
+    overlay.querySelector(".vb-modal-x").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    const tree = overlay.querySelector("#vb-pick-tree");
+    let onMachine = "";
+    const browse = async (path, machine) => {
+      tree.textContent = "Reading folders…";
+      if (machine !== undefined) onMachine = machine || "";
+      let j = null;
+      try {
+        const r = await fetch("/ide/browse", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ path: path || "", node: onMachine }) });
+        j = await r.json();
+      } catch { j = null; }
+      if (!j || j.error) { tree.textContent = (j && j.error) || "The build computer could not be reached."; return; }
+      if (j.node) onMachine = j.node;
+      if (!path) onMachine = "";
+      render(j.path || "", j.dirs || []);
+    };
+    const render = (path, dirs) => {
+      tree.textContent = "";
+      const bar = document.createElement("div");
+      bar.className = "vb-adopt-bar";
+      const where = document.createElement("span");
+      where.textContent = (path || "This computer") + (onMachine ? "  ·  " + onMachine : "");
+      bar.append(where);
+      if (path) {
+        const up = document.createElement("button");
+        up.type = "button"; up.textContent = "Up";
+        up.addEventListener("click", () => {
+          const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+          if (parts.length <= 1) { browse("", ""); return; }
+          browse(parts.length === 2 ? parts[0] + "\\" : parts.slice(0, -1).join("\\"), onMachine);
+        });
+        const use = document.createElement("button");
+        use.type = "button"; use.className = "vb-adopt-use"; use.textContent = "Save it here";
+        use.addEventListener("click", () => { close(); onPick(path, onMachine); });
+        bar.append(up, use);
+      }
+      tree.append(bar);
+      for (const d of dirs) {
+        const row = document.createElement("div");
+        row.className = "vb-adopt-dirrow";
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "vb-adopt-dir";
+        b.textContent = d.name + (!path && d.machine ? "   " + d.machine : "");
+        b.addEventListener("click", () => browse(d.path, d.machine));
+        const pick = document.createElement("button");
+        pick.type = "button"; pick.className = "vb-adopt-pickone";
+        pick.textContent = "This one";
+        pick.title = "Save into this folder without opening it";
+        pick.addEventListener("click", () => {
+          if (!path && d.machine) onMachine = d.machine;
+          close(); onPick(d.path, onMachine);
+        });
+        row.append(b, pick);
+        tree.append(row);
+      }
+      if (!dirs.length && path) {
+        const none = document.createElement("div");
+        none.className = "vb-adopt-empty";
+        none.textContent = "No folders inside this one.";
+        tree.append(none);
+      }
+    };
+    browse("");
+  }
+
+  // The Save to: selector's one handler, staged-aware. A staged project turns a pick into a
+  // creation; without one the selector keeps its old job of pointing at an existing project.
+  function handleSaveTo(value) {
     const sel = $("#vb-saveto");
-    if (sel) sel.value = "";
-    startOver();
+    if (staged && !staged.editing) {
+      if (value === SAVE_CLOUD) { createStagedCloud(); return; }
+      if (value === SAVE_BROWSE) { openFolderPicker((path, machine) => createStagedAt(path, machine)); if (sel) sel.value = ""; return; }
+      status("Pick Dominion cloud folder, or choose a folder on this computer, for the new project.", true);
+      if (sel) sel.value = "";
+      return;
+    }
+    if (value === SAVE_CLOUD || value === SAVE_BROWSE) {
+      status("Press New and name the project first. Then pick where it lives.", true);
+      if (sel) sel.value = bridge() ? (bridge().workspaceId() || "") : "";
+      return;
+    }
+    bridge() && bridge().selectWorkspace(value);
+    renderSlider(); renderBudget();
   }
 
   function startOver() {
     for (const w of WINDOWS) { state.chats[w].messages = []; state.chats[w].busy = false; renderLog(w); }
     state.vision = null;
     state.adopt = null;
+    staged = null;
+    unhighlightSaveTo();
     closeAdopt();
     state.army = null;
     $("#vb-army-grid").hidden = true;
@@ -381,15 +615,46 @@
 
   /* ================= 3. Customize Your Workspace ============================================ */
 
+  /*
+   * FOUR CHOICES (Fred, 2026-07-31): Minimal, Design Studio, Full Stack, Custom. The tick boxes
+   * exist only under Custom; the old separate explainer tiles are gone, their words folded into
+   * each tick box, and the "Preloads" caption is deleted.
+   */
   const MOD_LABELS = {
     workspace: "Workspace", brief: "Build Brief", crew: "Agent Crew", cost: "Cost",
     preview: "Live Preview", checks: "Results", history: "History", code: "Files/Diffs",
   };
+  const MOD_NOTES = {
+    workspace: "pick and manage the project folder (drawer below the build area)",
+    brief: "the written brief the build follows (drawer below the build area)",
+    crew: "the Agent Army on this page: split the build across models",
+    cost: "live spend meter below the build area",
+    preview: "watch the app run, once a build starts",
+    checks: "pass/fail results, once a build runs",
+    code: "every file and change, once a build runs",
+    history: "the build log, below the build area",
+  };
   let pendingModules = null;   // staged picks; Apply commits them to the real studio
+  let studioTab = "";          // which of the four buttons is lit; "" = derive from the applied set
+
+  function studioTabNow() {
+    if (studioTab) return studioTab;
+    if (!bridge()) return "custom";
+    const presets = bridge().studioPresets();
+    const chosen = [...(pendingModules || bridge().studioModules())].sort().join(",");
+    for (const key of ["minimal", "design", "fullstack"]) {
+      if ([...(presets[key] || [])].sort().join(",") === chosen) return key;
+    }
+    return "custom";
+  }
 
   function renderStudio() {
     const box = $("#vb-mods");
     if (!box || !bridge()) return;
+    const tab = studioTabNow();
+    box.hidden = tab !== "custom";
+    const note = $("#vb-studio-note");
+    if (note) note.textContent = tab === "custom" ? "Tick what you want; Apply makes it so." : "Apply makes it so.";
     const current = new Set(pendingModules || bridge().studioModules());
     box.textContent = "";
     for (const [id, label] of Object.entries(MOD_LABELS)) {
@@ -399,58 +664,31 @@
       input.type = "checkbox"; input.value = id; input.checked = current.has(id);
       input.addEventListener("change", () => {
         pendingModules = [...box.querySelectorAll("input:checked")].map((i) => i.value);
+        studioTab = "custom";
         paintPresetButtons();
       });
-      lab.append(input, document.createTextNode(" " + label));
+      const words = document.createElement("span");
+      words.className = "vb-mod-words";
+      words.innerHTML = "<b></b><small></small>";
+      words.querySelector("b").textContent = label;
+      words.querySelector("small").textContent = MOD_NOTES[id] || "";
+      lab.append(input, words);
       box.append(lab);
     }
     paintPresetButtons();
-    paintDesignations();   // the applied set's tiles stay in step with every repaint
   }
 
   function paintPresetButtons() {
-    if (!bridge()) return;
-    const presets = bridge().studioPresets();
-    const chosen = [...(pendingModules || bridge().studioModules())].sort().join(",");
+    const tab = studioTabNow();
     for (const b of document.querySelectorAll("#vb-presets button")) {
-      const ids = presets[b.dataset.preset] || [];
-      b.classList.toggle("on", [...ids].sort().join(",") === chosen);
+      b.classList.toggle("on", b.dataset.preset === tab);
     }
-  }
-
-  // Where each module's REAL surface lives, told honestly on its tile.
-  const MOD_HOMES = {
-    workspace: "folder drawer, below the build area",
-    brief: "brief drawer, below the build area",
-    crew: "Agent Army section, right on this page",
-    cost: "cost meter, below the build area",
-    preview: "appears in the build windows once a build runs",
-    checks: "appears in the build windows once a build runs",
-    code: "appears in the build windows once a build runs",
-    history: "log button, below the build area",
-  };
-  function paintDesignations() {
-    const box = $("#vb-desig");
-    if (!box || !bridge()) return;
-    const active = bridge().studioModules();
-    box.textContent = "";
-    for (const id of active) {
-      if (!MOD_LABELS[id]) continue;
-      const t = document.createElement("div");
-      t.className = "vb-desig-tile";
-      t.innerHTML = "<b></b><span></span>";
-      t.querySelector("b").textContent = MOD_LABELS[id];
-      t.querySelector("span").textContent = MOD_HOMES[id] || "";
-      box.append(t);
-    }
-    box.hidden = !box.childNodes.length;
   }
 
   function applyStudio() {
     if (!bridge()) return;
     bridge().setStudioModules(pendingModules || bridge().studioModules());
     pendingModules = null;
-    paintDesignations();
     const names = bridge().studioModules().map((id) => MOD_LABELS[id] || id);
     status("Workspace applied: " + (names.length ? names.join(", ") : "minimal — no extra modules") + ".");
   }
@@ -731,7 +969,28 @@
     btn.classList.toggle("is-done", !!ok);
     setTimeout(() => { btn.textContent = was; btn.classList.remove("is-done"); }, 1800);
   }
-  // The whole thread, attributed, so a pasted plan still says who proposed what.
+  /*
+   * Clean text for pasting (Fred, 2026-07-31: "neat and tidy text that can be pasted without all
+   * the artifacts or asterisks"). Markdown markup comes OFF: emphasis stars and underscores,
+   * backticks, heading hashes, blockquote arrows; list dashes become a plain bullet. Content is
+   * never dropped, only the punctuation that reads as noise in a text editor or an email.
+   */
+  function cleanText(s) {
+    return String(s || "")
+      .replace(/```[a-z]*\n?/gi, "")                      // fence lines
+      .replace(/`([^`]+)`/g, "$1")                         // inline code
+      .replace(/\*\*([^*]+)\*\*/g, "$1")                   // bold
+      .replace(/\*([^*\n]+)\*/g, "$1")                     // italic
+      .replace(/__([^_]+)__/g, "$1")
+      .replace(/(^|\s)_([^_\n]+)_(?=\s|$|[.,;:!?])/g, "$1$2")
+      .replace(/^#{1,6}\s+/gm, "")                         // heading hashes
+      .replace(/^>\s?/gm, "")                              // blockquotes
+      .replace(/^(\s*)[-*]\s+/gm, "$1• ")                  // list markers -> a real bullet
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  // The whole thread, attributed and cleaned, so a pasted plan still says who proposed what.
   function threadText(w) {
     const c = state.chats[w];
     if (!c || !c.messages.length) return "";
@@ -739,7 +998,7 @@
       const who = m.from === "user" ? "You" : (WNAME[m.from] || m.from);
       const text = typeof m.content === "string" ? m.content
         : (m.content.find((p) => p.type === "text") || { text: "(picture)" }).text;
-      return who + ": " + text;
+      return who + ": " + cleanText(text);
     }).join("\n\n");
   }
 
@@ -755,13 +1014,20 @@
       const img = document.createElement("img"); img.className = "vpb-pic"; img.src = src; img.alt = "picture"; b.append(img);
     }
     // Thinking placeholders and errors carry no text worth lifting, so they get no button.
+    // The traditional quiet clipboard glyph at the bottom of the bubble (Fred, 2026-07-31),
+    // copying the message as clean text with the markdown noise stripped.
     if (text && !/vpb-thinking/.test(cls)) {
       const copy = document.createElement("button");
-      copy.type = "button"; copy.className = "vpb-copy"; copy.textContent = "Copy";
+      copy.type = "button"; copy.className = "vpb-copy";
+      copy.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>';
       copy.title = "Copy this message";
+      copy.setAttribute("aria-label", "Copy this message");
       copy.addEventListener("click", async (e) => {
         e.stopPropagation();
-        flashCopied(copy, await copyToClipboard(text), b.querySelector("p"));
+        const ok = await copyToClipboard(cleanText(text));
+        copy.classList.toggle("is-done", ok);
+        if (!ok) selectElementText(b.querySelector("p"));
+        setTimeout(() => copy.classList.remove("is-done"), 1500);
       });
       b.append(copy);
     }
@@ -794,24 +1060,21 @@
     if (w === "main" && state.vision) visionCard();
   }
 
-  /* ---------- silent message selection (Fred, 2026-07-26) -----------------------------------
-   * Opening the Send destinations quietly puts a tick box on every message in that window, with
-   * the last exchange (the user's message and the AI's reply) already ticked. Crossing to
-   * another rank sends exactly the ticked messages. Nothing on screen explains this (clutter);
-   * the user guide carries it. Send-here and Enter ignore the ticks entirely, so talking to one
-   * rank alone, indefinitely, stays the unforced default.
+  /* ---------- message selection (reworked 2026-07-31) ---------------------------------------
+   * The Advisors toggle puts a tick box on every message in that window, all UNCHECKED: the
+   * user checks any number of them, then presses another rank's insignia to send exactly those.
+   * Send and Enter ignore the ticks entirely, so talking to one rank alone, indefinitely, stays
+   * the unforced default.
    */
   function enterSelect(w) {
     const log = $("#vb-log-" + w);
     if (!log) return;
-    const n = state.chats[w].messages.length;
     for (const b of log.querySelectorAll(".vpb[data-mi]")) {
       if (b.querySelector(".vpb-pick")) continue;
       const lab = document.createElement("label");
       lab.className = "vpb-pick";
       const box = document.createElement("input");
       box.type = "checkbox";
-      box.checked = Number(b.dataset.mi) >= n - 2;   // the last exchange rides by default
       lab.append(box);
       b.append(lab);
     }
@@ -836,7 +1099,9 @@
     if (!log || log.querySelector(".vpb-vision")) return;
     const card = document.createElement("div");
     card.className = "vpb vpb-vision";
-    card.innerHTML = "<h4>Here is what gets built</h4><div></div>";
+    // The planning has an END and it says so (Fred, 2026-07-31: "It is not clear when the
+    // planning is supposed to end").
+    card.innerHTML = "<h4>Here is what gets built</h4><div></div><p class='vpb-vision-done'>Planning is done. Press BEGIN BUILDING below, or keep talking to change the plan.</p>";
     card.querySelector("div").textContent = state.vision;
     log.append(card);
     log.scrollTop = log.scrollHeight;
@@ -857,6 +1122,7 @@
     try {
       const r = await fetch("/ide/planchat", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ window: w, model: c.model || "", messages: c.messages, register: reg(), mode: "vibe", device: device(),
+          seedPlan: !!(w === "main" && state.plan),
           adopt: !!state.adopt, adoptionContext: state.adopt ? state.adopt.brief : "",
           adoptionWorkspaceId: state.adopt ? state.adopt.workspaceId : "" }) });
       j = await r.json();
@@ -875,103 +1141,89 @@
   }
 
   /*
-   * The Send stack (Fred: "when you click send, there is an additional two buttons that extend
-   * down from it; the selection determines where the message goes").
-   *
-   * First press reveals the destinations extending downward: this window, and the other two by
-   * name (written out, not M/T/M/S). Choosing THIS window sends the typed text as the user's own
-   * turn — a command. Choosing ANOTHER window routes it across: it lands there tagged as coming
-   * from this window, wearing this window's colour, framed by the server as an opinion — because
-   * Fred's rule is that nothing crossing windows ever commands. If the composer is empty, the
-   * cross-window buttons forward this window's LAST AI REPLY instead, which is the independent-
-   * audit move the drawing's arrows described.
+   * The split Send (Fred, 2026-07-31). Send, the top half, ALWAYS talks to this rank and nothing
+   * else — first click sends, no menu, no surprises, and Enter does the same. Advisors, the
+   * bottom half, is a toggle: on, the two insignia buttons appear beside it and every message
+   * grows a tick box. Tick any number, press an insignia, and exactly those messages cross to
+   * that rank — never the whole chat. The receiving rank gets NO other context, so its opinion
+   * stays uninfluenced; if no context was typed, the sender is prompted to add a line first.
    */
   function wireSend(w) {
     const input = $("#vb-in-" + w);
     const send = $("#vb-send-" + w);
-    const menu = $("#vb-sendto-" + w);
-
-    const closeMenu = () => { menu.hidden = true; menu.textContent = ""; exitSelect(w); };
+    const advToggle = $("#vb-advtoggle-" + w);
+    const advBtns = $("#vb-adv-" + w);
 
     // What a forwarded message reads as: its speaker's rank, then its words. Pictures collapse to
     // their text the same way drafts do; pixels never cross windows.
     const textOf = (c) => (typeof c === "string" ? c : ((c.find((p) => p.type === "text") || {}).text || "(picture)"));
     const speaker = (from) => (from === "user" ? "User" : WNAME[from] || from);
 
-    const deliver = (target) => {
+    const setAdvisors = (on) => {
+      advBtns.hidden = !on;
+      advToggle.classList.toggle("on", on);
+      advToggle.setAttribute("aria-pressed", String(on));
+      if (on) enterSelect(w); else exitSelect(w);
+    };
+
+    const sendHere = () => {
       const text = (input.value || "").trim();
-      if (target === w) {
-        // Send here: the ordinary conversation with THIS rank alone. Ticks are ignored and
-        // cleared; pressing Send twice (or Enter) never crosses a window. Not required to ever
-        // pick a destination: this path is the whole conversation for as long as the user wants.
-        closeMenu();
-        if (!text || state.chats[w].busy) return;
-        input.value = ""; input.style.height = "";
-        state.chats[w].messages.push({ from: "user", content: text });
-        const b = bubble(w, "vpb-user", text);
-        if (b) b.dataset.mi = String(state.chats[w].messages.length - 1);
-        saveDraft();
-        askWindow(w);
+      if (!text || state.chats[w].busy) return;
+      // Advisors that never got a model have no seat to answer from (Fred: no default for the
+      // Captain or the Sergeant) — say so instead of quietly running on some other model.
+      if (w !== "main" && !state.chats[w].model) {
+        status("Pick a model for " + WNAME[w] + " in its corner first.", true);
         return;
       }
-      /*
-       * Crossing ranks: exactly the TICKED messages travel (default: the last exchange), joined
-       * as a labelled transcript in one forwarded turn, which the server stamps as opinion. Text
-       * in the composer rides separately AS THE USER, never inside the forwarded block, so the
-       * user's own words can never be mistaken for an AI's opinion.
-       */
+      input.value = ""; input.style.height = "";
+      state.chats[w].messages.push({ from: "user", content: text });
+      const b = bubble(w, "vpb-user", text);
+      if (b) b.dataset.mi = String(state.chats[w].messages.length - 1);
+      saveDraft();
+      askWindow(w);
+    };
+
+    /*
+     * Crossing ranks: exactly the TICKED messages travel, joined as a labelled transcript in one
+     * forwarded turn, which the server stamps as opinion. Text in the composer rides separately
+     * AS THE USER, never inside the forwarded block, so the user's own words can never be
+     * mistaken for an AI's opinion. Context is REQUIRED: an advisor handed a bare transcript
+     * with no ask does not know what to do with it, so the sender is prompted to type one line.
+     */
+    const sendToAdvisor = (target) => {
+      const text = (input.value || "").trim();
       const picks = pickedIndexes(w);
-      closeMenu();
+      if (!picks.length) { status("Tick the messages to send to " + WNAME[target] + " first.", true); return; }
+      if (!text) {
+        status("Type a line of context for " + WNAME[target] + " (what should they do with these messages?), then press their insignia again.", true);
+        input.focus();
+        return;
+      }
+      if (target !== "main" && !state.chats[target].model) {
+        status("Pick a model for " + WNAME[target] + " in its corner first.", true);
+        return;
+      }
       const msgs = state.chats[w].messages;
       let joined = picks.map((i) => msgs[i] ? "[" + speaker(msgs[i].from) + "] " + textOf(msgs[i].content) : "").filter(Boolean).join("\n\n");
       if (joined.length > 3800) joined = "(earlier ticked messages trimmed)\n\n" + joined.slice(-3800);
-      if (!joined && !text) { status("Nothing selected to send to " + WNAME[target] + "."); return; }
       input.value = ""; input.style.height = "";
-      if (joined) state.chats[target].messages.push({ from: w, content: joined });
-      if (text) state.chats[target].messages.push({ from: "user", content: text });
+      state.chats[target].messages.push({ from: w, content: joined });
+      state.chats[target].messages.push({ from: "user", content: text });
       if (!state.chats[target].open) toggleWin(target, true);
       renderLog(target);
+      setAdvisors(false);
       saveDraft();
       askWindow(target);
+      status("Sent " + picks.length + " message" + (picks.length === 1 ? "" : "s") + " to " + WNAME[target] + ".");
     };
 
-    send.addEventListener("click", () => {
-      if (!menu.hidden) { deliver(w); return; }   // second press = send here, ranks stay separate
-      menu.textContent = "";
-      const here = document.createElement("button");
-      here.type = "button";
-      here.textContent = "Send here";
-      here.addEventListener("click", () => deliver(w));
-      menu.append(here);
-      for (const other of WINDOWS.filter((x) => x !== w)) {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.className = "vb-sendto-" + other;
-        b.textContent = "To " + WNAME[other];
-        b.addEventListener("click", () => deliver(other));
-        menu.append(b);
-      }
-      // Discoverability (Fred, 2026-07-26: "no obvious way to send chat between AIs"): the menu
-      // now says out loud what the tick boxes are for, instead of appearing silently.
-      const hint = document.createElement("div");
-      hint.className = "vb-dest-hint";
-      hint.textContent = "Tick any messages above to include them, then pick where this goes. Ticked messages travel as a labelled transcript.";
-      menu.append(hint);
-      menu.hidden = false;
-      enterSelect(w);
-      // Anywhere else closes the stack; capture so a tap on another window's send does not stack
-      // two. Taps on the tick boxes themselves must NOT close it, or nothing could be ticked.
-      setTimeout(() => {
-        const away = (e) => {
-          if (menu.contains(e.target) || e.target === send || e.target.closest(".vpb-pick")) return;
-          closeMenu();
-          document.removeEventListener("pointerdown", away, true);
-        };
-        document.addEventListener("pointerdown", away, true);
-      }, 0);
-    });
+    send.addEventListener("click", sendHere);
+    advToggle.addEventListener("click", () => setAdvisors(advBtns.hidden));
+    for (const b of advBtns.querySelectorAll(".vb-adv-btn")) {
+      b.addEventListener("click", () => sendToAdvisor(b.dataset.to));
+    }
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); deliver(w); }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendHere(); }
     });
     input.addEventListener("input", () => { input.style.height = ""; input.style.height = Math.min(120, input.scrollHeight) + "px"; });
   }
@@ -1030,7 +1282,10 @@
     btn.disabled = true; btn.textContent = "Planning…";
     orchNote("");
     try {
-      const orchestrator = $("#vb-orch-model").value || "";
+      // The empty seat means "same as the General" (Fred, 2026-07-31): whatever model the user
+      // gave the General runs the orchestration too, unless they picked one here deliberately.
+      // The server still applies its own floor and says so when the seat has to change hands.
+      const orchestrator = $("#vb-orch-model").value || state.chats.main.model || "";
       const r = await fetch("/ide/tasks", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ prompt: goal + (state.vision ? "\n\nAGREED VISION:\n" + state.vision : ""), model: orchestrator, mode: "vibe", register: reg() }) });
       const j = await r.json();
@@ -1280,16 +1535,18 @@
     $("#vb-adopt-go").addEventListener("click", runAdopt);
     wireAdoptBrowse();
     $("#vb-startover").addEventListener("click", startOver);
-    $("#vb-saveto").addEventListener("change", (e) => { bridge() && bridge().selectWorkspace(e.target.value); renderSlider(); renderBudget(); });
+    $("#vb-saveto").addEventListener("change", (e) => handleSaveTo(e.target.value));
     // The limit follows the project, so switching folders never shows another project's number.
     $("#vb-budget").addEventListener("input", () => { const n = $("#vb-budget-note"); if (n) n.textContent = String($("#vb-budget").value || "").trim() ? "Saved when the build starts." : "No limit set: the build will not stop itself."; });
     for (const b of document.querySelectorAll("#vb-presets button")) {
       b.addEventListener("click", () => {
-        pendingModules = (bridge() ? bridge().studioPresets()[b.dataset.preset] : null) || [];
+        studioTab = b.dataset.preset;
+        if (studioTab !== "custom") pendingModules = (bridge() ? bridge().studioPresets()[studioTab] : null) || [];
         renderStudio();
       });
     }
     $("#vb-apply").addEventListener("click", applyStudio);
+    $("#vb-plan-view").addEventListener("click", showPlanModal);
     for (const w of WINDOWS) {
       wireSend(w);
       const sel = $("#vb-model-" + w);
@@ -1297,6 +1554,7 @@
     }
     for (const t of document.querySelectorAll(".vb-win-toggle")) t.addEventListener("click", () => toggleWin(t.dataset.win));
     // Fresh start (Fred, 2026-07-26): wipe an advisor window mid-planning for an unbiased opinion.
+    // It clears THAT window's conversation and nothing else.
     for (const f of document.querySelectorAll(".vb-win-fresh")) f.addEventListener("click", () => {
       const w = f.dataset.win;
       if (!state.chats[w] || !state.chats[w].messages.length) { status(WNAME[w] + " is already a blank slate."); return; }
@@ -1305,19 +1563,73 @@
       saveDraft();
       status(WNAME[w] + " has a clean slate — ask for a fresh opinion.");
     });
-    // Copy this whole conversation, attributed by rank so a pasted plan still reads as a dialogue.
-    for (const c of document.querySelectorAll(".vb-win-copy")) c.addEventListener("click", async () => {
+    // Copy all: the whole conversation as clean text, one press, above the typing field.
+    for (const c of document.querySelectorAll(".vb-copyall")) c.addEventListener("click", async () => {
       const w = c.dataset.win;
       const text = threadText(w);
       if (!text) { status(WNAME[w] + " has nothing to copy yet."); return; }
       const ok = await copyToClipboard(text);
       flashCopied(c, ok, document.getElementById("vb-log-" + w));
-      if (ok) status(WNAME[w] + "'s conversation is on your clipboard.");
+      if (ok) status(WNAME[w] + "'s conversation is on your clipboard, cleaned up for pasting.");
     });
     for (const g of document.querySelectorAll(".vb-grab")) wireGrab(g);
     $("#vb-orch-model").addEventListener("change", (e) => { if (state.army) { state.army.orchestrator = e.target.value; persistArmy(); } orchNote(""); });
     $("#vb-plan-tasks").addEventListener("click", planArmy);
     $("#vb-begin").addEventListener("click", beginBuilding);
+  }
+
+  /* ================= the plan from chat ====================================================== */
+
+  // The full plan, word for word, in a window of its own (Fred, 2026-07-31: "a button that brings
+  // up a window with the full plan, word for word from the chat").
+  function showPlanModal() {
+    if (!state.plan) return;
+    const old = $("#vb-plan-modal"); if (old) old.remove();
+    const overlay = document.createElement("div");
+    overlay.className = "vb-modal"; overlay.id = "vb-plan-modal";
+    overlay.innerHTML =
+      '<div class="vb-modal-card">' +
+        '<div class="vb-modal-head"><h3 class="vb-h">The plan from chat</h3>' +
+          '<button type="button" class="vb-modal-copy">Copy</button>' +
+          '<button type="button" class="vb-modal-x" aria-label="Close">&times;</button></div>' +
+        '<div class="vb-modal-body"></div>' +
+      '</div>';
+    const body = overlay.querySelector(".vb-modal-body");
+    body.textContent = (state.plan.name ? state.plan.name + "\n\n" : "") + state.plan.brief;
+    document.body.append(overlay);
+    const close = () => overlay.remove();
+    overlay.querySelector(".vb-modal-x").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    const copy = overlay.querySelector(".vb-modal-copy");
+    copy.addEventListener("click", async () => { flashCopied(copy, await copyToClipboard(state.plan.brief), body); });
+  }
+
+  /*
+   * Consume the chat hand-off (Fred, 2026-07-31: "It tells me it is reading the plan, brings me
+   * to the profile selector, I pressed vibe coder, and then it just opened the screen with no
+   * plan"). The plan is stored word for word behind the See-the-plan button, the project card is
+   * staged with the plan's name ready to save, and the General opens the conversation itself:
+   * a confirmation, a short summary, and the question of whether there is anything to add.
+   */
+  function consumePlanHandoff() {
+    const b = bridge();
+    if (!b || typeof b.pendingPlan !== "function") return;
+    const ph = b.pendingPlan();
+    if (!ph || !ph.brief) return;
+    b.clearPendingPlan();
+    state.plan = { name: ph.name || "", brief: ph.brief };
+    const btn = $("#vb-plan-view"); if (btn) btn.hidden = false;
+    // Name it right away: the plan's own name is staged in the project row, folder choice next.
+    if (ph.name && !staged) { staged = { name: ph.name, editing: false }; renderSlider(); highlightSaveTo(); }
+    // Kick the General exactly once: only when its thread is empty (a later reopen must not
+    // replay the hand-off on top of a conversation already underway).
+    if (!state.chats.main.messages.length) {
+      state.chats.main.messages.push({ from: "user", content: "Here is the plan from our chat, word for word:\n\n" + ph.brief });
+      renderLog("main");
+      toggleWin("main", true);
+      askWindow("main");
+    }
+    saveDraft();
   }
 
   /* ================= open and close ========================================================== */
@@ -1335,6 +1647,9 @@
     paintAllModelSelects();
     gateArmy();
     for (const w of WINDOWS) { renderLog(w); toggleWin(w, state.chats[w].open); }
+    // A plan saved from an earlier visit keeps its button; a fresh hand-off arms everything.
+    const pv = $("#vb-plan-view"); if (pv) pv.hidden = !state.plan;
+    consumePlanHandoff();
   }
 
   function close() {
@@ -1346,7 +1661,7 @@
   // Workspaces and the catalog both load after the panel exists; repaint when they land.
   document.addEventListener("dominion-ide-state", () => { if (state.open) { renderSlider(); renderSaveTo(); paintAllModelSelects();
     if ($("#vb-adopt-panel") && !$("#vb-adopt-panel").hidden) paintAdoptChoices(); } });
-  document.addEventListener("dominion-studio-changed", () => { if (state.open) { gateArmy(); paintDesignations(); } });
+  document.addEventListener("dominion-studio-changed", () => { if (state.open) gateArmy(); });
 
   window.dominionVibe = { open, close };
 })();

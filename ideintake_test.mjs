@@ -304,6 +304,29 @@ await t("main interviews, advisers advise: the two prompts never swap jobs", () 
   assert.ok(/intake interviewer/.test(odd[0].content));
 });
 
+await t("vibe's General is a working partner: answers questions, capped at five, adds ideas", () => {
+  const vibe = intakeSystem("hybrid", "vibe");
+  assert.ok(/Never answer a question with a question/.test(vibe), "deflection is banned");
+  assert.ok(/no more than FIVE questions/.test(vibe), "the question budget is five");
+  assert.ok(/ADD something of your own/.test(vibe), "every reply must contribute");
+  assert.ok(!/at least three clarifying questions/.test(vibe), "the beginner floor does not apply");
+  assert.ok(/planning is done/.test(vibe), "the vision reply names the exit");
+  // The beginner interview is untouched: gentle, one question at a time, three-question floor.
+  const beg = intakeSystem("plain", "beginner");
+  assert.ok(/at least three clarifying questions/.test(beg));
+  assert.ok(!/Never answer a question with a question/.test(beg));
+});
+
+await t("seedPlan reshapes only the General's FIRST move, and only when asked", () => {
+  const seeded = planchatMessages({ window: "main", seedPlan: true, history: [{ from: "user", content: "PLAN: build a bird app" }] });
+  assert.ok(/ARRIVING PLAN/.test(seeded[0].content), "the system prompt carries the arriving-plan contract");
+  assert.ok(/anything to\s*\n?\s*add or discuss/.test(seeded[0].content), "the first reply must ask what to add");
+  const plain = planchatMessages({ window: "main", history: [{ from: "user", content: "hi" }] });
+  assert.ok(!/ARRIVING PLAN/.test(plain[0].content), "no hand-off, no contract");
+  const adv = planchatMessages({ window: "second", seedPlan: true, history: [{ from: "user", content: "hi" }] });
+  assert.ok(!/ARRIVING PLAN/.test(adv[0].content), "advisers never inherit the hand-off framing");
+});
+
 await t("a forwarded picture keeps its pixels and the mark rides the text part", () => {
   const dataUrl = "data:image/png;base64," + "C".repeat(40);
   const msgs = planchatMessages({ window: "main", history: [

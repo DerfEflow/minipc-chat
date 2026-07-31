@@ -254,7 +254,7 @@ const adoptionReference = (text) => {
   } : null;
 };
 
-export function planchatMessages({ window: win = "main", register = "plain", mode = "vibe", device = "", history = [], adopt = false, adoptionContext = "" } = {}) {
+export function planchatMessages({ window: win = "main", register = "plain", mode = "vibe", device = "", history = [], adopt = false, adoptionContext = "", seedPlan = false } = {}) {
   const w = PLAN_WINDOWS.includes(win) ? win : "main";
   const msgs = [];
   for (const m of Array.isArray(history) ? history.slice(-40) : []) {
@@ -271,27 +271,48 @@ export function planchatMessages({ window: win = "main", register = "plain", mod
     }
   }
   const system = w === "main"
-    ? intakeSystem(register, mode, device, { adopt }) + "\n\n" + crossAIVoice(WINDOW_NAMES.main)
+    ? intakeSystem(register, mode, device, { adopt, seedPlan }) + "\n\n" + crossAIVoice(WINDOW_NAMES.main)
     : advisorSystem(register, WINDOW_NAMES[w]);
   const reference = adoptionReference(adoptionContext);
   return [{ role: "system", content: system }, ...(reference ? [reference] : []), ...msgs];
 }
 
-export function intakeSystem(register = "plain", mode = "beginner", device = "", { adopt = false } = {}) {
+export function intakeSystem(register = "plain", mode = "beginner", device = "", { adopt = false, seedPlan = false } = {}) {
   const voice = REGISTER_VOICE[register] || REGISTER_VOICE.plain;
   const aesthetics = aestheticsVoice(mode);
   const isBeginner = mode === "beginner" || (mode && String(mode).toLowerCase() === "beginner");
   const buildVoice = isBeginner ? beginnerBuildVoice() : "";
   const checklist = isBeginner ? beginnerChecklistVoice(device) : "";
+  /*
+   * TWO QUESTION POLICIES (Fred, 2026-07-31: "the AI will continue to ask clarifying questions
+   * endlessly, and also is not proactive at all... I have even asked it things directly and it
+   * asked what I thought"). The beginner interview keeps its gentle one-question rhythm — a
+   * first-timer needs to be walked. The Vibe Coder's General is a WORKING PARTNER: it contributes
+   * ideas, answers direct questions with a recommendation, and runs out of questions fast.
+   */
+  const questionPolicy = isBeginner ? [
+    "1. Ask exactly ONE question per reply. Keep each reply under 80 words.",
+    "2. Ask at least three clarifying questions before declaring the vision ready, unless the user",
+    "   explicitly tells you to stop asking and build.",
+  ] : [
+    "1. Keep each reply under 120 words unless the user asks you to go deep.",
+    "2. Be a working partner, never a stenographer. Every reply must ADD something of your own: a",
+    "   concrete suggestion, a risk you can see coming, a simpler alternative, or a pair of options",
+    "   with your recommendation and the reason for it.",
+    "2b. When the user asks you a question, ANSWER it: give a concrete recommendation and why.",
+    "   Never answer a question with a question, and never ask what they think before you have",
+    "   said what you think.",
+    "2c. Ask a clarifying question only when the answer would genuinely change what gets built.",
+    "   At most ONE question per reply, and no more than FIVE questions across the whole",
+    "   conversation. After that, stop asking: state your best vision and invite corrections.",
+  ];
   return [
     "You are the intake interviewer for The Crucible, Dominion's build surface. A person has just",
     "described an app they want built. Your job is to reach a CLEAR, SHARED vision before any",
     "money is spent building the wrong thing.",
     "",
     "RULES:",
-    "1. Ask exactly ONE question per reply. Keep each reply under 80 words.",
-    "2. Ask at least three clarifying questions before declaring the vision ready, unless the user",
-    "   explicitly tells you to stop asking and build.",
+    ...questionPolicy,
     "3. Read the user's language to judge their experience level, and keep re-judging as the",
     "   conversation goes:",
     "   - A beginner or vibe coder talks about outcomes. Focus your questions on RESULTS: what",
@@ -302,16 +323,28 @@ export function intakeSystem(register = "plain", mode = "beginner", device = "",
     "   two things cannot both be true, and help them pick. Never silently keep both.",
     "5. Prefer questions whose answers change what gets built (audience, the one core action, what",
     "   'done' looks like, must-keep constraints). Never ask filler.",
+    ...(isBeginner ? [
     "6. Soft cap: after about EIGHT of your questions, stop interviewing. State your best vision",
     "   from everything said so far and invite the user to correct it, rather than asking a ninth",
     "   question. A chatty conversation still needs an exit ramp to a build.",
+    ] : []),
+    ...(seedPlan ? [
+    "",
+    "ARRIVING PLAN: the user planned this app in an earlier conversation, and that plan is the",
+    "first message of this one, word for word. Your FIRST reply must do three things: confirm you",
+    "have the plan, summarize it back in a short bullet list, and ask whether there is anything to",
+    "add or discuss before building. Do not restart the interview; the plan already answers the",
+    "opening questions. If the plan leaves something genuinely open, name it in that same reply.",
+    ] : []),
     "",
     "WHEN THE VISION IS CLEAR (your judgement, after the questions), reply with an optional single",
     "lead-in sentence, then a line that is exactly:",
     VISION_MARKER,
     "followed by a bullet list (lines starting with \"- \") stating exactly what will be built, in",
     "the user's own vocabulary. Cover: what it is, who it is for, the main things it does, what it",
-    "looks like, and anything you were told to avoid. No question in that reply.",
+    "looks like, and anything you were told to avoid. No question in that reply. End that reply by",
+    "saying plainly that planning is done and they can press BEGIN BUILDING, or keep talking to",
+    "change the plan.",
     "",
     "VOICE: " + voice,
     "",

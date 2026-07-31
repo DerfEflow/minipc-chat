@@ -3133,6 +3133,27 @@
       paintStudio();
     },
     studioPresets: () => JSON.parse(JSON.stringify(STUDIO_PRESETS)),
+    /*
+     * The chat hand-off, for the Vibe surface (Fred, 2026-07-31: "it just opened the screen with
+     * no plan"). The brief used to land only in the classic starter's textarea, which the Vibe
+     * surface never reads — the plan was genuinely lost the moment Vibe Coder was picked. Now the
+     * surface asks for it on open and clears it once consumed, so a later manual visit to Vibe
+     * does not replay an old plan.
+     */
+    pendingPlan: () => (pendingHandoff ? { ...pendingHandoff } : null),
+    clearPendingPlan: () => { pendingHandoff = null; },
+    // Remove a project pointer (the folder and its files stay on disk; the server says the same).
+    removeWorkspace: async (id) => {
+      const r = await fetch("/ide/workspace/delete", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }) });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && !j.error) {
+        state.workspaces = (state.workspaces || []).filter((w) => w.id !== id);
+        if (state.workspaceId === id) state.workspaceId = "";
+        renderStarter();
+      }
+      return j || {};
+    },
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

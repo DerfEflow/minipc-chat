@@ -1785,8 +1785,13 @@ async function handleIde(req, res, u) {
      * Open to anyone whose lane is the cloud, which is everyone with no machine attached PLUS
      * anyone who has one and chose the cloud anyway. Someone routed to their own machine still
      * gets the typed-path flow, which is the honest one for folders only they can enumerate.
+     *
+     * cloud:true (Fred, 2026-07-31: the Vibe project row offers "Dominion cloud folder" beside
+     * the hard drive) is an EXPLICIT ask for a server-side folder, honored even when the account
+     * has a machine attached. The old refusal stays for the implicit path, because someone whose
+     * lane is their own machine should not silently get a cloud folder they never asked for.
      */
-    if (buildLane(T, null) !== "workshop") {
+    if (!body.cloud && buildLane(T, null) !== "workshop") {
       return send({ status: 400, body: { error: "Pick a folder on your computer instead — this account is set to build on your own machine.", code: "has_node" } });
     }
     const name = String(body.name || "").trim().slice(0, 60);
@@ -2136,7 +2141,7 @@ async function handleIde(req, res, u) {
     const mode = normalizeCrucibleMode(body.mode || "vibe");
     const device = body.device === "mobile" ? "mobile" : "desktop";
     const messages = planchatMessages({ window: win, register: reg, mode, device, history: body.messages,
-      adopt: !!body.adopt, adoptionContext: body.adoptionContext });
+      adopt: !!body.adopt, adoptionContext: body.adoptionContext, seedPlan: !!body.seedPlan });
     if (messages.length < 2) return send({ status: 400, body: { error: "Say something first." } });
     let model = String(body.model || "").trim() && modelById(body.model) ? body.model : defaultModelFor(!!T.isOwner);
     // A pasted sketch needs a model with eyes, same rule as intake: reroute the one turn or say so.
