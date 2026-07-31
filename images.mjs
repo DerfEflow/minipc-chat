@@ -20,6 +20,10 @@ import https from "node:https";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+// The ONE credit rule, imported rather than repeated. This file used to carry three of its own
+// copies of Math.max(1, Math.ceil(usd * 100)), so image work kept charging a whole-credit
+// minimum after the shared rule dropped it. Money math lives in exactly one place now.
+import { creditsForCostUsd } from "./billing.mjs";
 
 export const IMAGE_SIZES = {
   square: "1024x1024",
@@ -441,7 +445,7 @@ export function createImagesFeature(deps) {
     // even though the charge lands at collection (when real per-line usage is known).
     if (!T.isOwner && T.role === "credit" && billingAccount) {
       const acct = billingAccount(T.email) || {};
-      const needCredits = Math.max(1, Math.ceil(estUsd * 100));
+      const needCredits = creditsForCostUsd(estUsd);
       if ((acct.balance || 0) < needCredits) {
         return json(res, 402, { error: `This batch estimates ${needCredits} credits; you have ${acct.balance || 0}. Add credits in Setup first.`, code: "needs_credits" });
       }
@@ -483,7 +487,7 @@ export function createImagesFeature(deps) {
     // Collection settles against real usage — overcharges come back as credits, and the rare
     // actual-above-published overrun is charged as the difference. Terminal failures refund fully.
     const metered = isMetered(T);
-    const chargedCredits = metered ? Math.max(1, Math.ceil(estUsd * 100)) : 0;
+    const chargedCredits = metered ? creditsForCostUsd(estUsd) : 0;
     if (metered) meter(T, estUsd);
 
     const jobs = loadJobs();
@@ -587,8 +591,8 @@ export function createImagesFeature(deps) {
         }
       }
       job.costUsd = +cost.toFixed(6);
-      const actualCredits = ok.length ? Math.max(1, Math.ceil(job.costUsd * 100)) : 0;
-      const delta = actualCredits - job.chargedCredits;
+      const actualCredits = ok.length ? creditsForCostUsd(job.costUsd) : 0;
+      const delta = Math.round((actualCredits - job.chargedCredits) * 1e6) / 1e6;
       if (delta > 0) meter(T, delta / 100);
       else if (delta < 0) creditBack(T, -delta, "batch settle refund " + job.id);
       job.refundedCredits = delta < 0 ? -delta : 0;

@@ -138,7 +138,7 @@ import { unkeptIntent, intentNudge } from "./intentguard.mjs";
 import { featureIndex, featureHelp } from "./features.mjs";
 import { createFreeRetriever, applyRerank } from "./retriever.mjs";
 import { createGoogleProvider } from "./google.mjs";
-import { createBilling, creditsForUsd, creditsForCostUsd } from "./billing.mjs";
+import { createBilling, creditsForUsd, creditsForCostUsd, roundCredits } from "./billing.mjs";
 import { createSessionBudgets } from "./sessionbudget.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
@@ -5211,11 +5211,18 @@ const imagesFeature = createImagesFeature({
   screenContent,
   meter: (T, costUsd) => meterOcr(T, costUsd),
   isMetered: (T) => !!(MULTI_TENANT && T && !T.isOwner && (T.role === "credit" || T.role === "sponsored")),
-  // Batch settle (Fred 2026-07-18): submit-charge overages come back as credits.
+  /*
+   * Batch settle (Fred 2026-07-18): submit-charge overages come back as credits.
+   *
+   * Math.trunc used to sit on this refund, from when a credit was the smallest unit. Once charges
+   * became exact it started shortchanging people in the one direction that must never round in the
+   * house's favour: a 7.129 refund paid back 7, and any refund under a whole credit paid back
+   * nothing at all. Refunds are exact, same precision as the charge that created them.
+   */
   creditBack: (T, credits, reason) => {
     if (!MULTI_TENANT || !T || T.isOwner || !(credits > 0)) return;
     try {
-      if (T.role === "credit") billing.adminAdjust(T.email, Math.trunc(credits), reason || "batch settle refund");
+      if (T.role === "credit") billing.adminAdjust(T.email, roundCredits(credits), reason || "batch settle refund");
       else if (T.role === "sponsored") usersStore.addSponsoredSpend(T.email, -(credits / 100));
     } catch {}
   },

@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v146-work-orders-and-model-labels";
+const CACHE = "dominion-ai-v147-exact-credits-no-minimum";
 const SHELL = [
   "/",
   "/index.html",
@@ -21,7 +21,7 @@ const SHELL = [
   "/dominion-ide.css?v=24",
   "/dominion-ide.js?v=31",
   "/dominion-tour.js?v=6",
-  "/app.js?v=68",
+  "/app.js?v=69",
   "/dominion-markdown.css?v=1",
   "/dominion-markdown.js?v=1",
   "/dominion-ui.css?v=41",
@@ -36,7 +36,7 @@ const SHELL = [
   "/dominion-rendered-v2.css?v=41",
   "/dominion-forge.css?v=6",
   "/dominion-forge.js?v=6",
-  "/dominion-money.js?v=1",
+  "/dominion-money.js?v=2",
   "/assets/dominion-neural-chassis-desktop-4k-v3.webp",
   "/assets/dominion-neural-chassis-mobile-4k-v3.webp",
   "/assets/fonts/domine-latin-var.woff2",

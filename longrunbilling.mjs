@@ -12,6 +12,7 @@
  */
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { creditsForCostUsd } from "./billing.mjs";
 
 // D2, locked 2026-07-22. Amounts are suggestions inside Fred's "never exceed ~$2 for guests"
 // rule; changing them is a one-line edit here and nowhere else.
@@ -129,7 +130,10 @@ export function canApprove({ T, billing, usd }) {
   if (!T) return { ok: false, error: "no identity" };
   if (T.isOwner) return { ok: true };
   if (T.role === "sponsored") return { ok: true };   // spend draws the cap; the cap is the wall
-  const need = Math.ceil(Math.max(0, Number(usd) || 0) * 100);
+  // The requirement uses the SAME rule as the charge. Rounding it up asked a user with 3.9
+  // credits to find 4 for a tranche that will cost 3.7, which is the minimum-spend habit
+  // wearing a different hat.
+  const need = creditsForCostUsd(usd);
   const have = billing.balance(T.email);
   if (have < need) return { ok: false, error: "Approving this tranche needs " + need + " credits and you have " + have + ". Add credits in Setup first.", code: "needs_credits" };
   return { ok: true };

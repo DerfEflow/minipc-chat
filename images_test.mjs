@@ -244,13 +244,17 @@ await t("content wall screens image prompts for non-owners (restricted tier)", a
   if (r.status !== 403 || r.body.code !== "content_blocked") throw new Error(r.status + " " + JSON.stringify(r.body));
 });
 
-await t("credit user is METERED: balance drops by ceil(costUsd*100)", async () => {
+// Metering is EXACT as of 2026-07-31: the old expectation here was Math.max(1, ceil(cost*100)),
+// which rounded a 0.822-credit image up to a whole credit. A charge is a measurement now.
+await t("credit user is METERED: balance drops by exactly costUsd*100", async () => {
   const before = await balanceOf(USER);
   const r = await req("POST", "/api/images/generate", { email: USER, body: { prompt: "a copper gear city", quality: "low", aspect: "square", n: 1 } });
   if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
   const after = await balanceOf(USER);
-  const expectCredits = Math.max(1, Math.ceil(r.body.costUsd * 100));
-  if (before - after !== expectCredits) throw new Error(`balance ${before}->${after}, expected -${expectCredits}`);
+  const expectCredits = Math.round(r.body.costUsd * 100 * 1e6) / 1e6;
+  const moved = Math.round((before - after) * 1e6) / 1e6;
+  if (moved !== expectCredits) throw new Error(`balance ${before}->${after}, moved ${moved}, expected -${expectCredits}`);
+  if (expectCredits >= 1) throw new Error("this fixture is meant to cost UNDER a credit, so it proves no rounding up happened");
 });
 
 await t("a credit user's draft generation does NOT touch their balance", async () => {
@@ -279,10 +283,12 @@ await t("batch submit uploads JSONL, creates the job, and CHARGES AT SUBMIT", as
   if (r.status !== 200 || r.body.id !== "batch_mock1") throw new Error(r.status + " " + JSON.stringify(r.body));
   est = r.body.estUsd;
   if (est !== +(3 * 0.053 * 0.5).toFixed(6)) throw new Error("estUsd " + est);
-  submitCharged = Math.max(1, Math.ceil(est * 100));
+  // Exact, not rounded up: 7.95 credits is charged as 7.95 (2026-07-31, no minimum spend).
+  submitCharged = Math.round(est * 100 * 1e6) / 1e6;
   if (r.body.chargedCredits !== submitCharged) throw new Error("chargedCredits " + r.body.chargedCredits);
   const after = await balanceOf(USER);
-  if (before - after !== submitCharged) throw new Error(`submit charge ${before}->${after}, expected -${submitCharged}`);
+  const moved = Math.round((before - after) * 1e6) / 1e6;
+  if (moved !== submitCharged) throw new Error(`submit charge ${before}->${after}, moved ${moved}, expected -${submitCharged}`);
   const lines = seen.uploadedJsonl.split("\n").filter((l) => l.includes("custom_id"));
   if (lines.length !== 3) throw new Error("jsonl lines " + lines.length);
   if (!seen.uploadedJsonl.includes('"url": "/v1/images/generations"') && !seen.uploadedJsonl.includes('"url":"/v1/images/generations"')) throw new Error("jsonl endpoint wrong");
@@ -305,12 +311,15 @@ await t("collection settles ONCE against real usage: overcharge comes back as cr
   // actual: 2 ok lines * (10*$5 + 272*$30)/1M * 0.5
   const expectCost = +((2 * ((10 * 5 + 272 * 30) / 1e6)) * 0.5).toFixed(6);
   if (Math.abs(p1.body.costUsd - expectCost) > 1e-9) throw new Error("costUsd " + p1.body.costUsd + " != " + expectCost);
-  const actualCredits = Math.max(1, Math.ceil(expectCost * 100));
-  const expectRefund = submitCharged - actualCredits;
+  const actualCredits = Math.round(expectCost * 100 * 1e6) / 1e6;
+  const expectRefund = Math.round((submitCharged - actualCredits) * 1e6) / 1e6;
   if (expectRefund <= 0) throw new Error("test premise broken: expected an overcharge to refund");
   if (p1.body.refundedCredits !== expectRefund) throw new Error("refundedCredits " + p1.body.refundedCredits + " != " + expectRefund);
   const afterFirst = await balanceOf(USER);
-  if (afterFirst - before !== expectRefund) throw new Error(`refund ${before}->${afterFirst}, expected +${expectRefund}`);
+  // Subtracting two float balances reintroduces exactly the noise the rounding removed, so the
+  // comparison is made at the precision the ledger actually stores.
+  const movedBack = Math.round((afterFirst - before) * 1e6) / 1e6;
+  if (movedBack !== expectRefund) throw new Error(`refund ${before}->${afterFirst}, moved ${movedBack}, expected +${expectRefund}`);
   const p2 = await req("GET", "/api/images/batch/batch_mock1?offset=1&limit=4", { email: USER });
   if (p2.body.images.length !== 1 || !p2.body.done) throw new Error("page2 shape wrong: " + JSON.stringify({ n: p2.body.images.length, done: p2.body.done }));
   if ((await balanceOf(USER)) !== afterFirst) throw new Error("settled twice");

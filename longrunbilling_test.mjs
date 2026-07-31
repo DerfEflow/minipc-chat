@@ -27,7 +27,7 @@ function mockBilling(initial = {}) {
     charges,
     balance: (e) => bal[e] || 0,
     chargeTurn: (e, usd) => {
-      const ded = Math.max(1, Math.ceil((Number(usd) || 0) * 100));
+      const ded = Math.max(0, Math.round((Number(usd) || 0) * 100 * 1e6) / 1e6);   // exact, no minimum
       bal[e] = Math.max(0, (bal[e] || 0) - ded);
       charges.push({ email: e, usd, deducted: ded });
       return { balance: bal[e], deducted: ded, low: bal[e] <= 100 };
@@ -91,13 +91,15 @@ await t("gate: zero-balance credit user cannot approve; funded can; sponsored an
 });
 
 // ---- chargeUnit routing ----
-await t("chargeUnit: owner never metered; credit pays ceil x100; sponsored draws the cap", () => {
+// 2026-07-31: a unit costs what it costs. This asserted ceil(3.7) = 4, which quietly took an extra
+// 0.3 credits on every long-run unit; the same minimum-spend rule that billed free models.
+await t("chargeUnit: owner never metered; credit pays cost x100 exactly; sponsored draws the cap", () => {
   const billing = mockBilling({ "c@x.com": 500 });
   const users = mockUsers();
   assert.equal(chargeUnit({ T: { isOwner: true }, billing, users, costUsd: 1 }).charged, false);
   const r = chargeUnit({ T: { role: "credit", email: "c@x.com" }, billing, users, costUsd: 0.037 });
-  assert.equal(r.credits, 4);                  // ceil(3.7) = 4 credits
-  assert.equal(billing.balance("c@x.com"), 496);
+  assert.equal(r.credits, 3.7);                // exactly 3.7 credits, not a rounded 4
+  assert.equal(billing.balance("c@x.com"), 496.3);
   chargeUnit({ T: { role: "sponsored", email: "s@x.com" }, billing, users, costUsd: 0.25 });
   assert.deepEqual(users.spends, [{ email: "s@x.com", usd: 0.25 }]);
   assert.equal(chargeUnit({ T: { role: "credit", email: "c@x.com" }, billing, users, costUsd: 0 }).charged, false);

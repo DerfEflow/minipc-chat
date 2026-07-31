@@ -32,10 +32,25 @@ await t("pricing: $12.50 buys 1000 credits (25% markup)", () => {
   assert.equal(creditsForUsd(25), 2000);
   assert.equal(usdValueOfCredits(1000), 10);           // 1000 credits = $10 of token value
 });
-await t("pricing: a turn deducts cost x 100, rounded up, never zero", () => {
+/*
+ * A turn deducts EXACTLY what it cost (Fred, 2026-07-31: "I've never authorized a minimum spend").
+ * The old rule was Math.max(1, ceil(usd * 100)), which charged a whole credit for a turn costing a
+ * fraction of one and, worse, charged a whole credit for a turn that cost nothing, so the free
+ * NVIDIA fleet quietly billed a credit per message. These assertions are the shape of the fix:
+ * proportional below one credit, and zero when the turn was free.
+ */
+await t("pricing: a turn deducts cost x 100 exactly, with no minimum", () => {
   assert.equal(creditsForCostUsd(0.5), 50);
-  assert.equal(creditsForCostUsd(0.001), 1);           // ceil, never free
-  assert.equal(creditsForCostUsd(0), 1);
+  assert.equal(creditsForCostUsd(0.00005), 0.005);     // Fred's example: .005 credits, charged as .005
+  assert.equal(creditsForCostUsd(0.001), 0.1);         // a tenth of a credit, not a whole one
+  assert.equal(creditsForCostUsd(0), 0);               // free is free
+  assert.equal(creditsForCostUsd(-1), 0);              // never a negative charge
+});
+await t("pricing: a free model costs the user nothing across a whole conversation", () => {
+  // The reported bug: four messages on a free model took four credits.
+  let charged = 0;
+  for (let turn = 0; turn < 4; turn++) charged += creditsForCostUsd(0);
+  assert.equal(charged, 0, "four free turns must cost nothing");
 });
 
 const dir = mkdtempSync(join(tmpdir(), "billing-"));

@@ -37,7 +37,8 @@ const money = () => window.DominionMoney || {
   cost: (u, o) => ((o && o.approx) ? "~" : "") + "$" + (Number(u) || 0).toFixed(2),
   rate: (i, o) => (!i && !o) ? "Free" : "$" + i + "/" + o,
   balance: (u) => "$" + (Number(u) || 0).toFixed(2),
-  inCredits: () => false, toCredits: (u) => Math.max(1, Math.ceil((Number(u) || 0) * 100)),
+  // Exact, matching billing.mjs creditsForCostUsd: no one-credit floor, and zero stays zero.
+  inCredits: () => false, toCredits: (u) => { const n = Number(u) || 0; return n <= 0 ? 0 : Math.round(n * 100 * 1e6) / 1e6; },
 };
 
 // ---- Phase 2 privacy modes (Fred's hard allow-list; the SERVER enforces, this mirrors it) ----

@@ -66,8 +66,23 @@ t("a displayed cost is never less than what billing actually deducts", () => {
 t("the noun agrees with the number", () => {
   const M = loadMoney();
   M.adopt({ isOwner: false, pricing: { CREDITS_PER_USD } });
-  assert.match(M.cost(0.005), /^1 credit$/, "one credit is singular: " + M.cost(0.005));
+  // $0.01 is exactly one credit. This used to be written as $0.005 because the old rounding-up
+  // rule turned half a credit into a whole one; with exact charging, half a credit stays half.
+  assert.match(M.cost(0.01), /^1 credit$/, "one credit is singular: " + M.cost(0.01));
   assert.match(M.cost(0.05), /^5 credits$/, "five is plural: " + M.cost(0.05));
+});
+
+/*
+ * Fractions have to survive the trip to the screen, or the fix is invisible where it matters most:
+ * the number a guest actually reads. Float noise (0.30000000000000004) must never surface either.
+ */
+t("a fraction of a credit is shown as a fraction, cleanly", () => {
+  const M = loadMoney();
+  M.adopt({ isOwner: false, pricing: { CREDITS_PER_USD } });
+  assert.match(M.cost(0.005), /^0\.5 credits$/, "half a credit reads as half: " + M.cost(0.005));
+  assert.match(M.cost(0.00005), /^0\.005 credits$/, "Fred's example: " + M.cost(0.00005));
+  assert.equal(M.cost(0), "0 credits", "a free turn quotes zero, not a minimum");
+  assert.ok(!/\d{6,}/.test(M.cost(0.003)), "no float noise on screen: " + M.cost(0.003));
 });
 
 t("a free lane says Free rather than quoting zero", () => {

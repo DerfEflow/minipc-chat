@@ -33,12 +33,37 @@ export const FREE_CAP_USD = 20;               // default monthly ceiling Fred co
 const MAX_RECHARGE_FAILS = 3;                 // after this many failed retries, stop trying (about a week at ~3 days apart)
 const RETRY_INTERVAL_DAYS = 3;
 
-// usd a buyer pays -> credits granted (markup applied here, at purchase).
+// usd a buyer pays -> credits granted (markup applied here, at purchase). Purchases stay whole
+// credits: a top-up is a round number the buyer chose, not a measurement.
 export const creditsForUsd = (usd) => Math.round((Number(usd) || 0) / MARKUP * CREDITS_PER_USD);
 // credits -> the token-value dollars they represent (at cost, no markup).
 export const usdValueOfCredits = (credits) => (Number(credits) || 0) / CREDITS_PER_USD;
-// token cost dollars for a turn -> credits to deduct (rounded up; never free).
-export const creditsForCostUsd = (usd) => Math.max(1, Math.ceil((Number(usd) || 0) * CREDITS_PER_USD));
+/*
+ * CREDIT PRECISION. A deduction is a MEASUREMENT of what a turn actually cost, so it is carried to
+ * six decimal places of a credit, one part in 10^8 of a dollar. That is far finer than any real
+ * token cost and fine enough that rounding cannot accumulate into a cent over a lifetime of turns.
+ */
+const CREDIT_DP = 1e6;
+export const roundCredits = (n) => Math.round((Number(n) || 0) * CREDIT_DP) / CREDIT_DP;
+/*
+ * Token cost dollars for a turn -> credits to deduct. EXACT: no floor, no rounding up.
+ *
+ * This was Math.max(1, Math.ceil(usd * 100)), a one-credit minimum on every turn however little it
+ * cost, including turns that cost nothing at all. That quietly made the free NVIDIA fleet cost
+ * money: the preflight estimate said "Free", the ledger then took a credit per turn, and a guest
+ * chatting briefly on a free model was billed four credits for four messages. The same floor
+ * overcharged every cheap turn on a paid model too, which is the identical defect wearing a
+ * smaller number. Fred, 2026-07-31: "I've never authorized a minimum spend... if they use .005
+ * credits, that's how much should be deducted. and yes, free models are free."
+ *
+ * Zero in, zero out, so "free is free" falls out of the arithmetic instead of relying on a special
+ * case that a later edit could forget.
+ */
+export const creditsForCostUsd = (usd) => {
+  const n = Number(usd) || 0;
+  if (n <= 0) return 0;
+  return roundCredits(n * CREDITS_PER_USD);
+};
 
 // A friendly single-use code, e.g. DOMI-7QK4-9F2M. Ambiguous chars removed.
 function genCode() {
@@ -53,15 +78,23 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
   mkdirSync(dir, { recursive: true });
   const db = new DatabaseSync(join(dir, "billing.db"));
   db.exec("PRAGMA journal_mode=WAL");
+  /*
+   * balance/delta/balanceAfter are REAL: a turn can cost a fraction of a credit. Existing
+   * databases keep their INTEGER declaration and need no rebuild, because SQLite's NUMERIC
+   * affinity stores a value that cannot be exactly represented as an integer as a REAL, losslessly
+   * (verified against this exact schema before the change: 1000 minus four 0.005 deductions reads
+   * back as 999.98). Rebuilding a live money table would have been the riskier way to get the same
+   * result.
+   */
   db.exec(`CREATE TABLE IF NOT EXISTS credits (
-    email TEXT PRIMARY KEY, balance INTEGER NOT NULL DEFAULT 0,
+    email TEXT PRIMARY KEY, balance REAL NOT NULL DEFAULT 0,
     autorecharge INTEGER NOT NULL DEFAULT 1, topupUsd REAL NOT NULL DEFAULT ${MIN_TOPUP_USD},
     stripeCustomer TEXT, defaultPm TEXT,
     rechargeFails INTEGER NOT NULL DEFAULT 0, nextRetryAt TEXT,
     createdAt TEXT, updatedAt TEXT )`);
   db.exec(`CREATE TABLE IF NOT EXISTS ledger (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, delta INTEGER NOT NULL,
-    reason TEXT, balanceAfter INTEGER NOT NULL, ts TEXT NOT NULL )`);
+    id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, delta REAL NOT NULL,
+    reason TEXT, balanceAfter REAL NOT NULL, ts TEXT NOT NULL )`);
   db.exec(`CREATE TABLE IF NOT EXISTS codes (
     code TEXT PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unused',
     capUsd REAL, credits INTEGER NOT NULL DEFAULT 0, note TEXT,
@@ -101,11 +134,19 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
   }
   const balance = (email) => (ensure(email) || {}).balance || 0;
 
+  /*
+   * Math.trunc used to sit on both writes here, from when a credit was the smallest unit that
+   * existed. Left in place it would defeat exact charging completely: a 0.005 deduction truncates
+   * to 0 and the turn becomes free, which is the same class of error as the floor it replaced,
+   * pointed the other way. Deltas are now carried at full precision and only rounded to the credit
+   * precision, so what the ledger records is what the balance moved by.
+   */
   function apply(email, delta, reason) {
     const e = lc(email); const row = ensure(e);
-    const next = Math.max(0, row.balance + Math.trunc(delta));
+    const d = roundCredits(delta);
+    const next = Math.max(0, roundCredits((Number(row.balance) || 0) + d));
     q.setBal.run(next, now(), e);
-    q.ledgerIns.run(e, Math.trunc(delta), reason || "", next, now());
+    q.ledgerIns.run(e, d, reason || "", next, now());
     return next;
   }
 

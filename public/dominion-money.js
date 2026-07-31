@@ -40,12 +40,33 @@
     creditsPerUsd: DEFAULT_CREDITS_PER_USD,
   };
 
-  // usd -> credits, matching billing.mjs creditsForCostUsd: never zero for a real cost, never less
-  // than the account is charged. A true zero (free lanes) stays zero so "Free" can be said honestly.
+  /*
+   * usd -> credits, matching billing.mjs creditsForCostUsd EXACTLY. Both sides carry six decimal
+   * places and neither rounds up. The old pair rounded up to a one-credit minimum, so the number
+   * shown and the number charged agreed with each other while both overstated a cheap turn and
+   * charged outright for a free one.
+   */
+  const CREDIT_DP = 1e6;
   const toCredits = (usd) => {
     const n = Number(usd) || 0;
     if (n <= 0) return 0;
-    return Math.max(1, Math.ceil(n * state.creditsPerUsd));
+    return Math.round(n * state.creditsPerUsd * CREDIT_DP) / CREDIT_DP;
+  };
+
+  /*
+   * Rendering a credit count. A fraction has to read like a quantity a person can hold, so it
+   * shows enough decimals to be true and no trailing zeros: 0.005, 1.25, 4, 1,240. Float noise
+   * (0.30000000000000004) never reaches the screen.
+   */
+  const fmtCredits = (n) => {
+    const v = Number(n) || 0;
+    if (v === 0) return "0";
+    if (Number.isInteger(v)) return v.toLocaleString();
+    const abs = Math.abs(v);
+    const dp = abs >= 100 ? 2 : abs >= 1 ? 3 : 4;
+    const s = v.toFixed(dp).replace(/0+$/, "").replace(/\.$/, "");
+    const [whole, frac] = s.split(".");
+    return Number(whole).toLocaleString() + (frac ? "." + frac : "");
   };
 
   // A cost that has already happened, or a firm estimate of one. `approx` prefixes the tilde in the
@@ -55,7 +76,7 @@
     const tilde = approx ? "~" : "";
     if (state.isOwner) return tilde + "$" + (n > 0 && n < 0.01 ? n.toFixed(4) : n.toFixed(2));
     const c = toCredits(n);
-    return tilde + c.toLocaleString() + " " + noun(c);
+    return tilde + fmtCredits(c) + " " + noun(c);
   };
 
   // A catalog rate, quoted per million tokens. Guests read the same rate in the currency they hold.
@@ -73,11 +94,16 @@
       : ci.toLocaleString() + "/" + co.toLocaleString() + " " + UNIT_NOUN;
   };
 
-  // A balance or budget the viewer holds. Whole units: nobody budgets in fractions of a credit.
+  /*
+   * A balance or budget the viewer holds. This used to floor to whole units on the reasoning that
+   * nobody budgets in fractions of a credit. Once a turn can cost 0.005, flooring UNDER-reports
+   * what someone actually holds, and a balance that reads low by design is the wrong kind of
+   * wrong. It is shown as precisely as it is held.
+   */
   const balance = (usd) => {
     if (state.isOwner) return "$" + (Number(usd) || 0).toFixed(2);
-    const c = Math.floor(toCredits(usd));
-    return c.toLocaleString() + " " + noun(c);
+    const c = toCredits(usd);
+    return fmtCredits(c) + " " + noun(c);
   };
 
   const announce = () => { try { document.dispatchEvent(new CustomEvent("dominion-money-ready")); } catch {} };
