@@ -2391,9 +2391,21 @@
    * A build's outcome, said directly under the button that started it. Without this, a build that
    * started and then failed left this end of the page silent, which reads as a dead button.
    */
+  let statusFromBuild = false;
   document.addEventListener("dominion-ide-build-outcome", (e) => {
     if (!state.open || !e.detail) return;
     const d = e.detail;
+    /*
+     * The selected project has no build to report. Take down a verdict THIS listener put up, and
+     * nothing else: the same line carries "Updated from your other device." and the ordinary
+     * saving messages, and blanking one of those because a project was switched would look like
+     * the app forgetting what it just told you.
+     */
+    if (d.clear) {
+      if (statusFromBuild) { status(""); statusFromBuild = false; }
+      return;
+    }
+    statusFromBuild = true;
     status(d.error ? d.message + " Scroll up to the run for the reason." : d.message, !!d.error);
   });
 

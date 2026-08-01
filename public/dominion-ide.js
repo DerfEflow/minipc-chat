@@ -2017,7 +2017,26 @@
     return job && job.done ? "failed" : "running";
   }
 
-  function paintBuildStatus(kind) {
+  /*
+   * Nothing has been built on this page yet, so nothing may be claimed about it. Called when the
+   * selected project has no build of its own to report; without it, switching from a project that
+   * failed to one that has never run left the first project's verdict sitting on the second one.
+   */
+  function clearBuildStatus() {
+    const el = $("#st-status");
+    const root = $("#ide-root");
+    if (root) delete root.dataset.buildState;
+    if (el) { el.textContent = ""; el.classList.remove("bad"); }
+    try { document.dispatchEvent(new CustomEvent("dominion-ide-build-outcome", { detail: { kind: "", message: "", error: false, clear: true } })); } catch {}
+  }
+
+  /*
+   * `announce: false` paints the line at the top of the page without telling the rest of the app
+   * that a build just ended. Replaying an outcome the page found already finished when it loaded
+   * is not news, and the surfaces that put news under the BEGIN BUILDING button must not be made
+   * to shout an old one at somebody who has just opened a project.
+   */
+  function paintBuildStatus(kind, { announce = true } = {}) {
     const spec = JOB_UI[kind] || JOB_UI.failed;
     const el = $("#st-status");
     const root = $("#ide-root");
@@ -2026,6 +2045,7 @@
       el.textContent = spec.message;
       el.classList.toggle("bad", !!spec.error);
     }
+    if (!announce) return;
     /*
      * THE OUTCOME HAS TO REACH THE BUTTON THAT CAUSED IT (Fred, 2026-08-01: "Pressed build, nothing
      * happened. Pressed again, nothing... The top also said Build failed, stopped early").
@@ -2598,6 +2618,34 @@
     return true;
   }
 
+  /*
+   * WHOSE OUTCOME IS THIS? (Fred and a guest testing together, 2026-08-01: "both of us noticed a
+   * warning at the bottom of the page before we even split the project into tasks".)
+   *
+   * /ide/jobs is per ACCOUNT on purpose: a build keeps running while you look at something else,
+   * and the rail is meant to say so. But the status line and the journey phase describe THE
+   * PROJECT ON SCREEN, and this function painted them from state.jobs[0] — the newest job
+   * anywhere in the account, of any age. So opening a project that had never been built told you
+   * "Build failed before completion. The work so far is saved." about some other project, on some
+   * other day. Once that verdict also started being announced under the button, it arrived with
+   * "Scroll up to the run for the reason" attached, pointing at a run that is not on this page.
+   *
+   * The rail keeps the whole account. The verdict is scoped to the project it belongs to.
+   */
+  const selectedWorkspaceId = () => (($("#st-ws") && $("#st-ws").value) || state.workspaceId || "");
+  function jobsHere() {
+    const here = selectedWorkspaceId();
+    if (!here) return [];
+    return (state.jobs || []).filter((j) => j && j.workspaceId === here);
+  }
+
+  /*
+   * An ended build is announced under the button only when it ENDED WHILE THIS PAGE WAS WATCHING.
+   * A job this page has already seen in some other state and now sees terminal is news. A job that
+   * was over before the page loaded is history, and history goes in the status line, quietly.
+   */
+  const jobSeen = new Map();
+
   async function refreshJobs() {
     if (!state.allowed) return;
     try {
@@ -2609,21 +2657,20 @@
     paintRail();
     renderAsk();
     trackFlameFromJobs();
-    const live = state.jobs.find((j) => !j.done);
-    if (live) {
-      const kind = jobUiState(live);
-      if (kind === "running") {
-        if (state.phase !== "verify") setJourneyPhase("build");
-      } else {
-        paintBuildStatus(kind);
-        setJourneyPhase("ready");
-      }
-    } else if (state.jobs[0]) {
-      const kind = jobUiState(state.jobs[0]);
-      paintBuildStatus(kind);
-      setJourneyPhase(kind === "complete" ? "ship"
-        : (intake.vision ? "ready" : (intake.messages.length ? "clarify" : "idea")));
+    const mine = jobsHere();
+    const latest = mine.find((j) => !j.done) || mine[0] || null;
+    if (!latest) { clearBuildStatus(); return; }
+    const kind = jobUiState(latest);
+    const announce = jobSeen.has(latest.id) && jobSeen.get(latest.id) !== kind;
+    jobSeen.set(latest.id, kind);
+    if (kind === "running") {
+      if (state.phase !== "verify") setJourneyPhase("build");
+      return;
     }
+    paintBuildStatus(kind, { announce });
+    if (!latest.done) return setJourneyPhase("ready");
+    setJourneyPhase(kind === "complete" ? "ship"
+      : (intake.vision ? "ready" : (intake.messages.length ? "clarify" : "idea")));
   }
 
   // A frozen build asking for a human. Answering is one tap, and the card says plainly that

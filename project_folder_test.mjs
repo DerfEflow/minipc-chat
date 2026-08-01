@@ -62,6 +62,8 @@ test("ensureRoot tries both kinds of machine", () => {
 test("a build outcome is announced, not only painted at the top of the page", () => {
   assert.match(ide, /dominion-ide-build-outcome/, "the surface that owns the button decides where it goes");
   assert.match(vibe, /document\.addEventListener\("dominion-ide-build-outcome"/);
-  const listener = vibe.slice(vibe.indexOf('addEventListener("dominion-ide-build-outcome"'), vibe.indexOf('addEventListener("dominion-ide-build-outcome"') + 400);
+  // To the end of the listener rather than a fixed window: it grew a clear-on-project-switch
+  // branch (see buildbanner_test.mjs), and a character count is not what this test is about.
+  const listener = vibe.slice(vibe.indexOf('addEventListener("dominion-ide-build-outcome"'), vibe.indexOf("window.dominionVibe"));
   assert.match(listener, /status\(/, "said directly under BEGIN BUILDING, where the finger just was");
 });

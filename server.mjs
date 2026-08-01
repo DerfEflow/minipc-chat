@@ -1510,6 +1510,24 @@ if (MULTI_TENANT && ideGate && ideGate.everyone && !cfgGet("DOMINION_IDE_VAPID_S
  * question already answered elsewhere can never buzz a phone as if it were still open.
  */
 function ideEscalate(job, event) {
+  /*
+   * WHY A BUILD FAILED HAS TO BE READABLE FROM OUTSIDE THE BUILD (Fred + a guest, 2026-08-01).
+   *
+   * Two people in one room pressed BEGIN BUILDING and both builds died. The server log recorded
+   * "job started" and "push: ide-error", and not one word about the cause. The reason existed —
+   * it was written into the job's own journal and shown in the run panel — but it was reachable
+   * only by the person it happened to, scrolling up. Diagnosing it from outside meant asking them.
+   *
+   * Every terminal failure now says so on the server's own log, with the job id to join it to the
+   * journal. Placed FIRST, above every early return in this function: escalationFor() declines
+   * most events and the push path bails when an account has no subscribed device, so anything
+   * logged further down would only be logged for people who happen to own a phone.
+   */
+  if (event && (event.type === "error" || event.type === "stopped")) {
+    const why = String(event.message || event.code || "no reason given").replace(/\s+/g, " ").slice(0, 300);
+    console.log("[ide] job " + job.id + " (" + job.kind + ") " + event.type + " for " + job.uid
+      + (event.code ? " [" + event.code + "]" : "") + ": " + why);
+  }
   // An answer releases a frozen probe. The real engine will hang its move loop here in Phase 5.
   if (event && event.type === "answer" && job.kind === "probe") { try { resumeIdeProbe(job); } catch {} }
   const note = escalationFor(event);
@@ -4151,9 +4169,22 @@ async function runIdeBuild(job, {
           model: (assignByN.get(t.n) || {}).model || workerModel,
           why: (t.needs && t.needs.length ? "Runs after task(s) " + t.needs.join(", ") + ". " : "") + "Owns: " + (t.files || []).join(", ") })) });
 
-      // Budget freeze for the whole roadmap before any task runs.
+      /*
+       * Budget freeze for the whole roadmap before any task runs.
+       *
+       * `files:` was added to this estimate as `(mv && mv.files && mv.files.length) || 1`, copied
+       * from the single-move path where `mv` is the move being estimated. There is no `mv` in this
+       * scope, and a free identifier in a module is a ReferenceError, not undefined. So every build
+       * that split into tasks threw here — right after the Blueprint was drawn, which is why the
+       * tasks appeared and then the build died. The bare "mv is not defined" went into the job as
+       * its failure message and nowhere else.
+       *
+       * The estimate is per unit and multiplied by the unit count below, so the per-unit figure is
+       * the WIDEST task in the roadmap. A seatbelt that guesses low is not a seatbelt.
+       */
       const wmRec = modelById(workerModel) || {};
-      const est = estimateMove({ manifestBytes: 8000, files: (mv && mv.files && mv.files.length) || 1, inCost: wmRec.inCost || 0, outCost: wmRec.outCost || 0 });
+      const filesPerTask = Math.max(1, ...tasks.map((t) => (t.files || []).length));
+      const est = estimateMove({ manifestBytes: 8000, files: filesPerTask, inCost: wmRec.inCost || 0, outCost: wmRec.outCost || 0 });
       const b = budgetCheck({ spentUsd: budget.spentUsd, capUsd: budget.capUsd, nextEstUsd: est.usd * tasks.length });
       if (b.stop) {
         const answer = await ask("budget", phrase("budget_question", reg, money(budget.capUsd), money(budget.spentUsd)), [phrase("budget_keep", reg), phrase("budget_stop", reg)]);
@@ -4393,7 +4424,10 @@ async function runIdeBuild(job, {
       // 2. The whole worker batch is estimated BEFORE any worker starts; the freeze is the seatbelt.
       const workerAssign = afAssignFor(afSpec.workers[0].model || "") || resolved;
       const wmRec = modelById(afSpec.workers[0].model || resolved.build_code) || {};
-      const est = estimateMove({ manifestBytes: 8000, files: (mv && mv.files && mv.files.length) || 1, inCost: wmRec.inCost || 0, outCost: wmRec.outCost || 0 });
+      // Same ReferenceError as the roadmap freeze above, same cause, same fix: the widest PART,
+      // since the estimate is per part and multiplied by the part count.
+      const filesPerPart = Math.max(1, ...parts.map((p) => (p.files || []).length));
+      const est = estimateMove({ manifestBytes: 8000, files: filesPerPart, inCost: wmRec.inCost || 0, outCost: wmRec.outCost || 0 });
       const b = budgetCheck({ spentUsd: budget.spentUsd, capUsd: budget.capUsd, nextEstUsd: est.usd * parts.length });
       if (b.stop) {
         const answer = await ask("budget", phrase("budget_question", reg, money(budget.capUsd), money(budget.spentUsd)),
@@ -4847,7 +4881,29 @@ async function runIdeBuild(job, {
     });
   } catch (e) {
     if (ac.signal.aborted) return;
-    ideJobs.finish(job.id, { type: "error", message: String((e && e.message) || e) });
+    /*
+     * A fault in THIS file must not be dressed up as a failure of the user's project.
+     *
+     * The mv ReferenceError above reached Fred as the four words "mv is not defined", under a
+     * banner telling him to scroll up for the reason. He did, and that was the reason. A person
+     * cannot act on that, cannot tell whether they caused it, and cannot tell whether their money
+     * or their files are involved — so it reads as "your build is broken" when it means "Dominion
+     * is broken". The three error classes below are only ever OUR bug: they are what a wrong
+     * identifier, a wrong shape, or wrong syntax throws. Everything else keeps its own words,
+     * because a provider timeout or a refused carve-out is a real answer.
+     *
+     * The stack goes to the server log, where it is useful, and never to the user, where it is not.
+     */
+    const internal = (e instanceof ReferenceError) || (e instanceof TypeError) || (e instanceof SyntaxError);
+    console.log("[ide] build " + job.id + " threw"
+      + (internal ? " (INTERNAL FAULT)" : "") + ": " + String((e && e.stack) || (e && e.message) || e).slice(0, 900));
+    ideJobs.finish(job.id, {
+      type: "error",
+      internal: internal || undefined,
+      message: internal
+        ? "Dominion hit a fault in its own code and stopped this build. It is not your project, your plan, or the models you picked, and nothing you can change on this page will fix it. The fault is recorded against build " + job.id + "."
+        : String((e && e.message) || e),
+    });
   }
 }
 
