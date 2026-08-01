@@ -88,8 +88,14 @@ export function mergePlan({ root, jobId, into }) {
  * never snapshots it. owner/repo name the remote repository (created via the connector's API by
  * the caller before this runs). Returns { cmds, maskedCmds } so logs show the masked form.
  */
-export function githubPushPlan({ root, jobId, owner, repo, token, setUpstream = true }) {
-  const branch = buildBranch(jobId);
+export function githubPushPlan({ root, jobId, owner, repo, token, setUpstream = true, branch: refOverride = "" }) {
+  /*
+   * `branch` overrides the job's own build branch, which the ship path needs: after a successful
+   * build merges build/<jobid> into main, MAIN is what has to reach GitHub. Without this the
+   * remote would only ever carry build branches and the repo's default branch would stay empty,
+   * which looks broken to anyone who opens it.
+   */
+  const branch = String(refOverride || "").replace(/[^a-zA-Z0-9_/.-]/g, "") || buildBranch(jobId);
   const safeOwner = String(owner || "").replace(/[^a-zA-Z0-9_.-]/g, "");
   const safeRepo = String(repo || "").replace(/[^a-zA-Z0-9_.-]/g, "");
   if (!safeOwner || !safeRepo) return { error: "a GitHub owner and repo are required" };

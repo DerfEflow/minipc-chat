@@ -533,5 +533,26 @@ export function createConnectors({ dir, cfgGet, providers = {} }) {
   }
   const provider = (id) => providers[id] || null;
 
-  return { listFor, setEnabled, setConfig, addCustom, removeCustom, setGuestAllowed, test, toolDefsFor, disabledFor, run, metaFor, disconnect, provider, REGISTRY };
+  /*
+   * ONE decrypted credential, for a caller that has to use it directly rather than through an MCP
+   * tool call (Fred, 2026-08-01: shipping a build to GitHub needs the raw token inside a git push
+   * URL, which no MCP tool can do for us).
+   *
+   * Deliberately narrow rather than a general secret getter:
+   *   - it runs the SAME usable() gate as a tool call, so the guest wall, the per-connector guest
+   *     flag and the not-configured case all refuse here exactly as they refuse everywhere else;
+   *   - it names one connector and one field, so a caller cannot sweep an account's credentials;
+   *   - it returns "" rather than throwing, so a missing credential is a quiet no rather than a
+   *     stack trace that might carry context into a log.
+   * The caller is responsible for never writing the value anywhere. idegit.githubPushPlan() exists
+   * precisely so the echoed command is the masked one.
+   */
+  function secretFor(T, id, field) {
+    if (!usable(T, id).ok) return "";
+    const c = configFor(T, id) || {};
+    const v = c[String(field || "")];
+    return typeof v === "string" ? v : "";
+  }
+
+  return { listFor, setEnabled, setConfig, addCustom, removeCustom, setGuestAllowed, test, toolDefsFor, disabledFor, run, metaFor, disconnect, provider, secretFor, usable, REGISTRY };
 }

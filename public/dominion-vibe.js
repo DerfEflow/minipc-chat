@@ -483,7 +483,7 @@
     for (const w of WINDOWS) { renderLog(w); renderDesk(w); toggleWin(w, state.chats[w].open); }
     const pv = $("#vb-plan-view"); if (pv) pv.hidden = !state.plan;
     const grid = $("#vb-army-grid"); if (grid && !state.army) grid.hidden = true;
-    renderSlider(); renderSaveTo(); renderBudget(); paintAllModelSelects(); gateArmy();
+    renderSlider(); renderSaveTo(); renderBudget(); renderShip(); paintAllModelSelects(); gateArmy();
   }
 
   /* ================= the shell =============================================================== */
@@ -600,6 +600,17 @@
         '<input id="vb-budget" class="vb-budget-input" type="text" inputmode="decimal" autocomplete="off" placeholder="no limit" />' +
         '<span class="vb-budget-unit" id="vb-budget-unit"></span>' +
         '<span class="vb-budget-note" id="vb-budget-note"></span>' +
+      '</div>' +
+      /*
+       * SHIP TO GITHUB (Fred, 2026-08-01: "why can Dominion not create a GitHub repo?"). Beside
+       * the spend limit and above BEGIN BUILDING, because both answer the same question: what is
+       * this build allowed to do on my behalf. OFF unless switched on, per project, and it states
+       * plainly whether a GitHub account is actually connected rather than letting a build run all
+       * the way to the push before discovering there is nobody to push as.
+       */
+      '<div class="vb-ship" id="vb-ship-row">' +
+        '<label class="vb-ship-switch"><input type="checkbox" id="vb-ship" /><span>Save this project to GitHub when a build finishes</span></label>' +
+        '<span class="vb-ship-note" id="vb-ship-note"></span>' +
       '</div>' +
       '<button type="button" class="vb-begin" id="vb-begin">BEGIN BUILDING</button>' +
       '<div class="vb-status" id="vb-status" role="status"></div>';
@@ -771,7 +782,7 @@
         if (!window.confirm('Remove "' + (ws.name || ws.id) + '" from the project list? The folder and its files stay where they are.')) return;
         const r = await bridge().removeWorkspace(ws.id);
         if (r && r.error) { status(r.error, true); return; }
-        renderSlider(); renderSaveTo(); renderBudget();
+        renderSlider(); renderSaveTo(); renderBudget(); renderShip();
         status("Removed. The folder itself was not touched.");
       });
       rail.append(c);
@@ -944,7 +955,7 @@
       bridge() && bridge().selectWorkspace(j.workspace.id);
       staged = null;
       unhighlightSaveTo();
-      renderSlider(); renderSaveTo(); renderBudget();
+      renderSlider(); renderSaveTo(); renderBudget(); renderShip();
       status('"' + j.workspace.name + '" lives in the Dominion cloud now. Plan below, then press BEGIN BUILDING.');
     } catch { status("The server could not be reached.", true); }
   }
@@ -963,7 +974,7 @@
       bridge() && bridge().selectWorkspace(j.workspace.id);
       staged = null;
       unhighlightSaveTo();
-      renderSlider(); renderSaveTo(); renderBudget();
+      renderSlider(); renderSaveTo(); renderBudget(); renderShip();
       status('"' + j.workspace.name + '" will be saved at ' + root + ". Plan below, then press BEGIN BUILDING.");
     } catch { status("The server could not be reached.", true); }
   }
@@ -1068,7 +1079,7 @@
       return;
     }
     bridge() && bridge().selectWorkspace(value);
-    renderSlider(); renderBudget(); paintWhere();
+    renderSlider(); renderBudget(); renderShip(); paintWhere();
   }
 
   function startOver() {
@@ -2100,6 +2111,40 @@
    * "with no limit to the budget they can set in credits"), so the only rejection is text that is
    * not a number, which is refused out loud instead of quietly becoming unlimited.
    */
+  /*
+   * The Ship to GitHub switch. Three states worth telling apart, because the difference decides
+   * what actually happens at the end of a build:
+   *   off                      nothing leaves this computer
+   *   on, GitHub connected     the build creates a private repo if needed and pushes to it
+   *   on, GitHub NOT connected the build will say so and leave the work on its branch
+   * The third case used to be invisible until the build ended, which is the whole complaint.
+   */
+  let githubReady = null;   // null = not asked yet
+  function renderShip() {
+    const box = $("#vb-ship"), note = $("#vb-ship-note"), row = $("#vb-ship-row");
+    const b = bridge();
+    if (!box || !b) return;
+    // No project chosen yet: the switch belongs to a project, so it waits for one.
+    const ws = b.workspaceInfo && b.workspaceInfo();
+    row.classList.toggle("is-idle", !ws);
+    box.disabled = !ws;
+    box.checked = !!(ws && b.shipToGithub && b.shipToGithub());
+    if (!ws) { note.textContent = "Pick or make a project first."; note.className = "vb-ship-note"; return; }
+    if (!box.checked) { note.textContent = "Off. The build stays on this computer."; note.className = "vb-ship-note"; return; }
+    if (githubReady === null) { note.textContent = "Checking your GitHub connection…"; note.className = "vb-ship-note"; return; }
+    note.textContent = githubReady
+      ? "On. A finished build creates a private repository if you do not have one, then pushes to it."
+      : "On, but no GitHub account is connected. Connect GitHub in Setup, or the build will keep the work on this computer and tell you why.";
+    note.className = "vb-ship-note" + (githubReady ? " is-good" : " is-bad");
+  }
+
+  async function refreshGithubReady() {
+    const b = bridge();
+    if (!b || !b.githubConnected) { githubReady = false; renderShip(); return; }
+    githubReady = await b.githubConnected();
+    renderShip();
+  }
+
   function budgetIsCredits() { const m = money(); return !!(m.inCredits && m.inCredits()); }
   function renderBudget() {
     const row = $("#vb-budget-row"), input = $("#vb-budget"), unit = $("#vb-budget-unit"), note = $("#vb-budget-note");
@@ -2145,6 +2190,23 @@
         renderStudio();
       });
     }
+    $("#vb-ship").addEventListener("change", async (e) => {
+      const on = e.target.checked;
+      const b = bridge();
+      if (!b || !b.setShipToGithub) return;
+      const r = await b.setShipToGithub(on);
+      if (r && r.error) {
+        e.target.checked = !on;
+        status(r.error === "no_workspace" ? "Pick or make a project first." : "That could not be saved.", true);
+        return;
+      }
+      if (on && githubReady === null) await refreshGithubReady();
+      renderShip();
+      status(on
+        ? (githubReady ? "This project will be saved to GitHub when a build finishes."
+                       : "Switched on. Connect GitHub in Setup and the next finished build will push.")
+        : "Off. Builds for this project stay on this computer.");
+    });
     $("#vb-apply").addEventListener("click", applyStudio);
     $("#vb-plan-view").addEventListener("click", showPlanModal);
     for (const w of WINDOWS) {
@@ -2276,6 +2338,10 @@
     renderSlider();
     renderSaveTo();
     renderBudget();
+    renderShip();
+    // Asked once per open, not per repaint: it is a network call, and the answer only changes
+    // when the person visits Setup. renderShip() paints "checking…" until it lands.
+    refreshGithubReady();
     renderStudio();
     paintAllModelSelects();
     gateArmy();
@@ -2292,7 +2358,7 @@
   }
 
   // Workspaces and the catalog both load after the panel exists; repaint when they land.
-  document.addEventListener("dominion-ide-state", () => { if (state.open) { renderSlider(); renderSaveTo(); paintAllModelSelects();
+  document.addEventListener("dominion-ide-state", () => { if (state.open) { renderSlider(); renderSaveTo(); renderShip(); paintAllModelSelects();
     if ($("#vb-adopt-panel") && !$("#vb-adopt-panel").hidden) paintAdoptChoices(); } });
   /*
    * The other device spoke. The project list is refreshed when the app comes back to the

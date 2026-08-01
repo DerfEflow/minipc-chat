@@ -316,6 +316,56 @@ await t("a started probe job appears in the caller's registry immediately", () =
   assert.equal(list.body.active, 1, "it is running until something seals it");
 });
 
+/*
+ * SHIP TO GITHUB is per project and OFF (Fred, 2026-08-01). A multi-tenant service must not push
+ * somebody's code anywhere on an inherited default, so the absence of the switch is a real
+ * assertion, not an oversight.
+ */
+await t("a new project ships nowhere until someone says so", () => {
+  const s = newStore();
+  const w = s.create({ name: "My App", root: "C:\\Projects\\my-app" }).workspace;
+  assert.equal(w.ship, null, "a fresh project must not carry a ship setting at all");
+});
+
+await t("the ship switch is per project, and private is the default direction", () => {
+  const s = newStore();
+  const a = s.create({ name: "A", root: "C:\\Projects\\a" }).workspace;
+  const b = s.create({ name: "B", root: "C:\\Projects\\b" }).workspace;
+  const on = s.update(a.id, { ship: { github: true } });
+  assert.equal(on.workspace.ship.github, true);
+  assert.equal(on.workspace.ship.private, true, "private unless explicitly told otherwise");
+  assert.equal(s.get(b.id).ship, null, "switching one project on must not switch another on");
+});
+
+await t("the ship block is normalized, so a hostile shape cannot become a public push", () => {
+  const s = newStore();
+  const w = s.create({ name: "A", root: "C:\\Projects\\a" }).workspace;
+  const r = s.update(w.id, { ship: { github: "yes", private: 0, repo: "../../etc/passwd", extra: "x".repeat(9000) } });
+  assert.equal(r.workspace.ship.github, true, "truthy becomes a real boolean");
+  assert.equal(r.workspace.ship.private, true, "only an explicit false makes a repo public");
+  assert.equal(r.workspace.ship.repo, "....etcpasswd", "the repo name is stripped to GitHub-legal characters");
+  assert.ok(!("extra" in r.workspace.ship), "unknown keys are dropped rather than stored");
+});
+
+await t("ship: null switches it back off, and junk is ignored rather than half-applied", () => {
+  const s = newStore();
+  const w = s.create({ name: "A", root: "C:\\Projects\\a" }).workspace;
+  s.update(w.id, { ship: { github: true } });
+  assert.equal(s.update(w.id, { ship: null }).workspace.ship, null, "null is the off switch");
+  s.update(w.id, { ship: { github: true } });
+  assert.equal(s.update(w.id, { ship: "on" }).workspace.ship.github, true, "a bad shape leaves the old setting alone");
+});
+
+await t("the ship setting survives a reopen, so the phone and the laptop agree", () => {
+  const dir = freshDir();
+  const s1 = createIdeStore({ dir, isProtectedPath });
+  const w = s1.create({ name: "A", root: "C:\\Projects\\a" }).workspace;
+  s1.update(w.id, { ship: { github: true } });
+  const reopened = createIdeStore({ dir, isProtectedPath }).get(w.id);
+  assert.equal(reopened.ship.github, true);
+  assert.equal(reopened.ship.private, true);
+});
+
 for (const d of dirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
 console.log("\n" + passed + " passed, " + failed + " failed");
 process.exit(failed ? 1 : 0);

@@ -3211,6 +3211,42 @@
       const w = (state.workspaces || []).find((x) => x.id === id);
       return Number(w && w.budget && w.budget.capUsd) || 0;
     },
+    /*
+     * SHIP TO GITHUB, per project (Fred, 2026-08-01). Off unless it is switched on, and read back
+     * from the workspace record rather than from a local preference, so the answer to "will this
+     * build push my code?" is the same on the phone and the laptop.
+     */
+    shipToGithub: () => {
+      const id = (($("#st-ws") && $("#st-ws").value) || state.workspaceId || "");
+      const w = (state.workspaces || []).find((x) => x.id === id);
+      return !!(w && w.ship && w.ship.github);
+    },
+    setShipToGithub: async (on) => {
+      const id = (($("#st-ws") && $("#st-ws").value) || state.workspaceId || "");
+      if (!id) return { error: "no_workspace" };
+      // `private: true` is not offered as a choice here on purpose: a repo created public by
+      // mistake cannot be un-leaked, and nobody has asked for public repos yet.
+      const ship = on ? { github: true, private: true, repo: "" } : null;
+      const r = await fetch("/ide/workspace/update", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, ship }) });
+      const j = await r.json().catch(() => ({}));
+      const w = (state.workspaces || []).find((x) => x.id === id);
+      if (w && j && j.ok) w.ship = ship;
+      return j || {};
+    },
+    // Is a GitHub account actually connected? The switch says so plainly rather than letting a
+    // build get all the way to the push before discovering there is no account behind it.
+    githubConnected: async () => {
+      try {
+        const r = await fetch("/connectors", { cache: "no-store" });
+        const j = await r.json().catch(() => ({}));
+        const row = ((j && j.connectors) || []).find((c) => c && c.id === "github");
+        // Matches connectors.usable(): credentials present AND this account is allowed to use it.
+        // The separate on/off `enabled` toggle is deliberately NOT required, because secretFor()
+        // does not require it either, and a switch that disagrees with the engine is worse than none.
+        return !!(row && row.configured && row.usable !== false);
+      } catch { return false; }
+    },
     startBuild: (prompt, status) => startBuild(prompt, status || (() => {})),
     jobs: () => (state.jobs || []).slice(),
     refreshJobs,

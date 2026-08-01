@@ -148,7 +148,8 @@ import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_
 import { createIdeJobs } from "./idejobs.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages } from "./ideengine.mjs";
 import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor, adequacyWarning, chunksForPart } from "./ideaf.mjs";
-import { isRepoCmd, startBranchPlan, salvageCommitPlan, githubPushPlan, buildBranch } from "./idegit.mjs";
+import { isRepoCmd, startBranchPlan, salvageCommitPlan, githubPushPlan, mergePlan, buildBranch } from "./idegit.mjs";
+import { ensureRepo, repoNameFrom, shipSummary } from "./idegithub.mjs";
 import { createTelemetry, estimatePartTokens } from "./idetelemetry.mjs";
 import { taskRoadmapMessages, parseTaskRoadmap, topoOrder, readyTasks, filesCollide, resolveTaskAssignments, reduceTaskGoal, classifyReduction } from "./idetasks.mjs";
 import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } from "./ideafrun.mjs";
@@ -3704,6 +3705,108 @@ async function runIdeBuild(job, {
       ideJobs.emit(job.id, { type: "run", command: "git", ok: true, output: "Working on branch " + plan.branch + " (your main stays untouched)." });
     } catch (e) { ideJobs.emit(job.id, { type: "run", command: "git", ok: false, output: "Could not cut a build branch; using file snapshots instead." }); }
   }
+  /*
+   * SHIP TO GITHUB (Fred, 2026-08-01: "why can Dominion not create a GitHub repo?").
+   *
+   * It could not because this function did not exist. Everything below it did: idegit plans the
+   * branch, the salvage commit, the merge and the masked push, all unit-tested, and
+   * githubPushPlan() was even imported into this file. Nothing called it, and nothing anywhere
+   * created a repository, so every build in history ended on a local branch with no remote. That
+   * is what stranded TruSignal on build/ide_3b532cf7-651.
+   *
+   * THE GATES, in order, every one of which is a silent no rather than a failure:
+   *   1. The project has ship.github switched ON. Off by default, per project. A multi-tenant
+   *      service does not push somebody's code anywhere they did not ask for.
+   *   2. The build actually succeeded. A half-finished build is salvage, and salvage belongs on a
+   *      local branch, not in a repository someone will mistake for a working app.
+   *   3. The workspace is a git repo with a branch (cutBuildBranch got that far).
+   *   4. The account's OWN GitHub connector is usable and holds a token. Never a server token:
+   *      code lands in the user's account or it does not land.
+   *
+   * A failure here NEVER fails the build. The app was built; the delivery is a separate promise,
+   * and the person is told plainly which of the two happened.
+   */
+  async function shipToGithub() {
+    const ship = workspace && workspace.ship;
+    if (!ship || !ship.github) return null;
+    if (!onGitBranch) {
+      ideJobs.emit(job.id, { type: "run", command: "github", ok: false,
+        output: "Ship to GitHub is on, but this project folder is not a git repository, so there was nothing to push." });
+      return null;
+    }
+    let token = "";
+    try { token = connectors.secretFor(T, "github", "token") || ""; } catch { token = ""; }
+    if (!token) {
+      ideJobs.emit(job.id, { type: "run", command: "github", ok: false,
+        output: "Ship to GitHub is on, but no GitHub account is connected. Connect GitHub in Setup and the next build will push. The work is safe on branch " + onGitBranch + "." });
+      return null;
+    }
+    ideJobs.emit(job.id, { type: "run", command: "github", ok: true, output: "Making sure there is a repository to push into." });
+    const repoRes = await ensureRepo({
+      token,
+      name: ship.repo || workspace.name,
+      description: "Built with Dominion Works.",
+      private: ship.private !== false,
+    });
+    if (!repoRes.ok) {
+      ideJobs.emit(job.id, { type: "run", command: "github", ok: false,
+        output: repoRes.error + " The work is safe on branch " + onGitBranch + "." });
+      return null;
+    }
+    // runShell sets ok = (exit code === 0), so ok alone is the honest signal; a refusal and a
+    // timeout both arrive as ok:false too. The masked form is what would ever be echoed.
+    const run = async (plan) => {
+      for (const [i, c] of plan.cmds.entries()) {
+        const shown = (plan.maskedCmds && plan.maskedCmds[i]) || c;
+        const r = await handsFor("shell_run", { command: c, timeoutMs: 120000 });
+        if (!r || r.ok !== true) return { ok: false, shown, detail: String((r && (r.stderr || r.error || r.stdout)) || "").slice(0, 300) };
+      }
+      return { ok: true };
+    };
+    // The build branch first: that is the work, and it reaches GitHub even if the merge is refused.
+    const pushBuild = githubPushPlan({ root: workspace.root, jobId: job.id, owner: repoRes.owner, repo: repoRes.repo, token, branch: onGitBranch });
+    if (pushBuild.error) {
+      ideJobs.emit(job.id, { type: "run", command: "github", ok: false, output: pushBuild.error });
+      return null;
+    }
+    const pushed = await run(pushBuild);
+    if (!pushed.ok) {
+      ideJobs.emit(job.id, { type: "run", command: "github", ok: false,
+        output: "The push to " + repoRes.owner + "/" + repoRes.repo + " failed: " + pushed.detail + " The work is safe on branch " + onGitBranch + "." });
+      return null;
+    }
+    /*
+     * Then main. A repository whose default branch is empty looks broken to anyone who opens it,
+     * and Fred's own rule is that a SUCCESSFUL build's work belongs on main. A refused merge (a
+     * conflict, a protected branch) leaves the build branch pushed and says so, rather than
+     * pretending the ship did not happen.
+     */
+    let merged = false;
+    const mergeInto = mergePlan({ root: workspace.root, jobId: job.id, into: "main" });
+    const mergeRan = await run({ cmds: mergeInto.cmds });
+    if (mergeRan.ok) {
+      const pushMain = githubPushPlan({ root: workspace.root, jobId: job.id, owner: repoRes.owner, repo: repoRes.repo, token, branch: "main" });
+      merged = !pushMain.error && (await run(pushMain)).ok;
+    } else {
+      /*
+       * A refused merge must not leave the person's working copy sitting on main in a conflicted
+       * state. Abort whatever is half-applied and put them back on the build branch, which is
+       * where their finished work is and where they expect to find it. Both commands are
+       * best-effort: if the merge never started, `merge --abort` simply fails and that is fine.
+       */
+      await handsFor("shell_run", { command: 'git -C "' + String(workspace.root).replace(/"/g, "") + '" merge --abort', timeoutMs: 30000 });
+      await handsFor("shell_run", { command: 'git -C "' + String(workspace.root).replace(/"/g, "") + '" checkout ' + onGitBranch, timeoutMs: 30000 });
+    }
+    if (!merged) {
+      ideJobs.emit(job.id, { type: "run", command: "github", ok: true,
+        output: "Pushed " + onGitBranch + " to " + repoRes.owner + "/" + repoRes.repo + ". Main could not be updated automatically, so merge it on GitHub when you are ready. " + repoRes.htmlUrl });
+      return { ...repoRes, branch: onGitBranch, merged: false };
+    }
+    ideJobs.emit(job.id, { type: "run", command: "github", ok: true,
+      output: shipSummary({ ...repoRes, branch: onGitBranch, merged: true }) });
+    return { ...repoRes, branch: onGitBranch, merged: true };
+  }
+
   async function salvage(outcome, note) {
     if (!onGitBranch) return;
     try {
@@ -4689,12 +4792,23 @@ async function runIdeBuild(job, {
       });
     }
 
+    /*
+     * Delivery happens AFTER the build is verified complete and BEFORE it is called done, so the
+     * repository link is part of the same answer rather than a message that arrives later. A ship
+     * failure is reported on its own line and never turns a finished build into a failed one.
+     */
+    let shipped = null;
+    try { shipped = await shipToGithub(); } catch (e) {
+      ideJobs.emit(job.id, { type: "run", command: "github", ok: false,
+        output: "The build finished, but shipping to GitHub failed: " + String((e && e.message) || e).slice(0, 200) });
+    }
     ideJobs.finish(job.id, {
       type: "done",
       complete: true,
       completionVerified: true,
       evidence: completionEvidence,
-      message: phrase("build_done", reg),
+      github: shipped ? { owner: shipped.owner, repo: shipped.repo, url: shipped.htmlUrl, created: shipped.created, merged: shipped.merged } : undefined,
+      message: phrase("build_done", reg) + (shipped ? " " + shipSummary(shipped) : ""),
     });
   } catch (e) {
     if (ac.signal.aborted) return;

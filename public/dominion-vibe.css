@@ -584,6 +584,23 @@
   border: 1px solid rgba(212, 130, 60, .38); border-radius: 10px;
   background: rgba(10, 6, 2, .45);
 }
+/* Ship to GitHub (Fred, 2026-08-01), beside the spend limit because both answer the same
+   question: what is this build allowed to do on my behalf. Cooler than the money row on purpose,
+   so the two never read as one control. */
+.vb-ship {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin: 0 0 10px; padding: 10px 12px;
+  border: 1px solid hsla(var(--vb-hue), 55%, 58%, .34); border-radius: 10px;
+  background: rgba(2, 8, 14, .5);
+}
+.vb-ship.is-idle { opacity: .55; }
+.vb-ship-switch { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; }
+.vb-ship.is-idle .vb-ship-switch { cursor: default; }
+.vb-ship-switch input { width: 17px; height: 17px; accent-color: var(--energy, #66ff5b); cursor: inherit; }
+.vb-ship-switch span { font-size: 12px; font-weight: 700; letter-spacing: .04em; color: var(--ink, #eaf6ff); }
+.vb-ship-note { flex: 1 1 240px; min-width: 0; font-size: 11px; line-height: 1.45; color: var(--muted, #8ba0ae); }
+.vb-ship-note.is-good { color: var(--energy, #66ff5b); }
+.vb-ship-note.is-bad { color: #ffb08a; }
 .vb-budget-label { font-size: 12px; font-weight: 700; letter-spacing: .04em; color: #e8d3ba; }
 .vb-budget-input {
   width: 110px; min-width: 0; padding: 7px 9px;

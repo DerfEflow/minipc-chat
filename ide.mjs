@@ -200,7 +200,33 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
      * thing typed on it. Keeping it beside the project it belongs to fixes both at once.
      */
     crucible: w.crucible || null,
+    /*
+     * SHIP TO GITHUB, per project, OFF unless the person turned it on (Fred's ruling 2026-08-01,
+     * after asking "why can Dominion not create a GitHub repo?").
+     *
+     * The answer was that half the git lane was never wired: builds cut a branch and committed to
+     * it, and githubPushPlan() sat fully written, unit-tested, imported by the engine and never
+     * called, while nothing anywhere created a repository. So a build ended on a local branch with
+     * no remote, which reads exactly like a failed build to the person who asked for an app.
+     *
+     * It is a PER-PROJECT switch and it defaults OFF because this is a multi-tenant service:
+     * pushing somebody's code to GitHub is an outward-facing act that must be chosen, not
+     * inherited from a global preference or from whatever the last project did.
+     * Shape: { github: bool, private: bool, repo: "" (blank = derive from the project name) }.
+     */
+    ship: w.ship || null,
   });
+
+  /*
+   * Normalize a ship block. Anything unrecognized is dropped rather than stored, and `private`
+   * defaults TRUE: a repo that was meant to be private and is created public cannot be un-leaked.
+   */
+  const cleanShip = (raw) => {
+    if (raw === null) return null;
+    if (!raw || typeof raw !== "object") return undefined;
+    const repo = String(raw.repo || "").trim().replace(/[^A-Za-z0-9._-]/g, "").slice(0, 100);
+    return { github: !!raw.github, private: raw.private !== false, repo };
+  };
 
   return {
     file,
@@ -278,6 +304,9 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
         if (!c) return { error: "That project's planning state is too large to sync (limit " + MAX_CRUCIBLE_JSON.toLocaleString() + " characters).", code: "crucible_too_large" };
         w.crucible = c;
       }
+      // Ship to GitHub. `null` clears it back to off; an unrecognized shape is ignored rather
+      // than half-applied, because a half-applied ship setting decides where code goes.
+      if ("ship" in patch) { const sh = cleanShip(patch.ship); if (sh !== undefined) w.ship = sh; }
       if (typeof patch.lastMoveAt === "number") w.lastMoveAt = patch.lastMoveAt;
       w.updatedAt = now();
       write(s);
@@ -491,6 +520,7 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
         name: b.name, root: b.root, node: b.node, assignments: b.assignments,
         budget: "budget" in b ? b.budget : undefined,
         crucible: "crucible" in b ? b.crucible : undefined,
+        ...("ship" in b ? { ship: b.ship } : {}),
       };
       const r = storeFor(T).update(b.id, patch);
       if (r.error) return { status: r.code === "not_found" ? 404 : 400, code: r.code, body: r };
