@@ -441,6 +441,40 @@
 .vb-grab i { width: 44px; height: 4px; border-radius: 999px; background: hsla(var(--vb-hue), 60%, 60%, .4); }
 .vb-grab:hover i { background: hsla(var(--vb-hue), 60%, 70%, .7); }
 
+/* ---------- the reading desk (Fred, 2026-08-01) --------------------------------------------
+   Documents attached to the CONVERSATION, listed above the typing field so the person can see
+   exactly what the rank is holding and take any of it back off. Each chip states how the file was
+   read and how much of it landed, because "did my PDF actually go through?" is the whole worry. */
+.vb-desk { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 6px; min-width: 0; }
+.vb-doc {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid hsla(var(--vb-hue), 60%, 60%, .38); border-radius: 8px;
+  background: rgba(2, 10, 16, .72);
+}
+.vb-doc b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; color: var(--ink, #eaf6ff); }
+.vb-doc small { white-space: nowrap; font-size: 9.5px; letter-spacing: .02em; color: var(--muted, #8ba0ae); }
+.vb-doc.is-stale { border-color: rgba(255, 176, 138, .5); }
+.vb-doc.is-stale small { color: #ffb08a; }
+.vb-doc-x {
+  flex: 0 0 auto; width: 20px; height: 20px; padding: 0; cursor: pointer;
+  font: 600 14px/1 system-ui, sans-serif; color: var(--muted, #8ba0ae);
+  border: 1px solid transparent; border-radius: 5px; background: transparent;
+}
+.vb-doc-x:hover { color: #ffc0ba; border-color: rgba(255, 117, 105, .45); }
+.vb-clip {
+  flex: 0 0 auto; width: 38px; height: 38px; display: grid; place-items: center; cursor: pointer;
+  border: 1px solid hsla(var(--vb-hue), 60%, 60%, .3); border-radius: 9px;
+  background: rgba(2, 8, 14, .7);
+}
+.vb-clip svg { width: 19px; height: 19px; fill: none; stroke: var(--muted, #8ba0ae); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.vb-clip:hover svg { stroke: var(--energy, #66ff5b); }
+.vb-clip.is-busy { pointer-events: none; }
+.vb-clip.is-busy svg { stroke: var(--energy, #66ff5b); animation: vb-clip-pulse 1s ease-in-out infinite; }
+@keyframes vb-clip-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+/* A file dragged anywhere over the window is a valid drop, so the whole body lights up. */
+.vb-win-body.is-dropping { outline: 2px dashed hsla(var(--vb-hue), 70%, 62%, .7); outline-offset: -4px; }
+
 .vb-row { display: flex; align-items: flex-end; gap: 8px; padding: 8px 12px 12px; min-width: 0; }
 .vb-row textarea {
   flex: 1 1 0; min-width: 0; resize: none;

@@ -55,10 +55,13 @@
     built: false,
     // One conversation per window. Every turn is {from: "user"|"main"|"second"|"third", content},
     // which is exactly the wire shape /ide/planchat consumes: the from-tag IS the routing truth.
+    // `docs` is the reading desk (Fred, 2026-08-01): documents attached to the CONVERSATION, not
+    // to one message, so a rank can be asked about a spec turn after turn. See the reading desk
+    // section below.
     chats: {
-      main: { messages: [], model: "", busy: false, open: true },
-      second: { messages: [], model: "", busy: false, open: false },
-      third: { messages: [], model: "", busy: false, open: false },
+      main: { messages: [], model: "", busy: false, open: true, docs: [] },
+      second: { messages: [], model: "", busy: false, open: false, docs: [] },
+      third: { messages: [], model: "", busy: false, open: false, docs: [] },
     },
     vision: null,
     // The plan carried over from the main chat, word for word (Fred, 2026-07-31: it used to
@@ -73,6 +76,160 @@
   };
 
   const device = () => (window.matchMedia("(pointer: coarse)").matches || window.innerWidth <= 620 ? "mobile" : "desktop");
+
+  /* ================= the reading desk ======================================================== */
+  /*
+   * Fred, 2026-08-01: "I want the user to be able to attach word, pdf, md, txt, or json files to
+   * the General chat, and have it automatically detect them and have access to any tool necessary
+   * to read and interpret them, then interact about them."
+   *
+   * The plan windows could receive typed words and nothing else. Anyone holding a written spec had
+   * to paste it in, past a 4,000-character sanitizer that ate the rest without saying so.
+   *
+   * Every format is read HERE, on the device, through attach-extract.mjs: the same vendored pdf.js
+   * and dependency-free zip reader the main chat has used since July. Two consequences worth the
+   * detour: a document works with EVERY model, local ones included, because what crosses the wire
+   * is plain text; and the server never grows a binary parser or a place to put uploaded files.
+   * A scanned PDF has no text layer to extract, so it takes the existing /api/ocr door and comes
+   * back as text like everything else, which is the "any tool necessary" part of the ask.
+   *
+   * The desk is per window and per conversation, NOT per message: a file stays attached until it
+   * is taken off, and rides every turn. That is what makes "interact about them" work rather than
+   * answering one question and forgetting.
+   */
+  const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  // Mirrors PLAN_MAX_DOCS / PLAN_DOC_CHARS in ideintake.mjs. Extracting to the same ceiling the
+  // server enforces is the point: what the chip says was read is exactly what the model receives.
+  const DESK_MAX_DOCS = 6;
+  const DESK_DOC_CHARS = 60_000;
+  // A whole desk of documents would blow the ~5MB localStorage budget the draft shares with the
+  // transcript, so the draft keeps text up to this much and beyond it keeps the NAMES only, marked
+  // as needing re-attachment. Losing a file silently would be worse than saying it must come back.
+  const DESK_DRAFT_CHARS = 120_000;
+  const DOC_TEXT_EXT = /\.(txt|md|markdown|csv|json|log|xml|yaml|yml|html|css|js|mjs|ts|py|sql|sh|ps1)$/i;
+  const DOC_BINARY_EXT = /\.(pdf|docx|xlsx)$/i;
+
+  let extractMod = null, pdfjsLib = null;
+  const docsOf = (w) => (state.chats[w].docs = Array.isArray(state.chats[w].docs) ? state.chats[w].docs : []);
+
+  // Read one file into { name, text, how }. `how` is shown on the chip so the person can tell an
+  // extracted PDF from an OCR'd scan from a plain text read.
+  async function readOneDocument(f) {
+    const name = (f.name || "file").slice(0, 160);
+    const isBinary = f.type === "application/pdf" || f.type === DOCX_MIME || f.type === XLSX_MIME || DOC_BINARY_EXT.test(name);
+    if (isBinary) {
+      if (!("DecompressionStream" in window)) throw new Error("this browser cannot unpack documents; paste the text instead");
+      extractMod ||= await import("/attach-extract.mjs?v=2");
+      const buf = await f.arrayBuffer();
+      if (f.type === XLSX_MIME || /\.xlsx$/i.test(name)) {
+        const r = await extractMod.extractXlsx(buf, { maxChars: DESK_DOC_CHARS });
+        return { name, text: r.text, how: "spreadsheet read" };
+      }
+      if (f.type === "application/pdf" || /\.pdf$/i.test(name)) {
+        pdfjsLib ||= await extractMod.loadPdfjsBrowser();
+        try {
+          const r = await extractMod.extractPdf(buf, pdfjsLib, { maxChars: DESK_DOC_CHARS });
+          return { name, text: r.text, how: "PDF text read" };
+        } catch (e) {
+          if (!/scanned or image-only/.test((e && e.message) || "")) throw e;
+          // No text layer: render the pages here and let the server's vision OCR transcribe them.
+          const rp = await extractMod.renderPdfPages(buf, pdfjsLib, { maxPages: 12 });
+          const resp = await fetch("/api/ocr", { method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name, pages: rp.pages, source: "pdf" }) });
+          const j = await resp.json().catch(() => ({}));
+          if (!resp.ok || j.error) throw new Error(j.error || "the scan could not be read");
+          let text = String(j.text || "");
+          if (rp.total > rp.rendered) text += "\n\n(Only the first " + rp.rendered + " of " + rp.total + " pages were transcribed; that is the reading limit for a scan.)";
+          return { name, text, how: "scanned, read by OCR" };
+        }
+      }
+      const r = await extractMod.extractDocx(buf, { maxChars: DESK_DOC_CHARS });
+      return { name, text: r.text, how: "Word document read" };
+    }
+    const text = await new Promise((resolve) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result || ""));
+      r.onerror = () => resolve("");
+      r.readAsText(f.slice(0, DESK_DOC_CHARS * 4));   // UTF-8 bytes, trimmed to chars below
+    });
+    return { name, text: text.slice(0, DESK_DOC_CHARS), how: /\.json$/i.test(name) ? "JSON read" : "text read" };
+  }
+
+  async function addDocuments(w, fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const clip = $("#vb-clip-" + w);
+    const skipped = [];
+    if (clip) clip.classList.add("is-busy");
+    winNote(w, "Reading " + files.length + " file" + (files.length === 1 ? "" : "s") + "…");
+    try {
+      for (const f of files) {
+        const name = f.name || "file";
+        if (docsOf(w).length >= DESK_MAX_DOCS) { skipped.push(name + " (the desk holds " + DESK_MAX_DOCS + ")"); continue; }
+        if (/\.(doc|xls|ppt)$/i.test(name)) {
+          skipped.push(name + " (old Office format; save it as .docx or .xlsx first)");
+          continue;
+        }
+        const known = f.type === "application/pdf" || f.type === DOCX_MIME || f.type === XLSX_MIME ||
+          f.type === "application/json" || (f.type || "").startsWith("text/") ||
+          DOC_BINARY_EXT.test(name) || DOC_TEXT_EXT.test(name);
+        if (!known) { skipped.push(name + " (Word, PDF, markdown, text, JSON and spreadsheets)"); continue; }
+        try {
+          const d = await readOneDocument(f);
+          if (!d.text.trim()) { skipped.push(name + " (nothing readable inside it)"); continue; }
+          docsOf(w).push({ ...d, chars: d.text.length, truncated: d.text.length >= DESK_DOC_CHARS });
+        } catch (e) {
+          skipped.push(name + " (" + ((e && e.message) || "could not be read") + ")");
+        }
+      }
+    } finally {
+      if (clip) clip.classList.remove("is-busy");
+    }
+    renderDesk(w);
+    saveDraft();
+    const onDesk = docsOf(w).length;
+    winNote(w, skipped.length
+      ? "Not added: " + skipped.join(", ") + (onDesk ? ". " + onDesk + " on the desk." : "")
+      : onDesk
+        ? onDesk + " document" + (onDesk === 1 ? "" : "s") + " on the desk. " + WNAME[w] + " reads " + (onDesk === 1 ? "it" : "them") + " on the next message you send."
+        : "", !!skipped.length);
+  }
+
+  function renderDesk(w) {
+    const el = $("#vb-desk-" + w);
+    if (!el) return;
+    const docs = docsOf(w);
+    el.textContent = "";
+    el.hidden = !docs.length;
+    if (!docs.length) return;
+    for (const [i, d] of docs.entries()) {
+      const chip = document.createElement("span");
+      chip.className = "vb-doc" + (d.needsReattach ? " is-stale" : "");
+      const label = document.createElement("b");
+      label.textContent = d.name;
+      const meta = document.createElement("small");
+      meta.textContent = d.needsReattach
+        ? "attach it again after the reload"
+        : d.how + " · " + d.chars.toLocaleString() + " characters" + (d.truncated ? " (the rest was too long to send)" : "");
+      const x = document.createElement("button");
+      x.type = "button"; x.className = "vb-doc-x"; x.textContent = "×";
+      x.title = "Take " + d.name + " off the desk";
+      x.setAttribute("aria-label", "Take " + d.name + " off the desk");
+      x.addEventListener("click", () => {
+        docsOf(w).splice(i, 1);
+        renderDesk(w); saveDraft();
+        winNote(w, "");
+      });
+      chip.append(label, meta, x);
+      el.append(chip);
+    }
+  }
+
+  // What actually crosses the wire. A document whose text did not survive a reload is NOT sent as
+  // an empty file; it is left off, and its chip says it must be attached again.
+  const documentsFor = (w) => docsOf(w).filter((d) => !d.needsReattach && d.text)
+    .slice(0, DESK_MAX_DOCS).map((d) => ({ name: d.name, text: d.text }));
 
   /* ================= what the planners are told about this page ============================== */
   /*
@@ -120,6 +277,10 @@
       add(WNAME[w] + "'s window", (openNow ? "open" : "closed, but it has already been used") +
         ", model: " + modelLabel(state.chats[w].model));
     }
+    // The desk is named in the settings too, so a rank knows a file is loaded even before it
+    // reaches the ATTACHED DOCUMENT blocks, and so an adviser can be told what the General holds.
+    const desk = docsOf("main").filter((d) => !d.needsReattach).map((d) => d.name);
+    if (desk.length) add("Documents the user attached to the General", desk.join(", "));
     if (state.plan) add("A plan was carried over from the main chat", state.plan.name || "yes");
     if (state.adopt) add("This is an app they already started", "adopted: " + (state.adopt.name || "yes"));
     if (state.vision) add("A vision has already been agreed", "yes; do not re-run the interview unless they change it");
@@ -145,6 +306,23 @@
 
   /* ================= draft persistence ====================================================== */
 
+  /*
+   * The desk in the draft. localStorage is a few megabytes for the whole app, and six PDFs would
+   * take all of it, so text is kept up to DESK_DRAFT_CHARS and every document past that budget
+   * keeps its NAME with `needsReattach`. A chip that says "attach it again after the reload" is
+   * honest; a chip that silently stood for an empty file would not be.
+   */
+  function draftDocs(w) {
+    let budget = DESK_DRAFT_CHARS;
+    return docsOf(w).map((d) => {
+      if (d.needsReattach || !d.text || d.text.length > budget) {
+        return { name: d.name, how: d.how, chars: d.chars, truncated: !!d.truncated, needsReattach: true, text: "" };
+      }
+      budget -= d.text.length;
+      return { name: d.name, how: d.how, chars: d.chars, truncated: !!d.truncated, needsReattach: false, text: d.text };
+    });
+  }
+
   function saveDraft() {
     try {
       localStorage.setItem(DRAFT_KEY, JSON.stringify({
@@ -153,6 +331,7 @@
           // multimodal turns collapse to their text on reload, which is the honest cheap trade.
           messages: state.chats[w].messages.map((m) => ({ from: m.from, content: typeof m.content === "string" ? m.content : (m.content.find((p) => p.type === "text") || { text: "(picture)" }).text })).slice(-40),
           model: state.chats[w].model, open: state.chats[w].open,
+          docs: draftDocs(w),
         }])),
         // The transcript can be hundreds of KB and localStorage is a few MB total, so the draft
         // keeps the decision record (what planning needs) and drops the raw source. A reload
@@ -173,6 +352,11 @@
           state.chats[w].messages = Array.isArray(d.chats[w].messages) ? d.chats[w].messages : [];
           state.chats[w].model = d.chats[w].model || "";
           state.chats[w].open = w === "main" ? true : !!d.chats[w].open;
+          state.chats[w].docs = (Array.isArray(d.chats[w].docs) ? d.chats[w].docs : [])
+            .filter((x) => x && x.name)
+            .slice(0, DESK_MAX_DOCS)
+            .map((x) => ({ name: String(x.name), text: String(x.text || ""), how: String(x.how || "read"),
+              chars: Number(x.chars) || 0, truncated: !!x.truncated, needsReattach: !!x.needsReattach || !x.text }));
         }
       }
       state.vision = d.vision || null;
@@ -353,7 +537,20 @@
           // "either the handoff to the advisors is broken or im doing it wrong" — neither; the
           // answer was rendering off-screen).
           '<div class="vb-win-note" id="vb-note-' + w + '" aria-live="polite" hidden></div>' +
+          /*
+           * THE READING DESK (Fred, 2026-08-01): Word, PDF, markdown, plain text, JSON and
+           * spreadsheets, attached to the conversation rather than to one message. Each file is
+           * read on THIS device and stays on the desk until it is taken off, so the rank can be
+           * asked about it turn after turn. The strip is the receipt: name, size, and how it was
+           * read, so nobody has to trust that the file landed.
+           */
+          '<div class="vb-desk" id="vb-desk-' + w + '" hidden></div>' +
           '<div class="vb-row">' +
+            '<button type="button" class="vb-clip" id="vb-clip-' + w + '" title="Attach a document for ' + WNAME[w] + ' to read (Word, PDF, markdown, text, JSON, spreadsheet)" aria-label="Attach a document">' +
+              '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5l-8.2 8.2a4.6 4.6 0 0 1-6.5-6.5l8.6-8.6a3 3 0 0 1 4.3 4.3l-8.5 8.5a1.5 1.5 0 0 1-2.1-2.1l7.8-7.8"/></svg>' +
+            '</button>' +
+            '<input type="file" id="vb-file-' + w + '" class="vb-file" multiple hidden ' +
+              'accept=".pdf,.docx,.xlsx,.md,.markdown,.txt,.json,.csv,.log,.xml,.yaml,.yml,.html,.css,.js,.mjs,.ts,.py,.sql,application/pdf,' + DOCX_MIME + ',' + XLSX_MIME + ',text/*,application/json" />' +
             '<textarea id="vb-in-' + w + '" rows="1" placeholder="Type here…" aria-label="Message for ' + WNAME[w] + '"></textarea>' +
             '<div class="vb-adv-btns" id="vb-adv-' + w + '" hidden>' + advisorBtns + '</div>' +
             '<div class="vb-sendstack vb-split" id="vb-sendstack-' + w + '">' +
@@ -735,7 +932,12 @@
   }
 
   function startOver() {
-    for (const w of WINDOWS) { state.chats[w].messages = []; state.chats[w].busy = false; renderLog(w); }
+    // Start Over clears the desks too: a new project planned against the previous project's spec
+    // is exactly the kind of quiet contamination this control exists to prevent.
+    for (const w of WINDOWS) {
+      state.chats[w].messages = []; state.chats[w].busy = false; state.chats[w].docs = [];
+      renderLog(w); renderDesk(w); winNote(w, "");
+    }
     state.vision = null;
     state.adopt = null;
     staged = null;
@@ -1274,8 +1476,9 @@
           seedPlan: !!(w === "main" && state.plan),
           adopt: !!state.adopt, adoptionContext: state.adopt ? state.adopt.brief : "",
           adoptionWorkspaceId: state.adopt ? state.adopt.workspaceId : "",
-          // The project and the page, every turn, to every rank (Fred, 2026-08-01).
-          workspaceId: currentWorkspaceId(), settings: pageSettings() }) });
+          // The project, the page, and the reading desk, every turn, to every rank (Fred, 08-01).
+          workspaceId: currentWorkspaceId(), settings: pageSettings(),
+          documents: documentsFor(w) }) });
       j = await r.json();
     } catch { j = { error: "The workshop could not be reached. Try again." }; }
     t.remove();
@@ -1315,6 +1518,36 @@
     const send = $("#vb-send-" + w);
     const advToggle = $("#vb-advtoggle-" + w);
     const advBtns = $("#vb-adv-" + w);
+    const clip = $("#vb-clip-" + w);
+    const file = $("#vb-file-" + w);
+
+    // The paperclip, plus drag-and-drop onto the window, plus paste. Three ways in because a
+    // document is most often already on screen somewhere when someone decides to hand it over.
+    if (clip && file) {
+      clip.addEventListener("click", () => file.click());
+      file.addEventListener("change", () => { addDocuments(w, file.files); file.value = ""; });
+    }
+    const body = $("#vb-body-" + w);
+    if (body) {
+      body.addEventListener("dragover", (e) => {
+        if (!e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
+        e.preventDefault(); body.classList.add("is-dropping");
+      });
+      body.addEventListener("dragleave", (e) => { if (e.target === body) body.classList.remove("is-dropping"); });
+      body.addEventListener("drop", (e) => {
+        if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+        e.preventDefault(); body.classList.remove("is-dropping");
+        addDocuments(w, e.dataTransfer.files);
+      });
+    }
+    if (input) {
+      input.addEventListener("paste", (e) => {
+        const files = [...((e.clipboardData && e.clipboardData.files) || [])];
+        if (!files.length) return;
+        e.preventDefault();
+        addDocuments(w, files);
+      });
+    }
 
     // What a forwarded message reads as: its speaker's rank, then its words. Pictures collapse to
     // their text the same way drafts do; pixels never cross windows.
@@ -1747,11 +1980,17 @@
     // It clears THAT window's conversation and nothing else.
     for (const f of document.querySelectorAll(".vb-win-fresh")) f.addEventListener("click", () => {
       const w = f.dataset.win;
-      if (!state.chats[w] || !state.chats[w].messages.length) { status(WNAME[w] + " is already a blank slate."); return; }
+      const hadDocs = docsOf(w).length;
+      if (!state.chats[w] || (!state.chats[w].messages.length && !hadDocs)) { status(WNAME[w] + " is already a blank slate."); return; }
       state.chats[w].messages = [];
+      // The desk goes with the conversation. An "unbiased second opinion" formed from the same
+      // attached spec is not unbiased, and leaving files loaded after a wipe would be a surprise.
+      state.chats[w].docs = [];
       renderLog(w);
+      renderDesk(w);
+      winNote(w, "");
       saveDraft();
-      status(WNAME[w] + " has a clean slate — ask for a fresh opinion.");
+      status(WNAME[w] + " has a clean slate" + (hadDocs ? " (documents taken off the desk too)" : "") + ". Ask for a fresh opinion.");
     });
     // Copy all: the whole conversation as clean text, one press, above the typing field.
     for (const c of document.querySelectorAll(".vb-copyall")) c.addEventListener("click", async () => {
@@ -1844,7 +2083,7 @@
     renderStudio();
     paintAllModelSelects();
     gateArmy();
-    for (const w of WINDOWS) { renderLog(w); toggleWin(w, state.chats[w].open); }
+    for (const w of WINDOWS) { renderLog(w); renderDesk(w); toggleWin(w, state.chats[w].open); }
     // A plan saved from an earlier visit keeps its button; a fresh hand-off arms everything.
     const pv = $("#vb-plan-view"); if (pv) pv.hidden = !state.plan;
     consumePlanHandoff();

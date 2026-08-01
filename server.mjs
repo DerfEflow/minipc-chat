@@ -156,7 +156,7 @@ import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderou
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
 import { createAdoptScanner, composeBrief, analysisPrompt } from "./ideadopt.mjs";
-import { intakeMessages, parseIntake, hasImages, planchatMessages, PLAN_WINDOWS, VISION_MARKER, CHANGE_MARKER, PROJECT_SETTINGS_SHOWN } from "./ideintake.mjs";
+import { intakeMessages, parseIntake, hasImages, planchatMessages, PLAN_WINDOWS, VISION_MARKER, CHANGE_MARKER, PROJECT_SETTINGS_SHOWN, PLAN_MAX_DOCS, PLAN_DOC_CHARS } from "./ideintake.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
 import { sweepFindings, sweepReport, brokenReferenceFindings, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
 import { helpVoice } from "./idehelp.mjs";
@@ -2204,6 +2204,7 @@ async function handleIde(req, res, u) {
       : null;
     const project = planWorkspace ? await ideProjectSnapshot(T, planWorkspace) : null;
     const settings = ideSettingsFromBody(body.settings);
+    const documents = ideDocumentsFromBody(body.documents);
     let model = String(body.model || "").trim() && modelById(body.model) ? body.model : defaultModelFor(!!T.isOwner);
     // A pasted sketch needs a model with eyes, same rule as intake: reroute the one turn or say so.
     if (hasImages(body.messages) && !isVisionCapable(model)) {
@@ -2220,16 +2221,24 @@ async function handleIde(req, res, u) {
     const canReadProject = !!(planWorkspace && planWorkspace.root && isToolCapable(model) && !(project && project.unreadable));
     const messages = planchatMessages({ window: win, register: reg, mode, device, history: body.messages,
       adopt: !!body.adopt, adoptionContext: body.adoptionContext, seedPlan: !!body.seedPlan,
-      project, settings, tools: canReadProject });
+      project, settings, tools: canReadProject, documents });
     if (messages.length < 2) return send({ status: 400, body: { error: "Say something first." } });
-    // One line saying what the planner was actually given. When someone reports "the AI does not
-    // know my folder" again, this answers it from the log instead of from a guess.
-    if (project) {
-      console.log("[ide] plan:" + win + " project " + project.name + " (" + project.root + ")" +
-        (project.unreadable ? " UNREADABLE: " + project.unreadable
-          : " " + project.entries.length + " top-level item(s)") +
-        " · folder tools " + (canReadProject ? "ON" : "off") +
-        " · " + ((settings || []).length) + " page setting(s)");
+    /*
+     * One line saying what the planner was actually given. When someone reports "the AI does not
+     * know my folder" or "it ignored my spec" again, this answers it from the log instead of from
+     * a guess. It fires on ANY carried context, not only a chosen project: a document attached
+     * before a folder is picked is exactly the case worth being able to check.
+     */
+    if (project || settings || documents) {
+      console.log("[ide] plan:" + win +
+        (project
+          ? " project " + project.name + " (" + project.root + ")" +
+            (project.unreadable ? " UNREADABLE: " + project.unreadable : " " + project.entries.length + " top-level item(s)") +
+            " · folder tools " + (canReadProject ? "ON" : "off")
+          : " no project chosen") +
+        " · " + ((settings || []).length) + " page setting(s)" +
+        " · " + ((documents || []).length) + " document(s) on the desk" +
+        ((documents || []).length ? " [" + documents.map((d) => d.name + " " + d.text.length + "c").join(", ") + "]" : ""));
     }
     const r = canReadProject
       ? await ideChatWithWorkspaceTools(model, messages, { root: planWorkspace.root, hands: ideHandsFor(T, planWorkspace), toolContext: T.ctxBase || CTX })
@@ -2779,6 +2788,28 @@ async function ideProjectSnapshot(T, ws) {
  * doctored payload can do is put its own words in a settings list the model is told is the user's
  * own configuration, which is no more reach than typing the same words into the chat.
  */
+/*
+ * Documents the user put on a plan window's desk (Fred, 2026-08-01). Extraction happens on the
+ * DEVICE, so what arrives here is already plain text and this only has to be a sanitizer: names
+ * flattened to one line, per-file and count ceilings enforced server-side rather than trusted to
+ * the client, and anything empty dropped. The prompt layer applies the total-budget ceiling.
+ */
+function ideDocumentsFromBody(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const d of raw.slice(0, PLAN_MAX_DOCS)) {
+    if (!d || typeof d !== "object") continue;
+    const name = String(d.name || "").replace(/[\r\n\t]+/g, " ").trim().slice(0, 160);
+    const text = String(d.text || "").slice(0, PLAN_DOC_CHARS);
+    // TEXT is what decides. A file that arrives without a name still gets read, under the same
+    // placeholder the prompt layer would give it: one rule in both places, so a client that omits
+    // a name never silently loses the document it attached.
+    if (!text.trim()) continue;
+    out.push({ name: name || "attached file", text });
+  }
+  return out.length ? out : null;
+}
+
 function ideSettingsFromBody(raw) {
   if (!Array.isArray(raw)) return null;
   const flat = (v) => String(v == null ? "" : v).replace(/[\r\n\t]+/g, " ").trim();

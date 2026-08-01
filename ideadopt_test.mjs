@@ -410,5 +410,54 @@ await t("the adopt voice demands the finish/fix/new tags and forbids invented pr
   assert.ok(!v.includes("—"), "no em dashes in prompt prose");
 });
 
+/*
+ * THE READING DESK, client half (Fred, 2026-08-01). Extraction runs in the browser, so what can be
+ * pinned here is the wiring: every format Fred named is accepted, the reading goes through the
+ * module that already exists rather than a second copy of it, a scan falls through to OCR, the
+ * desk rides EVERY turn rather than one, and wiping a conversation wipes its desk.
+ */
+await t("source: the plan windows accept Word, PDF, markdown, text, JSON and spreadsheets", () => {
+  const accept = /accept="([^"]+)"/.exec(vibeClient.slice(vibeClient.indexOf('id="vb-file-')));
+  assert.ok(accept, "the file input declares what it takes");
+  for (const ext of [".pdf", ".docx", ".md", ".txt", ".json", ".xlsx"]) {
+    assert.ok(accept[1].includes(ext), "the picker must offer " + ext);
+  }
+  assert.match(vibeClient, /old Office format; save it as \.docx or \.xlsx first/,
+    "a .doc must be refused with the fix, not a shrug");
+});
+
+await t("source: documents are read by the SHARED extractor, never a second copy of it", () => {
+  assert.match(vibeClient, /import\("\/attach-extract\.mjs/, "the plan windows reuse the main chat's extractor");
+  for (const fn of ["extractDocx", "extractPdf", "extractXlsx", "loadPdfjsBrowser"]) {
+    assert.ok(vibeClient.includes("extractMod." + fn), "must call " + fn);
+  }
+  assert.match(vibeClient, /scanned or image-only[\s\S]{0,600}\/api\/ocr/,
+    "a PDF with no text layer must fall through to the OCR door");
+});
+
+await t("source: the desk rides EVERY turn, which is what 'interact about them' needs", () => {
+  assert.match(vibeClient, /\/ide\/planchat[\s\S]{0,900}documents: documentsFor\(w\)/,
+    "every plan turn carries the desk");
+  assert.match(vibeClient, /const documentsFor = \(w\)[\s\S]{0,220}!d\.needsReattach && d\.text/,
+    "a document whose text did not survive a reload is left off rather than sent empty");
+});
+
+await t("source: wiping a conversation wipes its desk, so no spec leaks into a fresh plan", () => {
+  assert.match(vibeClient, /function startOver\(\)[\s\S]{0,600}state\.chats\[w\]\.docs = \[\]/,
+    "Start Over clears every desk");
+  assert.match(vibeClient, /vb-win-fresh[\s\S]{0,900}state\.chats\[w\]\.docs = \[\]/,
+    "a per-window fresh start clears that window's desk");
+});
+
+await t("source: the server sanitizes the desk rather than trusting the browser", () => {
+  assert.match(server, /function ideDocumentsFromBody/);
+  assert.match(server, /slice\(0, PLAN_MAX_DOCS\)/, "the count ceiling is enforced server-side");
+  assert.match(server, /slice\(0, PLAN_DOC_CHARS\)/, "so is the per-file ceiling");
+  const start = server.indexOf('path === "/ide/planchat"');
+  const block = server.slice(start, start + 5000);
+  assert.match(block, /documents = ideDocumentsFromBody\(body\.documents\)/, "planchat sanitizes what it is handed");
+  assert.match(block, /tools: canReadProject, documents \}/, "and passes it to the message builder");
+});
+
 console.log("\n" + passed + " passed, " + failed + " failed");
 process.exit(failed ? 1 : 0);
