@@ -257,6 +257,24 @@
 }
 .vb-modal .vb-adopt-tree { max-height: 60vh; overflow: auto; }
 
+/* ---------- the per-window note: feedback beside the control, never only page-bottom ------- */
+.vb-win-note {
+  margin: 4px 12px 0;
+  padding: 7px 10px;
+  font-size: 12px; line-height: 1.45;
+  color: #cfe4f2;
+  border: 1px solid hsla(var(--vb-hue), 60%, 60%, .35);
+  border-radius: 8px;
+  background: hsla(var(--vb-hue), 45%, 14%, .75);
+}
+.vb-win-note.is-bad { color: #ffc0ba; border-color: rgba(255, 117, 105, .45); background: rgba(67, 18, 16, .5); }
+/* The receiving window announces the arrival: one bright pulse of its own hue. */
+.vb-win.vb-flash { animation: vb-win-flash 1.2s ease 2; }
+@keyframes vb-win-flash {
+  0%, 100% { box-shadow: none; }
+  50% { box-shadow: 0 0 0 3px hsla(var(--vb-hue), 70%, 60%, .65); }
+}
+
 /* ---------- Copy all + the per-bubble clipboard glyph -------------------------------------- */
 .vb-copyall-row { display: flex; justify-content: flex-end; padding: 0 12px; }
 .vb-copyall {

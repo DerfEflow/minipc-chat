@@ -271,6 +271,12 @@
           '<div class="vb-log" id="vb-log-' + w + '" aria-live="polite"></div>' +
           '<div class="vb-grab" data-win="' + w + '" title="Drag to make this window taller" aria-hidden="true"><i></i></div>' +
           '<div class="vb-copyall-row"><button type="button" class="vb-copyall" data-win="' + w + '" title="Copy this whole conversation as clean text">Copy all</button></div>' +
+          // Advisor-flow feedback lands HERE, beside the buttons that caused it. The first build
+          // sent refusals to the page-bottom status line, 900+ px below the insignia on a laptop
+          // screen: the app looked dead while it was asking for context (Fred, 2026-07-31,
+          // "either the handoff to the advisors is broken or im doing it wrong" — neither; the
+          // answer was rendering off-screen).
+          '<div class="vb-win-note" id="vb-note-' + w + '" aria-live="polite" hidden></div>' +
           '<div class="vb-row">' +
             '<textarea id="vb-in-' + w + '" rows="1" placeholder="Type here…" aria-label="Message for ' + WNAME[w] + '"></textarea>' +
             '<div class="vb-adv-btns" id="vb-adv-' + w + '" hidden>' + advisorBtns + '</div>' +
@@ -1031,6 +1037,16 @@
       });
       b.append(copy);
     }
+    // A message arriving WHILE the Advisors ticks are up gets its own tick box immediately;
+    // without this, a reply that lands mid-selection is the one message that cannot be sent on.
+    if (text && !/vpb-thinking/.test(cls) && log.classList.contains("vb-selecting")) {
+      const lab = document.createElement("label");
+      lab.className = "vpb-pick";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      lab.append(box);
+      b.append(lab);
+    }
     log.append(b);
     log.scrollTop = log.scrollHeight;
     return b;
@@ -1129,6 +1145,7 @@
     } catch { j = { error: "The workshop could not be reached. Try again." }; }
     t.remove();
     c.busy = false;
+    winNote(w, "");   // "Answering…" and any stale refusal stand down the moment the turn settles
     if (!j || j.error) { bubble(w, "vpb-ai vpb-err", (j && j.error) || "Something went wrong."); return; }
     c.messages.push({ from: w, content: (j.reply || "") + (j.vision ? "\nVISION READY\n" + j.vision : "") });
     if (j.reply) { const b = bubble(w, "vpb-ai", j.reply); if (b) b.dataset.mi = String(c.messages.length - 1); }
@@ -1148,6 +1165,16 @@
    * that rank — never the whole chat. The receiving rank gets NO other context, so its opinion
    * stays uninfluenced; if no context was typed, the sender is prompted to add a line first.
    */
+  // The per-window note: feedback rendered beside the control that caused it, never only at the
+  // page-bottom status line (which sits 900+ px away and taught Fred the feature was "broken").
+  function winNote(w, text, bad) {
+    const el = $("#vb-note-" + w);
+    if (!el) return;
+    el.textContent = text || "";
+    el.hidden = !text;
+    el.classList.toggle("is-bad", !!bad);
+  }
+
   function wireSend(w) {
     const input = $("#vb-in-" + w);
     const send = $("#vb-send-" + w);
@@ -1164,6 +1191,9 @@
       advToggle.classList.toggle("on", on);
       advToggle.setAttribute("aria-pressed", String(on));
       if (on) enterSelect(w); else exitSelect(w);
+      // The flow teaches itself the moment it opens, right where the eye already is.
+      const others = WINDOWS.filter((x) => x !== w).map((o) => WNAME[o]).join(" or ");
+      winNote(w, on ? "Tick any messages above, type one line of context in the box, then press " + others + "'s insignia." : "");
     };
 
     const sendHere = () => {
@@ -1172,9 +1202,10 @@
       // Advisors that never got a model have no seat to answer from (Fred: no default for the
       // Captain or the Sergeant) — say so instead of quietly running on some other model.
       if (w !== "main" && !state.chats[w].model) {
-        status("Pick a model for " + WNAME[w] + " in its corner first.", true);
+        winNote(w, "Pick a model for " + WNAME[w] + " in its corner first.", true);
         return;
       }
+      winNote(w, "");
       input.value = ""; input.style.height = "";
       state.chats[w].messages.push({ from: "user", content: text });
       const b = bubble(w, "vpb-user", text);
@@ -1193,14 +1224,14 @@
     const sendToAdvisor = (target) => {
       const text = (input.value || "").trim();
       const picks = pickedIndexes(w);
-      if (!picks.length) { status("Tick the messages to send to " + WNAME[target] + " first.", true); return; }
+      if (!picks.length) { winNote(w, "Tick the messages to send to " + WNAME[target] + " first (the boxes on each message).", true); return; }
       if (!text) {
-        status("Type a line of context for " + WNAME[target] + " (what should they do with these messages?), then press their insignia again.", true);
+        winNote(w, "Type a line of context for " + WNAME[target] + " in the box below (what should they do with these messages?), then press their insignia again.", true);
         input.focus();
         return;
       }
       if (target !== "main" && !state.chats[target].model) {
-        status("Pick a model for " + WNAME[target] + " in its corner first.", true);
+        winNote(w, "Pick a model for " + WNAME[target] + " in its corner first.", true);
         return;
       }
       const msgs = state.chats[w].messages;
@@ -1214,7 +1245,17 @@
       setAdvisors(false);
       saveDraft();
       askWindow(target);
-      status("Sent " + picks.length + " message" + (picks.length === 1 ? "" : "s") + " to " + WNAME[target] + ".");
+      const sentLine = "Sent " + picks.length + " message" + (picks.length === 1 ? "" : "s") + " to " + WNAME[target] + " below.";
+      winNote(w, sentLine);
+      winNote(target, "Answering what " + WNAME[w] + " sent over…");
+      status(sentLine);
+      // Bring the receiving window to the eye: scroll it into view and flash its border, so the
+      // crossing is SEEN to happen instead of taken on faith.
+      const winEl = $("#vb-win-" + target);
+      if (winEl) {
+        winEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        winEl.classList.remove("vb-flash"); void winEl.offsetWidth; winEl.classList.add("vb-flash");
+      }
     };
 
     send.addEventListener("click", sendHere);
