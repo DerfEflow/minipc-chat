@@ -143,6 +143,7 @@ import { createSessionBudgets } from "./sessionbudget.mjs";
 import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore, buildInstallerZip } from "./forge.mjs";
+import { createGuide, createGuideStore, GUIDE_MODEL } from "./guide.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_PROMPT_MAX_CHARS, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs } from "./idejobs.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages } from "./ideengine.mjs";
@@ -1281,6 +1282,10 @@ const HANDS_TOKEN = cfgGet("HANDS_TOKEN", "");
 // token (forge.mjs). The hub binds that connection to their uid so a user's chat reaches ONLY their
 // own node. On connect, we push their chosen folders (allowed roots) down to the node.
 const forgeStore = createForgeStore({ dir: dataPath("forge") });
+// The Guide: read-only in-app support. Knowledge is a curated file, reloaded on a short TTL so a
+// deploy updates what it knows without a restart. See guide.mjs for why the limits are structural.
+const guideStore = createGuideStore({ dir: dataPath("guide") });
+const guide = createGuide({ knowledgePath: join(HERE, "docs", "GUIDE-KNOWLEDGE.md"), store: guideStore, log: (m) => console.log(m) });
 const handsHub = createHandsHub({
   token: HANDS_TOKEN,
   log: (m) => console.log("[dominion-ai] " + m),
@@ -4811,6 +4816,78 @@ async function handleForge(req, res, u) {
     const saved = forgeStore.setRoots(uid, body.roots);
     if (connected()) await handsHub.dispatch(nodeKey, "set_roots", { roots: saved.roots }, { timeoutMs: 15000 }).catch(() => {});
     return sjson(res, 200, saved);
+  }
+  return sjson(res, 404, { error: "not found" });
+}
+
+/*
+ * THE GUIDE (Fred, 2026-07-31). A read-only support voice on every screen. It is metered like any
+ * turn but deliberately cheap: one small model, a few KB of curated knowledge, no tools.
+ *
+ * NOTHING here binds a tool or touches the user's real conversations. The call is assembled by
+ * guide.mjs from the knowledge file plus the Guide's own thread, which is what makes "it cannot
+ * leak the code" a property of the system rather than a promise in a prompt.
+ */
+async function handleGuide(req, res, u) {
+  const T = resolveTenant(req);
+  if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
+  const p = u.pathname;
+
+  // The owner's complaint book. Guests can file; only Fred can read.
+  if (req.method === "GET" && p === "/guide/complaints") {
+    if (!T.isOwner) return sjson(res, 403, { error: "owner only" });
+    return sjson(res, 200, { complaints: guideStore.recent(100), open: guideStore.openCount() });
+  }
+  const body = (await readJsonBody(req)) || {};
+  if (req.method === "POST" && p === "/guide/complaint/resolve") {
+    if (!T.isOwner) return sjson(res, 403, { error: "owner only" });
+    return sjson(res, 200, guideStore.resolve(body.id));
+  }
+
+  if (req.method === "POST" && p === "/guide/ask") {
+    const question = String(body.question || "").trim();
+    if (!question) return sjson(res, 400, { error: "ask something" });
+    if (!guide.ready()) return sjson(res, 200, { reply: "My notes are not loaded right now, so I would only be guessing. Try again in a moment." });
+    const r = await ideChatOnce(GUIDE_MODEL, guide.messagesFor(question, body.history));
+    if (r.costUsd) { try { await meterTurn(T, r.costUsd, "guide", ""); } catch {} }
+    if (!r.ok) return sjson(res, 200, { reply: "I could not reach my own brain just then. Ask me again?" });
+
+    // Pull the complaint marker out before the user ever sees the reply.
+    const { reply, complaint } = guide.extractComplaint(r.content || "");
+    let logged = null;
+    if (complaint && complaint.summary) {
+      const saved = guideStore.log({
+        uid: T.uid || "", userEmail: T.email || "", contactEmail: complaint.email || "",
+        summary: complaint.summary, surface: String(body.surface || "").slice(0, 60),
+      });
+      if (saved.ok) {
+        logged = { id: saved.id, contactEmail: complaint.email || "" };
+        console.log(`[guide] complaint #${saved.id} from ${T.email || T.uid || "unknown"}: ${complaint.summary.slice(0, 120)}`);
+        /*
+         * Alert Fred by email (his choice of channel). Fire-and-forget on purpose: a mail failure
+         * must never cost the user their complaint or their reply, because the record is already
+         * safely written above. Never mails anyone but the owner.
+         */
+        (async () => {
+          try {
+            const prov = connectors.provider("google");
+            if (!prov || !prov.connected || !prov.connected(OWNER_T)) { console.warn("[guide] complaint alert skipped: Google not connected"); return; }
+            const lines = [
+              "A Dominion user filed a complaint through the Guide.",
+              "", "WHAT THEY SAID:", complaint.summary,
+              "", "FROM: " + (T.email || T.uid || "unknown") + (T.isOwner ? " (owner)" : ""),
+              "REPLY TO: " + (complaint.email || "they did not leave an address"),
+              "WHERE: " + (String(body.surface || "unknown")),
+              "COMPLAINT #" + saved.id,
+            ].join("\n");
+            await prov.call(OWNER_T, "gmail_send", { to: OWNER_EMAIL, subject: "Dominion complaint #" + saved.id, body: lines });
+            guideStore.markAlerted(saved.id);
+            console.log("[guide] complaint #" + saved.id + " emailed to the owner");
+          } catch (e) { console.warn("[guide] complaint alert failed: " + (e && e.message)); }
+        })();
+      }
+    }
+    return sjson(res, 200, { reply, logged, model: GUIDE_MODEL });
   }
   return sjson(res, 404, { error: "not found" });
 }
@@ -9082,6 +9159,7 @@ const server = http.createServer(async (req, res) => {
     if (path.startsWith("/billing/")) return handleBilling(req, res, u);
     if (path.startsWith("/admin/") && path !== "/admin/restore-corpus") return handleAdmin(req, res, u);
     if (path.startsWith("/forge/")) return handleForge(req, res, u);
+    if (path.startsWith("/guide/")) return handleGuide(req, res, u);
     if (path === "/connectors" || path.startsWith("/connectors/")) return handleConnectors(req, res, u);
 
     if (path === "/api/ocr" && req.method === "POST") return handleOcr(req, res);
