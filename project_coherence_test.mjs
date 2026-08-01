@@ -140,8 +140,26 @@ test("only a deliberate choice is stamped, never an echo of the account", () => 
   assert.match(ide, /if \(save\) stampChoice\(\)/);
 });
 
-test("the account records WHEN it changed its mind", () => {
-  const store = readFileSync(new URL("./ide.mjs", import.meta.url), "utf8");
-  assert.match(store, /s\.prefs\.at = Date\.now\(\)/,
-    "without a timestamp, recency degrades into whoever-chose-at-all-wins");
+/*
+ * This one is a ROUND TRIP on purpose. The first version of it asserted that the source contained
+ * `s.prefs.at = Date.now()`, which was true and useless: read() rebuilds prefs from a whitelist,
+ * so the stamp was written to disk and dropped on the way back, and every caller saw undefined.
+ * A source-text assertion cannot catch a value that does not survive being stored.
+ */
+test("the account records WHEN it changed its mind, and it survives a read", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dominion-prefsat-"));
+  try {
+    const store = createIdeStore({ dir, isProtectedPath });
+    assert.equal(store.prefs().at, 0, "never chosen starts at zero, not undefined");
+
+    const after = store.setPrefs({ mode: "vibe", engaged: true });
+    assert.ok(after.at > 0, "choosing an interface stamps the account");
+    assert.equal(store.prefs().at, after.at, "and the stamp survives being stored and read back");
+
+    // A change that touches neither the switch nor the interface must not pretend to be a choice,
+    // or an unrelated save on one device would outvote a real decision made on another.
+    const was = store.prefs().at;
+    store.setPrefs({ language: "technical" });
+    assert.equal(store.prefs().at, was, "language is not a choice about which interface to be in");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

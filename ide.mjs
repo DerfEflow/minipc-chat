@@ -125,7 +125,9 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
   mkdirSync(home, { recursive: true });
 
   // mode "" means "never chosen": the client shows the three-cards picker exactly once.
-  const blank = () => ({ prefs: { engaged: false, language: DEFAULT_REGISTER, mode: "", buildWhere: "mine" }, workspaces: [], subs: [] });
+  // `at: 0` means never chosen. read() only applies its whitelist when a file exists, so this shape
+  // has to carry every field too, or a brand-new account answers undefined where callers expect 0.
+  const blank = () => ({ prefs: { engaged: false, language: DEFAULT_REGISTER, mode: "", buildWhere: "mine", at: 0 }, workspaces: [], subs: [] });
 
   function read() {
     if (!existsSync(file)) return blank();
@@ -149,6 +151,14 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
           // work lives here — an existing project always runs where its files already are, so
           // flipping this can never point a project at a folder that does not exist.
           buildWhere: normalizeBuildWhere(j && j.prefs && j.prefs.buildWhere),
+          /*
+           * WHEN the account last chose its switch position or interface. read() rebuilds prefs
+           * from this whitelist, so a field missing here is written to disk and then silently
+           * dropped on the way back: setPrefs stamped it, every reader saw undefined, and "the
+           * newer choice wins" quietly degraded back into "whichever device chose at all wins".
+           * Any future pref needs a line here or it does not exist as far as callers are concerned.
+           */
+          at: Number(j && j.prefs && j.prefs.at) || 0,
         },
         workspaces: Array.isArray(j && j.workspaces) ? j.workspaces : [],
         subs: Array.isArray(j && j.subs) ? j.subs : [],
