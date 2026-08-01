@@ -1,0 +1,323 @@
+/*
+ * Mobile viewport stability.
+ *
+ * Some iPhone browsers (and "Request Desktop Website") expose a 980px CSS viewport even though
+ * the physical screen is narrow. The old phone layout stopped at 620px, so those devices kept the
+ * desktop sidebar and one-row composer. The controls then squeezed the textarea into a tall square
+ * and the page overflowed horizontally.
+ *
+ * Treat a portrait/touch viewport up to 1180px as a compact shell. The regular <=620px rules still
+ * provide the tighter phone art direction; this bridge makes sure they are not the only route to a
+ * usable mobile layout.
+ */
+
+.bar,
+#bar-left,
+#bar-mid,
+#input {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+@media (max-width: 1180px) and (orientation: portrait),
+       (max-width: 1180px) and (hover: none) and (pointer: coarse) {
+  html,
+  body {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+    min-height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: calc(8px + env(safe-area-inset-top)) 8px
+             calc(8px + env(safe-area-inset-bottom));
+  }
+
+  #rendered-scene {
+    background-image: url("/assets/dominion-neural-chassis-mobile-4k-v3.webp");
+    background-position: center;
+    transform: none;
+  }
+
+  #commandbar,
+  .neural-glass {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    align-self: stretch;
+  }
+
+  #commandbar {
+    flex: none;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "brand actions"
+      "controls controls";
+    min-height: auto;
+    gap: 7px;
+    padding: 8px;
+    overflow: visible;
+  }
+
+  .brand-cluster {
+    grid-area: brand;
+    min-width: 0;
+    grid-template-columns: 38px 44px minmax(0, 1fr);
+    border-right: 0;
+  }
+
+  .brand-copy,
+  .command-controls,
+  .command-select,
+  .control-copy,
+  .model-trigger {
+    min-width: 0;
+  }
+
+  .brand-core {
+    width: 42px;
+    height: 42px;
+  }
+
+  .brand-copy .title {
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 17px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .command-actions {
+    grid-area: actions;
+    display: flex;
+    justify-self: end;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .command-actions::-webkit-scrollbar {
+    display: none;
+  }
+
+  .command-actions .command-icon {
+    flex: 0 0 43px;
+    width: 43px;
+    height: 48px;
+  }
+
+  .command-label {
+    display: none;
+  }
+
+  .command-controls {
+    grid-area: controls;
+    width: 100%;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .model-current,
+  .command-select select {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  #sidebar {
+    position: fixed;
+    z-index: 35;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(88vw, 350px);
+    transform: translateX(-105%);
+    transition: transform .22s ease;
+    padding-top: calc(10px + env(safe-area-inset-top));
+  }
+
+  #sidebar.open {
+    transform: none;
+  }
+
+  .telemetry-rail,
+  .console-footer {
+    display: none;
+  }
+
+  .neural-glass {
+    flex: 1 1 auto;
+    min-height: 0;
+    transform: none !important;
+  }
+
+  main {
+    min-width: 0;
+    min-height: 0;
+    overflow-x: hidden;
+  }
+
+  .wrap {
+    width: min(930px, 100%);
+    max-width: 100%;
+    margin-inline: auto;
+  }
+
+  .neural-glass > footer {
+    width: auto;
+    max-width: none;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  /*
+   * Give text and controls separate rows. This remains stable when Send becomes Stop and when the
+   * textarea grows; neither state can steal width from the input.
+   */
+  .bar {
+    width: 100%;
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+    grid-template-rows: auto auto;
+    align-items: center;
+    gap: 7px;
+  }
+
+  #input {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    width: 100%;
+    min-height: 58px;
+    padding: 13px 12px;
+    /*
+     * iOS zooms and pans the visual viewport when a focused form control is below 16px. That
+     * looked like the whole console "walking" sideways and vertically during send.
+     */
+    font-size: 16px;
+  }
+
+  #bar-left {
+    grid-column: 1;
+    grid-row: 2;
+    align-self: center;
+    overflow: hidden;
+  }
+
+  #speak {
+    display: flex;
+    grid-column: 2;
+    grid-row: 2;
+    align-self: center;
+    justify-self: center;
+  }
+
+  #bar-mid {
+    grid-column: 3;
+    grid-row: 2;
+    align-self: center;
+    justify-self: center;
+    margin-bottom: 0;
+  }
+
+  #mic {
+    grid-column: 4;
+    grid-row: 2;
+    align-self: center;
+  }
+
+  #send {
+    grid-column: 5;
+    grid-row: 2;
+    align-self: center;
+    margin-left: 0;
+  }
+
+  /* Chat Focus must follow physical phones even when Safari advertises its desktop viewport. */
+  body.chat-focus #commandbar {
+    position: relative;
+    width: 100%;
+  }
+
+  body.chat-focus .command-controls,
+  body.chat-focus .command-actions {
+    display: none;
+  }
+
+  body.chat-focus .focus-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 30px;
+    flex: 0 0 auto;
+    border: 1px solid rgba(255, 255, 255, .22);
+    border-radius: 8px;
+    color: #cfd8e3;
+    background: #0d1117;
+    cursor: pointer;
+  }
+
+  body.chat-focus #focus-actions-handle {
+    position: absolute;
+    z-index: 30;
+    top: 50%;
+    right: 0;
+    width: 16px;
+    height: 44px;
+    border-right: 0;
+    border-radius: 8px 0 0 8px;
+    transform: translateY(-50%);
+  }
+
+  body.chat-focus.reveal-controls .command-controls {
+    position: absolute;
+    z-index: 60;
+    top: 100%;
+    right: 0;
+    left: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, .18);
+    background: #0b0f14;
+  }
+
+  body.chat-focus.reveal-actions .command-actions {
+    position: absolute;
+    z-index: 60;
+    top: 100%;
+    right: 0;
+    left: 0;
+    display: flex;
+    justify-content: space-around;
+    padding: 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, .18);
+    background: #0b0f14;
+  }
+}
+
+@media (max-width: 620px) {
+  .command-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .privacy-mode-select {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: max(16px, 1em);
+  }
+}
