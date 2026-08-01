@@ -1,0 +1,62 @@
+/* =============================================================================================
+   Touch-device corrections. Loads LAST, so it can settle arguments the width-based sheets cannot.
+
+   This file is the surviving part of a 07-28 draft (branch salvage/f-sandbox-uncommitted-20260728)
+   that was written to give phones advertising a desktop-width viewport a usable shell. Most of
+   that draft is deliberately NOT here, for two reasons found on 2026-08-01 while auditing it:
+
+   1. It restated the phone shell in full, including `#sidebar { left: 0 }`. Loading last, that
+      would have overridden dominion-vault.css's `#sidebar { left: -110% }` and pinned the
+      navigation drawer permanently open on every phone. The draft predates the 07-30 Android
+      repaint fix, which forbids the drawer riding ANY transform on a phone, and it slid the drawer
+      by transform. Two days apart, and directly incompatible.
+   2. Everything else in it already exists in main, at `max-width: 620px` and `max-width: 900px`.
+      Its real contribution was the media CONDITION, not the rules: a phone in desktop browsing
+      mode reports a 980px viewport and reaches neither tier. Widening those two tiers to also
+      match a coarse pointer touches eleven stylesheets, so it is its own change, not a passenger.
+
+   What remains is the draft's one live correction, with its targets read out of the running
+   CSSOM at 375px rather than out of the stylesheets. That mattered twice over. The sheet the draft
+   argued with, dominion-rendered-v2.css, is not loaded any more at all: nothing links it and only
+   the service worker still remembers it. And the composer reads 17px on a desktop window, which
+   made the whole fix look unnecessary until it was measured at phone width, where it is 14px.
+   Measured, not reasoned about.
+   ============================================================================================= */
+
+/*
+ * iOS zooms the visual viewport whenever a focused form control is smaller than 16px, and does not
+ * zoom back out. `maximum-scale=1` in the viewport meta does not prevent it: iOS has ignored that
+ * for accessibility since iOS 10. Sixteen pixels on the focused control is the only remedy.
+ *
+ * The selectors are named at the specificity of the rules they lift, because `#input` (1,0,0) and
+ * `.ide-start textarea` (0,1,1) both beat a bare `textarea` (0,0,1) at any load order. Written the
+ * short way, this file would have looked like a fix and done nothing.
+ *
+ * max(16px, 1em) rather than a flat 16px, so a control the design deliberately made LARGER keeps
+ * its size instead of being pulled down to the floor.
+ *
+ * Deliberately NOT lifted: the 12px selects in Settings. A select opens a picker wheel on iOS
+ * rather than a caret, and raising two dozen of them would redesign that panel's density while
+ * testers are mid-session. This is a typing fix, so it covers what people type into.
+ *
+ * Measured at 375px before shipping: two controls move, #input 14 to 16 and #bb-input 13 to 16,
+ * both with zero change to their own width or height, no new overflow in any panel, and the page's
+ * horizontal overflow still zero. On a desktop pointer the query does not match at all.
+ */
+@media (hover: none) and (pointer: coarse) {
+  input,
+  textarea,
+  select,
+  #input,
+  #bb-input,
+  .ide-start input,
+  .ide-start select,
+  .ide-start textarea,
+  .vb-row input,
+  .vb-row select,
+  .vb-row textarea,
+  .bg-row input,
+  .bg-row textarea {
+    font-size: max(16px, 1em);
+  }
+}
