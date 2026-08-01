@@ -67,3 +67,19 @@ test("a build outcome is announced, not only painted at the top of the page", ()
   const listener = vibe.slice(vibe.indexOf('addEventListener("dominion-ide-build-outcome"'), vibe.indexOf("window.dominionVibe"));
   assert.match(listener, /status\(/, "said directly under BEGIN BUILDING, where the finger just was");
 });
+
+/* ---- ...and it has to be repainted when the project CHANGES ---------------------------------
+ *
+ * Scoping the verdict to the selected project (buildbanner_test.mjs) is only half of it. The paint
+ * happens inside refreshJobs, which runs on open, on resume, and on a twenty-second poll. Moving to
+ * a different project between two polls left the previous project's failure on screen for up to
+ * twenty seconds, wearing the new project's name, which is exactly long enough to be believed.
+ */
+test("changing project repaints the verdict immediately, rather than at the next poll", () => {
+  const sel = ide.slice(ide.indexOf("selectWorkspace: (id) =>"), ide.indexOf("autoWorkspace:"));
+  assert.ok(sel.length > 100, "found the selectWorkspace bridge entry");
+  assert.match(sel, /state\.workspaceId = id;/);
+  assert.match(sel, /refreshJobs\(\);/, "the new project's own jobs decide what the line says");
+  assert.ok(sel.indexOf("state.workspaceId = id;") < sel.indexOf("refreshJobs()"),
+    "the choice lands before the repaint reads it, or the repaint repaints the old project");
+});

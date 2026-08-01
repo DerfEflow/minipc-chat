@@ -3221,7 +3221,17 @@
     // path, the folder drawer, drafts) sees the same choice.
     selectWorkspace: (id) => {
       const sel = $("#st-ws");
-      if (sel && [...sel.options].some((o) => o.value === id)) { sel.value = id; state.workspaceId = id; return true; }
+      if (sel && [...sel.options].some((o) => o.value === id)) {
+        sel.value = id; state.workspaceId = id;
+        /*
+         * The verdict is scoped to the project, so CHANGING the project has to repaint it now.
+         * Without this the scoping is still correct and still twenty seconds late: you move to a
+         * project that has never been built and the last one's failure sits there until the next
+         * poll, which is precisely the window in which somebody reads it and believes it.
+         */
+        refreshJobs();
+        return true;
+      }
       return false;
     },
     // Make a project folder for a beginner who has none, exactly as the silent auto-path does.
