@@ -45,6 +45,37 @@ export function escalateForContext({ contextTokens = 0, numCtx = 0, cap = 40960,
   };
 }
 
+/*
+ * WHAT THE PERSON IS ASKING, as opposed to what they pasted (Fred, 2026-08-01).
+ *
+ * He pasted an article his son is writing and asked for a review in his own voice. The reply
+ * opened with "that asks for real work on a machine", because the machine-intent pattern was run
+ * over the WHOLE message, article and all, and any few thousand words of English contain "run",
+ * "file", "fix", "command" or "server" somewhere. The guard was reading a teenager's essay for
+ * build instructions. On a second attempt with a chat-only model it was worse than noise: the turn
+ * classified as a BUILD, the contract demanded tool evidence the model could not produce, and a
+ * finished answer was replaced with "Work paused. This task is not complete."
+ *
+ * An instruction sits at one END of a message. People type the ask and paste below it, or paste
+ * and type the ask underneath. The middle of a long message is payload. So on a long message only
+ * the two ends count as intent. Short messages are returned untouched: there is no payload to
+ * separate, and slicing them could only lose meaning.
+ *
+ * This narrows what gets read; it cannot promise no sentence of prose ever contains "run". The
+ * callers therefore pair it with the task classification, so a keyword alone can never pause a
+ * turn or raise a warning.
+ *
+ * Lives HERE, in the pure routing module, rather than in server.mjs: importing server.mjs to test
+ * one string function boots an entire server against the real data directories.
+ */
+export const ASK_EDGE_CHARS = 400;
+export const ASK_PAYLOAD_MIN = 1200;   // below this, a message is all ask and no payload
+export function askSliceOf(text) {
+  const s = String(text || "");
+  if (s.length <= ASK_PAYLOAD_MIN) return s;
+  return s.slice(0, ASK_EDGE_CHARS) + "\n…\n" + s.slice(-ASK_EDGE_CHARS);
+}
+
 // Self-contained transform asks: the content to work on is IN the prompt, retrieval adds nothing.
 export const NO_RETRIEVAL_RE = /^(format|reformat|convert (this|the following)|rewrite (this|the following)|translate (this|the following)|fix the (grammar|spelling|typos)|proofread (this|the following))/i;
 

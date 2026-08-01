@@ -29,7 +29,7 @@ import { createMentor, MENTOR_ROLES } from "./mentor.mjs";
 import { Readable } from "node:stream";
 import { createFlywheel } from "./flywheel.mjs";
 import { createReviewEngine, computeQuality, extractCitations, wantsReview, detectArtifactTriggers, exportSafetyGate } from "./review.mjs";
-import { routeOf, escalateForContext, consumeNeeds, NO_RETRIEVAL_RE } from "./routing.mjs";
+import { routeOf, escalateForContext, consumeNeeds, askSliceOf, NO_RETRIEVAL_RE } from "./routing.mjs";
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
@@ -54,6 +54,7 @@ import {
  * tool-intent heuristic; it also anchors focused build-tool selection and the silent-disarm guard.
  */
 const MACHINE_INTENT_RE = /\b(build|deploy|install|refactor|migrate|fix|debug|run|execute|script|commit|push|repo|repository|codebase|server|database|file|folder|directory|terminal|shell|command|laptop|mini-?pc|machine|my computer)\b/i;
+
 const BUILD_TOOL_NAMES = new Set([
   "forge_read", "forge_edit", "forge_write", "forge_run", "forge_rollback", "scaffold_project",
   "recall_memory", "search_artifacts", "read_artifact", "search_chats", "retrieve_context_pack",
@@ -7281,7 +7282,14 @@ async function handleChat(req, res) {
   const continuation = continuationContext(history.slice(0, Math.max(0, lastUserAt)), lastUserText);
   const workGoalText = continuation.goal || lastUserText;
   const workIntentText = continuation.intentText || lastUserText;
-  const taskIntent = classifyTaskIntent(workIntentText);
+  /*
+   * Intent is read from the ASK, not from a pasted payload (Fred, 2026-08-01: an article pasted
+   * for review was scanned for machine intent and tripped the disarm warning). Everything that
+   * decides what KIND of turn this is reads askText; anything that needs the actual content, like
+   * the content wall and the persona retrieval, keeps reading the full message.
+   */
+  const askText = askSliceOf(workIntentText);
+  const taskIntent = classifyTaskIntent(askText);
   // Hardcoded content wall (safety.mjs): refuse prohibited requests before any model runs or any
   // token is billed. ABSOLUTE tier (minors / mass-harm how-to) applies to everyone incl. the owner;
   // RESTRICTED tier (explicit sexual / illicit) applies to non-owners only. Owner exempt from RESTRICTED.
@@ -7293,10 +7301,10 @@ async function handleChat(req, res) {
     sse({ type: "stopped", reason: "content_blocked" });
     return endStream();
   }
-  let mode, tier, reason, privacyRisk = privacyRiskOf(workIntentText);
+  let mode, tier, reason, privacyRisk = privacyRiskOf(askText);
   let routeConfidence = 0.95;
   // D1/D3: the needs_* block, produced for BOTH the auto route and explicit mode picks.
-  let needs = { tools: true, memory: true, retrieval: true, mentorReview: wantsReview(workIntentText) };
+  let needs = { tools: true, memory: true, retrieval: true, mentorReview: wantsReview(askText) };
   if (cloudModel) {
     // Cloud turn: never run the local light classifier (it picks a LOCAL tier and burns a warm-up).
     // Honor an explicitly chosen mode. Auto follows the task, not a cheap-model shortcut: simple
@@ -7313,7 +7321,7 @@ async function handleChat(req, res) {
     tier = MODES[mode].tier;
     reason = `${taskIntent.kind} task on cloud model via ` + (PROVIDER_CFG[providerOf(cloudModel)] || PROVIDER_CFG.openrouter).label;
     needs = {
-      tools: cloudTools && (["build", "audit", "research"].includes(taskIntent.baseKind) || MACHINE_INTENT_RE.test(workIntentText)),
+      tools: cloudTools && (["build", "audit", "research"].includes(taskIntent.baseKind) || MACHINE_INTENT_RE.test(askText)),
       memory: true,
       retrieval: mode !== "fast",
       mentorReview: taskIntent.baseKind === "audit",
@@ -7321,10 +7329,10 @@ async function handleChat(req, res) {
   } else if (reqMode !== "auto" && MODES[reqMode]) {
     mode = reqMode; tier = MODES[mode].tier; reason = "you chose " + mode.replace("_", " ");
     needs.retrieval = mode !== "fast";
-    needs.tools = mode !== "fast" || /\b(deck|forge|file|sandbox|remember|artifact|project|capture|run|search|export|save|write|python|scrape)\b/i.test(workIntentText);
+    needs.tools = mode !== "fast" || /\b(deck|forge|file|sandbox|remember|artifact|project|capture|run|search|export|save|write|python|scrape)\b/i.test(askText);
   } else {
     working("thinking");   // the ambiguous-case classifier can stall on a cold light model
-    const c = await routeDecision(workIntentText, totalInputChars);
+    const c = await routeDecision(askText, totalInputChars);
     mode = c.mode; tier = c.tier; reason = c.reason; privacyRisk = c.privacyRisk; routeConfidence = c.confidence;
     needs = { tools: c.needsTools, memory: c.needsMemory, retrieval: c.needsRetrieval, mentorReview: c.needsMentorReview };
   }
@@ -7344,7 +7352,7 @@ async function handleChat(req, res) {
   } else if (md.num_ctx) opts.num_ctx = md.num_ctx;
   // D3: consume needs_retrieval / needs_tools. Chat-only turns drop the tool defs from the prompt
   // (token savings); conservative bias — only fast-mode turns with no tool language skip them.
-  let { skipRetrieval, attachTools } = consumeNeeds({ mode, needsTools: needs.tools, needsRetrieval: needs.retrieval, lastUserText: workIntentText });
+  let { skipRetrieval, attachTools } = consumeNeeds({ mode, needsTools: needs.tools, needsRetrieval: needs.retrieval, lastUserText: askText });
   // As-Fred latency fix: voice writing needs no deck/forge tools (exemplars are injected) and CoT
   // adds minutes of invisible prefill+thinking for zero voice fidelity — one round, no think,
   // tokens start right after a single prefill.
@@ -7369,7 +7377,13 @@ async function handleChat(req, res) {
    * Any state that silently removes the app's hands has to announce itself the moment the user asks
    * for hands. Same doctrine as the Wildfire notices: loud beats silent, always.
    */
-  if (!attachTools && MACHINE_INTENT_RE.test(workIntentText)) {
+  /*
+   * The warning fires on the ASK and on the task class together. Keyword alone was enough to make
+   * an article about an old mill ("had not run in forty years", "a file of every repair") announce
+   * that Fred had asked for real work on a machine. A heads-up nobody asked for is not a safety
+   * feature, it is noise that teaches people to ignore the next one.
+   */
+  if (!attachTools && MACHINE_INTENT_RE.test(askText) && ["build", "audit", "research"].includes(taskIntent.baseKind)) {
     const why = mode === "as_fred"
       ? 'the Operating mode is set to "As Fred", which runs without tools on purpose so the voice stays pure. Switch Operating mode to Auto (or anything except As Fred) and ask again.'
       : (cloudModel && !isToolCapable(cloudModel))
@@ -7438,7 +7452,26 @@ async function handleChat(req, res) {
       "Never touch protected backup stores.",
       "Never alter retained customer/company data without a separate explicit target-specific instruction.",
     ],
-    requiredCapabilities: { tools: ["build", "audit", "research"].includes(taskIntent.baseKind) },
+    /*
+     * TOOLS ARE *REQUIRED* ONLY WHEN THE PERSON ASKED FOR MACHINE WORK (Fred, 2026-08-01).
+     *
+     * He pasted his son's article on Auto with a chat-only model and the turn began, then stopped
+     * with "Work paused. This task is not complete. Reason: the selected model cannot call the
+     * repository or machine tools required by this task." Nothing in that turn ever needed a tool.
+     *
+     * The chain: classifyTaskIntent read the WHOLE message, article included, and called it a
+     * build; that set requirements.tools; the model was chat-only so attachTools was false; and
+     * requiredToolsUnavailable then replaced a perfectly good answer with a pause notice. Reading
+     * the ask instead of the payload fixes the classification, and this AND is the belt to that
+     * braces: a turn with no machine language in the ask can never be paused for lack of hands.
+     *
+     * "research" is deliberately no longer in the required set. Wanting a web search is a reason to
+     * offer tools, never a reason to refuse to answer: a model that knows the subject should say so
+     * with a caveat rather than pause the conversation.
+     */
+    requiredCapabilities: {
+      tools: ["build", "audit"].includes(taskIntent.baseKind) && MACHINE_INTENT_RE.test(askText),
+    },
     budget: SB ? { hardLimit: SB.budget } : undefined,
     taskId: chatId || job.id,
   });
@@ -7601,6 +7634,27 @@ async function handleChat(req, res) {
     sse({ type: "route", model, mode, route: routeOf(tier, mode), reason, confidence: routeConfidence, escalated: true, num_ctx: opts.num_ctx,
           needs: { tools: attachTools, memory: needs.memory, retrieval: !skipRetrieval, mentor_review: needs.mentorReview }, privacyRisk });
     console.log(`[dominion-ai] post-retrieval escalation: ~${contextTokens} tok assembled -> num_ctx ${opts.num_ctx}${esc.atCap ? " (AT PROVIDER CAP — may truncate)" : ""}`);
+    /*
+     * SAY IT TO THE PERSON, NOT ONLY TO THE LOG (Fred, 2026-08-01: he pasted a long article, the
+     * answer started and then failed to finish, and nothing on screen ever said why).
+     *
+     * `atCap` has always meant "even the largest window this model has cannot hold what we just
+     * assembled". It was computed, named "flag honestly" in its own comment, and written to a
+     * server console line that only somebody reading Railway logs would ever see. The model then
+     * receives a prompt trimmed from the front by the provider, and whatever comes back next, a
+     * short answer, a confused one, or nothing at all, arrives with no explanation.
+     *
+     * The user is told what was too big and what to do about it, at the moment it happens.
+     */
+    if (esc.atCap) {
+      const overBy = Math.max(0, Number(esc.overflowTokens) || 0);
+      sse({ type: "context_overflow", tokens: contextTokens, cap: provCap, over: overBy, model: cloudModel || "local",
+        text: "Heads up: this turn assembled about " + contextTokens.toLocaleString() + " tokens, which is more than " +
+          (cloudModel ? (modelById(cloudModel)?.name || cloudModel) : "the local model") + " can hold (" + provCap.toLocaleString() + "). " +
+          "The oldest part of the prompt gets dropped to make it fit, so the answer may miss what was cut. " +
+          "Send the long part in pieces, or pick a model with a bigger window." });
+      console.log(`[dominion-ai] context overflow announced: ~${contextTokens} tok vs cap ${provCap}`);
+    }
   }
   // D1: the final decision object — logged with every usage.jsonl entry for this run.
   const routeInfo = { route: routeOf(tier, mode), mode, needs_tools: attachTools, needs_memory: needs.memory, needs_retrieval: !skipRetrieval,

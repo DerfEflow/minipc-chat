@@ -1754,6 +1754,19 @@ function processEvent(st, ev) {
     note.textContent = "⚠ " + (ev.text || "");
     inner.insertBefore(note, tools);
     scroll();
+  } else if (ev.type === "context_overflow") {
+    /*
+     * The assembled prompt was bigger than the model can hold, so the provider dropped the oldest
+     * part of it. The app has always known this (routing.escalateForContext returns `atCap`) and
+     * used to write it only to a server log, which is the same silent-disarm mistake in a
+     * different coat: Fred pasted a long article, the answer started and then failed to finish,
+     * and nothing on screen ever said why.
+     */
+    const note = document.createElement("div");
+    note.className = "ctx wildfire-note wildfire-blocked";
+    note.textContent = "⚠ " + (ev.text || "");
+    inner.insertBefore(note, tools);
+    scroll();
   } else if (ev.type === "tools_capped") {
     // The 128-tool ceiling silently shed connector tools for months. Never again silently.
     // The headline stays in plain sight; the raw tool identifiers fold behind a tap so a list
