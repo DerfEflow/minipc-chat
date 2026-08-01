@@ -467,8 +467,39 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
 
   // Snapshot BEFORE any write batch. A repo gets a commit; anything else gets copies. If neither
   // is possible the move does not run: no rollback path means no write.
+  /*
+   * Make sure the project folder actually exists on the machine that will build in it.
+   *
+   * Fred, 2026-08-01: he made a project, chose drive F, planned it, pressed BEGIN BUILDING, and got
+   * "hands fs_list failed: ENOENT ... scandir 'F:\Calorie Count Test'" followed by a build that
+   * stopped early. A workspace is a POINTER, and the folder-picker path registered a pointer to a
+   * folder nobody had created. The auto-folder path did create one, so the two doors behaved
+   * differently and only one of them worked.
+   *
+   * Two mechanisms because the two kinds of machine have different tools: the cloud workshop has
+   * fs_mkdir and refuses a shell, while the installed hands node has a shell and no fs_mkdir.
+   * Trying both means this works on every node already out there, with no reinstall.
+   */
+  async function ensureRoot(root) {
+    const path = String(root || "").replace(/[\\/]+$/, "");
+    if (!path) return { ok: false, error: "This project has no folder recorded." };
+    try {
+      const r = await hands("fs_mkdir", { path });
+      if (r && r.ok !== false) return { ok: true };
+    } catch {}
+    try {
+      // Single quotes doubled: a folder name may legitimately contain an apostrophe.
+      await hands("shell_run", { command: "New-Item -ItemType Directory -Force -Path '" + path.replace(/'/g, "''") + "' | Out-Null", timeoutMs: 15000 });
+      return { ok: true };
+    } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+  }
+
   async function snapshot(job, workspace) {
     const root = workspace.root;
+    // Before anything asks what is in the folder, make sure there IS a folder. A first build into
+    // a brand-new project is the normal case, not an error case.
+    const made = await ensureRoot(root);
+    if (!made.ok) return { ok: false, error: "The project folder could not be created (" + made.error + "), so nothing was written." };
     try {
       /*
        * A workshop account (guestsandbox.mjs) has no command line, so git and PowerShell copies are
@@ -879,5 +910,5 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
     }
   }
 
-  return { runMove, readManifest, snapshot, verify, writeFiles };
+  return { runMove, readManifest, snapshot, verify, writeFiles, ensureRoot };
 }

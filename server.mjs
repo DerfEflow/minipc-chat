@@ -1837,7 +1837,41 @@ async function handleIde(req, res, u) {
     const roll = buildTelemetry.estimatePlan(parts, (p, i) => ({ rec: modelById((picks[i] && picks[i].model) || "") || null, agents: (picks[i] && picks[i].agents) || 1 }));
     return send({ status: 200, body: { per, plan: roll } });
   }
-  if (req.method === "POST" && path === "/ide/workspace") return send(ideFeature.createWorkspace(T, body));
+  /*
+   * POST /ide/workspace: register a project pointing at a folder the user chose.
+   *
+   * IT MAKES THE FOLDER (Fred, 2026-08-01). He picked drive F, named the project, planned it,
+   * pressed BEGIN BUILDING, and the build stopped early on
+   * "ENOENT ... scandir 'F:\Calorie Count Test'". This door registered a POINTER and left it
+   * dangling, while /ide/workspace/auto right below has always created the directory first. Two
+   * doors to the same idea, one of them broken, and the broken one is the one a person reaches for
+   * when they want to choose where their app lives.
+   *
+   * `existing: true` is the adopt case, where the folder is already there and the whole point is to
+   * read what is in it. Creating is skipped so a typo cannot quietly conjure an empty folder and
+   * report it as an adopted project.
+   */
+  if (req.method === "POST" && path === "/ide/workspace") {
+    const blocked = ideFeature.wall(T);
+    if (blocked) return send(blocked);
+    const wantRoot = String(body.root || "").replace(/[\\/]+$/, "");
+    if (wantRoot && body.existing !== true) {
+      const handsFor = ideHandsFor(T);
+      let made = false;
+      // The cloud workshop has fs_mkdir and no shell; the installed hands node has a shell and no
+      // fs_mkdir. Trying both means no one has to reinstall anything for this to work.
+      try { const r = await handsFor("fs_mkdir", { path: wantRoot }); made = !!(r && r.ok !== false); } catch {}
+      if (!made) {
+        try {
+          await handsFor("shell_run", { command: "New-Item -ItemType Directory -Force -Path '" + wantRoot.replace(/'/g, "''") + "' | Out-Null", timeoutMs: 15000 });
+          made = true;
+        } catch (e) {
+          return send({ status: 200, body: { error: "That folder could not be created on your computer (" + String((e && e.message) || e).slice(0, 200) + "). Nothing was saved, so pick another place." } });
+        }
+      }
+    }
+    return send(ideFeature.createWorkspace(T, body));
+  }
   if (req.method === "POST" && path === "/ide/workspace/auto") {
     const blocked = ideFeature.wall(T);
     if (blocked) return send(blocked);

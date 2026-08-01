@@ -2026,6 +2026,21 @@
       el.textContent = spec.message;
       el.classList.toggle("bad", !!spec.error);
     }
+    /*
+     * THE OUTCOME HAS TO REACH THE BUTTON THAT CAUSED IT (Fred, 2026-08-01: "Pressed build, nothing
+     * happened. Pressed again, nothing... The top also said Build failed, stopped early").
+     *
+     * This line lives at the top of the page while BEGIN BUILDING is at the bottom. The build did
+     * start and it did fail, and the only report of that was somewhere he was not looking, so the
+     * button read as dead and he pressed it twice. Announcing the outcome lets each surface put it
+     * where its own user is actually looking. Third time this exact trap has been hit in this app:
+     * a verdict rendered far from the control that produced it reads as no verdict at all.
+     */
+    try {
+      document.dispatchEvent(new CustomEvent("dominion-ide-build-outcome", {
+        detail: { kind, message: spec.message, error: !!spec.error },
+      }));
+    } catch {}
   }
 
   /* ---------- the intake conversation (Fred's ruling 2026-07-21) ---------------------------

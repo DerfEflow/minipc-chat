@@ -1338,8 +1338,11 @@
       }
       const name = path.split(/[\\/]/).filter(Boolean).pop() || "Adopted App";
       try {
+        // `existing: true`: adopting means reading a folder that is already there. The server skips
+        // its create step for this door, so a mistyped path cannot conjure an empty folder and then
+        // be reported back as an adopted app.
         const r = await fetch("/ide/workspace", { method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name, root: path, node: onMachine }) });
+          body: JSON.stringify({ name, root: path, node: onMachine, existing: true }) });
         const j = await r.json();
         if (!r.ok || j.error) { adoptNote(j.error || "That folder could not be added.", true); return; }
         /*
@@ -2384,6 +2387,15 @@
   window.addEventListener("pagehide", () => { if (state.open) saveDraft(true); });
   document.addEventListener("visibilitychange", () => { if (document.hidden && state.open) saveDraft(true); });
   document.addEventListener("dominion-studio-changed", () => { if (state.open) gateArmy(); });
+  /*
+   * A build's outcome, said directly under the button that started it. Without this, a build that
+   * started and then failed left this end of the page silent, which reads as a dead button.
+   */
+  document.addEventListener("dominion-ide-build-outcome", (e) => {
+    if (!state.open || !e.detail) return;
+    const d = e.detail;
+    status(d.error ? d.message + " Scroll up to the run for the reason." : d.message, !!d.error);
+  });
 
   window.dominionVibe = { open, close };
 })();
