@@ -16,11 +16,17 @@
       match a coarse pointer touches eleven stylesheets, so it is its own change, not a passenger.
 
    What remains is the draft's one live correction, with its targets read out of the running
-   CSSOM at 375px rather than out of the stylesheets. That mattered twice over. The sheet the draft
-   argued with, dominion-rendered-v2.css, is not loaded any more at all: nothing links it and only
-   the service worker still remembers it. And the composer reads 17px on a desktop window, which
-   made the whole fix look unnecessary until it was measured at phone width, where it is 14px.
-   Measured, not reasoned about.
+   CSSOM at 375px rather than out of the stylesheets, because the composer reads 17px in a desktop
+   window and 14px at phone width, which made the whole fix look unnecessary until it was measured
+   where it matters.
+
+   CORRECTION (08-01, same day): this header first said dominion-rendered-v2.css was dead because
+   index.html does not name it and document.styleSheets does not list it. Both true, both
+   irrelevant. It arrives by @import from dominion-ui.css, which makes it a rule inside that sheet
+   rather than a top-level entry, and its rules are live. The same is true of all six
+   dominion-cinematic-0*.css files, and dominion-cinematic.js — which builds the entire navigation
+   — is injected at runtime by dominion-ui.js. Before calling any sheet here unused, read
+   dominion-ui.css and dominion-ui.js. Neither list is the whole truth on its own.
    ============================================================================================= */
 
 /*

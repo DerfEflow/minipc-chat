@@ -64,12 +64,25 @@ t("the controls are named at the specificity of the rules they lift", () => {
 });
 
 /*
- * The sheet the 07-28 draft was arguing with is dead. Nothing links dominion-rendered-v2.css; only
- * the service worker still remembers it. Pinned because the draft's whole cascade argument rested
- * on it, and anyone reading that argument later deserves to know it no longer applies.
+ * dominion-rendered-v2.css and the six dominion-cinematic-0*.css sheets ARE live, and index.html
+ * names none of them. They arrive by @import from dominion-ui.css, and dominion-cinematic.js — the
+ * script that builds the whole navigation — is injected at runtime by the seven-line
+ * dominion-ui.js. So `document.styleSheets` lists dominion-ui.css and stops: an @import is a rule
+ * INSIDE that sheet, not a top-level entry. Reading either list as the whole truth is how these
+ * files got called dead on 2026-08-01, one commit before their breakpoints broke the app's
+ * navigation. Walk CSSRule.IMPORT_RULE, or grep dominion-ui.css, before calling any sheet unused.
  */
-t("dominion-rendered-v2.css is still unlinked, so no rule of its can be cited as live", () => {
-  assert.ok(!/rendered-v2/.test(html), "if this ever gets linked again, the cascade here must be re-measured");
+t("the imported sheets are still reachable, so their rules count as live", () => {
+  const ui = readFileSync(new URL("./public/dominion-ui.css", import.meta.url), "utf8");
+  for (const sheet of ["dominion-rendered-v2.css", "dominion-cinematic-04.css", "dominion-cinematic-05.css"]) {
+    assert.ok(ui.includes("@import url(\"/" + sheet),
+      sheet + " must stay imported by dominion-ui.css, or the cascade measured here is not the one that ships");
+  }
+  const loader = readFileSync(new URL("./public/dominion-ui.js", import.meta.url), "utf8");
+  assert.match(loader, /dominion-cinematic\.js/,
+    "dominion-ui.js is the only thing that loads the script building the rail and the dock");
+  assert.match(html, /dominion-ui\.css/, "and index.html must still link the sheet that imports the rest");
+  assert.match(html, /dominion-ui\.js/, "and the loader itself");
 });
 
 t("it applies to touch devices only, so no desktop layout can change", () => {
@@ -104,6 +117,45 @@ t("the phone shell it duplicated is still owned by the width-based sheets", () =
   assert.ok(!/grid-template-rows/.test(rules), "the two-row composer already exists at 620px");
   assert.ok(!/translateX/.test(rules), "no shell transforms travel in this file");
   assert.ok(!/\.bar/.test(rules), "the composer layout is not this file's business");
+});
+
+/*
+ * The gap Fred hit on 2026-08-01: the app had NO navigation between 721px and 1180px. The rail is
+ * hidden at 1180px by two sheets older than the dock, and the dock was shown at 720px, so nothing
+ * reached the Crucible or the Foundry in the band between them — including a phone in desktop
+ * browsing mode, which reports 980px. Exactly one of the two must be on at every width.
+ */
+t("no width is left without navigation: the dock starts where the rail stops", () => {
+  const c04 = readFileSync(new URL("./public/dominion-cinematic-04.css", import.meta.url), "utf8");
+  const c05 = readFileSync(new URL("./public/dominion-cinematic-05.css", import.meta.url), "utf8");
+  const railHides = (sheet) => {
+    for (const m of sheet.matchAll(/@media\s*\(max-width:\s*(\d+)px\)\s*\{([\s\S]*?)\n\}/g)) {
+      if (/\.telemetry-rail\s*\{[^}]*display:\s*none/.test(m[2])) return Number(m[1]);
+    }
+    return null;
+  };
+  const railOff = railHides(c05) ?? railHides(rendered);
+  assert.ok(railOff, "the rail's hide breakpoint must be findable, or this invariant cannot be checked");
+  for (const src of [c05, rendered]) {
+    const other = railHides(src);
+    if (other) assert.equal(other, railOff, "both sheets that hide the rail must agree on the width");
+  }
+  const dockOn = [...c04.matchAll(/@media\s*\(max-width:\s*(\d+)px\)\s*\{[\s\S]{0,200}?#dock-nav\s*\{[^}]*display:\s*grid/g)]
+    .map((m) => Number(m[1]))[0];
+  assert.equal(dockOn, railOff,
+    "the dock appears at " + dockOn + "px but the rail vanishes at " + railOff + "px, so widths " +
+    (dockOn + 1) + "-" + railOff + " have no navigation at all");
+  for (const m of c04.matchAll(/@media\s*\(max-width:\s*(\d+)px\)\s*\{[^@]*#dock-nav/g)) {
+    assert.equal(Number(m[1]), railOff, "every #dock-nav media block must use the same breakpoint");
+  }
+});
+
+t("the dock still yields the bottom edge to nothing else", () => {
+  const c04 = readFileSync(new URL("./public/dominion-cinematic-04.css", import.meta.url), "utf8");
+  assert.match(c04, /html body\{padding-bottom:calc\(58px/,
+    "the page must keep its footing above the dock, at `html body` specificity (cinematic-05 loads later)");
+  assert.match(c04, /html body \.voice-bar\{bottom:calc\(66px/, "the voice bar steps up over the dock");
+  assert.match(c04, /html body #ide-flame\{bottom:calc\(70px/, "and so does the build flame");
 });
 
 t("the keyboard-resize guard the 07-28 work DID ship is still there", () => {

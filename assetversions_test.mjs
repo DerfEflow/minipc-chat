@@ -22,6 +22,19 @@ const html = readFileSync(new URL("./public/index.html", import.meta.url), "utf8
 const setup = readFileSync(new URL("./public/setup.html", import.meta.url), "utf8");
 const sw = readFileSync(new URL("./public/sw.js", import.meta.url), "utf8");
 
+/*
+ * The two documents are not the whole request list, and the part they leave out is the navigation.
+ * dominion-ui.css @imports the six cinematic sheets and dominion-rendered-v2.css; the seven-line
+ * dominion-ui.js injects dominion-cinematic.js, which BUILDS the rail and the dock. index.html
+ * names none of them. Checking only the documents missed a live drift (SHELL precached
+ * cinematic.js v42 while the loader asked for v41) and, worse, made those files look unreferenced
+ * to anyone grepping the HTML — which is how they got called dead on 2026-08-01, one commit before
+ * a breakpoint in one of them removed the app's navigation between 721px and 1180px.
+ */
+const uiCss = readFileSync(new URL("./public/dominion-ui.css", import.meta.url), "utf8");
+const uiJs = readFileSync(new URL("./public/dominion-ui.js", import.meta.url), "utf8");
+const requested = html + "\n" + setup + "\n" + uiCss + "\n" + uiJs;
+
 // file -> version, for every "name.js?v=N" / "name.css?v=N" in a document.
 const versions = (text) => {
   const found = new Map();
@@ -36,7 +49,7 @@ const shellList = sw.slice(sw.indexOf("const SHELL = ["), sw.indexOf("]", sw.ind
 test("the service worker precaches the same versions the pages ask for", () => {
   const precached = versions(shellList);
   const drift = [];
-  for (const [file, v] of versions(html + "\n" + setup)) {
+  for (const [file, v] of versions(requested)) {
     const got = precached.get(file);
     if (got && got !== v) drift.push(`${file}: page asks v${v}, sw precaches v${got}`);
   }
@@ -44,7 +57,7 @@ test("the service worker precaches the same versions the pages ask for", () => {
 });
 
 test("nothing in the shell is a version the pages never ask for", () => {
-  const asked = versions(html + "\n" + setup);
+  const asked = versions(requested);
   const orphans = [];
   for (const [file, v] of versions(shellList)) {
     const want = asked.get(file);

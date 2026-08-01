@@ -27,9 +27,15 @@
 .rail-soon small{color:#d4823c;font-weight:700}
 @keyframes soonPulse{0%{box-shadow:inset 0 0 0 rgba(212,130,60,0)}35%{box-shadow:inset 0 0 22px rgba(212,130,60,.4)}100%{box-shadow:inset 0 0 0 rgba(212,130,60,0)}}
 .soon-pulse{animation:soonPulse .7s ease}
-/* The dock: phones only. The rail is display:none under 720px, so this is the whole map there. */
+/* The dock. It must appear at EVERY width where the rail is gone, or the app has no navigation at
+   all. That was live from 07-28 to 08-01: the rail is hidden at max-width:1180px (set by
+   dominion-cinematic-05.css and dominion-rendered-v2.css, both older than the dock), the dock was
+   shown at max-width:720px, and between 721px and 1180px neither existed. Nothing reached the
+   Crucible or the Foundry in that band. A phone in desktop browsing mode reports 980px and lands
+   in the middle of it, and so does any laptop window shared with a second app.
+   The two numbers are now the same number. Change one and you must change the other. */
 #dock-nav{display:none}
-@media (max-width:720px){
+@media (max-width:1180px){
   #dock-nav{position:fixed;left:0;right:0;bottom:0;z-index:80;display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
     padding:5px 6px calc(5px + env(safe-area-inset-bottom));
     background:linear-gradient(180deg,rgba(10,7,3,.94),rgba(3,2,1,.98));border-top:1px solid rgba(185,107,50,.4);
@@ -48,4 +54,4 @@
   html body .voice-bar{bottom:calc(66px + env(safe-area-inset-bottom))}
   html body #ide-flame{bottom:calc(70px + env(safe-area-inset-bottom))}
 }
-@media (max-width:720px){#dock-nav .rail-dest{min-width:0}#dock-nav .rail-dest small{white-space:nowrap}}
+@media (max-width:1180px){#dock-nav .rail-dest{min-width:0}#dock-nav .rail-dest small{white-space:nowrap}}
