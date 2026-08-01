@@ -160,13 +160,53 @@ async function httpRpc(conn, method, params, id, signal) {
   } finally { clearTimeout(t); if (signal) signal.removeEventListener("abort", onAbort); }
 }
 
+/*
+ * HOW AN npx CONNECTOR IS ACTUALLY LAUNCHED (Fred, 2026-08-01: "make sure all the connector
+ * options are properly wired. It's not ok to give this to guests to test, and then not wire up the
+ * options we tell them are there.").
+ *
+ * `spawn("npx", ...)` is ENOENT on Windows, because the launcher there is npx.cmd, and Node 24
+ * refuses to spawn a .cmd at all without shell:true (EINVAL). So five connectors offered to every
+ * guest by default (Supabase, Stripe, Postgres, Railway, Cloudflare) could never start on a
+ * Windows-hosted Dominion, which is the shape Fred runs on his own machines.
+ *
+ * shell:true would fix the spawn and open a hole: argsTpl interpolates a user-supplied token or
+ * connection string, and on a shell command line that is an injection point. Instead we run npm's
+ * own npx-cli.js with THIS process's node binary. No shell, no quoting rules, arguments stay
+ * arguments, and it behaves identically on every platform. Verified launching
+ * @modelcontextprotocol/server-postgres, which answered `initialize` correctly.
+ */
+function npxLauncher() {
+  const dir = dirname(process.execPath);
+  for (const p of [join(dir, "node_modules", "npm", "bin", "npx-cli.js"),
+                   join(dir, "lib", "node_modules", "npm", "bin", "npx-cli.js"),
+                   join(dir, "..", "lib", "node_modules", "npm", "bin", "npx-cli.js")]) {
+    try { if (existsSync(p)) return { cmd: process.execPath, prefix: [p] }; } catch {}
+  }
+  // No bundled npm (an unusual install). POSIX can still find npx on PATH; Windows cannot.
+  return process.platform === "win32" ? null : { cmd: "npx", prefix: [] };
+}
+
 // ---- MCP wire: stdio transport ----------------------------------------------------------------
 function stdioSpawn(entry, cfg, cacheDir) {
   const fill = (s) => String(s).replace(/\{(\w+)\}/g, (_, k) => cfg[k] || "");
-  const args = (entry.argsTpl || []).map(fill);
   const env = { ...process.env, NPM_CONFIG_CACHE: cacheDir, NPM_CONFIG_UPDATE_NOTIFIER: "false" };
   for (const [k, v] of Object.entries(entry.envTpl || {})) env[k] = fill(v);
-  const child = spawn(entry.cmd, args, { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  let cmd = entry.cmd, prefix = [];
+  if (entry.cmd === "npx") {
+    const l = npxLauncher();
+    if (!l) {
+      // Fail LOUDLY and immediately rather than spawning something that cannot exist. The old
+      // path produced a 90-second wait and the words "connector timed out", which told the user
+      // nothing and cost them a minute and a half to learn it.
+      const dead = { child: null, pending: new Map(), buf: "", nextId: 1, dead: true,
+        deadReason: "this server has no npm/npx available, so connectors that run a local server cannot start here", lastUsed: Date.now() };
+      return dead;
+    }
+    cmd = l.cmd; prefix = l.prefix;
+  }
+  const args = [...prefix, ...(entry.argsTpl || []).map(fill)];
+  const child = spawn(cmd, args, { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
   const conn = { child, pending: new Map(), buf: "", nextId: 1, dead: false, deadReason: "", lastUsed: Date.now() };
   child.stdout.on("data", (d) => {
     conn.buf += d.toString("utf8");
@@ -186,18 +226,48 @@ function stdioSpawn(entry, cfg, cacheDir) {
     for (const p of conn.pending.values()) p.reject(new Error(conn.deadReason));
     conn.pending.clear();
   });
-  child.on("error", (e) => { conn.dead = true; conn.deadReason = e.message; });
+  /*
+   * A SPAWN FAILURE MUST NOT LOOK LIKE A TIMEOUT. This handler used to set `dead` and stop, while
+   * only the `exit` handler rejected anything pending. connect() spawns and immediately sends
+   * `initialize`, so a process that never started left that call sitting in `pending` until the
+   * 90-second RPC timer fired and reported "connector timed out (90s)". That sentence is false and
+   * it is expensive: a minute and a half to be told nothing. Every waiter now hears the real
+   * reason at once, in the same shape the exit handler uses.
+   */
+  child.on("error", (e) => {
+    conn.dead = true;
+    conn.deadReason = "could not start the connector: " + String((e && e.message) || e);
+    for (const p of conn.pending.values()) p.reject(new Error(conn.deadReason));
+    conn.pending.clear();
+  });
   return conn;
 }
+/*
+ * Two budgets, not one. The FIRST call to a connector is `initialize`, and on a cold cache npx has
+ * to download the server package before a single byte of protocol happens: a measured 20 seconds
+ * for a small one, and a fat server on a slow link is worse. Ordinary calls afterwards answer in
+ * well under a second. One shared 90-second timer meant the very first attempt at a connector was
+ * the most likely to fail, and it failed with the least useful sentence available.
+ */
+const STDIO_FIRST_MS = 180000;   // initialize, which may include a package download
+const STDIO_CALL_MS = 90000;     // every call after that
 function stdioRpc(conn, method, params, notify = false) {
   if (conn.dead) return Promise.reject(new Error("connector process is not running: " + conn.deadReason));
   conn.lastUsed = Date.now();
   const msg = { jsonrpc: "2.0", method, ...(params !== undefined ? { params } : {}) };
   if (notify) { conn.child.stdin.write(JSON.stringify(msg) + "\n"); return Promise.resolve(null); }
   msg.id = conn.nextId++;
+  const first = method === "initialize";
+  const budget = first ? STDIO_FIRST_MS : STDIO_CALL_MS;
   return new Promise((resolve, reject) => {
     conn.pending.set(msg.id, { resolve, reject });
-    const t = setTimeout(() => { conn.pending.delete(msg.id); reject(new Error("connector timed out (90s)")); }, 90000);
+    const t = setTimeout(() => {
+      conn.pending.delete(msg.id);
+      // Say which wait ran out and what it was doing, so the next step is obvious.
+      reject(new Error(first
+        ? "the connector did not start within " + Math.round(budget / 1000) + "s. The first use downloads its server, so try once more in a minute; if it keeps failing, this server may have no route to the npm registry."
+        : "the connector stopped answering after " + Math.round(budget / 1000) + "s."));
+    }, budget);
     const wrap = (fn) => (v) => { clearTimeout(t); fn(v); };
     conn.pending.set(msg.id, { resolve: wrap(resolve), reject: wrap(reject) });
     conn.child.stdin.write(JSON.stringify(msg) + "\n");
@@ -416,6 +486,32 @@ export function createConnectors({ dir, cfgGet, providers = {} }) {
     saveState(ownerT, s);
     return { ok: true, guestAllowed: !!on };
   }
+  /*
+   * A failed test has to say what to DO. The raw transport error is kept on the end for anyone who
+   * wants it, but a guest reading "HTTP 401: unauthorized: AuthenticateToken authentication
+   * failed" has been told nothing they can act on, and this is the exact screen Fred hands to
+   * people to try out.
+   */
+  function testAdvice(entry, raw) {
+    const s = String(raw || "");
+    const name = (entry && entry.name) || "That connector";
+    if (/\b401\b|unauthor|authenticat|invalid.*(token|key)|bad credentials/i.test(s)) {
+      return name + " refused the credentials. Paste a fresh one and save it again" +
+        (entry && entry.help ? " (" + entry.help + ")" : "") + ".";
+    }
+    if (/\b403\b|forbidden|permission|scope/i.test(s)) {
+      return name + " accepted the credentials but refused the access. The token needs broader permissions for what you want it to reach.";
+    }
+    if (/\b404\b|not found/i.test(s)) return name + " could not find that endpoint. Check the URL you saved.";
+    if (/\b429\b|rate limit/i.test(s)) return name + " is rate limiting this account right now. Wait a minute and test again.";
+    if (/did not start within|no route to the npm registry|no npm\/npx/i.test(s)) return s;   // already actionable
+    if (/could not start the connector/i.test(s)) return s;
+    if (/timed out|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|network/i.test(s)) {
+      return name + " could not be reached from this server. If it is behind a firewall or a VPN, it will not answer here.";
+    }
+    return name + " did not answer as expected.";
+  }
+
   async function test(T, id) {
     const u = usable(T, id);
     if (!u.ok) return { ok: false, error: u.reason };
@@ -424,8 +520,17 @@ export function createConnectors({ dir, cfgGet, providers = {} }) {
     try {
       conns.delete(cacheKey(T, id));
       const c = await toolsOf(T, id, true);
+      // Zero tools is not a pass. A server that connects and offers nothing is indistinguishable
+      // from a working connector on this screen, and useless in a chat.
+      if (!c.tools.length) {
+        return { ok: false, error: ((entryFor(T, id) || {}).name || "That connector") +
+          " connected but offered no tools, so it would do nothing in a conversation. Check what the server is configured to expose." };
+      }
       return { ok: true, tools: c.tools.length, total: c.total, server: c.server && c.server.name };
-    } catch (e) { return { ok: false, error: String(e.message || e).slice(0, 300) }; }
+    } catch (e) {
+      const raw = String((e && e.message) || e).slice(0, 300);
+      return { ok: false, error: testAdvice(entryFor(T, id), raw), detail: raw };
+    }
   }
 
   // Tool defs for the chat loop: every ENABLED + usable connector of THIS account, namespaced.

@@ -262,6 +262,75 @@ await t("disabledFor names off-but-permitted connectors, including unconfigured 
 });
 
 await new Promise((r) => fake.close(r));
+/* =============================================================================================
+ * THE LAUNCHER (Fred, 2026-08-01: "make sure all the connector options are properly wired. It's
+ * not ok to give this to guests to test, and then not wire up the options we tell them are
+ * there.").
+ *
+ * FIVE connectors offered to every guest by default ran their server through `spawn("npx", ...)`.
+ * That is ENOENT on Windows, and Node 24 refuses npx.cmd outright (EINVAL). Worse, the failure
+ * did not surface: the spawn `error` handler set a dead flag without rejecting anything pending,
+ * so the `initialize` sent a tick later sat in the queue until the 90-second RPC timer fired and
+ * reported "connector timed out (90s)". Ninety seconds to be told nothing true.
+ *
+ * Measured on the rig before the fix: supabase, stripe and railway all timed out. After: 29, 9
+ * and 38 tools. postgres and cloudflare, same code path, 1 and 40.
+ * ============================================================================================= */
+await t("an npx connector is launched through node, never a shell (no injection surface)", () => {
+  const src = readFileSync(new URL("./connectors.mjs", import.meta.url), "utf8");
+  assert.match(src, /function npxLauncher\(\)/, "npx must be resolved deliberately");
+  assert.match(src, /npx-cli\.js/, "npm's own launcher is run with this process's node binary");
+  assert.match(src, /cmd: process\.execPath/);
+  const spawnLine = /spawn\(cmd, args, \{ env, stdio: \["pipe", "pipe", "pipe"\], windowsHide: true \}\)/;
+  assert.match(src, spawnLine, "the spawn takes an argv array");
+  // Strip comments first: this file EXPLAINS why shell:true is refused, and the explanation must
+  // not read as the thing it warns about.
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!/shell:\s*true/.test(code), "shell:true would make a saved token an injection point");
+});
+
+await t("a connector that cannot start says so AT ONCE, never as a timeout", () => {
+  const src = readFileSync(new URL("./connectors.mjs", import.meta.url), "utf8");
+  const handler = src.slice(src.indexOf('child.on("error"'), src.indexOf('child.on("error"') + 400);
+  assert.match(handler, /for \(const p of conn\.pending\.values\(\)\) p\.reject/,
+    "the error handler must reject every waiter, exactly as the exit handler does");
+  assert.match(handler, /conn\.pending\.clear\(\)/);
+  assert.match(src, /could not start the connector: /, "and name the real reason");
+});
+
+await t("the first call gets its own budget, because it may be downloading the server", () => {
+  const src = readFileSync(new URL("./connectors.mjs", import.meta.url), "utf8");
+  assert.match(src, /const STDIO_FIRST_MS = \d+/);
+  assert.match(src, /const STDIO_CALL_MS = \d+/);
+  assert.match(src, /const first = method === "initialize"/, "initialize is the call that may install");
+  assert.match(src, /The first use downloads its server/, "and the message says so rather than blaming the network");
+});
+
+await t("a server with no npm at all refuses immediately instead of pretending", () => {
+  const src = readFileSync(new URL("./connectors.mjs", import.meta.url), "utf8");
+  assert.match(src, /no npm\/npx available/, "the no-npm case is named");
+  const guard = src.slice(src.indexOf("if (!l) {"), src.indexOf("if (!l) {") + 500);
+  assert.match(guard, /dead: true/, "and is returned already dead rather than spawned into the void");
+});
+
+await t("a failed test tells the person what to DO, keeping the raw error alongside", async () => {
+  const c = createConnectors({ dir: mkdtempSync(join(tmpdir(), "cx-advice-")), cfgGet: () => "" });
+  const r = await c.test(OWNER, "does-not-exist");
+  assert.equal(r.ok, false, "an unknown connector is refused rather than silently passing");
+  const src = readFileSync(new URL("./connectors.mjs", import.meta.url), "utf8");
+  assert.match(src, /function testAdvice\(entry, raw\)/);
+  for (const cue of ["refused the credentials", "refused the access", "rate limiting", "could not be reached from this server"]) {
+    assert.ok(src.includes(cue), "advice must cover: " + cue);
+  }
+  assert.match(src, /detail: raw/, "the raw transport error is kept for whoever wants it");
+});
+
+await t("connecting but offering zero tools is a FAILURE, not a pass", () => {
+  const src = readFileSync(new URL("./connectors.mjs", import.meta.url), "utf8");
+  assert.match(src, /if \(!c\.tools\.length\) \{[\s\S]{0,300}ok: false/,
+    "a server that exposes nothing would do nothing in a chat and must not read as connected");
+});
+
 try { rmSync(dir, { recursive: true, force: true }); } catch {}
 console.log(`\n${pass} passed, ${fail} failed`);
 // No process.exit(): a hard exit while libuv handles are closing aborts node on Windows
