@@ -2369,7 +2369,9 @@ if (toCrucibleBtn) toCrucibleBtn.addEventListener("click", async () => {
     // The Crucible owns everything past this point: it makes the folder, fills the brief, and shows
     // the level picker. Handing it an event rather than reaching into its internals keeps the two
     // surfaces separable.
-    document.dispatchEvent(new CustomEvent("dominion-to-crucible", { detail: { name: j.name, brief: j.brief, chatId: curId } }));
+    // transcript rides along: the brief is the decision record, the transcript is the ground truth
+    // behind it (Fred, 2026-07-31: the handoff must carry the corpus, never a light summary).
+    document.dispatchEvent(new CustomEvent("dominion-to-crucible", { detail: { name: j.name, brief: j.brief, transcript: j.transcript || "", chatId: curId } }));
   } catch {
     alert("The server could not be reached.");
   } finally {

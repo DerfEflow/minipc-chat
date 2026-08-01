@@ -85,7 +85,13 @@
           messages: state.chats[w].messages.map((m) => ({ from: m.from, content: typeof m.content === "string" ? m.content : (m.content.find((p) => p.type === "text") || { text: "(picture)" }).text })).slice(-40),
           model: state.chats[w].model, open: state.chats[w].open,
         }])),
-        vision: state.vision, adopt: state.adopt, plan: state.plan, at: Date.now(),
+        // The transcript can be hundreds of KB and localStorage is a few MB total, so the draft
+        // keeps the decision record (what planning needs) and drops the raw source. A reload
+        // therefore loses the appendix, never the decisions.
+        planTranscriptDropped: !!(state.plan && state.plan.transcript),
+        vision: state.vision, adopt: state.adopt,
+        plan: state.plan ? { name: state.plan.name, brief: state.plan.brief } : null,
+        at: Date.now(),
       }));
     } catch {}
   }
@@ -1539,6 +1545,20 @@
       renderSlider(); renderSaveTo();
     }
     let full = state.vision ? goal + "\n\nAGREED VISION (approved by the user; build exactly this):\n" + state.vision : goal;
+    /*
+     * THE CORPUS REACHES THE BUILD (Fred, 2026-07-31: "otherwise a completely different app might
+     * be built, which is what would have happened on this test"). The planning chat only ever held
+     * the decision record; the verbatim source stayed out of every planchat turn to keep those
+     * cheap. The build is a single call and the door takes 3,000,000 characters, so this is where
+     * the full record and its source belong. Ordered decisions-first: if anything is ever cut, the
+     * appendix goes before the decisions do.
+     */
+    if (state.plan && state.plan.brief) {
+      full += "\n\nDECISION RECORD FROM THE PLANNING CONVERSATION (complete; treat every line as settled unless the vision above overrides it):\n" + state.plan.brief;
+      if (state.plan.transcript) {
+        full += "\n\nSOURCE CONVERSATION (verbatim, for checking details the record may have compressed):\n" + state.plan.transcript;
+      }
+    }
     if (adopted) {
       // Brief LAST: the job door caps prompts, and a truncated tail must only ever cost brief
       // detail, never the agreed vision (see ide.mjs startJob).
@@ -1658,7 +1678,10 @@
         '<div class="vb-modal-body"></div>' +
       '</div>';
     const body = overlay.querySelector(".vb-modal-body");
-    body.textContent = (state.plan.name ? state.plan.name + "\n\n" : "") + state.plan.brief;
+    body.textContent = (state.plan.name ? state.plan.name + "\n\n" : "") + state.plan.brief +
+      (state.plan.transcript
+        ? "\n\n" + "=".repeat(60) + "\nTHE CONVERSATION THIS CAME FROM, word for word\n" + "=".repeat(60) + "\n\n" + state.plan.transcript
+        : "");
     document.body.append(overlay);
     const close = () => overlay.remove();
     overlay.querySelector(".vb-modal-x").addEventListener("click", close);
@@ -1680,7 +1703,7 @@
     const ph = b.pendingPlan();
     if (!ph || !ph.brief) return;
     b.clearPendingPlan();
-    state.plan = { name: ph.name || "", brief: ph.brief };
+    state.plan = { name: ph.name || "", brief: ph.brief, transcript: ph.transcript || "" };
     const btn = $("#vb-plan-view"); if (btn) btn.hidden = false;
     /*
      * ASK for the name, always (Fred, 2026-07-31: "It created a box for a project, did not ask me

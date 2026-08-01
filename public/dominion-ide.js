@@ -1714,7 +1714,12 @@
   document.addEventListener("dominion-to-crucible", async (e) => {
     const d = (e && e.detail) || {};
     if (!d.brief) return;
-    pendingHandoff = { name: String(d.name || "").slice(0, 60), brief: String(d.brief || "").slice(0, 8000) };
+    // 8,000 here was the third place the corpus got cut. The record and its source both survive now.
+    pendingHandoff = {
+      name: String(d.name || "").slice(0, 60),
+      brief: String(d.brief || "").slice(0, 200000),
+      transcript: String(d.transcript || "").slice(0, 400000),
+    };
     setEngaged(true, { reveal: true });
     await new Promise((r) => setTimeout(r, 120));
     // The brief lands first so the level picker is covering a screen that already knows the plan.

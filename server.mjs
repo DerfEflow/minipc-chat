@@ -2010,28 +2010,49 @@ async function handleIde(req, res, u) {
   if (req.method === "POST" && path === "/ide/from-chat") {
     const blocked = ideFeature.wall(T) || ideFeature.billableWall(T);
     if (blocked) return send(blocked);
-    const history = Array.isArray(body.messages) ? body.messages.slice(-40) : [];
+    /*
+     * THE CORPUS, not a summary (Fred, 2026-07-31: "it is not a light summary, but the entire
+     * corpus of pertinent decisions and details, otherwise a completely different app might be
+     * built, which is what would have happened on this test").
+     *
+     * The old numbers were the whole bug: 40 turns, 4,000 chars per turn, hard-cut to 24,000, then
+     * a model asked to compress THAT into an 8,000-char brief. A long planning conversation lost
+     * most of its decisions before the Crucible ever saw it, and the build then invented the rest.
+     * Meanwhile ide.mjs accepts a 3,000,000-char prompt, so the squeeze bought nothing.
+     */
+    const history = Array.isArray(body.messages) ? body.messages.slice(-400) : [];
     const said = history
       .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
-      .map((m) => (m.role === "user" ? "PERSON: " : "ASSISTANT: ") + m.content.slice(0, 4000))
+      .map((m) => (m.role === "user" ? "PERSON: " : "ASSISTANT: ") + m.content.slice(0, 40000))
       .join("\n\n")
-      .slice(-24000);
+      .slice(-400000);
     if (said.trim().length < 40) {
       return send({ status: 200, body: { error: "There is not enough in this conversation yet to start a project. Say what you want built, then send it over." } });
     }
     const messages = [
       { role: "system", content: [
-        "You turn a conversation into the opening brief for a software build.",
+        "You convert a planning conversation into the COMPLETE decision record for a software build.",
         "Return JSON only, no prose around it, shaped exactly:",
-        '{"name":"short-project-name","brief":"what to build, as instructions"}',
+        '{"name":"short-project-name","brief":"the full decision record"}',
         "",
         "name: 2 to 4 words, plain, no punctuation beyond spaces and hyphens. It becomes a folder.",
-        "brief: written to the builder, not to the person. State what the thing IS, what it must do,",
-        "and any constraint the person actually stated (a look, a platform, a rule). Use their words",
-        "for anything they were specific about. Do not invent features nobody mentioned, do not pad",
-        "with pleasantries, and do not recap the conversation as a story.",
-        "If the conversation settled a question, write the settled answer, not the debate.",
-        "If something important was never decided, end the brief with a line beginning 'OPEN:' naming it.",
+        "",
+        "brief: THIS IS NOT A SUMMARY. It is the complete record of everything decided, written to",
+        "the builder rather than to the person. Completeness outranks brevity every time: there is",
+        "no length limit worth respecting here, and an omitted decision means the wrong app gets",
+        "built. Carry ALL of the following that the conversation contains:",
+        "  - what the thing IS, who it is for, and the one core thing it must do",
+        "  - EVERY settled decision, written as the settled answer rather than the debate",
+        "  - every constraint actually stated: platform, look and feel, data, budget, timing, rules",
+        "  - every feature named, including small ones mentioned once in passing",
+        "  - anything explicitly REJECTED or ruled out, and say it was ruled out, so the builder",
+        "    does not helpfully reintroduce it",
+        "  - exact names, numbers, wordings and examples the person was specific about, verbatim",
+        "  - the intended tone, audience and any comparison the person drew to another product",
+        "Use the person's own vocabulary. Do not invent anything nobody mentioned. Do not pad with",
+        "pleasantries and do not retell the conversation as a story: it is a record, not a recap.",
+        "End with a line beginning 'OPEN:' for each thing that was raised and never settled, one per",
+        "line, so the planner knows exactly what still needs a decision.",
       ].join("\n") },
       { role: "user", content: "THE CONVERSATION:\n\n" + said },
     ];
@@ -2049,11 +2070,19 @@ async function handleIde(req, res, u) {
       const a = text.indexOf("{"), b = text.lastIndexOf("}");
       if (a >= 0 && b > a) parsed = JSON.parse(text.slice(a, b + 1));
     } catch {}
-    const brief = String((parsed && parsed.brief) || r.content || "").trim().slice(0, 8000);
+    // 8,000 was the second half of the squeeze. The decision record is allowed to be as long as the
+    // decisions actually are; the build door accepts 3,000,000 characters and this is a fraction.
+    const brief = String((parsed && parsed.brief) || r.content || "").trim().slice(0, 200000);
     if (!brief) return send({ status: 200, body: { error: "The plan came back empty. Try again, or start the project by hand." } });
     const rawName = String((parsed && parsed.name) || "").trim();
     const name = (rawName || brief.split("\n")[0].replace(/^#+\s*/, "")).replace(/[^A-Za-z0-9 ._-]/g, "").trim().slice(0, 48) || "New project";
-    return send({ status: 200, body: { ok: true, name, brief, costUsd: r.costUsd || 0 } });
+    /*
+     * The verbatim source rides along beside the record. The record is what the General plans from
+     * (it is the distilled truth and it is cheap to resend every turn); the transcript is ground
+     * truth for the BUILD prompt and for the user's own "See the plan from chat" window, so a
+     * detail the extractor happened to miss is still recoverable rather than gone forever.
+     */
+    return send({ status: 200, body: { ok: true, name, brief, transcript: said, costUsd: r.costUsd || 0 } });
   }
 
   if (req.method === "POST" && path === "/ide/intake") {
