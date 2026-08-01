@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { laneFor, canChooseLane, normalizeBuildWhere, LANES } from "./buildlane.mjs";
+import { laneFor, canChooseLane, normalizeBuildWhere, LANES, lifecycleRoot } from "./buildlane.mjs";
 import { createIdeStore } from "./ide.mjs";
 
 let passed = 0;
@@ -96,3 +96,29 @@ await t("the choice survives a restart, and defaults to your own computer", asyn
 });
 
 console.log(`\n${passed}/9 checks passed - a build runs where its files are, and the choice is only offered when it is real`);
+
+/* ---------- the lifecycle order, baked in 2026-07-31 --------------------------------------- */
+await t("new apps go to F:, iterations go to Z:", () => {
+  const roots = ["C:\\", "F:\\", "Z:\\"];
+  assert.equal(lifecycleRoot({ isOwner: true, roots, name: "my-app", kind: "new" }), "F:\\Claude Sandbox\\my-app");
+  assert.equal(lifecycleRoot({ isOwner: true, roots, name: "my-app", kind: "iteration" }), "Z:\\Apps\\my-app");
+});
+
+await t("a GUEST is never pushed onto Fred's drives", () => {
+  // The owner guard: someone else's computer has no F: or Z: to honour, and this order is about
+  // Fred's machines. "" means "no opinion, keep the previous behaviour".
+  assert.equal(lifecycleRoot({ isOwner: false, roots: ["C:\\", "F:\\", "Z:\\"], name: "my-app" }), "");
+});
+
+await t("an unmounted drive never gets a confident path composed onto it", () => {
+  // Laptop with the SSD unplugged: fall back rather than inventing a path on a drive that is gone.
+  assert.equal(lifecycleRoot({ isOwner: true, roots: ["C:\\", "F:\\"], name: "a", kind: "iteration" }), "F:\\Claude Sandbox\\a");
+  assert.equal(lifecycleRoot({ isOwner: true, roots: ["C:\\", "Z:\\"], name: "a", kind: "new" }), "Z:\\Apps\\a");
+  // Neither present: no opinion at all, so the caller keeps its home-directory path.
+  assert.equal(lifecycleRoot({ isOwner: true, roots: ["C:\\"], name: "a", kind: "new" }), "");
+  assert.equal(lifecycleRoot({ isOwner: true, roots: [], name: "a" }), "");
+});
+
+await t("a nameless request yields no path", () => {
+  assert.equal(lifecycleRoot({ isOwner: true, roots: ["F:\\"], name: "" }), "");
+});

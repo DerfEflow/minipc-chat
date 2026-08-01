@@ -123,7 +123,7 @@ import {
 import { createHandsHub } from "./hands/hub.mjs";
 import { createGuestSandbox } from "./guestsandbox.mjs";
 import { createFlyRunner } from "./flyrunner.mjs";
-import { laneFor, canChooseLane, normalizeBuildWhere } from "./buildlane.mjs";
+import { laneFor, canChooseLane, normalizeBuildWhere, lifecycleRoot } from "./buildlane.mjs";
 import { sanitizeToolList } from "./toolschema.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS, PRIVATE_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
@@ -1889,9 +1889,17 @@ async function handleIde(req, res, u) {
         return send({ status: 200, body: { error: phrase("auto_home_fail", reg) } });
       }
 
-      // Compose the workspace root
+      // Compose the workspace root. The lifecycle order wins when the machine reports the drive
+      // (see lifecycleRoot + the WHERE APPS LIVE block); the old home path stays the fallback for
+      // guests and for machines that simply do not have F:\ or Z:\.
       const cleanName = autoWorkspaceName(hint);
-      const root = home + "\\Dominion Apps\\" + cleanName;
+      const lifecycle = lifecycleRoot({
+        isOwner: !!T.isOwner,
+        roots: (probe && Array.isArray(probe.roots)) ? probe.roots : [],
+        name: cleanName,
+        kind: String(body.kind || "new") === "iteration" ? "iteration" : "new",
+      });
+      const root = lifecycle || (home + "\\Dominion Apps\\" + cleanName);
 
       // Check if a workspace with this root already exists (case-insensitive)
       const store = ideStoreFor(T);
@@ -4877,8 +4885,21 @@ function machinesBlock(T) {
   return head + "The machines connected right now:\n" + lines.join("\n") +
     (unique.length ? `\nA drive letter that exists on only one machine IS the address of that machine: ${unique.join(", ")}. Paths on those drives route themselves; you do not need to ask which machine.` : "") +
     (shared.length ? ` ${shared.join(" and ")} exists on more than one machine, so when a request touches it, say which machine you mean or ask.` : "") +
-    "\nD:\\ is the backup SSD and is permanently walled off on every machine; never plan work that touches it. Never claim a path does not exist because it is not on the machine you happen to be thinking of; check the map above first. When you finish a tool action, name the machine you acted on.";
+    "\nD:\\ is the backup SSD and is permanently walled off on every machine; never plan work that touches it. Never claim a path does not exist because it is not on the machine you happen to be thinking of; check the map above first. When you finish a tool action, name the machine you acted on." +
+    /*
+     * THE LIFECYCLE ORDER (Fred, 2026-07-31: "Dominion should be following the same rules for app
+     * building... please bake this into the Dominion logic"). It is his standing order for every
+     * build he runs, and until now the app knew nothing about it: /ide/workspace/auto composed
+     * C:\Users\<him>\Dominion Apps\<name>, which violates the rule on the first folder it makes.
+     * Stated unconditionally for the owner, because it holds whether or not a drive is mounted
+     * this second: a missing drive should produce a plain "F: is not connected", never a silent
+     * fallback to C:.
+     */
+    ((T && T.isOwner)
+      ? "\n\nWHERE APPS LIVE (standing order, not a preference): a NEW app is developed ONLY under F:\\Claude Sandbox\\. An app at MVP or already deployed is iterated ONLY under Z:\\Apps\\<app-name>\\<worktree-name>, one git worktree per piece of work. GitHub is the universal source of truth; no local copy is ever authoritative, and after a push you verify the deployment actually happened. Google Drive is a temporary fallback ONLY when F: or Z: is unavailable, and the work returns to its proper drive once that drive is back. Never start an app anywhere else and never propose C:\\ as a build location. If the drive you need is not in the map above, say so plainly and stop; do not substitute another drive."
+      : "");
 }
+
 
 function systemPrompt(persona, modeFrag, wolfeTier = "ember", {
   withTools = true, machines = "", mode = "normal", executionDirective = "",

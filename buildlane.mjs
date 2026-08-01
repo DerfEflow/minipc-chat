@@ -60,3 +60,30 @@ export function canChooseLane({ isOwner = false, nodeLive = false } = {}) {
 export function normalizeBuildWhere(v) {
   return v === "cloud" ? "cloud" : "mine";
 }
+
+/*
+ * WHERE A NEW PROJECT FOLDER GOES — Fred's standing lifecycle order, baked in 2026-07-31 after he
+ * asked for it directly ("Dominion should be following the same rules for app building").
+ *
+ *   new app                       -> F:\Claude Sandbox\<name>
+ *   MVP or already deployed       -> Z:\Apps\<name>          (one git worktree per piece of work)
+ *
+ * Until now /ide/workspace/auto composed <home>\Dominion Apps\<name>, i.e. C:\, which breaks the
+ * order on the very first folder the app creates.
+ *
+ * TWO GUARDS, both deliberate. It applies to the OWNER only, because these are HIS drives and a
+ * guest's machine has no F:\ or Z:\ to honour. And it applies only when the machine actually
+ * reports the drive, so a laptop without the SSD attached falls back to the old home path instead
+ * of composing a confident path onto a drive that is not there. Returning "" means "no opinion,
+ * use the previous behaviour", which is what keeps this additive rather than a new failure mode.
+ */
+export function lifecycleRoot({ isOwner = false, roots = [], name = "", kind = "new" } = {}) {
+  if (!isOwner || !name) return "";
+  const has = (letter) => (roots || []).some((r) => String(r || "").trim().toUpperCase().startsWith(letter));
+  if (kind === "iteration" && has("Z:")) return "Z:\\Apps\\" + name;
+  if (kind === "new" && has("F:")) return "F:\\Claude Sandbox\\" + name;
+  // The drive this kind of work wants is absent: take the other rather than silently landing on C:.
+  if (has("F:")) return "F:\\Claude Sandbox\\" + name;
+  if (has("Z:")) return "Z:\\Apps\\" + name;
+  return "";
+}

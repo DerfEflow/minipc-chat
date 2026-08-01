@@ -140,6 +140,7 @@
         '<button type="button" class="vb-small" id="vb-startover">Start Over</button>' +
         '<label class="vb-small vb-saveto">Save to: <select id="vb-saveto" aria-label="Which project folder the build lands in"></select></label>' +
       '</div>' +
+      '<div class="vb-saveto-where" id="vb-saveto-where" hidden></div>' +
 
       // ---- 2b. the Adopt panel (opens from the Adopt an App square) -------------------------
       // The intro line is the feature's one-sentence introduction (Fred's marketing seed, placed
@@ -450,8 +451,29 @@
     // cloud folder, or a folder on the user's own machine picked through the folder walk.
     sel.append(new Option("Dominion cloud folder", SAVE_CLOUD));
     sel.append(new Option("Choose a folder on this computer…", SAVE_BROWSE));
-    for (const ws of bridge().workspaces()) sel.append(new Option(ws.name || ws.id, ws.id));
+    /*
+     * SAY WHERE IT IS (Fred, 2026-07-31: "it also just has the name of a folder in the save to
+     * dropdown, I have no idea where that is stored"). A bare project name is not an address. The
+     * option now carries the real path, and the row below spells out the full location plus the
+     * machine, because a build writes real files and the person should know onto what.
+     */
+    for (const ws of bridge().workspaces()) {
+      const where = ws.root ? "  ·  " + ws.root : "";
+      sel.append(new Option((ws.name || ws.id) + where, ws.id));
+    }
     sel.value = bridge().workspaceId() || "";
+    paintWhere();
+  }
+
+  // The chosen folder's full path, under the selector, in plain sight.
+  function paintWhere() {
+    const el = $("#vb-saveto-where");
+    if (!el || !bridge()) return;
+    const id = $("#vb-saveto") ? $("#vb-saveto").value : "";
+    const ws = bridge().workspaces().find((w) => w.id === id);
+    if (!ws) { el.textContent = ""; el.hidden = true; return; }
+    el.textContent = "Saves to: " + (ws.root || "(folder not reported)") + (ws.node ? "  on " + (ws.node === "workshop" ? "the Dominion cloud" : ws.node) : "");
+    el.hidden = false;
   }
 
   function newProject(prefName) {
@@ -598,7 +620,7 @@
       return;
     }
     bridge() && bridge().selectWorkspace(value);
-    renderSlider(); renderBudget();
+    renderSlider(); renderBudget(); paintWhere();
   }
 
   function startOver() {
@@ -1660,8 +1682,13 @@
     b.clearPendingPlan();
     state.plan = { name: ph.name || "", brief: ph.brief };
     const btn = $("#vb-plan-view"); if (btn) btn.hidden = false;
-    // Name it right away: the plan's own name is staged in the project row, folder choice next.
-    if (ph.name && !staged) { staged = { name: ph.name, editing: false }; renderSlider(); highlightSaveTo(); }
+    /*
+     * ASK for the name, always (Fred, 2026-07-31: "It created a box for a project, did not ask me
+     * for a name"). The plan's suggested name is PREFILLED so one keystroke accepts it, but the
+     * field opens focused and editable, because the project's name is the user's to choose and a
+     * silently-named box teaches them the app decides such things on its own.
+     */
+    if (!staged) { staged = { name: ph.name || "", editing: true }; renderSlider(); }
     // Kick the General exactly once: only when its thread is empty (a later reopen must not
     // replay the hand-off on top of a conversation already underway).
     if (!state.chats.main.messages.length) {

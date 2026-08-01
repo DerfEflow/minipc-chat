@@ -210,6 +210,14 @@
 .vb-mod-words b { font-size: 12px; color: var(--ink, #e8f6ff); }
 .vb-mod-words small { font-size: 10.5px; color: var(--muted, #8ba0ae); line-height: 1.35; }
 
+/* The chosen folder's real address, said out loud under the selector. */
+.vb-saveto-where {
+  margin: -6px 0 2px;
+  font: 500 11px/1.5 ui-monospace, Consolas, monospace;
+  color: var(--muted, #8ba0ae);
+  overflow-wrap: anywhere;
+}
+
 /* ---------- the plan-from-chat button and the shared modal --------------------------------- */
 .vb-plan-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .vb-plan-view {
