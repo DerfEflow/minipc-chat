@@ -39,6 +39,12 @@ export function capObj(o, maxJson) {
 export const MAX_WORKSPACES = 24;
 export const MAX_NAME = 80;
 export const MAX_ROOT = 400;
+/*
+ * The per-project Crucible state ceiling. Big enough to hold three planning conversations and a
+ * full decision record, because that record is the thing whose loss would build the wrong app.
+ * Small enough that 24 projects cannot turn one tenant's state file into something unwieldy.
+ */
+export const MAX_CRUCIBLE_JSON = 300000;
 
 /*
  * Convert a free-text app description into a clean folder-safe workspace name.
@@ -185,6 +191,15 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
     id: w.id, name: w.name, root: w.root, node: w.node || "",
     createdAt: w.createdAt, updatedAt: w.updatedAt, lastMoveAt: w.lastMoveAt || 0,
     snapshotDir: w.snapshotDir || "", assignments: w.assignments || {}, budget: w.budget || null,
+    /*
+     * The Crucible working state for THIS project: the planning conversations, the agreed vision,
+     * the decision record, the studio setup (Fred, 2026-08-01: "The intent was to have any project
+     * seamlessly change from mobile to desktop and desktop to mobile"). It lived in one global
+     * localStorage draft, so it belonged to a DEVICE rather than to a project: the phone could not
+     * see what the laptop planned, and picking a different project on one device showed the last
+     * thing typed on it. Keeping it beside the project it belongs to fixes both at once.
+     */
+    crucible: w.crucible || null,
   });
 
   return {
@@ -200,6 +215,14 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
       if (patch && typeof patch.buildWhere === "string") s.prefs.buildWhere = normalizeBuildWhere(patch.buildWhere);
       // "" stays "": that is the never-chosen state that makes the picker appear exactly once.
       if (patch && typeof patch.mode === "string") s.prefs.mode = patch.mode === "" ? "" : normalizeMode(patch.mode);
+      /*
+       * WHEN the account last changed its mind (Fred, 2026-08-01). The switch position and the
+       * interface were "whichever device chose most recently wins", except no device ever recorded
+       * WHEN, so it degraded into "whichever device chose at all wins, forever". A phone that once
+       * opened Beginner would never follow the laptop into anything else, which reads as the phone
+       * having no Crucible at all. A timestamp is all it takes for recency to actually mean recency.
+       */
+      if (patch && (typeof patch.mode === "string" || typeof patch.engaged === "boolean")) s.prefs.at = Date.now();
       write(s);
       return s.prefs;
     },
@@ -243,6 +266,18 @@ export function createIdeStore({ dir, isProtectedPath = () => false, now = () =>
       if (typeof patch.node === "string") w.node = patch.node.slice(0, 120);
       if (patch.assignments && typeof patch.assignments === "object") { const a = capObj(patch.assignments, 20000); if (a) w.assignments = a; }
       if (patch.budget === null || (patch.budget && typeof patch.budget === "object")) w.budget = patch.budget === null ? null : capObj(patch.budget, 4000);
+      /*
+       * The project's Crucible state. `null` clears it (a fresh start on this project). Oversize is
+       * REFUSED BY NAME rather than dropped on the floor: capObj returns null for anything too big,
+       * and silently treating that as "clear it" would erase a planning conversation to punish it
+       * for being long. The client trims and retries off this code.
+       */
+      if (patch.crucible === null) w.crucible = null;
+      else if (patch.crucible && typeof patch.crucible === "object") {
+        const c = capObj(patch.crucible, MAX_CRUCIBLE_JSON);
+        if (!c) return { error: "That project's planning state is too large to sync (limit " + MAX_CRUCIBLE_JSON.toLocaleString() + " characters).", code: "crucible_too_large" };
+        w.crucible = c;
+      }
       if (typeof patch.lastMoveAt === "number") w.lastMoveAt = patch.lastMoveAt;
       w.updatedAt = now();
       write(s);
@@ -455,6 +490,7 @@ export function createIdeFeature({ gate, storeFor, jobs, billing, multiTenant = 
       const patch = (b.patch && typeof b.patch === "object") ? b.patch : {
         name: b.name, root: b.root, node: b.node, assignments: b.assignments,
         budget: "budget" in b ? b.budget : undefined,
+        crucible: "crucible" in b ? b.crucible : undefined,
       };
       const r = storeFor(T).update(b.id, patch);
       if (r.error) return { status: r.code === "not_found" ? 404 : 400, code: r.code, body: r };

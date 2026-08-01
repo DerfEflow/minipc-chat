@@ -3340,11 +3340,43 @@ async function handleIdeTasks(req, res, T, body) {
    */
   const asked = String(body.model || "").trim();
   if (asked && !modelById(asked)) return json(400, { error: "Unknown model: " + asked });
+  // Does this model have a live provider key? Both the promotion below and the failure fallback
+  // further down need the same answer, so it is asked once, here.
+  const keyForModel = (id) => { const rec = modelById(id); const cfg = rec && PROVIDER_CFG[rec.provider || "openrouter"]; return !!(cfg && cfg.key()); };
+  /*
+   * INHERITED SEATS ARE PROMOTED, NOT REFUSED (Fred, 2026-08-01: a guest reported "every time he
+   * tries to initiate the orchestrator, it says the plan could not be built").
+   *
+   * Two correct features collided. The empty orchestrator seat means "same as the General", so the
+   * General's model is what arrives here. The General's picker offers the WHOLE catalog, while this
+   * seat has a floor. Anyone whose General sat below the floor was refused on every single press,
+   * for a pick they never made: the seat was left on its default and the default was illegal.
+   *
+   * A refusal is the right answer for a DELIBERATE pick, because the person chose a specific model
+   * for a specific reason and swapping it silently would be a lie. It is the wrong answer for an
+   * inherited one. So the client now says which it is, and an inherited model below the floor is
+   * promoted to the strongest approved model with a live key and REPORTED through the same
+   * "changed for this plan" notice the failure path already uses. Still no silent substitution:
+   * the row says what took the seat and why.
+   */
+  const inherited = body.inherited === true;
+  const promotable = (id) => ORCHESTRATOR_FALLBACKS.find((f) => f !== id && keyForModel(f)) || "";
+  let promoted = null;
+  let seat = asked;
   if (asked && !isOrchestratorApproved(asked)) {
     const rec = modelById(asked);
-    return json(400, { error: (rec ? rec.name : asked) + " is below the size floor for the orchestrator slot. Every other row is yours to experiment with; this one seat plans the whole build, so it needs a model above the tiny tier." });
+    if (!inherited) {
+      return json(400, { error: (rec ? rec.name : asked) + " is below the size floor for the orchestrator slot. Every other row is yours to experiment with; this one seat plans the whole build, so it needs a model above the tiny tier." });
+    }
+    const up = promotable(asked);
+    if (!up) return json(502, { error: "No model above the orchestrator size floor has a live provider key right now, so the plan cannot be drawn up. Try again shortly." });
+    const upRec = modelById(up);
+    promoted = { from: asked, fromName: (rec && rec.name) || asked, to: up, toName: (upRec && upRec.name) || up,
+      reason: "it is below the size floor for the seat that plans the whole build" };
+    seat = up;
+    console.log(`[dominion-ai] orchestrator promoted an inherited seat: ${asked} -> ${up}`);
   }
-  const first = asked || defaultModelFor(!!T.isOwner);
+  const first = seat || defaultModelFor(!!T.isOwner);
   /*
    * Automatic fallback (Fred, 2026-07-25): if the orchestrator call FAILS — unreachable, or the
    * roadmap comes back unparseable — the next approved model with a live key takes the seat, and
@@ -3352,8 +3384,7 @@ async function handleIdeTasks(req, res, T, body) {
    * substitution would be the same lie as a silent truncation. One substitute attempt, not a
    * crawl through the whole list: two distinct failures in a row is a real outage to surface.
    */
-  const keyFor = (id) => { const rec = modelById(id); const cfg = rec && PROVIDER_CFG[rec.provider || "openrouter"]; return !!(cfg && cfg.key()); };
-  const substitute = ORCHESTRATOR_FALLBACKS.find((id) => id !== first && keyFor(id)) || "";
+  const substitute = ORCHESTRATOR_FALLBACKS.find((id) => id !== first && keyForModel(id)) || "";
   const attempt = async (model) => {
     const r = await ideChatOnce(model, taskRoadmapMessages({ goal: prompt, maxTasks, register: reg, persona }), {});
     if (r.costUsd) { try { await meterTurn(T, r.costUsd, prompt, ""); } catch {} }
@@ -3381,7 +3412,9 @@ async function handleIdeTasks(req, res, T, body) {
       ? json(200, { ok: false, reason: a.why, raw: a.raw })
       : json(502, { error: "The orchestrator could not be reached" + (substitute ? ", and neither could the backup (" + a.why + ")." : " (" + a.why + ").") });
     const topo = topoOrder(a.tasks);
-    return json(200, { ok: true, tasks: a.tasks, model: usedModel, fallback,
+    // `promoted` (an inherited seat lifted over the floor) is reported separately from `fallback`
+    // (a seat that failed mid-call), because they are different events and deserve different words.
+    return json(200, { ok: true, tasks: a.tasks, model: usedModel, fallback, promoted,
       schedulable: topo.ok, scheduleError: topo.ok ? "" : topo.error, costUsd: a.costUsd });
   } catch (e) { return json(502, { error: String((e && e.message) || e) }); }
 }
@@ -3918,12 +3951,35 @@ async function runIdeBuild(job, {
       const workerModel = (af.rows && af.rows[0] && af.rows[0].model) || planModel;
       const divModel = (af.divider && af.divider.model) || planModel;
 
-      // The roadmap: use the client's confirmed one if present (it was previewed and grouped),
-      // else ask the orchestrator now.
+      /*
+       * The roadmap: use the client's confirmed one if present (it was previewed and grouped),
+       * else ask the orchestrator now.
+       *
+       * A CONFIRMED PLAN IS NEVER REPLACED IN SILENCE (Fred, 2026-08-01). This used to read
+       * `tasks = parsed.ok ? parsed.tasks : null` and fall through to re-planning from scratch,
+       * so a plan the user had read, priced, and assigned models to could be swapped for a
+       * different one with a different task count and nothing said. The user is the only one who
+       * can decide that trade, so they are asked.
+       */
       let tasks;
+      let approvedPlanFailed = "";
       if (Array.isArray(af.taskPlan) && af.taskPlan.length) {
         const parsed = parseTaskRoadmap(af.taskPlan.map((t) => t.n + ". " + t.title + "\nFILES: " + (t.files || []).join(", ") + "\nNEEDS: " + ((t.needs || []).join(", ") || "none")).join("\n"));
         tasks = parsed.ok ? parsed.tasks : null;
+        if (!parsed.ok) approvedPlanFailed = parsed.error || "it could not be read";
+      }
+      if (approvedPlanFailed) {
+        ideJobs.emit(job.id, { type: "run", command: "task plan", ok: false,
+          output: "The task plan you approved could not be read back (" + approvedPlanFailed + "). Nothing has been built yet." });
+        const answer = await ask("plan-unreadable",
+          "The " + (af.taskPlan.length) + "-task plan you approved could not be read back (" + approvedPlanFailed
+          + "). I can draw up a fresh plan, which may divide the work differently and will not keep the models you set per task. Or I can stop here so you can rebuild the plan yourself. Nothing has been built and nothing beyond planning has been charged.",
+          ["Plan it again", "Stop and let me fix the plan"]);
+        if (answer === null) return false;
+        if (!/again|fresh|plan it/i.test(String(answer))) {
+          ideJobs.finish(job.id, { type: "stopped", message: "Stopped before building, so your approved plan is not overwritten. Reopen the task plan, press Plan the tasks again, and start the build from there." });
+          return false;
+        }
       }
       if (!tasks) {
         ideJobs.emit(job.id, { type: "move", id: "tg-plan", title: "Plan the tasks", state: "running", model: divModel });
@@ -3945,9 +4001,16 @@ async function runIdeBuild(job, {
       const assignList = resolveTaskAssignments(tasks, groups, { model: workerModel, agents: 1 });
       const assignByN = new Map(assignList.map((a) => [a.n, a]));
 
-      // Blueprint: one row per task, in order, with its dependencies shown.
-      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), af: true,
+      /*
+       * Blueprint: one row per task, in order, with its dependencies shown, and CARRYING THE MODEL
+       * each task was assigned (Fred, 2026-08-01: "this app build has two different accounts of the
+       * tasks"). The rows used to arrive without a model and only grew one as each task started, so
+       * the running screen could not be compared against the plan screen until it was too late to
+       * object. The same names, on both screens, from the first paint.
+       */
+      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), af: true, approved: !!(af.taskPlan && af.taskPlan.length),
         moves: tasks.map((t) => ({ id: "tg-" + t.n, title: t.n + ". " + t.title, files: t.files || [],
+          model: (assignByN.get(t.n) || {}).model || workerModel,
           why: (t.needs && t.needs.length ? "Runs after task(s) " + t.needs.join(", ") + ". " : "") + "Owns: " + (t.files || []).join(", ") })) });
 
       // Budget freeze for the whole roadmap before any task runs.
@@ -4304,7 +4367,16 @@ async function runIdeBuild(job, {
       if (!parsed.ok) return ideJobs.finish(job.id, { type: "error", message: parsed.error });
       moves = parsed.moves;
       for (const move of moves) for (const file of move.files || []) expectedFiles.add(file);
-      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves });
+      /*
+       * SAY WHOSE PLAN THIS IS (Fred, 2026-08-01). These steps were written by the builder just
+       * now, from the goal. They are not the numbered task plan anyone approved on the planning
+       * screen, and a run that looks identical to one is how two accounts of the same build come
+       * to disagree. `selfPlanned` marks it, and the line says it in words.
+       */
+      ideJobs.emit(job.id, { type: "run", command: "plan", ok: true,
+        output: "No approved task plan came with this build, so the builder planned its own "
+          + moves.length + " steps from your description. To choose the steps and the model for each one, use Plan the tasks before pressing Begin Building." });
+      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, selfPlanned: true });
     }
     }   // end of the standard-crew path; the AF relay above already planned and built its own way
 

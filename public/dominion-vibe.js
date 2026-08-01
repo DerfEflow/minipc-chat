@@ -323,30 +323,107 @@
     });
   }
 
-  function saveDraft() {
-    try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({
-        chats: Object.fromEntries(WINDOWS.map((w) => [w, {
-          // Pictures are not persisted (a phone photo in localStorage would blow the quota fast);
-          // multimodal turns collapse to their text on reload, which is the honest cheap trade.
-          messages: state.chats[w].messages.map((m) => ({ from: m.from, content: typeof m.content === "string" ? m.content : (m.content.find((p) => p.type === "text") || { text: "(picture)" }).text })).slice(-40),
-          model: state.chats[w].model, open: state.chats[w].open,
-          docs: draftDocs(w),
-        }])),
-        // The transcript can be hundreds of KB and localStorage is a few MB total, so the draft
-        // keeps the decision record (what planning needs) and drops the raw source. A reload
-        // therefore loses the appendix, never the decisions.
-        planTranscriptDropped: !!(state.plan && state.plan.transcript),
-        vision: state.vision, adopt: state.adopt,
-        plan: state.plan ? { name: state.plan.name, brief: state.plan.brief } : null,
-        at: Date.now(),
-      }));
-    } catch {}
+  /*
+   * ONE DRAFT PER PROJECT, KEPT WITH THE PROJECT (Fred, 2026-08-01: "The intent was to have any
+   * project seamlessly change from mobile to desktop and desktop to mobile", and before that: "A
+   * new project = chats reset. Pick a project from the project carousel, all settings from that
+   * project populate").
+   *
+   * There used to be ONE draft for the whole surface, in this device's local storage. Two
+   * consequences, both of which Fred hit. It could not travel, so the phone never saw what the
+   * laptop planned. And it did not follow the project, so picking a different project on the same
+   * device still showed the last thing typed on it.
+   *
+   * Now: local storage is keyed by project and acts as the fast, offline copy, while the project
+   * record on the server is the copy that travels. Whichever is newer wins on load. Work done
+   * before any project exists is kept under the "unattached" key and moves into the first project
+   * that adopts it, because planning legitimately happens before the folder is chosen.
+   */
+  const draftKeyFor = (wsId) => "dominion.vibe.project." + (wsId || "unattached") + ".v1";
+  const currentProjectId = () => { const b = bridge(); return (b && (b.buildWorkspaceId ? b.buildWorkspaceId() : b.workspaceId())) || ""; };
+
+  function snapshotState() {
+    return {
+      chats: Object.fromEntries(WINDOWS.map((w) => [w, {
+        // Pictures are not persisted (a phone photo in localStorage would blow the quota fast);
+        // multimodal turns collapse to their text on reload, which is the honest cheap trade.
+        messages: state.chats[w].messages.map((m) => ({ from: m.from, content: typeof m.content === "string" ? m.content : (m.content.find((p) => p.type === "text") || { text: "(picture)" }).text })).slice(-40),
+        model: state.chats[w].model, open: state.chats[w].open,
+        docs: draftDocs(w),
+      }])),
+      // The transcript can be hundreds of KB and localStorage is a few MB total, so the draft
+      // keeps the decision record (what planning needs) and drops the raw source. A reload
+      // therefore loses the appendix, never the decisions.
+      planTranscriptDropped: !!(state.plan && state.plan.transcript),
+      vision: state.vision, adopt: state.adopt,
+      plan: state.plan ? { name: state.plan.name, brief: state.plan.brief } : null,
+      at: Date.now(),
+    };
   }
-  function loadDraft() {
+
+  const isEmptyState = (d) => !d || !d.chats || (!WINDOWS.some((w) => d.chats[w] && (d.chats[w].messages || []).length) && !d.plan && !d.vision && !d.adopt);
+
+  /*
+   * The sync to the project record, debounced. Typing must not post on every keystroke, and the
+   * last write of a burst is the one that matters. It also fires on the way out of the page, so
+   * closing the laptop lid does not strand the last minute of planning on one device.
+   */
+  let syncTimer = 0, syncWarned = false;
+  function syncProject(blob, wsId) {
+    const b = bridge();
+    if (!b || !b.saveCrucible || !wsId) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(async () => {
+      const r = await b.saveCrucible(wsId, blob);
+      if (r && r.ok) { syncWarned = false; return; }
+      // Said once per problem, never on a loop: the work is safe on this device either way.
+      if (!syncWarned) {
+        syncWarned = true;
+        status((r && r.code === "crucible_too_large")
+          ? "This planning conversation is too long to sync between devices. It is saved on this device, and the build still gets all of it."
+          : "Saved on this device. It could not be synced to your other devices just now.", true);
+      }
+    }, 1200);
+  }
+
+  function saveDraft(flush) {
+    const blob = snapshotState();
+    const wsId = currentProjectId();
+    try { localStorage.setItem(draftKeyFor(wsId), JSON.stringify(blob)); } catch {}
+    /*
+     * On the way out there is no time for a debounce and no guarantee a normal fetch survives the
+     * page. sendBeacon is built for exactly this: the browser takes the payload and delivers it
+     * after the page is gone. The local copy is already written above either way.
+     */
+    if (flush && wsId) {
+      clearTimeout(syncTimer);
+      try {
+        const body = new Blob([JSON.stringify({ id: wsId, patch: { crucible: blob } })], { type: "application/json" });
+        if (navigator.sendBeacon && navigator.sendBeacon("/ide/workspace/update", body)) return;
+      } catch {}
+    }
+    syncProject(blob, wsId);
+  }
+
+  // Everything a project owns, wiped. Used by New Project and by picking a project with no state.
+  function blankState() {
+    for (const w of WINDOWS) {
+      state.chats[w].messages = [];
+      state.chats[w].docs = [];
+      state.chats[w].open = w === "main";
+    }
+    state.vision = null;
+    state.adopt = null;
+    state.plan = null;
+    state.army = null;
+  }
+
+  function applyState(d) {
+    if (!d || !d.chats) { blankState(); return; }
     try {
-      const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
-      if (!d || !d.chats) return;
+      // Start from empty, so a project whose state names only one window cannot leave the previous
+      // project's other two windows on screen.
+      blankState();
       for (const w of WINDOWS) {
         if (d.chats[w]) {
           state.chats[w].messages = Array.isArray(d.chats[w].messages) ? d.chats[w].messages : [];
@@ -362,7 +439,51 @@
       state.vision = d.vision || null;
       state.adopt = (d.adopt && d.adopt.workspaceId && d.adopt.brief) ? d.adopt : null;
       state.plan = (d.plan && d.plan.brief) ? d.plan : null;
-    } catch {}
+    } catch { blankState(); }
+  }
+
+  const readLocal = (wsId) => { try { return JSON.parse(localStorage.getItem(draftKeyFor(wsId)) || "null"); } catch { return null; } };
+
+  /*
+   * Load ONE project's Crucible state, taking whichever copy is newer: the one this device saved,
+   * or the one that came back with the project record from the server. A phone that planned on the
+   * train wins over a laptop that has not been touched since yesterday, and the other way round.
+   * Equal timestamps keep the local copy, because it is the one already on screen.
+   */
+  function loadProject(wsId) {
+    const b = bridge();
+    const remote = (b && b.crucibleFor) ? b.crucibleFor(wsId) : null;
+    const local = readLocal(wsId);
+    let pick = local;
+    if (remote && (!local || Number(remote.at || 0) > Number(local.at || 0))) pick = remote;
+    /*
+     * Work planned before any project existed moves into the first project that adopts it. Planning
+     * legitimately starts before the folder is chosen (the whole point of Begin Building making one
+     * for a first-timer), and that work must not evaporate the moment the folder appears. A project
+     * that ALREADY has state is never overwritten by it.
+     */
+    if (isEmptyState(pick) && wsId) {
+      const unattached = readLocal("");
+      if (!isEmptyState(unattached)) {
+        pick = unattached;
+        try { localStorage.removeItem(draftKeyFor("")); } catch {}
+        applyState(pick);
+        saveDraft();   // re-home it under this project, on this device and on the server
+        repaintProject();
+        return;
+      }
+    }
+    applyState(pick);
+    repaintProject();
+  }
+
+  // Everything on screen that belongs to a project, repainted after the state under it changed.
+  function repaintProject() {
+    if (!state.open) return;
+    for (const w of WINDOWS) { renderLog(w); renderDesk(w); toggleWin(w, state.chats[w].open); }
+    const pv = $("#vb-plan-view"); if (pv) pv.hidden = !state.plan;
+    const grid = $("#vb-army-grid"); if (grid && !state.army) grid.hidden = true;
+    renderSlider(); renderSaveTo(); renderBudget(); paintAllModelSelects(); gateArmy();
   }
 
   /* ================= the shell =============================================================== */
@@ -632,7 +753,17 @@
       c.tabIndex = 0;
       c.innerHTML = '<span class="vb-card-name"></span><small>project</small><button type="button" class="vb-card-x" title="Remove this project from the list" aria-label="Remove this project from the list">&times;</button>';
       c.querySelector(".vb-card-name").textContent = ws.name || ws.id;
-      const pick = () => { bridge().selectWorkspace(ws.id); renderSlider(); renderSaveTo(); renderBudget(); };
+      /*
+       * PICKING A PROJECT POPULATES EVERYTHING IT OWNS (Fred, 2026-08-01: "Pick a project from the
+       * project carousel, all settings from that project populate"). The current project's work is
+       * written down first, so switching away never costs the thing you were in the middle of.
+       */
+      const pick = () => {
+        if (ws.id === bridge().workspaceId()) return;
+        saveDraft();
+        bridge().selectWorkspace(ws.id);
+        loadProject(ws.id);
+      };
       c.addEventListener("click", (e) => { if (!e.target.closest(".vb-card-x")) pick(); });
       c.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
       c.querySelector(".vb-card-x").addEventListener("click", async (e) => {
@@ -786,8 +917,17 @@
 
   function newProject(prefName) {
     // Naming comes FIRST (Fred: "You should be able to name it right away"): the card takes the
-    // name, then the Save to: selector lights up and asks for the folder. Nothing on disk and no
-    // chat is touched until both halves are answered.
+    // name, then the Save to: selector lights up and asks for the folder.
+    /*
+     * A NEW PROJECT RESETS THE CHATS (Fred, 2026-08-01: "A new project = chats reset"). Starting a
+     * different app while the last app's planning conversation is still on screen is how a build
+     * ends up carrying decisions that belonged to something else. The work being left behind is
+     * written down first, under the project it belongs to, so nothing is lost by resetting.
+     */
+    saveDraft();
+    blankState();
+    try { localStorage.removeItem(draftKeyFor("")); } catch {}   // no stale unattached work follows it
+    repaintProject();
     staged = { name: typeof prefName === "string" ? prefName : "", editing: true };
     renderSlider();
   }
@@ -1691,18 +1831,31 @@
     btn.disabled = true; btn.textContent = "Planning…";
     orchNote("");
     try {
-      // The empty seat means "same as the General" (Fred, 2026-07-31): whatever model the user
-      // gave the General runs the orchestration too, unless they picked one here deliberately.
-      // The server still applies its own floor and says so when the seat has to change hands.
-      const orchestrator = $("#vb-orch-model").value || state.chats.main.model || "";
+      /*
+       * The empty seat means "same as the General" (Fred, 2026-07-31): whatever model the user
+       * gave the General runs the orchestration too, unless they picked one here deliberately.
+       *
+       * `inherited` tells the server WHICH of those two it is getting (Fred, 2026-08-01). It is the
+       * whole fix for the guest who could never plan anything: the General's picker offers the
+       * whole catalog, this seat has a size floor, and an inherited model below that floor used to
+       * be refused outright on every press. A deliberate pick is still refused by name, because
+       * swapping a model somebody chose on purpose would be a lie. An inherited one gets promoted
+       * and the row says so.
+       */
+      const deliberate = $("#vb-orch-model").value;
+      const orchestrator = deliberate || state.chats.main.model || "";
       const r = await fetch("/ide/tasks", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: goal + (state.vision ? "\n\nAGREED VISION:\n" + state.vision : ""), model: orchestrator, mode: "vibe", register: reg() }) });
+        body: JSON.stringify({ prompt: goal + (state.vision ? "\n\nAGREED VISION:\n" + state.vision : ""), model: orchestrator, inherited: !deliberate, mode: "vibe", register: reg() }) });
       const j = await r.json();
       if (!r.ok || !j.ok) { status(j.error || j.reason || "The plan could not be made.", true); return; }
       /*
        * The fallback notice (SOW 5.1): the server says WHICH model actually sat in the seat. The
        * row keeps saying it until the next plan, because a notice that vanishes was never read.
        */
+      if (j.promoted) {
+        orchNote("The General's model (" + j.promoted.fromName + ") cannot plan a whole build, so " + j.promoted.toName
+          + " drew up this task list. Your General is unchanged. Pick a model here to choose the planner yourself.", true);
+      }
       if (j.fallback) {
         orchNote("Changed for this plan: " + j.fallback.fromName + " could not do it (" + j.fallback.reason + "), so " + j.fallback.toName + " stepped in.", true);
         $("#vb-orch-model").value = "";   // the pick did not hold; do not display it as if it did
@@ -1839,17 +1992,27 @@
     }, 280);
   }
 
-  // Same wire contract Full Custom writes (taskMode/taskPlan/groups), plus the orchestrator seat,
-  // so the engine cannot tell which surface configured the crew.
-  function persistArmy() {
-    if (!bridge() || !state.army) return;
+  /*
+   * Same wire contract Full Custom writes (taskMode/taskPlan/groups), plus the orchestrator seat,
+   * so the engine cannot tell which surface configured the crew.
+   *
+   * THE PLAN FOLLOWS THE FOLDER (Fred, 2026-08-01: he approved a 12-task plan with four different
+   * models and watched a 6-step build run on one model). The approved plan is stored on a PROJECT.
+   * Every model pick here saved it to whichever project was selected at that second, and then Begin
+   * Building could select a different project, or create a brand new one, whose stored plan was
+   * empty. The engine read the empty one, found no task plan, and quietly planned its own build.
+   * Passing the target explicitly, and returning the promise so the caller can wait, is what makes
+   * "the plan I approved is the plan that runs" true rather than usually true.
+   */
+  function persistArmy(targetWorkspaceId) {
+    if (!bridge() || !state.army) return Promise.resolve(false);
     const groups = state.army.tasks.map((t, i) => ({ id: "t" + t.n, taskNumbers: [t.n], model: state.army.picks[i].model, agents: state.army.picks[i].agents }));
-    bridge().saveAF({
+    return bridge().saveAF({
       on: true, rows: [], taskMode: true,
       taskPlan: state.army.tasks.map((t) => ({ n: t.n, title: t.title, files: t.files, needs: t.needs })),
       groups,
       orchestrator: state.army.orchestrator || "",
-    });
+    }, targetWorkspaceId);
   }
 
   /* ================= 6. Begin Building ======================================================= */
@@ -1913,6 +2076,20 @@
      */
     const armed = await armBudget(b);
     if (armed === false) return;   // the field held something that is not a number; say so, do not guess
+    /*
+     * PIN THE APPROVED PLAN TO THE FOLDER THIS BUILD WILL USE, and wait for it to land, before the
+     * job starts (Fred, 2026-08-01). Everything above this line may have changed which project is
+     * selected: a Save to: pick, an adoption, or a folder created moments ago for a first-timer.
+     * The plan is stored per project, so it is written here, last, against the settled answer.
+     */
+    if (state.army) {
+      const target = b.buildWorkspaceId ? b.buildWorkspaceId() : b.workspaceId();
+      const landed = await persistArmy(target);
+      if (!landed) {
+        status("Your task plan could not be saved to the project folder, so the build was not started. Nothing has run and nothing was charged. Try again.", true);
+        return;
+      }
+    }
     status("Starting…");
     b.startBuild(full, (msg, bad) => status(msg || "", bad));
   }
@@ -2071,10 +2248,29 @@
 
   /* ================= open and close ========================================================== */
 
+  /*
+   * The one-off move from the old single global draft to per-project drafts. It runs once, and it
+   * hands the old draft to the project on screen (or keeps it as unattached work when there is no
+   * project yet) rather than dropping it. Nobody loses a planning conversation to a deploy.
+   */
+  function migrateLegacyDraft() {
+    let legacy = null;
+    try { legacy = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null"); } catch {}
+    if (!legacy) return;
+    try { localStorage.removeItem(DRAFT_KEY); } catch {}
+    if (isEmptyState(legacy)) return;
+    const wsId = currentProjectId();
+    const existing = readLocal(wsId);
+    const b = bridge();
+    const remote = (b && b.crucibleFor && wsId) ? b.crucibleFor(wsId) : null;
+    if (!isEmptyState(existing) || !isEmptyState(remote)) return;   // never overwrite real state
+    try { localStorage.setItem(draftKeyFor(wsId), JSON.stringify(legacy)); } catch {}
+  }
+
   function open() {
     const el = build();
     if (!el) return;
-    if (!state.open) loadDraft();
+    if (!state.open) { migrateLegacyDraft(); loadProject(currentProjectId()); }
     state.open = true;
     el.hidden = false;
     renderSlider();
@@ -2098,6 +2294,29 @@
   // Workspaces and the catalog both load after the panel exists; repaint when they land.
   document.addEventListener("dominion-ide-state", () => { if (state.open) { renderSlider(); renderSaveTo(); paintAllModelSelects();
     if ($("#vb-adopt-panel") && !$("#vb-adopt-panel").hidden) paintAdoptChoices(); } });
+  /*
+   * The other device spoke. The project list is refreshed when the app comes back to the
+   * foreground, and if the project on screen was planned on further elsewhere, the newer copy is
+   * adopted here. loadProject compares timestamps, so this can never overwrite newer local work
+   * with an older remote copy.
+   */
+  document.addEventListener("dominion-workspaces-changed", () => {
+    if (!state.open) return;
+    const wsId = currentProjectId();
+    renderSlider(); renderSaveTo();
+    if (!wsId) return;
+    const b = bridge();
+    const remote = (b && b.crucibleFor) ? b.crucibleFor(wsId) : null;
+    const localAt = Number((readLocal(wsId) || {}).at || 0);
+    if (remote && Number(remote.at || 0) > localAt) {
+      loadProject(wsId);
+      status("Updated from your other device.");
+    }
+  });
+  // Closing the tab, backgrounding the app, or locking the phone flushes the pending sync rather
+  // than stranding the last minute of planning on one device.
+  window.addEventListener("pagehide", () => { if (state.open) saveDraft(true); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden && state.open) saveDraft(true); });
   document.addEventListener("dominion-studio-changed", () => { if (state.open) gateArmy(); });
 
   window.dominionVibe = { open, close };

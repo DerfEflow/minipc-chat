@@ -18,6 +18,10 @@
 
   const ENGAGED_KEY = "dominion.ide.enabled.v1";
   const MODE_KEY = "dominion.crucible.mode.v1";
+  // When THIS device last chose its switch position or interface, so "the newer choice wins" can
+  // be decided against the account's own timestamp instead of "has this device ever chosen".
+  const CHOICE_AT_KEY = "dominion.crucible.choice-at.v1";
+  const stampChoice = () => { try { localStorage.setItem(CHOICE_AT_KEY, String(Date.now())); } catch {} };
   // Mode sets the register silently (ruling 4a): the machinery underneath stays, one question
   // fewer at the door.
   const MODE_REG = { beginner: "plain", vibe: "hybrid", engineer: "technical" };
@@ -767,16 +771,26 @@
   }
 
 
-  // Assignments belong to the workspace. With no workspace yet they are held as the account's
-  // starting point, so the board is usable before the first project exists.
-  function saveAssignments() {
+  /*
+   * Assignments belong to the workspace. With no workspace yet they are held as the account's
+   * starting point, so the board is usable before the first project exists.
+   *
+   * TWO THINGS THIS RETURNS THAT IT USED TO SWALLOW (Fred, 2026-08-01: the 12-task plan he approved
+   * ran as an unrelated 6-step build). It takes an explicit target, because the caller sometimes
+   * knows which folder the work is bound for before this module's own state catches up; and it
+   * RETURNS THE PROMISE, because a caller about to start a build has to know the plan actually
+   * landed. Fire-and-forget was a race that the build usually won.
+   */
+  function saveAssignments(targetWorkspaceId) {
     const body = { assignments: { ...state.assignments, allInOne: state.allInOne || "" } };
-    const wsId = state.workspaceId;
+    const wsId = targetWorkspaceId || state.workspaceId;
     const url = wsId ? "/ide/workspace/update" : "/ide/prefs";
     const payload = wsId ? { id: wsId, patch: body } : { engaged: state.engaged, ...body };
-    fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) })
-      .catch(() => {});
+    const done = fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) })
+      .then((r) => r.ok)
+      .catch(() => false);
     paintModelLine();   // the vibe coder's one-line summary must never contradict the board
+    return done;
   }
 
   // Live routing preview: type a job, see where it would go and why. Costs nothing: the server
@@ -1606,6 +1620,8 @@
     if (m === "engineer" && state.engineerComingSoon) return;
     state.mode = m;
     try { localStorage.setItem(MODE_KEY, m); } catch {}
+    // `save` marks a deliberate switch of interface, which is the thing recency is measured on.
+    if (save) stampChoice();
     const root = $("#ide-root");
     if (root) root.dataset.mode = m;
     const picker = $("#cw");
@@ -2412,7 +2428,9 @@
   }
 
   async function startBuild(prompt, status) {
-    const workspaceId = $("#st-ws").value;
+    // The select first, then this module's own selection: a folder created seconds ago exists in
+    // state before the select has been repainted, and a build must not be refused for that.
+    const workspaceId = $("#st-ws").value || state.workspaceId || "";
     if (!workspaceId) { status("Pick or add a folder first.", true); return; }
     if (nodePollingInterval) clearInterval(nodePollingInterval);
     nodePollingInterval = 0;
@@ -2525,6 +2543,46 @@
    * "come back and it is still there" promise: the client keeps no build state of its own, it
    * simply asks what is true now.
    */
+  /*
+   * THE PROJECT LIST TRAVELS (Fred, 2026-08-01: "They do not seem to be loading the others
+   * projects. The intent was to have any project seamlessly change from mobile to desktop and
+   * desktop to mobile").
+   *
+   * Projects always lived on the server, keyed to the account, so both devices really were looking
+   * at one list. The list was only ever FETCHED ONCE, during page boot. The recurring refresh and
+   * the come-back-to-the-tab refresh both asked for jobs and nothing else. On a laptop that is
+   * invisible, because tabs get closed and reopened all day. A phone resumes from the background
+   * instead of reloading, so it could sit for days on the list it saw when it last cold-started,
+   * and a project made on the laptop would never appear.
+   *
+   * This deliberately touches ONLY the workspace list. Prefs, routing and the assignment board are
+   * left alone, because overwriting those from a background poll would yank settings out from
+   * under someone mid-edit.
+   */
+  async function refreshWorkspaces() {
+    if (!state.allowed) return false;
+    let list;
+    try {
+      const r = await fetch("/ide/workspaces", { headers: { accept: "application/json" } });
+      if (!r.ok) return false;
+      const d = await r.json();
+      list = Array.isArray(d.workspaces) ? d.workspaces : null;
+    } catch { return false; }
+    if (!list) return false;
+    // updatedAt is in the signature so a project whose PLANNING STATE changed on another device
+    // also counts as news, not just one that was renamed or moved.
+    const before = JSON.stringify((state.workspaces || []).map((w) => [w.id, w.name, w.root, w.updatedAt]));
+    const after = JSON.stringify(list.map((w) => [w.id, w.name, w.root, w.updatedAt]));
+    state.workspaces = list;
+    // A project deleted on another device must not stay selected here.
+    if (state.workspaceId && !list.some((w) => w.id === state.workspaceId)) state.workspaceId = "";
+    if (before === after) return false;
+    renderStarter();
+    // The Vibe project row paints itself; it listens rather than being reached into from here.
+    document.dispatchEvent(new CustomEvent("dominion-workspaces-changed"));
+    return true;
+  }
+
   async function refreshJobs() {
     if (!state.allowed) return;
     try {
@@ -2868,6 +2926,9 @@
     // Remember it on the ACCOUNT too, so flipping it on the laptop is already on when the phone
     // opens (ledger L-5). The local copy stays authoritative for the first paint: the switch must
     // never wait on a network round trip to look right.
+    // `push` is what separates a choice from an echo: a user flipping the switch pushes, while
+    // adopting the account's own answer does not. Only a real choice is stamped.
+    if (push) stampChoice();
     if (push) {
       fetch("/ide/prefs", {
         method: "POST",
@@ -2951,13 +3012,21 @@
       }
       if ($("#ide-cards")) renderBoard();
 
+      /*
+       * WHICHEVER CHOICE IS NEWER WINS (Fred, 2026-08-01). The rule was meant to be "the person
+       * holding this phone gets the last word", and it was implemented as "any device that has ever
+       * chosen keeps its answer forever". So a phone that once picked Beginner could never follow
+       * the laptop into Vibe Coder, and Beginner has no project row on it: the phone looked like it
+       * had lost Crucible entirely. Both sides now carry a timestamp, and the later one wins.
+       */
+      const localChoiceAt = (() => { try { return Number(localStorage.getItem(CHOICE_AT_KEY) || 0) || 0; } catch { return 0; } })();
+      const accountChoiceAt = Number((s.prefs && s.prefs.at) || 0);
+      const accountIsNewer = accountChoiceAt > localChoiceAt;
       const deviceHasOpinion = (() => { try { return localStorage.getItem(ENGAGED_KEY) !== null; } catch { return false; } })();
-      if (!deviceHasOpinion && s.prefs && s.prefs.engaged === true) {
-        setEngaged(true, { reveal: false, push: false });
+      if ((!deviceHasOpinion || accountIsNewer) && s.prefs && typeof s.prefs.engaged === "boolean") {
+        setEngaged(s.prefs.engaged === true, { reveal: false, push: false });
       }
-      // The account remembers the mode the same way it remembers the switch: a device that has
-      // never chosen adopts it, a device that HAS chosen keeps its own opinion.
-      if (!readMode() && s.prefs && MODES.includes(s.prefs.mode)) {
+      if ((!readMode() || accountIsNewer) && s.prefs && MODES.includes(s.prefs.mode)) {
         state.mode = s.prefs.mode;
         try { localStorage.setItem(MODE_KEY, s.prefs.mode); } catch {}
       }
@@ -3037,9 +3106,14 @@
   });
 
   // The reattach triad. A build that ran while the app was closed reappears on the next of these.
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshJobs(); });
-  window.addEventListener("pageshow", () => refreshJobs());
-  setInterval(() => { if (!document.hidden && state.allowed && state.engaged) refreshJobs(); }, 20000);
+  /*
+   * Coming back to the app re-reads the PROJECT LIST as well as the jobs. `pageshow` is the one
+   * that matters most on a phone: an installed app resuming from the background fires it without
+   * ever reloading the page, which is precisely the case that used to show a days-old list.
+   */
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshJobs(); refreshWorkspaces(); } });
+  window.addEventListener("pageshow", () => { refreshJobs(); refreshWorkspaces(); });
+  setInterval(() => { if (!document.hidden && state.allowed && state.engaged) { refreshJobs(); refreshWorkspaces(); } }, 20000);
 
   // A tapped notification focuses the tab already open and tells it where to go, rather than
   // stacking up new windows.
@@ -3153,8 +3227,42 @@
      * default AI over the whole job, autonomously, exactly as before the crew existed.
      */
     getAF: () => (state.assignments.af ? JSON.parse(JSON.stringify(state.assignments.af)) : null),
-    saveAF: (af) => { state.assignments.af = af; saveAssignments(); },
-    clearAF: () => { delete state.assignments.af; saveAssignments(); },
+    // Both return the save promise, and both accept the workspace the caller means, so an approved
+    // plan can be pinned to the folder a build is about to run in rather than the one that happened
+    // to be selected when the user was still picking models.
+    saveAF: (af, targetWorkspaceId) => { state.assignments.af = af; return saveAssignments(targetWorkspaceId); },
+    clearAF: (targetWorkspaceId) => { delete state.assignments.af; return saveAssignments(targetWorkspaceId); },
+    /*
+     * The workspace a build will ACTUALLY use. startBuild reads the starter's select, while the
+     * Vibe surface tracks its own selection, and the two could disagree the moment a folder was
+     * auto-created (the select had not been repainted yet). One getter, consulted by both, so the
+     * plan and the build can never be pinned to different folders.
+     */
+    buildWorkspaceId: () => (($("#st-ws") && $("#st-ws").value) || state.workspaceId || ""),
+    /*
+     * A project's Crucible state, stored beside the project itself so it reaches every device the
+     * account signs in from (Fred, 2026-08-01). Reading is free: the workspace list already carries
+     * it. Writing returns a result rather than a promise of silence, because a planning
+     * conversation that failed to sync must be able to say so.
+     */
+    refreshWorkspaces,
+    crucibleFor: (wsId) => {
+      const w = (state.workspaces || []).find((x) => x.id === wsId);
+      return (w && w.crucible) || null;
+    },
+    saveCrucible: async (wsId, blob) => {
+      if (!wsId) return { ok: false, error: "No project is selected, so there is nowhere to save this." };
+      try {
+        const r = await fetch("/ide/workspace/update", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: wsId, patch: { crucible: blob } }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || j.error) return { ok: false, error: j.error || "The project could not be saved.", code: j.code || "" };
+        // Keep the local copy in step so a refresh does not immediately read back the old one.
+        const w = (state.workspaces || []).find((x) => x.id === wsId);
+        if (w) { w.crucible = blob; if (j.workspace && j.workspace.updatedAt) w.updatedAt = j.workspace.updatedAt; }
+        return { ok: true };
+      } catch { return { ok: false, error: "The server could not be reached, so this is saved on this device only." }; }
+    },
     studioModules: () => [...state.studio.modules],
     studioPreset: () => state.studio.preset,
     /*
