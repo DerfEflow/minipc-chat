@@ -217,6 +217,10 @@
   color: var(--muted, #8ba0ae);
   overflow-wrap: anywhere;
 }
+/* What is actually inside it, and whether the planners can open it (Fred, 2026-08-01). Lit rather
+   than muted, because "the AI can see my folder" is the fact he could not previously tell. */
+.vb-saveto-peek { display: inline-block; margin-top: 2px; color: var(--energy, #66ff5b); }
+.vb-saveto-peek.is-bad { color: #ffb08a; }
 
 /* ---------- the plan-from-chat button and the shared modal --------------------------------- */
 .vb-plan-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

@@ -243,6 +243,20 @@
     return parts;
   }
 
+  /*
+   * The screen the beginner is looking at, told to the interviewer (Fred, 2026-08-01). Short on
+   * purpose: this surface deliberately hides almost every switch, so there is little to report —
+   * but the project folder and the spend limit are real choices already made, and asking a
+   * first-timer to repeat either of them is exactly the failure being fixed here.
+   */
+  function pageSettings() {
+    const b = bridge();
+    const out = [{ label: "Which interface they are using", value: "the beginner surface: they are new at this, and almost every technical control is hidden from them" }];
+    const ws = b && b.workspaceInfo && b.workspaceInfo();
+    if (ws && ws.budgetUsd > 0) out.push({ label: "Spend limit on this project", value: "$" + ws.budgetUsd.toFixed(2) });
+    return out;
+  }
+
   async function askServer(phase, messages) {
     const r = await fetch("/ide/intake", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -250,6 +264,7 @@
         messages, phase, device: device(),
         mode: "beginner", register: "plain",
         workspaceId: bridge() ? bridge().workspaceId() : "",
+        settings: pageSettings(),
       }),
     });
     return r.json();

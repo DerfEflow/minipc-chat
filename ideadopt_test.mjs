@@ -363,7 +363,23 @@ await t("source: adoption and later planning turns have bounded live read-only w
   assert.match(server, /new Set\(\["web_search", "web_read"\]\)/);
   assert.match(server, /parts\.some\(\(p\) => p === "\.\."\)/, "traversal must be refused before hands dispatch");
   assert.match(server, /ideChatWithWorkspaceTools\(aModel[\s\S]{0,900}forceInspection: true/);
-  assert.match(server, /const adoptedWorkspace = body\.adopt[\s\S]{0,500}ideChatWithWorkspaceTools/);
+  /*
+   * Fred, 2026-08-01: the read-only tools used to be gated behind `body.adopt`, so a project
+   * opened the ordinary way had a planner that could not open its own folder. The gate is now the
+   * honest one — a folder exists, the model can call tools, and the folder answered — and it is
+   * the SAME gate in both planning doors. The old `body.adopt &&` shape must not come back.
+   */
+  for (const door of ["planchat", "intake"]) {
+    const start = server.indexOf('path === "/ide/' + door + '"');
+    assert.ok(start > 0, "the /ide/" + door + " door exists");
+    const block = server.slice(start, start + 5000);
+    assert.match(block, /const canReadProject = !!\([\s\S]{0,200}isToolCapable\(model\)[\s\S]{0,120}unreadable\)/,
+      door + " decides folder reach from the folder, not from adoption");
+    assert.match(block, /canReadProject\s*\r?\n?\s*\? await ideChatWithWorkspaceTools/,
+      door + " hands the workspace tools to every turn that can use them");
+    assert.doesNotMatch(block, /body\.adopt && \w*[Ww]orkspace\s*\r?\n?\s*\?/,
+      door + " must not re-gate the read tools behind adoption");
+  }
   const defs = server.slice(server.indexOf("const IDE_WORKSPACE_READ_TOOLS ="), server.indexOf("function ideWorkspaceRelative"));
   assert.doesNotMatch(defs, /write|shell|exec/i, "the adoption tool set must stay read-only");
 });

@@ -515,8 +515,29 @@ function summarizeLeft(id) {
   if (!c || c.messages.length < 4) return;
   fetch("/memory/summarize-session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: id }) }).catch(() => {});
 }
+/*
+ * Starting a new conversation NEVER removes the one you were on (Fred, 2026-08-01: on the phone it
+ * "seems to delete the chat you were on before and replaces it with the new one"). It never did:
+ * this unshifts, and the drawer's list was simply too short on a phone to show what survived. The
+ * cramped list is fixed in dominion-vault.css; the two additions here are the other half of the
+ * same confusion.
+ *
+ * First, pressing New on an already-empty new chat now just returns to it instead of stacking a
+ * second identical "New chat" row — a column of them is indistinguishable from a history that
+ * keeps getting wiped. Second, the drawer says how many conversations it holds, which is the
+ * fastest possible proof that nothing was thrown away.
+ */
+const isUntouched = (c) => !!c && !c.messages.length && !(c.draft || "").trim() &&
+  !(Array.isArray(c.pendingAttachments) && c.pendingAttachments.length);
+
 function newChat() {
   const prev = curId;
+  const current = chats.find((c) => c.id === prev);
+  if (isUntouched(current)) {
+    // Already sitting in a blank one: re-open it rather than minting a twin.
+    renderAll(); scroll(true); closeSidebar(); igniteChatSurface(); input.focus();
+    return;
+  }
   if (prev) persistChatComposer();
   if (typeof window.closeForgeDial === "function") window.closeForgeDial();
   detachCurrentSession();
@@ -608,6 +629,10 @@ const relTime = (ts) => { const d = Date.now() - (ts || 0); const m = Math.round
 function renderSidebar() {
   chatlist.innerHTML = "";
   const q = chatQuery.trim().toLowerCase();
+  // The count, said out loud. On a phone the drawer is a modal sheet with no other context, and
+  // "Conversation Archive · 8" answers the question the cramped list used to raise.
+  const head = document.querySelector(".sb-head .h");
+  if (head) head.textContent = "Conversation Archive" + (chats.length ? " · " + chats.length : "");
   for (const c of [...chats].sort((a, b) => (b.activityAt || b.updatedAt || 0) - (a.activityAt || a.updatedAt || 0))) {
     if (q && !(c.title || "").toLowerCase().includes(q) && !c.messages.some((m) => (m.content || "").toLowerCase().includes(q))) continue;
     const row = document.createElement("div"); row.className = "ci" + (c.id === curId ? " active" : "") + (busyFor(c.id) ? " running" : "");

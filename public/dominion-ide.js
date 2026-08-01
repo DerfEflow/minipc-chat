@@ -2046,6 +2046,31 @@
     log.scrollTop = log.scrollHeight;
   }
 
+  /*
+   * What this surface has already been told, in words a model can use (Fred, 2026-08-01: "it
+   * should also be context aware of any setting in that page so that it doesn't have to be
+   * reiterated"). The project folder itself is NOT in here on purpose: it travels as an id and the
+   * server reads the real record, so a browser can never assert a path it does not own.
+   */
+  function starterSettings() {
+    const out = [];
+    const add = (label, value) => { if (value) out.push({ label, value }); };
+    const surface = state.mode === "vibe" ? "Vibe Coder" : state.mode === "engineer" ? "Engineer" : "beginner";
+    add("Which interface they are using", surface);
+    const reg = window.DominionLexicon ? window.DominionLexicon.register : "plain";
+    add("How they want things explained", reg === "plain" ? "plain English, no jargon"
+      : reg === "technical" ? "technical terms, they speak the language" : "the technical term with a short plain-English gloss");
+    const mods = STUDIO_MODULES.filter((m) => state.studio.modules.has(m.id)).map((m) => L(m.title));
+    add("Workspace setup they chose", state.studio.preset || "custom");
+    add("Workspace panels switched on", mods.length ? mods.join(", ") : "none beyond the basics");
+    const id = ($("#st-ws") && $("#st-ws").value) || state.workspaceId || "";
+    const ws = (state.workspaces || []).find((w) => w.id === id);
+    const cap = Number(ws && ws.budget && ws.budget.capUsd) || 0;
+    add("Spend limit on this project", cap > 0 ? money().cost(cap) + ": the build pauses before passing it" : "none set; the build will not stop itself");
+    if (intake.adopt) add("This is an app they already started", "yes; it was scanned and the report is above");
+    return out;
+  }
+
   async function intakeTurn(status) {
     if (intake.busy) return;
     intake.busy = true;
@@ -2060,6 +2085,9 @@
         body: JSON.stringify({ messages: intake.messages, workspaceId: $("#st-ws").value || "",
           mode: state.mode || "beginner", adopt: !!intake.adopt,
           adoptionContext: intake.adoptionContext || "",
+          // The classic starter's own switches, so the interviewer stops asking about settings the
+          // person has already set on the screen in front of them (Fred, 2026-08-01).
+          settings: starterSettings(),
           register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }),
         signal: controller.signal });
       j = await r.json();
@@ -3128,6 +3156,37 @@
     saveAF: (af) => { state.assignments.af = af; saveAssignments(); },
     clearAF: () => { delete state.assignments.af; saveAssignments(); },
     studioModules: () => [...state.studio.modules],
+    studioPreset: () => state.studio.preset,
+    /*
+     * The full record for the project on screen, not just its id (Fred, 2026-08-01: the planner
+     * "is not aware of which folder was chosen or what its contents are"). Surfaces need the name,
+     * the folder and the machine to SAY where a build lands; the wire needs the id so the server
+     * can look the same record up for itself and never trust a client-supplied path.
+     */
+    workspaceInfo: () => {
+      const id = (($("#st-ws") && $("#st-ws").value) || state.workspaceId || "");
+      const w = (state.workspaces || []).find((x) => x.id === id);
+      if (!w) return null;
+      return { id: w.id, name: w.name || w.id, root: w.root || "", node: w.node || "",
+        cloud: w.node === "workshop", budgetUsd: Number(w.budget && w.budget.capUsd) || 0 };
+    },
+    /*
+     * A live peek inside the chosen folder, straight from the user's own machine. Deterministic,
+     * free, and no model call: the surface can show that the folder is understood before anyone
+     * spends money proving it in conversation.
+     */
+    peekProject: async (id) => {
+      const wsId = id || (($("#st-ws") && $("#st-ws").value) || state.workspaceId || "");
+      if (!wsId) return { error: "no_workspace" };
+      try {
+        const r = await fetch("/ide/project/peek", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspaceId: wsId }) });
+        return (await r.json()) || {};
+      } catch { return { error: "The workshop could not be reached." }; }
+    },
+    // The names of the modules that are ticked, in the viewer's own register, for the settings
+    // block that rides to the planner. Ids like "crew" mean nothing to a model or to a person.
+    studioModuleLabels: () => STUDIO_MODULES.filter((m) => state.studio.modules.has(m.id)).map((m) => L(m.title)),
     // The vibe surface draws its own Customize Your Workspace panel; the choice still lives HERE,
     // in the one studio state every gate reads (dominion-studio-changed fires from paintStudio).
     setStudioModules: (modules) => {

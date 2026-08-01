@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v153-corpus-handoff";
+const CACHE = "dominion-ai-v154-project-context";
 const SHELL = [
   "/",
   "/index.html",

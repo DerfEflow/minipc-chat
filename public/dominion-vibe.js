@@ -74,6 +74,75 @@
 
   const device = () => (window.matchMedia("(pointer: coarse)").matches || window.innerWidth <= 620 ? "mobile" : "desktop");
 
+  /* ================= what the planners are told about this page ============================== */
+  /*
+   * Fred, 2026-08-01, verbatim: "when choosing the project and the project folder the general is
+   * not aware of which folder was chosen or what its contents are until you tell it in the chat...
+   * It should also be context aware of any setting in that page so that it doesn't have to be
+   * reiterated."
+   *
+   * Everything the person set on this screen is knowledge this surface already holds and used to
+   * keep to itself. Two halves, split by who can be trusted with which:
+   *   - the PROJECT (which folder, where, what is in it) travels as an ID only. The server looks
+   *     the record up in the caller's own workspace list and reads the folder itself, so a path
+   *     can never be asserted by the browser.
+   *   - the SETTINGS are screen state that exists nowhere else, so they travel as plain
+   *     label/value display text and are treated as such at the far end.
+   */
+  function pageSettings() {
+    const b = bridge();
+    const out = [];
+    const add = (label, value) => { if (value) out.push({ label, value }); };
+    add("Which interface they are using", "Vibe Coder (the Crucible App Launcher)");
+    add("How they want things explained", reg() === "plain" ? "plain English, no jargon"
+      : reg() === "technical" ? "technical terms, they speak the language" : "the technical term with a short plain-English gloss");
+    if (b) {
+      const ws = b.workspaceInfo && b.workspaceInfo();
+      if (ws) add("Spend limit on this project", ws.budgetUsd > 0
+        ? money().cost(ws.budgetUsd) + ": the build pauses and asks before passing it"
+        : "none set; the build will not stop itself");
+      const mods = (b.studioModuleLabels && b.studioModuleLabels()) || [];
+      add("Workspace setup they chose", (b.studioPreset && b.studioPreset()) || "custom");
+      add("Workspace panels switched on", mods.length ? mods.join(", ") : "none beyond the basics");
+      add("Agent Army", (b.studioModules && b.studioModules().includes("crew"))
+        ? (state.army ? "on; " + state.army.tasks.length + " task(s) planned, orchestrator: " + (state.army.orchestrator || "same as the General")
+                      : "on, but the tasks have not been planned yet")
+        : "off; one AI runs the whole build by itself");
+    }
+    add("Model in the General's window", modelLabel(state.chats.main.model));
+    // Read the window's real state off the panel, not off a flag that a draft restore can leave
+    // stale. A settings block that reports an adviser as "open" when it is folded away is the same
+    // class of untruth this whole change exists to remove.
+    for (const w of ["second", "third"]) {
+      const body = $("#vb-body-" + w);
+      const openNow = !!(body && !body.hidden);
+      if (!openNow && !state.chats[w].messages.length) continue;
+      add(WNAME[w] + "'s window", (openNow ? "open" : "closed, but it has already been used") +
+        ", model: " + modelLabel(state.chats[w].model));
+    }
+    if (state.plan) add("A plan was carried over from the main chat", state.plan.name || "yes");
+    if (state.adopt) add("This is an app they already started", "adopted: " + (state.adopt.name || "yes"));
+    if (state.vision) add("A vision has already been agreed", "yes; do not re-run the interview unless they change it");
+    return out;
+  }
+
+  const modelLabel = (id) => {
+    if (!id) return "their main model (no specific pick)";
+    for (const g of (bridge() && bridge().models()) || []) {
+      for (const m of g.models || []) if (m && m.id === id) return m.name || id;
+    }
+    return id;
+  };
+
+  // The id the server resolves the folder from. Empty until a project is chosen, and that is a fact
+  // worth sending too: it tells the planner to talk about picking one rather than inventing one.
+  const currentWorkspaceId = () => {
+    const b = bridge();
+    if (!b) return "";
+    if (state.adopt && state.adopt.workspaceId) return state.adopt.workspaceId;
+    return (b.workspaceId && b.workspaceId()) || "";
+  };
+
   /* ================= draft persistence ====================================================== */
 
   function saveDraft() {
@@ -471,7 +540,17 @@
     paintWhere();
   }
 
-  // The chosen folder's full path, under the selector, in plain sight.
+  /*
+   * The chosen folder's full path, under the selector, in plain sight — and, since 2026-08-01,
+   * WHAT IS IN IT and whether the planners can read it.
+   *
+   * Fred could not tell whether the General knew about the folder because nothing on screen ever
+   * said so, and it did not. This line is the receipt: it names the folder, counts what is inside,
+   * and states out loud that the AIs on this page can open it. When the machine holding the folder
+   * is not reachable, it says THAT instead, which is the one fact that changes what the planners
+   * can do for you.
+   */
+  let peekToken = 0;
   function paintWhere() {
     const el = $("#vb-saveto-where");
     if (!el || !bridge()) return;
@@ -480,6 +559,32 @@
     if (!ws) { el.textContent = ""; el.hidden = true; return; }
     el.textContent = "Saves to: " + (ws.root || "(folder not reported)") + (ws.node ? "  on " + (ws.node === "workshop" ? "the Dominion cloud" : ws.node) : "");
     el.hidden = false;
+    paintProjectPeek(ws, el);
+  }
+
+  async function paintProjectPeek(ws, el) {
+    const mine = ++peekToken;
+    let line = document.createElement("span");
+    line.className = "vb-saveto-peek";
+    line.textContent = "Reading what is in that folder…";
+    el.append(document.createElement("br"), line);
+    const j = await (bridge().peekProject ? bridge().peekProject(ws.id) : Promise.resolve({}));
+    if (mine !== peekToken) return;                     // a faster switch already won
+    const p = j && j.project;
+    if (!p || j.error) {
+      line.textContent = "Dominion could not open that folder right now" + (j && j.error ? " (" + j.error + ")" : "") + ", so the planners cannot read it this session.";
+      line.classList.add("is-bad");
+      return;
+    }
+    if (p.unreadable) {
+      line.textContent = "Dominion cannot read that folder right now: " + p.unreadable + ". The planners will say so rather than guess.";
+      line.classList.add("is-bad");
+      return;
+    }
+    if (p.empty) { line.textContent = "That folder is empty, and every AI on this page knows it. A clean start."; return; }
+    const names = (p.entries || []).slice(0, 6).map((e) => e.name + (e.type === "dir" ? "/" : "")).join(", ");
+    line.textContent = "Inside: " + (p.entries || []).length + (p.truncated ? "+" : "") + " item(s): " + names +
+      ((p.entries || []).length > 6 ? ", …" : "") + ". Every AI on this page can see this and can open the files.";
   }
 
   function newProject(prefName) {
@@ -1168,7 +1273,9 @@
         body: JSON.stringify({ window: w, model: c.model || "", messages: c.messages, register: reg(), mode: "vibe", device: device(),
           seedPlan: !!(w === "main" && state.plan),
           adopt: !!state.adopt, adoptionContext: state.adopt ? state.adopt.brief : "",
-          adoptionWorkspaceId: state.adopt ? state.adopt.workspaceId : "" }) });
+          adoptionWorkspaceId: state.adopt ? state.adopt.workspaceId : "",
+          // The project and the page, every turn, to every rank (Fred, 2026-08-01).
+          workspaceId: currentWorkspaceId(), settings: pageSettings() }) });
       j = await r.json();
     } catch { j = { error: "The workshop could not be reached. Try again." }; }
     t.remove();

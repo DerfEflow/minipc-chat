@@ -35,6 +35,31 @@
     transition: left .22s ease;
   }
   #sidebar.open { left: 0; }
+
+  /* ---- THE CONVERSATION ARCHIVE IS THE DRAWER'S REASON TO EXIST ---------------------------
+     Fred, 2026-08-01: "on mobile there is no history of chats available", and starting a new
+     chat "seems to delete the chat you were on before and replaces it with the new one".
+
+     Nothing was ever deleted. newChat() unshifts and every previous conversation stays in
+     storage and in the list — verified on the rig. What the phone showed was a 42%-of-drawer
+     peephole roughly two and a half rows tall, sitting inside a drawer that ALSO scrolls. Two
+     nested scrollers on a touch screen means the outer one usually eats the gesture, so the
+     list looked like a fixed stub containing one brand-new "New chat" and nothing else. That
+     reads exactly like a replaced conversation, which is why the report says "delete".
+
+     On a phone the list therefore takes its natural height and the DRAWER is the single
+     scroller. flex:0 0 auto is load-bearing: #sidebar is a flex column, so without it the list
+     is shrunk back to the peephole no matter what max-height says. */
+  #chatlist {
+    max-height: none;
+    overflow: visible;
+    flex: 0 0 auto;
+  }
+  /* The rail's title is hidden on desktop, where the layout makes the column obvious. On the
+     phone the drawer is a modal sheet with no such context, so it says what it is — and now
+     carries the count, which is the fastest possible proof that nothing was thrown away. */
+  .sb-head { flex-wrap: wrap; }
+  .sb-head .h { display: block; width: 100%; font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: #8ba0ae; }
 }
 /* Panel sheets always sit above the cinematic chrome (telemetry rail z7, footer z8, header z100). */
 #smodal, #mmodal, #pmodal, #tmodal, #amodal, #imodal { z-index: 1300; }

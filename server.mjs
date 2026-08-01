@@ -156,7 +156,7 @@ import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderou
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
 import { createAdoptScanner, composeBrief, analysisPrompt } from "./ideadopt.mjs";
-import { intakeMessages, parseIntake, hasImages, planchatMessages, PLAN_WINDOWS, VISION_MARKER, CHANGE_MARKER } from "./ideintake.mjs";
+import { intakeMessages, parseIntake, hasImages, planchatMessages, PLAN_WINDOWS, VISION_MARKER, CHANGE_MARKER, PROJECT_SETTINGS_SHOWN } from "./ideintake.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
 import { sweepFindings, sweepReport, brokenReferenceFindings, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
 import { helpVoice } from "./idehelp.mjs";
@@ -2107,13 +2107,10 @@ async function handleIde(req, res, u) {
      */
     const phase = body.phase === "review" ? "review" : body.phase === "stuck" ? "stuck" : "intake";
     const device = body.device === "mobile" ? "mobile" : "desktop";
-    // adopt: the conversation opened from a state-of-the-app brief (POST /ide/adopt); the
-    // interviewer plans what exists toward what it should become. Intake phase only.
-    const messages = intakeMessages({ register: reg, mode, history: body.messages, device, phase,
-      adopt: !!body.adopt, adoptionContext: body.adoptionContext });
-    if (messages.length < 2) return send({ status: 400, body: { error: "Say what you want built first." } });
     // The same brain that will do the engineering conducts the interview: the workspace's
-    // build_code assignment, resolved exactly the way the build itself will resolve it.
+    // build_code assignment, resolved exactly the way the build itself will resolve it. (`adopt`
+    // means the conversation opened from a state-of-the-app brief; it now changes the PROMPT only,
+    // because folder reach no longer depends on it.)
     let stored = {}, activeWorkspace = null;
     try {
       activeWorkspace = body.workspaceId ? (ideFeature.listWorkspaces(T).body.workspaces || []).find((w) => w.id === body.workspaceId) : null;
@@ -2134,7 +2131,19 @@ async function handleIde(req, res, u) {
       if (seeing) model = seeing;
       else return send({ status: 200, body: { error: "No picture-reading model is available on this server, so I cannot look at that. Tell me in words instead and we will keep going." } });
     }
-    const r = body.adopt && activeWorkspace
+    /*
+     * Same repair as /ide/planchat: the folder the person picked is context this conversation
+     * always had and never used, and the read-only tools were gated behind adoption. A "review"
+     * turn is the sharpest case — the app EXISTS in that folder, and the interviewer used to
+     * discuss it from memory of a chat rather than from the files sitting right there.
+     */
+    const project = activeWorkspace ? await ideProjectSnapshot(T, activeWorkspace) : null;
+    const settings = ideSettingsFromBody(body.settings);
+    const canReadProject = !!(activeWorkspace && activeWorkspace.root && isToolCapable(model) && !(project && project.unreadable));
+    const messages = intakeMessages({ register: reg, mode, history: body.messages, device, phase,
+      adopt: !!body.adopt, adoptionContext: body.adoptionContext, project, settings, tools: canReadProject });
+    if (messages.length < 2) return send({ status: 400, body: { error: "Say what you want built first." } });
+    const r = canReadProject
       ? await ideChatWithWorkspaceTools(model, messages, { root: activeWorkspace.root, hands: ideHandsFor(T, activeWorkspace), toolContext: T.ctxBase || CTX })
       : await ideChatOnce(model, messages);
     if (r.costUsd) { try { await meterTurn(T, r.costUsd, "crucible " + phase, ""); } catch {} }
@@ -2163,7 +2172,8 @@ async function handleIde(req, res, u) {
     // `vision` stays the field name in both phases so one client path reads either; `phase` tells
     // the client whether the bullets are a first build or a change to an app that already exists.
     return send({ status: 200, body: { ok: true, reply: parsed.reply, vision: parsed.vision,
-      mockups: parsed.mockups || [], involves, mode, phase, costUsd: r.costUsd } });
+      mockups: parsed.mockups || [], involves, mode, phase, costUsd: r.costUsd,
+      project: project || undefined, canReadProject } });
   }
 
   /*
@@ -2182,9 +2192,18 @@ async function handleIde(req, res, u) {
     const reg = normalizeRegister(body.register);
     const mode = normalizeCrucibleMode(body.mode || "vibe");
     const device = body.device === "mobile" ? "mobile" : "desktop";
-    const messages = planchatMessages({ window: win, register: reg, mode, device, history: body.messages,
-      adopt: !!body.adopt, adoptionContext: body.adoptionContext, seedPlan: !!body.seedPlan });
-    if (messages.length < 2) return send({ status: 400, body: { error: "Say something first." } });
+    /*
+     * THE CHOSEN PROJECT, whether or not this is an adoption (Fred, 2026-08-01: "if you're adopting
+     * an app or if you are just opening up an app to work on it, it seems to not be able to know
+     * what has been chosen"). The workspace is resolved from the ACCOUNT'S OWN list by id, so the
+     * folder path and the machine can never be supplied by the caller.
+     */
+    const planWorkspaceId = String(body.workspaceId || body.adoptionWorkspaceId || "");
+    const planWorkspace = planWorkspaceId
+      ? (ideFeature.listWorkspaces(T).body.workspaces || []).find((w) => w.id === planWorkspaceId)
+      : null;
+    const project = planWorkspace ? await ideProjectSnapshot(T, planWorkspace) : null;
+    const settings = ideSettingsFromBody(body.settings);
     let model = String(body.model || "").trim() && modelById(body.model) ? body.model : defaultModelFor(!!T.isOwner);
     // A pasted sketch needs a model with eyes, same rule as intake: reroute the one turn or say so.
     if (hasImages(body.messages) && !isVisionCapable(model)) {
@@ -2192,20 +2211,54 @@ async function handleIde(req, res, u) {
       if (seeing) model = seeing;
       else return send({ status: 200, body: { error: "No picture-reading model is available here, so I cannot look at that. Describe it in words and we keep going." } });
     }
-    const adoptedWorkspaceId = String(body.adoptionWorkspaceId || body.workspaceId || "");
-    const adoptedWorkspace = body.adopt && adoptedWorkspaceId
-      ? (ideFeature.listWorkspaces(T).body.workspaces || []).find((w) => w.id === adoptedWorkspaceId)
-      : null;
-    const r = adoptedWorkspace
-      ? await ideChatWithWorkspaceTools(model, messages, { root: adoptedWorkspace.root, hands: ideHandsFor(T, adoptedWorkspace), toolContext: T.ctxBase || CTX })
+    /*
+     * READ-ONLY WORKSPACE TOOLS FOR EVERY PLANNING TURN, not only adoptions. This machinery already
+     * existed and was gated behind `body.adopt`, which is why a project opened the ordinary way had
+     * a planner that could not open its own folder. The gate is now simply: a folder was chosen,
+     * the model can call tools, and the folder can actually be reached.
+     */
+    const canReadProject = !!(planWorkspace && planWorkspace.root && isToolCapable(model) && !(project && project.unreadable));
+    const messages = planchatMessages({ window: win, register: reg, mode, device, history: body.messages,
+      adopt: !!body.adopt, adoptionContext: body.adoptionContext, seedPlan: !!body.seedPlan,
+      project, settings, tools: canReadProject });
+    if (messages.length < 2) return send({ status: 400, body: { error: "Say something first." } });
+    // One line saying what the planner was actually given. When someone reports "the AI does not
+    // know my folder" again, this answers it from the log instead of from a guess.
+    if (project) {
+      console.log("[ide] plan:" + win + " project " + project.name + " (" + project.root + ")" +
+        (project.unreadable ? " UNREADABLE: " + project.unreadable
+          : " " + project.entries.length + " top-level item(s)") +
+        " · folder tools " + (canReadProject ? "ON" : "off") +
+        " · " + ((settings || []).length) + " page setting(s)");
+    }
+    const r = canReadProject
+      ? await ideChatWithWorkspaceTools(model, messages, { root: planWorkspace.root, hands: ideHandsFor(T, planWorkspace), toolContext: T.ctxBase || CTX })
       : await ideChatOnce(model, messages);
     if (r.costUsd) { try { await meterTurn(T, r.costUsd, "crucible plan:" + win, ""); } catch {} }
     if (!r.ok) return send({ status: 200, body: { error: r.error || "That model could not be reached. Try again, or pick another in this window's corner." } });
     // Only the Main window can end in an agreed vision; the advisers' replies are always prose.
     const parsed = win === "main" ? parseIntake(r.content, { marker: VISION_MARKER })
                                   : { reply: String(r.content || "").trim(), vision: null, mockups: [] };
+    // `project` rides back so the surface can SHOW what the planner was given. Fred's complaint was
+    // as much about not being able to tell as about the gap itself.
     return send({ status: 200, body: { ok: true, window: win, reply: parsed.reply, vision: parsed.vision,
-      mockups: parsed.mockups || [], model, costUsd: r.costUsd } });
+      mockups: parsed.mockups || [], model, costUsd: r.costUsd,
+      project: project || undefined, canReadProject } });
+  }
+
+  /*
+   * POST /ide/project/peek {workspaceId}: what is in the chosen project folder, right now.
+   * The surface calls this the moment a project is picked so the person can SEE that the planner
+   * knows the folder, before spending a penny on a turn that proves it. Read-only, no model call,
+   * nothing metered; the same account-scoped workspace lookup as every other door here.
+   */
+  if (req.method === "POST" && path === "/ide/project/peek") {
+    const blocked = ideFeature.wall(T);
+    if (blocked) return send(blocked);
+    const ws = (ideFeature.listWorkspaces(T).body.workspaces || []).find((w) => w.id === String(body.workspaceId || ""));
+    if (!ws) return send({ status: 404, body: { error: "No such project." } });
+    try { return send({ status: 200, body: { ok: true, project: await ideProjectSnapshot(T, ws) } }); }
+    catch (e) { return send({ status: 200, body: { error: String((e && e.message) || e).slice(0, 300) } }); }
   }
 
   /*
@@ -2664,6 +2717,79 @@ function altKeyedModelFor(model) {
 
 function ideLengthStop(reason) {
   return /^(?:length|max_output_tokens?|token_limit)$/i.test(String(reason || ""));
+}
+
+/*
+ * WHAT IS ACTUALLY IN THE CHOSEN FOLDER (Fred, 2026-08-01). The planning conversations knew a
+ * workspace id and nothing else, so the General opened blind and the person had to describe their
+ * own screen to it before any work could start.
+ *
+ * Built SERVER-SIDE and LIVE, once per planning turn, on purpose:
+ *   - the path and the machine come from the account's own workspace record, never from the client,
+ *     so a doctored request cannot point the briefing at a folder the caller does not own;
+ *   - the listing is read at the moment of the turn, so it cannot go stale between two messages;
+ *   - a dead or missing hands node degrades into an honest "could not be read" line instead of
+ *     hanging the turn. One directory listing over the tunnel is trivial next to a model call.
+ * Depth stops at the top level: the model has workspace_list/workspace_read for anything deeper,
+ * and those tools are exactly what Fred asked for ("nor does that AI have any ability to read the
+ * contents of a folder if told to").
+ */
+const IDE_PEEK_TIMEOUT_MS = 5000;
+const IDE_PEEK_ENTRIES = 80;
+
+async function ideProjectSnapshot(T, ws) {
+  if (!ws) return null;
+  const cloud = String(ws.node || "") === "workshop";
+  const budgetUsd = Number(ws.budget && ws.budget.capUsd) || 0;
+  const snap = {
+    id: ws.id, name: ws.name || ws.id, root: ws.root || "", node: cloud ? "" : String(ws.node || ""),
+    cloud, budgetText: budgetUsd > 0 ? "$" + budgetUsd.toFixed(2) : "none set (unlimited)",
+    entries: [], empty: false, truncated: false, unreadable: "",
+  };
+  if (!ws.root) { snap.unreadable = "this project has no folder yet"; return snap; }
+  let hands = null;
+  try { hands = ideHandsFor(T, ws); } catch { hands = null; }
+  if (typeof hands !== "function") { snap.unreadable = "the computer that holds this folder is not connected"; return snap; }
+  let r = null;
+  try {
+    r = await Promise.race([
+      hands("fs_list", { path: ws.root }),
+      new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: "the computer that holds this folder did not answer in time" }), IDE_PEEK_TIMEOUT_MS)),
+    ]);
+  } catch (e) { r = { ok: false, error: String((e && e.message) || e) }; }
+  if (!r || r.ok === false) {
+    snap.unreadable = String((r && (r.error || r.reason)) || "the folder could not be listed").slice(0, 200);
+    return snap;
+  }
+  const all = Array.isArray(r.entries) ? r.entries : [];
+  snap.truncated = all.length > IDE_PEEK_ENTRIES;
+  snap.entries = all.slice(0, IDE_PEEK_ENTRIES).map((e) => ({
+    name: String((e && e.name) || "").slice(0, 160),
+    type: e && e.type === "dir" ? "dir" : "file",
+    size: Number(e && e.size) || 0,
+  })).filter((e) => e.name);
+  snap.empty = snap.entries.length === 0;
+  return snap;
+}
+
+/*
+ * The switches the person flipped on the planning page. Only the CLIENT knows these (they are
+ * screen state, not server state), so they arrive on the wire and are treated as untrusted display
+ * text: label/value pairs, hard length caps, no structure the prompt depends on. The worst a
+ * doctored payload can do is put its own words in a settings list the model is told is the user's
+ * own configuration, which is no more reach than typing the same words into the chat.
+ */
+function ideSettingsFromBody(raw) {
+  if (!Array.isArray(raw)) return null;
+  const flat = (v) => String(v == null ? "" : v).replace(/[\r\n\t]+/g, " ").trim();
+  const out = [];
+  for (const item of raw.slice(0, PROJECT_SETTINGS_SHOWN)) {
+    if (!item || typeof item !== "object") continue;
+    const label = flat(item.label).slice(0, 80);
+    const value = flat(item.value).slice(0, 400);
+    if (label && value) out.push({ label, value });
+  }
+  return out.length ? out : null;
 }
 
 // One logical model turn. Provider output ceilings are chunk boundaries, not task boundaries:

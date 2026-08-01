@@ -230,4 +230,37 @@ assert.equal(fallbackStorage[0].pendingAttachments[0].kind, "image_ref",
 assert.equal(fallbackStorage[0].pendingAttachments[1].text, "",
   "the quota fallback retained staged text bytes");
 
-console.log("session_ui_test: per-chat model, budget, draft, and attachment state are pinned");
+/*
+ * THE PHONE'S CONVERSATION ARCHIVE (Fred, 2026-08-01: "in the mobile version when you hit the left
+ * side hamburger menu to start a new chat and hit start new chat it seems to delete the chat you
+ * were on before and replaces it with the new one. on mobile there is no history of chats
+ * available.")
+ *
+ * Nothing was ever deleted. What the phone showed was a list capped at 42% of a drawer that also
+ * scrolled, roughly two and a half rows, so a fresh "New chat" filled the visible strip and every
+ * older conversation sat below an edge that a touch gesture could not reliably reach. These pin
+ * both halves of the repair.
+ */
+assert.match(app, /function newChat\(\)[\s\S]{0,1600}chats\.unshift\(c\)/,
+  "starting a new chat must ADD to the list, never replace it");
+assert.doesNotMatch(app, /function newChat\(\)[\s\S]{0,1600}chats\s*=\s*\[/,
+  "starting a new chat must never rebuild the chat array");
+assert.match(app, /const isUntouched = \(c\)[\s\S]{0,200}!c\.messages\.length/,
+  "an untouched chat must be recognisable");
+assert.match(app, /function newChat\(\)[\s\S]{0,400}if \(isUntouched\(current\)\)[\s\S]{0,260}return;/,
+  "pressing New on an already-blank chat must return to it, not stack a twin");
+assert.match(app, /head\.textContent = "Conversation Archive"[\s\S]{0,80}chats\.length/,
+  "the drawer must say how many conversations it holds");
+
+const vault = readFileSync(new URL("./public/dominion-vault.css", import.meta.url), "utf8");
+const phone = vault.slice(vault.indexOf("@media (max-width: 900px)"), vault.indexOf("/* Panel sheets"));
+assert.match(phone, /#chatlist\s*\{[^}]*max-height:\s*none/,
+  "the phone drawer must not cap the conversation list to a peephole");
+assert.match(phone, /#chatlist\s*\{[^}]*overflow:\s*visible/,
+  "the phone must have ONE scroller (the drawer), never a list nested inside it");
+assert.match(phone, /#chatlist\s*\{[^}]*flex:\s*0 0 auto/,
+  "without flex:0 0 auto the flex column shrinks the list straight back to the peephole");
+assert.match(phone, /\.sb-head \.h \{[^}]*display:\s*block/,
+  "the phone drawer must name itself: it is a modal sheet with no other context");
+
+console.log("session_ui_test: per-chat model, budget, draft, attachment state, and the phone archive are pinned");
