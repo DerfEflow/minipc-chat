@@ -435,22 +435,60 @@ export function createIdeJobs({
 
   const activeFor = (uid) => listFor(uid).filter((j) => !j.done);
 
+  /*
+   * HARD RULE R2 (Fred, 2026-08-02). A build that ended UNFINISHED must not vanish.
+   *
+   * `publish()` sets job.done = true for every terminal type, and activeFor() drops anything done.
+   * `checkpoint` is terminal-but-unfinished, so a checkpointed build left the active rail the
+   * instant it was saved and landed in no other bucket. That is what Fred watched happen to
+   * Speak-Easy: he answered the Furnace question, and the project fell off the interface with no
+   * outcome shown anywhere.
+   *
+   * `done` is the ONLY outcome allowed to disappear quietly. Everything else — checkpoint, error,
+   * stopped, interrupted — belongs here until the user resumes or dismisses it.
+   */
+  const UNFINISHED_OUTCOMES = new Set(["checkpoint", "error", "stopped"]);
+  const isUnfinished = (j) => !!j.done && (UNFINISHED_OUTCOMES.has(String(j.outcome || "")) || !!j.interrupted);
+  const needsAttentionFor = (uid) => listFor(uid).filter(isUnfinished);
+
+  /*
+   * What a status rail should render: everything still running, plus everything that stopped short.
+   * Callers that previously used activeFor() alone were structurally unable to show the second
+   * group, which is why the bug was invisible from the client side.
+   */
+  const openFor = (uid) => listFor(uid).filter((j) => !j.done || isUnfinished(j));
+
   function summarize(j) {
     // The last event that carries user-facing progress, so a status rail can render without
     // replaying the whole journal.
-    let lastMove = null, lastCost = null, pending = null;
+    let lastMove = null, lastCost = null, pending = null, terminal = null;
     for (const ev of j.events) {
       // A move after a question means the question was answered and work resumed, so the pending
       // prompt clears. Terminal events clear it too: a finished job is never still asking.
       if (ev.type === "move") { lastMove = ev; pending = null; }
       else if (ev.type === "cost") lastCost = ev;
       else if (ev.type === "need_input") pending = ev;
-      else if (ev.type === "answer" || isTerminal(ev.type)) pending = null;
+      else if (ev.type === "answer" || isTerminal(ev.type)) { pending = null; if (isTerminal(ev.type)) terminal = ev; }
     }
+    /*
+     * R2: the reason a build stopped short travels WITH the summary. A rail that knows only
+     * `done: true` cannot tell a finished build from an abandoned one, and that is precisely the
+     * distinction the user needs at a glance.
+     */
+    const unfinished = isUnfinished(j);
+    const remaining = terminal && Array.isArray(terminal.remaining) ? terminal.remaining.filter(Boolean) : [];
     return {
       id: j.id, uid: j.uid, workspaceId: j.workspaceId, kind: j.kind,
       startedAt: j.startedAt, endedAt: j.endedAt,
       done: j.done, stopped: j.stopped, interrupted: j.interrupted, outcome: j.outcome,
+      unfinished,
+      remainingCount: remaining.length,
+      remaining: remaining.slice(0, 20),
+      // One plain sentence a status rail can render without interpreting anything.
+      why: unfinished
+        ? (terminal && terminal.message ? String(terminal.message).slice(0, 240)
+           : remaining[0] ? String(remaining[0]).slice(0, 240) : "This build stopped before it finished.")
+        : "",
       // "waiting" is deliberately distinct from "running": a frozen job is spending nothing, and
       // a status rail that shows a spinner for it would be lying about both.
       waiting: !j.done && !!pending,
@@ -526,7 +564,8 @@ export function createIdeJobs({
    */
   const runningCount = () => { let n = 0; for (const j of INDEX.values()) if (!j.done) n++; return n; };
 
-  return { create, emit, finish, stop, get, listFor, activeFor, attach, loadFromDisk, summarize, waitForAnswer, dispose,
+  return { create, emit, finish, stop, get, listFor, activeFor, needsAttentionFor, openFor,
+           attach, loadFromDisk, summarize, waitForAnswer, dispose,
            runningCount,
            get size() { return INDEX.size; } };
 }

@@ -326,6 +326,96 @@ export function verifyCommandFor(packageJsonText) {
 }
 
 /*
+ * HARD RULE R8 (Fred, 2026-08-02). VERIFICATION MUST DISCOVER THE PROJECT IT IS ACTUALLY IN.
+ *
+ * verificationPlanFor() above reads exactly one ROOT package.json. That is why the Speak-Easy build
+ * (ide_656a18b1-254) logged, three separate times:
+ *
+ *   "Nothing to verify: no package.json scripts, so there is nothing to run."
+ *
+ * It is a Gradle/Android project with a Node server in server/. There is no root package.json, so
+ * nothing was ever compiled, and a 660-line transcription route that no entrypoint registers went
+ * out the door. `tsc` in server/ takes two seconds and would have caught it.
+ *
+ * Discovery now walks the listing the node already returns and recognises project markers wherever
+ * they sit. Each command carries the directory it must run in. An unrecognised stack is NOT a pass:
+ * it produces zero commands, and R7 turns "no commands" into "cannot be called finished".
+ */
+const dirOf = (p) => { const i = String(p).lastIndexOf("/"); return i < 0 ? "" : String(p).slice(0, i); };
+const baseOf = (p) => { const i = String(p).lastIndexOf("/"); return i < 0 ? String(p) : String(p).slice(i + 1); };
+
+export async function discoverVerificationPlan({ entries = [], readFile = async () => "", maxProjects = 6 } = {}) {
+  const paths = [...new Set((entries || [])
+    .map((e) => String((e && (e.path || e.name)) || e || "").replace(/\\/g, "/").replace(/^\.?\/+/, ""))
+    .filter(Boolean))];
+  const has = (name) => paths.filter((p) => baseOf(p).toLowerCase() === name.toLowerCase());
+  const commands = [];
+  const seenDirs = new Set();
+  const notes = [];
+
+  // ---- Node / TypeScript, at ANY depth (this is the nested server/ case) ----------------------
+  for (const pkgPath of has("package.json").slice(0, maxProjects)) {
+    const dir = dirOf(pkgPath);
+    if (/(^|\/)node_modules(\/|$)/.test(pkgPath) || seenDirs.has("node:" + dir)) continue;
+    seenDirs.add("node:" + dir);
+    let scripts = null;
+    try { scripts = (JSON.parse(String(await readFile(pkgPath) || "{}")) || {}).scripts || null; } catch {}
+    const declared = scripts ? VERIFY_SCRIPT_ORDER.filter((n) => typeof scripts[n] === "string" && scripts[n].trim()) : [];
+    for (const name of declared) {
+      commands.push({ name: (dir ? dir + ":" : "") + name, dir, cmd: "npm run " + name + " --silent",
+        needsInstall: true, why: (dir ? dir + "/" : "") + "package.json defines a " + name + " script" });
+    }
+    // A TS project that declares no check script still compiles. Not compiling it is the gap.
+    if (!declared.length && paths.includes(dir ? dir + "/tsconfig.json" : "tsconfig.json")) {
+      commands.push({ name: (dir ? dir + ":" : "") + "tsc", dir, cmd: "npx --yes tsc --noEmit",
+        needsInstall: true, why: (dir ? dir + "/" : "") + "tsconfig.json exists but no check script is declared" });
+    }
+  }
+
+  // ---- Gradle / Android ------------------------------------------------------------------------
+  const gradleRoots = [...new Set([...has("settings.gradle"), ...has("settings.gradle.kts")].map(dirOf))];
+  for (const dir of gradleRoots.slice(0, maxProjects)) {
+    if (seenDirs.has("gradle:" + dir)) continue;
+    seenDirs.add("gradle:" + dir);
+    const wrapper = paths.some((p) => p === (dir ? dir + "/gradlew" : "gradlew")
+      || p === (dir ? dir + "/gradlew.bat" : "gradlew.bat"));
+    if (!wrapper) {
+      /*
+       * No wrapper means no pinned Gradle and no way to build. This is a real blocker, reported as
+       * itself rather than silently skipped. Speak-Easy shipped with no gradlew at all.
+       */
+      notes.push((dir ? dir + "/" : "") + "is a Gradle project with no gradlew wrapper, so it cannot be built");
+      continue;
+    }
+    const gw = (dir ? dir + "/" : "") + "gradlew";
+    const isAndroid = paths.some((p) => /(^|\/)AndroidManifest\.xml$/i.test(p));
+    commands.push({ name: (dir ? dir + ":" : "") + (isAndroid ? "assembleDebug" : "build"),
+      dir, cmd: (process.platform === "win32" ? ".\\gradlew.bat " : "./gradlew ")
+        + (isAndroid ? "assembleDebug" : "build") + " --console=plain --no-daemon",
+      why: gw + " exists" + (isAndroid ? " and an AndroidManifest.xml was written" : "") });
+  }
+
+  // ---- Other ecosystems -------------------------------------------------------------------------
+  for (const [marker, name, cmd] of [
+    ["Cargo.toml", "cargo check", "cargo check --quiet"],
+    ["go.mod", "go build", "go build ./..."],
+  ]) {
+    for (const p of has(marker).slice(0, maxProjects)) {
+      const dir = dirOf(p);
+      if (seenDirs.has(marker + ":" + dir)) continue;
+      seenDirs.add(marker + ":" + dir);
+      commands.push({ name: (dir ? dir + ":" : "") + name, dir, cmd, why: (dir ? dir + "/" : "") + marker + " exists" });
+    }
+  }
+
+  const why = commands.length
+    ? "discovered " + commands.map((c) => c.name).join(", ")
+    : (notes.length ? notes.join("; ")
+       : "no recognised project markers (package.json, settings.gradle, Cargo.toml, go.mod) were found in the workspace");
+  return { commands, why, blockers: notes };
+}
+
+/*
  * Build the message pair for one move. The system string is the frozen constant; everything
  * variable goes in the user turn, which is what keeps the cacheable prefix identical across every
  * move of every build.
@@ -594,15 +684,53 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
   }
 
   async function verify(job, workspace) {
+    const rootPath = workspace.root.replace(/[\\/]+$/, "");
     let pkg = "";
     try {
-      const r = await hands("fs_read", { path: workspace.root.replace(/[\\/]+$/, "") + "/package.json", maxBytes: 20000 });
+      const r = await hands("fs_read", { path: rootPath + "/package.json", maxBytes: 20000 });
       pkg = (r && (r.content || r.text)) || "";
     } catch {}
-    const { commands, why } = verificationPlanFor(pkg);
+
+    /*
+     * R8: discover across the whole workspace, not just the root package.json. The listing is the
+     * same call the Furnace already makes, so this costs one fs_list and finds Gradle projects,
+     * nested Node servers, and TypeScript that declares no check script.
+     */
+    let commands = [], why = "", blockers = [];
+    try {
+      const listed = await hands("fs_list", { path: rootPath, depth: 4, maxEntries: 1200 });
+      const entries = (listed && (listed.entries || listed.files || listed.items)) || [];
+      const rel = entries.map((e) => String((e && (e.path || e.name)) || e || "")
+        .replace(/\\/g, "/").replace(rootPath.replace(/\\/g, "/"), "").replace(/^\/+/, "")).filter(Boolean);
+      const discovered = await discoverVerificationPlan({
+        entries: rel,
+        readFile: async (p) => {
+          if (p === "package.json" && pkg) return pkg;
+          try {
+            const r = await hands("fs_read", { path: rootPath + "/" + p, maxBytes: 20000 });
+            return (r && (r.content || r.text)) || "";
+          } catch { return ""; }
+        },
+      });
+      commands = discovered.commands; why = discovered.why; blockers = discovered.blockers || [];
+    } catch {}
+
+    // If the listing failed entirely, fall back to the original root-package.json behaviour rather
+    // than losing verification altogether.
+    if (!commands.length && !blockers.length) {
+      const fallback = verificationPlanFor(pkg);
+      if (fallback.commands.length) { commands = fallback.commands.map((c) => ({ ...c, dir: "", needsInstall: true })); why = fallback.why; }
+      else if (!why) why = fallback.why;
+    }
+
     if (!commands.length) {
-      jobs.emit(job.id, { type: "run", skipped: true, message: "Nothing to verify: " + why + "." });
-      return { ran: false, ok: true, output: "", cmd: "", commands: [], failed: [] };
+      /*
+       * R7 lives in the caller: `ran: false` is now a completion blocker, not a shrug. The message
+       * says what was looked for so the gap is actionable instead of mysterious.
+       */
+      jobs.emit(job.id, { type: "run", skipped: true, ok: false,
+        message: "Nothing could be verified: " + why + ". This build cannot be called finished." });
+      return { ran: false, ok: true, output: "", cmd: "", commands: [], failed: [], why, blockers };
     }
     /*
      * A workshop has no command line, so the checks cannot run. Say that plainly and count the work
@@ -624,12 +752,28 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
      * all: four red "not recognized" lines blame the code for the absence of a toolchain, and that
      * is the confusion this whole path produced.
      */
-    const dep = await installDeps(job, workspace.root.replace(/[\\/]+$/, ""), pkg);
-    if (!dep.ok) {
-      jobs.emit(job.id, { type: "run", ok: false, command: "npm install",
-        output: "The project's dependencies did not install, so its checks could not run." });
-      return { ran: false, ok: false, toolingBroken: true, output: dep.output || "npm install failed",
-               cmd: "npm install", commands: [], failed: [{ name: "install", cmd: "npm install", ok: false, output: dep.output || "" }] };
+    /*
+     * R8: install per project directory. A nested server/ needs its own node_modules, and the old
+     * single root install silently did nothing for it.
+     */
+    const installDirs = [...new Set(commands.filter((c) => c.needsInstall).map((c) => c.dir || ""))];
+    for (const dir of installDirs) {
+      let dirPkg = pkg;
+      if (dir) {
+        try {
+          const r = await hands("fs_read", { path: rootPath + "/" + dir + "/package.json", maxBytes: 20000 });
+          dirPkg = (r && (r.content || r.text)) || "";
+        } catch { dirPkg = ""; }
+      }
+      if (!dirPkg) continue;
+      const dep = await installDeps(job, dir ? rootPath + "/" + dir : rootPath, dirPkg);
+      if (!dep.ok) {
+        jobs.emit(job.id, { type: "run", ok: false, command: "npm install" + (dir ? " (" + dir + ")" : ""),
+          output: "The project's dependencies did not install, so its checks could not run." });
+        return { ran: false, ok: false, toolingBroken: true, output: dep.output || "npm install failed",
+                 cmd: "npm install", commands: [], failed: [{ name: "install", cmd: "npm install", ok: false, output: dep.output || "" }],
+                 why: "dependency install failed in " + (dir || "the project root") };
+      }
     }
 
     const results = [];
@@ -638,8 +782,10 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       try {
         // No "&&": the node runs PowerShell 5.1 on Windows, where "&&" is a parse error. Each
         // discovered check is dispatched separately so every result remains attributable.
+        // R8: each check runs in ITS OWN directory. A nested server's `tsc` must not be run from
+        // the repository root, where there is no tsconfig.
         const r = await hands("shell_run", {
-          command: "cd \"" + workspace.root + "\"; " + check.cmd,
+          command: "cd \"" + workspace.root + (check.dir ? "/" + check.dir : "") + "\"; " + check.cmd,
           timeoutMs: VERIFY_TIMEOUT_MS,
         });
         const rawCode = r && (r.code ?? r.exitCode);
@@ -692,6 +838,8 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       cmd: results.length === 1 ? results[0].cmd : results.map((r) => r.cmd).join("; "),
       commands: results,
       failed,
+      why,
+      blockers,
     };
   }
 

@@ -4686,15 +4686,68 @@ async function runIdeBuild(job, {
             [phrase("furnace_fix", reg), phrase("furnace_finish", reg)]);
           if (answer === null) return;
           if (ANSWER.fix.test(answer)) {
+            /*
+             * HARD RULE R4 (Fred, 2026-08-02). A REPAIR MOVE MUST BE ABLE TO WRITE THE FILES THAT
+             * ARE MISSING.
+             *
+             * This move used to be scoped `files: written` — the files the build had ALREADY
+             * produced. The missing files are by definition not in that set, so when the audit said
+             * "MainActivity.kt does not exist" and Fred said "fix it", the repair was handed a file
+             * list that structurally excluded the very thing it was asked to create.
+             *
+             * Speak-Easy (ide_656a18b1-254) is the proof: told to close 6 gaps, it rewrote 5 files
+             * that already existed (libs.versions.toml, app/build.gradle.kts, AndroidManifest.xml,
+             * strings.xml, themes.xml), created NONE of the 20 planned-but-absent files, and
+             * reported state:"done". Fred was told it was fixed. Nothing was fixed.
+             *
+             * The scope is now written ∪ planned-but-never-produced, with the MISSING files first
+             * so that a cap can never truncate away the only files that matter.
+             */
+            const missingPlanned = [...expectedFiles].filter((file) => {
+              const normalized = String(file || "").trim().replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase();
+              return normalized && !coveredFiles.has(normalized);
+            });
+            // Paths the deterministic sweep named directly (these exist but carry unfinished marks).
+            const flaggedPaths = [...new Set(findings.map((f) => f.path).filter(Boolean))];
+            const fixScope = [...new Set([...missingPlanned, ...flaggedPaths, ...written])].slice(0, MAX_FILES_PER_MOVE);
+
+            if (missingPlanned.length) {
+              ideJobs.emit(job.id, { type: "run", command: "furnace repair scope", ok: true,
+                output: "Repairing " + findingCount + " finding(s). " + missingPlanned.length +
+                  " planned file(s) were never written and are included in this repair:\n" +
+                  missingPlanned.slice(0, 25).join("\n") });
+            }
+
             const fixMove = { id: "furnace-fix",
               title: reg === "technical" ? "Close the audit findings" : "Finish the unfinished pieces",
               why: "The honesty audit found: " + findings.map((f) => f.path + ":" + f.line + " " + f.kind)
-                .concat(gaps.map((g) => g.bullet + " :: " + g.why)).join("; ").slice(0, 900),
-              files: written };
+                .concat(gaps.map((g) => g.bullet + " :: " + g.why)).join("; ").slice(0, 900)
+                + (missingPlanned.length
+                    ? "\n\nThese planned files DO NOT EXIST YET and must be created in full, not referenced:\n"
+                      + missingPlanned.slice(0, 40).join("\n")
+                    : ""),
+              files: fixScope };
             const fixed = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt });
             spend(fixed && fixed.costUsd);
             if (fixed && fixed.ok) markCovered(fixed.covered);
             if (!fixed || !fixed.ok) knownIncomplete.push("The Furnace findings remained after automatic repair.");
+
+            /*
+             * HARD RULE R5. A repair is not closed on the repairing model's own say-so. Re-check the
+             * specific files it was asked to create; anything still absent is named plainly and
+             * carried to the completion gate, which can then never emit `done`.
+             */
+            const stillMissing = [...expectedFiles].filter((file) => {
+              const normalized = String(file || "").trim().replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase();
+              return normalized && !coveredFiles.has(normalized);
+            });
+            if (stillMissing.length) {
+              ideJobs.emit(job.id, { type: "run", command: "furnace repair check", ok: false,
+                output: "The repair did not produce " + stillMissing.length + " of the files it was asked for:\n"
+                  + stillMissing.slice(0, 25).join("\n") });
+              knownIncomplete.push(...stillMissing.slice(0, 25).map((file) =>
+                "Still missing after the repair you approved: " + file + "."));
+            }
           } else {
             const remaining = findings.map((f) => f.path + ":" + f.line + " " + f.kind)
               .concat(gaps.map((g) => g.bullet + (g.why ? " — " + g.why : "")));
@@ -4817,16 +4870,48 @@ async function runIdeBuild(job, {
       }
     }
 
+    /*
+     * HARD RULE R7 (Fred's ruling, 2026-08-02): UNVERIFIABLE MEANS INCOMPLETE. ALWAYS.
+     *
+     * The old status expression read:
+     *   uniqueRemaining.length || (finalVerification.ran && !finalVerification.ok) ? "partial" : "completed"
+     * When verification never ran, `finalVerification.ran` is false, so the whole clause collapsed
+     * and a build with no other findings evaluated to "completed" — never compiled, never executed,
+     * never tested, and called finished.
+     *
+     * Speak-Easy hit this three times over. It is a Gradle project with a Node server in server/,
+     * and discovery only ever parsed a ROOT package.json, so the journal reads:
+     *   "Nothing to verify: no package.json scripts, so there is nothing to run."
+     * Nothing was ever built. A single `tsc` in server/ would have caught a 660-line transcription
+     * route that no entrypoint registers (POST /api/transcribe answers 404).
+     *
+     * A build that executed no check may not reach `done`. It checkpoints and says so.
+     */
+    if (!finalVerification.ran) {
+      knownIncomplete.push(
+        "Nothing was compiled, run, or tested in this build, so it cannot be called finished. " +
+        (finalVerification.why ? "Verification found no checks it could run: " + String(finalVerification.why).slice(0, 240) + "."
+                               : "No runnable check was discovered for this project type."));
+      recordIdeSteering(
+        "unverified_build",
+        resolved.review || resolved.build_code || planModel,
+        "A build reached the completion gate having executed no verification at all.",
+        "Never claim completion without evidence; checkpoint and name the missing checks.",
+        String(finalVerification.why || "no verification plan was discovered").slice(0, 600),
+      );
+    }
+
     const validationEvidence = finalVerification.ran
       ? (finalVerification.commands || []).map((check) => ({
           name: check.name || check.cmd || "verification",
           status: check.ok ? "passed" : "failed",
           detail: String(check.output || "").slice(-500),
         }))
-      : [{ name: "declared project checks", status: "not_applicable", detail: "No check, lint, test, or build script was declared." }];
+      : [{ name: "declared project checks", status: "not_run",
+           detail: "Nothing was compiled, run, or tested. " + String(finalVerification.why || "No runnable check was discovered.") }];
     const uniqueRemaining = [...new Set(knownIncomplete.filter(Boolean))];
     const completionEvidence = {
-      status: uniqueRemaining.length || (finalVerification.ran && !finalVerification.ok) ? "partial" : "completed",
+      status: uniqueRemaining.length || !finalVerification.ran || (finalVerification.ran && !finalVerification.ok) ? "partial" : "completed",
       result: uniqueRemaining.length ? "The build reached a truthful checkpoint." : "The requested build completed and passed its discovered completion gate.",
       changes: writtenAtGate,
       validation: validationEvidence,

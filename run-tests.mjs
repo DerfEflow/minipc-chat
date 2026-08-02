@@ -12,7 +12,18 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const files = readdirSync(HERE).filter((n) => n.endsWith("_test.mjs")).sort();
+/*
+ * The gate scanned ONLY this directory, so hands/*_test.mjs never ran and could never block a
+ * deploy. The hands node is where the 2026-07-22 F:\ baseline incident happened — an empty snapshot
+ * reported as a real rollback point — which makes it precisely the code that most needs the
+ * mechanical backstop. Subdirectories holding real modules are scanned too.
+ */
+const TEST_DIRS = ["", "hands"];
+const files = TEST_DIRS.flatMap((sub) => {
+  let names = [];
+  try { names = readdirSync(sub ? join(HERE, sub) : HERE); } catch { return []; }
+  return names.filter((n) => n.endsWith("_test.mjs")).map((n) => (sub ? sub + "/" + n : n));
+}).sort();
 
 let passed = 0, failed = 0;
 const failures = [];

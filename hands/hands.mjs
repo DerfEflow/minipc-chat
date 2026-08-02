@@ -566,22 +566,178 @@ function gitIn(dir, gitArgs, timeoutMs = 30000) {
   });
 }
 
+/*
+ * HARD RULES R19-R21 (Fred, 2026-08-02). THE BASELINE IS THE ROLLBACK GUARANTEE, SO IT MUST BE REAL.
+ *
+ * What this replaces, and why. The previous three lines were:
+ *
+ *     await gitIn(dir, ["init"]);
+ *     await gitIn(dir, ["add", "-A"]);
+ *     await gitIn(dir, ["commit", "--allow-empty", "-m", "hands: baseline snapshot"]);
+ *
+ * On 2026-07-22 a work order was pointed at `F:\` itself. HANDS_ROOTS permits a drive root (the
+ * check is `t === n`), so nothing objected. `git add -A` then swept the whole 650 GB drive —
+ * $RECYCLE.BIN, browser profiles holding Login Data and Cookies, pgsql binaries — writing 48,212
+ * loose objects. On exFAT with a 512 KB allocation unit that cost 28 GB on disk for 4.40 GiB of
+ * content. The add was interrupted, leaving a stale index.lock.
+ *
+ * Then `--allow-empty` let the commit SUCCEED with git's canonical empty tree, 4b825dc6…, and
+ * claudeBaseline returned that SHA as though a snapshot existed. Every claude_code run afterwards
+ * believed it had a rollback point. None of them did. That is the same shape as every other failure
+ * in this codebase's history: a step that failed, reported success, and told nobody.
+ *
+ * Three guarantees now:
+ *   R20  never `git init` at a filesystem/drive root, and never above a file ceiling. The refusal
+ *        is returned as a BLOCKER so the caller declines the job instead of mutating unsnapshotted.
+ *   R21  a deny-list is written to .git/info/exclude BEFORE the first add, so credential stores and
+ *        junk trees can never enter the object database at all.
+ *   R19  `--allow-empty` is banned, and the resulting tree is verified not to be the empty tree.
+ */
+const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const MAX_BASELINE_FILES = 20000;
+
+// R21: never captured, under any circumstances. Credential stores first — these are the ones that
+// turned a disk-space incident into a privacy incident.
+const BASELINE_EXCLUDES = [
+  "# Written by the Dominion hands node before the baseline snapshot (HARD RULE R21).",
+  "# Credential stores — never captured.",
+  "Login Data", "Login Data For Account", "Web Data", "Cookies", "Trust Tokens", "Trust Tokens-journal",
+  "Safe Browsing Cookies", "*.keychain", "id_rsa", "id_ed25519", ".netrc", ".npmrc", ".pgpass",
+  "# Volume junk.",
+  "$RECYCLE.BIN/", "System Volume Information/", "*.lnk", "Thumbs.db", ".DS_Store", "lost+found/",
+  "# Browser profiles.",
+  "*browser-profile/", "*-browser-v*/", "Default/Cache/", "Default/Code Cache/", "Default/Service Worker/",
+  "# Dependency and build trees — restorable, enormous, and never the thing being rolled back.",
+  "node_modules/", ".next/", ".nuxt/", ".gradle/", "target/", "__pycache__/", ".venv/", "venv/",
+  "npm-cache/", "pnpm-store*/", ".pnpm-store/", "*.pack", "*.iso", "*.vmdk",
+  "# Database data directories.",
+  "pgsql_data/", "pgsql_bin/", "_pgdata/", "*.mdf", "*.ldf",
+];
+
+/*
+ * A filesystem root: "F:\", "F:/", "/", "\\server\share". Snapshotting one of these is never what
+ * a work order means, and it is what actually happened.
+ */
+function isFilesystemRoot(dir) {
+  const p = resolve(String(dir || "")).replace(/[\\/]+$/, "");
+  if (!p) return true;
+  if (/^[A-Za-z]:$/.test(p)) return true;              // F:  (drive root, trailing sep stripped)
+  if (p === "/" || p === "\\") return true;            // posix root
+  if (/^\\\\[^\\]+\\[^\\]+$/.test(p)) return true;     // \\server\share
+  return false;
+}
+
+/*
+ * Count entries with a hard early bail. O(cap), not O(drive): the walk stops the instant it exceeds
+ * the ceiling, so a 650 GB target costs the same as a 20,001-file one.
+ */
+function countFilesBounded(dir, cap) {
+  const SKIP = new Set([".git", "node_modules", "$RECYCLE.BIN", "System Volume Information", "lost+found"]);
+  let n = 0;
+  const stack = [dir];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try { entries = readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (SKIP.has(entry.name)) continue;
+        stack.push(join(current, entry.name));
+      } else {
+        if (++n > cap) return { count: n, exceeded: true };
+      }
+    }
+  }
+  return { count: n, exceeded: false };
+}
+
 async function claudeBaseline(dir) {
   try { mkdirSync(NOHOOKS_DIR, { recursive: true }); } catch {}
   const isRepo = (await gitIn(dir, ["rev-parse", "--is-inside-work-tree"])).out.trim() === "true";
+
   if (!isRepo) {
-    await gitIn(dir, ["init"]);
-    await gitIn(dir, ["add", "-A"]);
-    await gitIn(dir, ["commit", "--allow-empty", "-m", "hands: baseline snapshot"]);
+    // R20: refuse the shapes that produced the F:\ incident, BEFORE anything is written.
+    if (isFilesystemRoot(dir)) {
+      return { ok: false, head: "",
+        error: "Refusing to create a snapshot repository at the filesystem root " + dir + ". "
+          + "A baseline here would sweep the entire drive. Point the work order at a project folder." };
+    }
+    const { count, exceeded } = countFilesBounded(dir, MAX_BASELINE_FILES);
+    if (exceeded) {
+      return { ok: false, head: "",
+        error: "Refusing to create a snapshot repository at " + dir + ": it holds more than "
+          + MAX_BASELINE_FILES.toLocaleString() + " files. A baseline this large is not a rollback point, "
+          + "it is a copy of the disk. Point the work order at a project folder." };
+    }
+
+    const init = await gitIn(dir, ["init"]);
+    if (init.code !== 0) return { ok: false, head: "", error: "git init failed: " + (init.err || "").slice(0, 200) };
+
+    // R21: the deny-list lands in .git/info/exclude BEFORE the first add, so nothing on it can ever
+    // be hashed into the object database. info/exclude is used rather than .gitignore so the
+    // snapshot never leaves a stray tracked file behind in the user's project.
+    try {
+      const infoDir = join(dir, ".git", "info");
+      mkdirSync(infoDir, { recursive: true });
+      writeFileSync(join(infoDir, "exclude"), BASELINE_EXCLUDES.join("\n") + "\n", "utf8");
+    } catch (e) {
+      return { ok: false, head: "", error: "could not write the snapshot deny-list: " + String(e && e.message) };
+    }
+
+    const add = await gitIn(dir, ["add", "-A"], 180000);
+    if (add.code !== 0) {
+      return { ok: false, head: "",
+        error: "The baseline could not stage the project (git add failed: " + (add.err || "").slice(0, 200) + "). "
+          + "No rollback point exists, so the job was not started." };
+    }
+    // R19: NO --allow-empty. An interrupted add must fail the commit, not produce a hollow one.
+    const commit = await gitIn(dir, ["commit", "-m", "hands: baseline snapshot"], 180000);
+    if (commit.code !== 0 && !/nothing to commit/i.test(commit.out + commit.err)) {
+      return { ok: false, head: "",
+        error: "The baseline commit failed, so there is no rollback point: " + (commit.err || commit.out || "").slice(0, 200) };
+    }
   } else {
     const dirty = (await gitIn(dir, ["status", "--porcelain"])).out.trim();
-    if (dirty) { await gitIn(dir, ["add", "-A"]); await gitIn(dir, ["commit", "-m", "hands: pre-job snapshot"]); }
+    if (dirty) {
+      const add = await gitIn(dir, ["add", "-A"], 180000);
+      if (add.code !== 0) return { ok: false, head: "", error: "pre-job snapshot could not stage: " + (add.err || "").slice(0, 200) };
+      const commit = await gitIn(dir, ["commit", "-m", "hands: pre-job snapshot"], 180000);
+      if (commit.code !== 0 && !/nothing to commit/i.test(commit.out + commit.err)) {
+        return { ok: false, head: "", error: "pre-job snapshot commit failed: " + (commit.err || commit.out || "").slice(0, 200) };
+      }
+    }
   }
-  return (await gitIn(dir, ["rev-parse", "HEAD"])).out.trim();
+
+  const head = (await gitIn(dir, ["rev-parse", "HEAD"])).out.trim();
+  if (!head) return { ok: false, head: "", error: "the baseline produced no commit to roll back to" };
+
+  /*
+   * R19, the check that would have caught this on day one: a baseline whose tree is git's empty
+   * tree contains nothing. It is not a snapshot, and reporting it as one is the lie.
+   */
+  const tree = (await gitIn(dir, ["rev-parse", "HEAD^{tree}"])).out.trim();
+  if (!tree || tree === EMPTY_TREE_SHA) {
+    return { ok: false, head,
+      error: "The baseline commit is EMPTY (tree " + EMPTY_TREE_SHA.slice(0, 8) + "), so it is not a rollback point. "
+        + "This is the 2026-07-22 F:\\ failure mode; the job was not started." };
+  }
+  return { ok: true, head, tree };
 }
 
 async function runClaudeCode({ dir, title, instructions, canDelete, emit, timeoutMs }) {
-  const baseline = await claudeBaseline(dir);
+  /*
+   * R19/R20: no baseline, no job. Fred's standing rule is that nothing changes on his machines
+   * without a rollback path — which only means anything if the absence of one STOPS the work.
+   * Previously claudeBaseline() returned a bare SHA and its failures were unobservable, so a job
+   * whose snapshot had silently produced an empty tree ran anyway, unprotected.
+   */
+  const base = await claudeBaseline(dir);
+  if (!base.ok) {
+    journal({ kind: "baseline_refused", dir, error: base.error });
+    return { ok: false, baseline: "", blocked: true,
+      error: "No rollback point could be created, so nothing was run. " + base.error };
+  }
+  const baseline = base.head;
   const deleteRule = canDelete ? "" :
     "IMPORTANT: This folder is delete-protected. You may create and edit files, but do NOT delete files or remove their contents wholesale.\n";
   const prompt =

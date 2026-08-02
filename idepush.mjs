@@ -72,7 +72,26 @@ export function vapidAuth({ endpoint, publicKey, privateKey, subject, now = () =
  * Fred's escalation ruling, in one place so no caller can quietly invent its own policy:
  * questions, completion, and failure reach the user. Routine per-move progress never does.
  * Returns null when an event must stay silent.
+ *
+ * HARD RULE R1 (Fred, 2026-08-02): EVERY terminal state notifies. `checkpoint` is terminal — it is
+ * the honest "unfinished, work preserved" outcome — and it was missing from this function, so it
+ * returned null and said nothing. Combined with job.done being set for every terminal type, a
+ * checkpointed build left the active rail and announced nothing: Fred answered the Furnace's
+ * question, told it to fix six findings, and the entire project fell off the interface with no
+ * success, no failure, and no notification. The Speak-Easy build (ide_656a18b1-254) ended exactly
+ * this way.
+ *
+ * The silent list below is now enumerated explicitly rather than left as "everything else", and
+ * TERMINAL_ESCALATIONS is asserted to cover every member of TERMINAL at module load, so a future
+ * terminal state cannot be added without either a notification or a deliberate silent entry.
  */
+const SILENT_BY_DESIGN = new Set([
+  "move", "plan", "file", "diff", "run", "cost", "snapshot", "answer", "_lease",
+  // `stopped` is terminal but deliberately silent: the user pressed stop, so they already know.
+  // It still surfaces in the "needs attention" bucket (idejobs R2) — it just does not buzz a phone.
+  "stopped",
+]);
+
 export function escalationFor(event, { workspaceName = "" } = {}) {
   const type = String(event && event.type || "");
   const where = workspaceName ? " in " + workspaceName : "";
@@ -88,7 +107,32 @@ export function escalationFor(event, { workspaceName = "" } = {}) {
     return { urgency: "high", tag: "ide-error", title: "Build stopped",
       body: (event.message ? String(event.message).slice(0, 140) : "Something went wrong") + where };
   }
-  return null;   // move, plan, file, diff, run, cost, snapshot, stopped: silent by design
+  /*
+   * A checkpoint is the build telling the truth about being unfinished. That is MORE urgent than a
+   * clean finish, not less: there is work waiting on the user. The count comes first because
+   * "3 items need you" is actionable from a lock screen and "Checkpoint saved" is not.
+   */
+  if (type === "checkpoint") {
+    const remaining = Array.isArray(event.remaining) ? event.remaining.filter(Boolean) : [];
+    const n = remaining.length;
+    const lead = n === 1 ? "1 item still needs you" : n ? n + " items still need you" : "It stopped short of finished";
+    return { urgency: "high", tag: "ide-checkpoint",
+      title: "Build unfinished" + (workspaceName ? " — " + workspaceName : ""),
+      body: lead + (n ? ": " + String(remaining[0]).slice(0, 100) : (event.message ? ": " + String(event.message).slice(0, 100) : ".")) };
+  }
+  return null;   // SILENT_BY_DESIGN: routine progress, and `stopped` (the user pressed it themselves)
+}
+
+/*
+ * The construction guarantee behind R1: every terminal state must resolve to a notification. This
+ * runs at import, so a new terminal state that nobody wired up fails the test suite immediately
+ * instead of going silent in production for a fortnight.
+ */
+export function unnotifiedTerminals(terminalTypes) {
+  return [...terminalTypes].filter((type) => {
+    if (SILENT_BY_DESIGN.has(type)) return false;
+    return escalationFor({ type, remaining: [], message: "" }) === null;
+  });
 }
 
 /*
