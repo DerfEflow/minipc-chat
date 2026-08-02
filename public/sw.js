@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v161-dock-gap";
+const CACHE = "dominion-ai-v162-dock-reserve";
 const SHELL = [
   "/",
   "/index.html",
@@ -31,7 +31,7 @@ const SHELL = [
   "/dominion-cinematic-01.css?v=30",
   "/dominion-cinematic-02.css?v=30",
   "/dominion-cinematic-03.css?v=31",
-  "/dominion-cinematic-04.css?v=33",
+  "/dominion-cinematic-04.css?v=34",
   "/dominion-cinematic-05.css?v=30",
   "/dominion-cinematic-06.css?v=30",
   "/dominion-rendered-v2.css?v=41",

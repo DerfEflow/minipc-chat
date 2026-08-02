@@ -150,12 +150,33 @@ t("no width is left without navigation: the dock starts where the rail stops", (
   }
 });
 
-t("the dock still yields the bottom edge to nothing else", () => {
+/*
+ * The reserve has to be at least as tall as the bar it reserves for. The dock measures 69px in the
+ * wide band (measured at 760px and 1000px) and 60px on phones, where dominion-tenant.css shrinks
+ * it and reserves 64px. It shipped at 58px against 69px, so the last 11px of every page slid under
+ * the dock — found once for phones on 07-30, then reintroduced for 721-1180px on 08-01 by widening
+ * the block without carrying the correction along. Numbers, so the next widening cannot repeat it.
+ */
+t("the reserve is at least as tall as the dock it reserves for", () => {
   const c04 = readFileSync(new URL("./public/dominion-cinematic-04.css", import.meta.url), "utf8");
-  assert.match(c04, /html body\{padding-bottom:calc\(58px/,
-    "the page must keep its footing above the dock, at `html body` specificity (cinematic-05 loads later)");
-  assert.match(c04, /html body \.voice-bar\{bottom:calc\(66px/, "the voice bar steps up over the dock");
-  assert.match(c04, /html body #ide-flame\{bottom:calc\(70px/, "and so does the build flame");
+  const tenant = readFileSync(new URL("./public/dominion-tenant.css", import.meta.url), "utf8");
+  const DOCK_WIDE = 69, DOCK_PHONE = 60;
+
+  const reserve = Number((c04.match(/html body\{padding-bottom:calc\((\d+)px/) || [])[1]);
+  assert.ok(reserve >= DOCK_WIDE,
+    "the page reserves " + reserve + "px for a bar that measures " + DOCK_WIDE + "px, so the last " +
+    (DOCK_WIDE - reserve) + "px of every page slides underneath it");
+
+  const phoneReserve = Number((tenant.match(/html body \{ padding-bottom: calc\((\d+)px/) || [])[1]);
+  assert.ok(phoneReserve >= DOCK_PHONE,
+    "phones reserve " + phoneReserve + "px for a " + DOCK_PHONE + "px bar");
+
+  const floats = [["voice bar", /\.voice-bar\{bottom:calc\((\d+)px/], ["build flame", /#ide-flame\{bottom:calc\((\d+)px/]];
+  for (const [what, re] of floats) {
+    const px = Number((c04.match(re) || [])[1]);
+    assert.ok(px > DOCK_WIDE,
+      "the " + what + " sits " + px + "px up, inside a " + DOCK_WIDE + "px dock, so its bottom edge is hidden");
+  }
 });
 
 t("the keyboard-resize guard the 07-28 work DID ship is still there", () => {
