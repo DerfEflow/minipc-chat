@@ -203,14 +203,30 @@ Applies to every model Dominion keeps, now and later:
 
 `arcee-ai/trinity-large-thinking`, `qwen/qwen3-coder` (agentic coding with a 1M window, and NVIDIA's coding shelf tops out well below it), `deepseek/deepseek-r1`.
 
-### Catalog defects found while counting (fix in Phase A)
+### Catalog id check: NO defects. An earlier claim in this document was wrong.
 
-Comparing the shipped catalog against the live NVIDIA endpoint:
-- Catalog `minimax/minimax-m3` versus endpoint `minimaxai/minimax-m3`. Different vendor prefix.
-- Catalog `nvidia/nemotron-3-nano-omni-30b-a3b` versus endpoint `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`. Different suffix.
-- Catalog `nvidia/nemotron-3-super-120b-a12b:free`. The `:free` suffix is an OpenRouter convention and does not appear on NVIDIA's list.
+**Retracted 2026-08-03.** An earlier draft of this SOW, and the commit message on 0baeeab, claimed three NVIDIA catalog ids did not match the live endpoint and would throw at whoever selected them. **That was wrong**, and it was reached by comparing the catalog's `id` field against the endpoint's list without first checking whether a mapping layer existed. It does. Every NVIDIA entry carries a `directId` that is what actually goes on the wire:
 
-If any of those are wrong they throw an error at whoever selects them, and they are in production now. The catalog also prices `nemotron-3-ultra-550b-a55b` and GLM 5.2 while marking other NVIDIA entries free; on the developer tier those figures may all be wrong in Fred's favor.
+| Catalog `id` | `directId` sent to NVIDIA | Live? |
+|---|---|---|
+| `minimax/minimax-m3` | `minimaxai/minimax-m3` | yes |
+| `nvidia/nemotron-3-nano-omni-30b-a3b` | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | yes |
+| `nvidia/nemotron-3-super-120b-a12b:free` | `nvidia/nemotron-3-super-120b-a12b` | yes |
+
+The internal `id` is deliberately the OpenRouter slug so a model falls back to OpenRouter unchanged when the NVIDIA key is absent, which is the resolve-at-call-time design from the 07-28 SOW working as intended. All three map correctly.
+
+**The lesson is the one this document already preaches, applied to its own author:** the rule is not "check the list," it is "check the whole path." A comparison that skips a layer produces a confident wrong answer, which is exactly the failure Phase A exists to prevent.
+
+**Genuine drift found by `tools_audit.mjs` against live provider lists (2026-08-03):**
+- `qwen/qwen3-coder`: catalog says 1,000,000 context, live says **262,144**. This weakens the case for keeping it, since the 1M window was the argument (see survivors above).
+- `qwen/qwen3-vl-8b-instruct`: catalog 128,000 vs live 262,144. Being cut anyway.
+- `anthracite-org/magnum-v4-72b`, `thedrummer/unslopnemo-12b`: drift plus a tool-support undersell. Both being cut.
+
+No dead ids across OpenRouter (337 live), OpenAI (131), Anthropic (11), or DeepSeek (2). **`anthropic/claude-opus-4-8` is real**, which resolves a doubt raised earlier in this session.
+
+**The audit does not cover NVIDIA or Google at all.** That remains Phase A's job, and it is why the three ids above had to be checked by hand.
+
+Pricing still needs verification: the catalog prices `nemotron-3-ultra-550b-a55b` and GLM 5.2 while marking other NVIDIA entries free. On the developer tier those figures may be wrong in Fred's favor.
 
 ### The model dropdown, redesigned
 
@@ -348,7 +364,7 @@ The model is chosen per query. The user never sees a choice.
 
 | Query class | Model | Lane |
 |---|---|---|
-| General chat (the default path) | `openai/gpt-oss-120b` | NVIDIA, free |
+| General chat (the default path) | `openai/gpt-oss-120b` | NVIDIA, free. **See the timeout warning below before locking this in.** |
 | Science and math | `deepseek/deepseek-r1` | OpenRouter, kept for this |
 | Literary | `writer/palmyra-creative-122b` | NVIDIA, free |
 | Creative | `deepseek/deepseek-v4-flash` | DeepSeek direct |
@@ -356,6 +372,18 @@ The model is chosen per query. The user never sees a choice.
 | Personal, empathetic, high EQ | `meta/llama-3.3-70b-instruct` | NVIDIA |
 | Theological and philosophical | `nvidia/llama-3.1-nemotron-70b-instruct` | NVIDIA |
 | Business | `z-ai/glm-5.2` | NVIDIA |
+
+### Warning on the general chat pick, found in the catalog 2026-08-03
+
+`models.catalog.mjs` carries this note from the Wave 2 free-fleet probe, verbatim:
+
+> gpt-oss-120b timed out on the free tier; re-probe at the weekly audit.
+
+**The model Fred chose to carry the highest-volume path in the app has already failed a live probe once.** The 20B sibling is in the catalog and marked tools-verified; the 120B is not in the catalog because it did not answer. Two possibilities: the free tier could not serve it then and the developer-program quota changes that, or it is simply slow. **Phase A re-probes it before Simplify commits to it**, and Phase 6 carries a named fallback for the default route rather than discovering the problem in front of users.
+
+The same probe note also records that **`stepfun-ai/step-3.7-flash` was already probed and deliberately excluded**: it answered with tools, but undisclosed size and unclear specialty meant it brought nothing an existing seat lacked. It appears on the Phase A shortlist in this document and in the NVIDIA audit artifact. **Remove it.** It was rejected on evidence a week ago and I re-proposed it from the model list without checking the catalog's own history.
+
+**The catalog already has a curation doctrine, and it is the one to follow:** a seat joins only by beating or matching an existing seat on some axis. That predates the picker-hygiene variable proposed in the NVIDIA audit document, and the audit's shortlist should be re-scored against it rather than against a parallel standard invented alongside it.
 
 **Web search is not a route.** `web_search` already exists via SerpApi with `web_read` to pull a page in full, and the comment above it records Fred's original ask: search wired in so ANY model can look things up. Whichever model is answering calls the tool. No Perplexity integration, no new key, no new bill.
 
