@@ -10165,9 +10165,24 @@ const server = http.createServer(async (req, res) => {
     if (path.startsWith("/billing/")) return handleBilling(req, res, u);
     if (path.startsWith("/admin/") && path !== "/admin/restore-corpus") return handleAdmin(req, res, u);
     if (path.startsWith("/forge/")) return handleForge(req, res, u);
-    // The /guide/ prefix is kept on purpose. A cached client, a bookmarked owner page, or a
-    // half-deployed asset must not 404 on a support surface.
-    if (path.startsWith("/altana/") || path.startsWith("/guide/")) return handleAltana(req, res, u);
+    /*
+     * NAMED ENDPOINTS, NOT A PREFIX, AND THE DIFFERENCE WAS A LIVE BUG.
+     *
+     * This used to read `path.startsWith("/altana/")`. Altana's six face images live in
+     * public/altana/, so that prefix swallowed every request for `/altana/altana-aether.png` and
+     * answered it from the API handler, which 404s an unknown path. She mounted correctly, sat in
+     * the right corner at the right size with nothing on top of her, and rendered a 56-pixel
+     * transparent square, because a background-image that 404s leaves no trace in the DOM. Every
+     * client-side check said she was fine.
+     *
+     * Matching the three real endpoints instead means a static asset under public/altana/ falls
+     * through to the file server where it belongs, and a future asset added there cannot silently
+     * disappear the same way.
+     *
+     * The /guide/ aliases stay: a cached client or a bookmarked owner page must not 404 on a
+     * support surface just because the feature was renamed.
+     */
+    if (/^\/(?:altana|guide)\/(?:ask|complaints|complaint\/resolve)$/.test(path)) return handleAltana(req, res, u);
     if (path === "/connectors" || path.startsWith("/connectors/")) return handleConnectors(req, res, u);
 
     if (path === "/api/video" || path.startsWith("/api/video/")) return videoHttp.handle(req, res, u);

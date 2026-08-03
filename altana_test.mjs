@@ -306,8 +306,21 @@ function collectText(node) {
   assert.deepEqual(seen[4], { type: "work_list", items: [{ id: "1", title: "Roof estimate" }] });
 
   const text = collectText(panel);
-  assert.ok(text.includes("Here is how that works."), "help text is rendered in the panel, not just dispatched");
-  assert.ok(text.includes("Roof estimate"), "work_list items are rendered in the panel");
+  /*
+   * A LOOKUP'S RAW RESULT IS NO LONGER SHOWN, and that reversal is the point.
+   *
+   * This used to assert the help text appeared in the panel. That assertion was pinning the bug:
+   * Fred asked Altana who made Dominion and received two verbatim markdown sections of the
+   * knowledge file, because the model called search_help, the server answered with the document,
+   * and the panel handed the document to the human instead of back to the model.
+   *
+   * A lookup now rides a follow-up request carrying `toolResults`, and HER answer is what gets
+   * rendered. A work_list is still drawn directly, because a list of the user's own saved work is
+   * something to look at rather than something to reason about.
+   */
+  assert.ok(!text.includes("Here is how that works."),
+    "a lookup's raw text must go back to the model, never straight to the user");
+  assert.ok(text.includes("Roof estimate"), "work_list items are still rendered, being a list to look at");
   ok("every clientActions shape dispatches altana:action with the detail intact, and reads back honestly");
 }
 
@@ -453,4 +466,44 @@ function collectText(node) {
   ok("she is switched ON and the full loop is wired: module, stylesheet, listener, context hook");
 }
 
-console.log(`\n${passed}/21 checks passed - Altana mounts on body, rotates every ten sign-ins, guards her own anchoring, opens into a conversation that never claims more than clientActions actually dispatched, and is switched ON.`);
+
+/* ---- 16. her API route must not swallow her own face images -------------------------------- */
+{
+  /*
+   * SHE SHIPPED INVISIBLE FOR THIS (2026-08-03). The dispatch read
+   * `path.startsWith("/altana/")`, and her six faces live in public/altana/, so every request for
+   * /altana/altana-aether.png was answered by the API handler with a 404. She mounted correctly,
+   * in the right corner, at the right size, at full opacity, with nothing on top of her, and drew
+   * a 56-pixel transparent square. A background-image that 404s leaves NO trace in the DOM, so
+   * every client-side check reported her healthy.
+   *
+   * The lesson is the assertion: an API prefix and a static directory must never share a name.
+   */
+  const rawServer = readFileSync(new URL("./server.mjs", import.meta.url), "utf8");
+  /*
+   * Strip comments first. The fix carries a comment that QUOTES the broken prefix while explaining
+   * why it is gone, and a check for that string finds it in the explanation. This is the third
+   * assertion in this codebase to trip on its own documentation, after the model-picker check and
+   * the Simplify budget check, so it is worth saying plainly: when a test greps for a forbidden
+   * string, strip comments, or the sentence describing the rule will fail the rule.
+   */
+  const server = rawServer.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  assert.ok(!/path\.startsWith\("\/altana\/"\)/.test(server),
+    "a bare /altana/ prefix swallows public/altana/*.png and renders her invisible");
+
+  // Greedy to the LAST slash before `.test(path)`: the pattern contains (?: ... ) groups and escaped
+  // slashes, so a lazy or bracket-excluded match stops inside its own syntax.
+  const m = server.match(/if \((\/.+\/)\.test\(path\)\) return handleAltana/);
+  assert.ok(m, "the Altana dispatch must match named endpoints, not a prefix");
+  const re = new RegExp(m[1].slice(1, -1));
+  for (const p of ["/altana/ask", "/altana/complaints", "/altana/complaint/resolve",
+                   "/guide/ask", "/guide/complaints", "/guide/complaint/resolve"]) {
+    assert.ok(re.test(p), `${p} must still reach the API`);
+  }
+  for (const face of ALTANA_FACES) {
+    assert.ok(!re.test(`/altana/altana-${face}.png`), `/altana/altana-${face}.png must fall through to the file server`);
+  }
+  ok("her API matches named endpoints only, so her face images still reach the file server");
+}
+
+console.log(`\n${passed}/22 checks passed - Altana mounts on body, rotates every ten sign-ins, guards her own anchoring, opens into a conversation that never claims more than clientActions actually dispatched, and is switched ON.`);

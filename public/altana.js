@@ -291,6 +291,28 @@ function dispatchAction(action, doc) {
   try { doc.dispatchEvent(new CustomEvent("altana:action", { detail: action })); } catch {}
 }
 
+/*
+ * Hand a lookup's result back to her and let HER answer it.
+ *
+ * Without this, the raw tool output is what the user reads: a question about who built Dominion
+ * returned two verbatim sections of the knowledge file, because the model asked for a document and
+ * the panel handed the document to the human instead of to the model.
+ *
+ * Deliberately fire-and-forget. The first answer is already on screen, so if this second call
+ * fails the user keeps what they had and loses only the polish. Failing loudly here would turn a
+ * cosmetic problem into a broken turn.
+ */
+function answerFromLookup(doc, requestBody, lookups) {
+  altanaState("thinking", doc);
+  postAsk({ ...requestBody, toolResults: lookups })
+    .then((data) => {
+      if (data && data.reply) appendMessage(doc, "altana", data.reply);
+      if (data && data.fallback && data.fallback.text) appendMessage(doc, "system", data.fallback.text);
+    })
+    .catch(() => {})
+    .finally(() => altanaState("idle", doc));
+}
+
 const panels = new WeakMap();
 
 function ensurePanel(doc) {
@@ -456,13 +478,37 @@ function appendConfirm(doc, entry, originalBody) {
 function handleAskResult(doc, data, requestBody) {
   if (data.reply) appendMessage(doc, "altana", data.reply);
 
+  /*
+   * AN ACTION IS NOT A LOOKUP, AND THEY MUST NOT BE SHOWN THE SAME WAY.
+   *
+   * "Switch to dark mode" produces an ACTION. Nothing to read; the sentence the server wrote
+   * already says what happened, and rendering the action too would just repeat it.
+   *
+   * "Who made Dominion?" produces a LOOKUP. Its result is a slab of the knowledge file, and this
+   * used to be appended to the transcript verbatim. Fred asked her who made Dominion and got two
+   * raw markdown sections about reliability and complaints, because the model never saw what the
+   * tool found. It called search_help, the server answered with the document, and the panel
+   * printed it.
+   *
+   * The server already accepts `toolResults` and folds them back through wrapToolResult. The loop
+   * existed and nothing closed it. So a lookup now goes BACK to her: same question, tool result
+   * attached, and her answer replaces the raw text. One extra second on Luna, and she speaks in
+   * her own words instead of handing over a document.
+   */
   const actions = Array.isArray(data.clientActions) ? data.clientActions : [];
+  const lookups = [];
   for (const action of actions) {
     if (!action || !action.type) continue;
     dispatchAction(action, doc);
-    if (action.type === "help") appendMessage(doc, "altana", action.text);
+    // A DOCUMENT goes back to her. A LIST is drawn, because the user's own saved work is something
+    // to look at rather than something for a model to summarise back at them.
+    if (action.type === "help") lookups.push({ name: "search_help", result: action.text });
     else if (action.type === "work_list") appendWorkList(doc, action.items);
     else if (action.type === "echo_settings") appendMessage(doc, "system", "Checked your current settings.");
+  }
+  if (lookups.length && requestBody && !requestBody.toolResults) {
+    // Guard on toolResults so a follow-up can never trigger another follow-up.
+    answerFromLookup(doc, requestBody, lookups);
   }
 
   if (data.fallback && data.fallback.text) appendMessage(doc, "system", data.fallback.text);
