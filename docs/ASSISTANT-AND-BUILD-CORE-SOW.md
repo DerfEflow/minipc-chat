@@ -372,6 +372,29 @@ Everything else the user could flip on or off, the assistant may flip for them. 
 
 **Knowledge freshness.** Fred's requirement: every commit updates what the assistant can draw from. `GUIDE-KNOWLEDGE.md` already carries the same rule as human discipline ("update this file in the SAME commit"), which can rot silently. This phase makes it mechanical: a commit-time step regenerates the assistant's knowledge from the features index and doc set, and a check fails the build when a shipped change alters a guarantee without touching it.
 
+### The presence layer: BUILT 2026-08-03 (shipped dark)
+
+Fred supplied six face variants in one sprite sheet and asked for an icon that appears when Altana is interacting, simple animation, and a face that rotates roughly every ten sign-ins so she looks fresh.
+
+**Assets.** The sheet was sliced by measuring real content bounds rather than assuming a grid (the row bands came out at y 102-451 and 519-874). Six 256px PNGs at `public/altana/altana-<name>.png`: **aether, cosmic, verdant, solar, lunar, crystal**. Only the current face is ever fetched; preloading the set would cost roughly 750 KB for five images the user cannot see for another ten sign-ins.
+
+**Rotation.** `faceForSignIn(count)` is a pure function: ten sign-ins per face, in order, wrapping after the sixth. Deterministic rather than random, for two reasons: a user actually sees all six over time instead of being handed the same two by chance, and the face cannot change mid-session, which would read as a glitch rather than a flourish. The counter is `localStorage`, so it is per-device; harmless for something purely cosmetic, and written down so nobody reports it later as a bug.
+
+**Animation, four states.** Idle breathes on a 6.5s loop; **thinking** rotates slowly, echoing the ring of marks already drawn around each face; **speaking** breathes faster without rotating, so it reads as talking rather than working; **attention** shimmers exactly three times and then stops, because a badge that pulses forever gets ignored and is then worth nothing on the day it matters. A halo behind the face carries a glow colour sampled per variant, so a warm face is never washed in cold light.
+
+**Verified in a live browser, not asserted:** all four states resolve to the right keyframes and durations, the dot mounts on `<body>`, and the resting position is exact at the breakpoint that once cost four days: **84px dock clearance at 1180px, 20px at 1181px, no dead zone between them**. Also confirmed on a 375px phone viewport with no horizontal overflow. The preview browser happened to have reduced motion enabled, which meant the accessibility path got exercised for free: every animation correctly collapsed to a plain fade while the state changes still came through.
+
+**Three constraints the code is built around, each from a scar in this repo:**
+- Animation touches only `transform` and `opacity`, so the compositor does the work and nothing repaints. This element is on screen for the whole session on every page. A test parses the keyframes and fails if any other property is ever animated.
+- The dot is mounted on `<body>` and nowhere else, because a `position: fixed` child of any transformed ancestor silently anchors to that ancestor instead of the viewport, and this app has ~50 fixed rules across 17 stylesheets.
+- Animation pauses when the tab is hidden.
+
+**It ships dark.** `altanaMount()` is a no-op unless explicitly enabled, and nothing is appended when disabled. Altana's reasoning side does not exist yet, and this build removed the Knowledge Vault precisely because it showed guests three impressive buttons that opened three empty rooms. The preview page lives in `ops/`, never `public/`, so production serves only the three things Altana actually needs.
+
+`altana_test.mjs`, 10 checks, in the standard gate.
+
+**Still open here:** the click target does nothing until Phase 4 wires her brain, and the flag flips then.
+
 **The floating dot.**
 - Hovers above the screen, lightly visible, follows the user to every screen with no exceptions.
 - **User-movable.** That is the point of floating; a default position that is wrong for one person is theirs to fix.

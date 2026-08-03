@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Altana — presence preview</title>
+<link rel="stylesheet" href="/altana.css" />
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh; background: #05070b; color: #d8e3f0;
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 40px 28px 140px;
+  }
+  h1 { font-size: 22px; font-weight: 650; letter-spacing: -.2px; margin: 0 0 6px; color: #eaf2fb; }
+  p.sub { margin: 0 0 32px; color: #7d8ea3; max-width: 62ch; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .12em; color: #6d8098;
+       margin: 34px 0 14px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px; max-width: 1000px; }
+  .cell { background: #0b1017; border: 1px solid #1b2634; border-radius: 14px; padding: 16px; text-align: center; }
+  .cell .art { width: 92px; height: 92px; margin: 0 auto 10px; border-radius: 14px;
+               background-size: cover; background-position: center; }
+  .cell .nm { font-size: 13px; color: #c3d2e4; text-transform: capitalize; }
+  .cell .rg { font-size: 11px; color: #63788f; margin-top: 2px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; max-width: 1000px; }
+  button.demo {
+    background: #111a25; color: #cfdcec; border: 1px solid #22303f; border-radius: 999px;
+    padding: 9px 18px; font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  button.demo:hover { background: #17222f; border-color: #2e3f52; }
+  button.demo[aria-pressed="true"] { background: #1d2b3a; border-color: #3c5670; color: #eaf2fb; }
+  .note { margin-top: 30px; padding: 14px 16px; border-left: 2px solid #24425e; background: #080d13;
+          color: #8296ad; font-size: 13px; max-width: 72ch; border-radius: 0 8px 8px 0; }
+  code { background: #121a24; padding: 1px 6px; border-radius: 5px; color: #a9c0d8; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>Altana</h1>
+  <p class="sub">Presence preview. The live dot is bottom-right and is draggable; drop it anywhere and reload to confirm it stays put. In the real app this ships dark until her reasoning side exists.</p>
+
+  <h2>The six faces, and when each one appears</h2>
+  <div class="grid" id="faces"></div>
+
+  <h2>States</h2>
+  <div class="row" id="states"></div>
+
+  <div class="note">
+    Motion here is transform and opacity only, so the compositor does the work and nothing repaints. Animation pauses when the tab is hidden, and collapses to a plain fade if the operating system is set to reduce motion. The dot is mounted on <code>&lt;body&gt;</code> so no transformed ancestor can capture it, and it clears the mobile dock below 1180px.
+  </div>
+
+<script type="module">
+  import { altanaMount, altanaState, faceForSignIn, ALTANA_FACES } from "/altana.js";
+
+  const grid = document.getElementById("faces");
+  ALTANA_FACES.forEach((f, i) => {
+    const lo = i * 10 + 1, hi = i * 10 + 10;
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    cell.innerHTML = `<div class="art" style="background-image:url('/altana/altana-${f}.png')"></div>
+      <div class="nm">${f}</div><div class="rg">sign-ins ${lo}–${hi}</div>`;
+    grid.appendChild(cell);
+  });
+
+  // signins is passed explicitly so the preview never advances the real counter.
+  const el = altanaMount({ enabled: true, signins: 0 });
+
+  const states = [["idle", "Idle"], ["thinking", "Thinking"], ["speaking", "Speaking"], ["attention", "Attention"]];
+  const row = document.getElementById("states");
+  for (const [key, label] of states) {
+    const b = document.createElement("button");
+    b.className = "demo"; b.textContent = label; b.setAttribute("aria-pressed", key === "idle");
+    b.onclick = () => {
+      altanaState(key);
+      for (const other of row.children) other.setAttribute("aria-pressed", other === b);
+    };
+    row.appendChild(b);
+  }
+
+  const cycle = document.createElement("button");
+  cycle.className = "demo"; cycle.textContent = "Next face";
+  let n = 0;
+  cycle.onclick = () => {
+    n += 10;
+    const f = faceForSignIn(n);
+    el.dataset.face = f;
+    el.querySelector(".altana-face").style.backgroundImage = `url('/altana/altana-${f}.png')`;
+    cycle.textContent = "Next face (" + f + ")";
+  };
+  row.appendChild(cycle);
+</script>
+</body>
+</html>

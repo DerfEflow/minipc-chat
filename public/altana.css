@@ -1,0 +1,139 @@
+/*
+ * ALTANA — the executive assistant's presence layer.
+ *
+ * Fred, 2026-08-03: an icon that appears when she is interacting, with simple animation, rotating
+ * through six faces so she looks fresh roughly every ten sign-ins.
+ *
+ * TWO HAZARDS THIS FILE IS BUILT AROUND, both from scars already in this repo:
+ *
+ * 1. A `position: fixed` element stops being fixed the moment ANY ancestor carries a transform,
+ *    filter, perspective or will-change: it silently becomes relative to that ancestor instead of
+ *    the viewport. This app has ~50 fixed rules across 17 stylesheets and plenty of transformed
+ *    containers, so #altana is mounted directly on <body> by altana.js and every animation below
+ *    is scoped to the dot's own INNER elements. Never add a transform to #altana itself.
+ * 2. The app shipped with no navigation at all between 721px and 1180px because two breakpoints
+ *    disagreed. The dot's resting position is therefore expressed in one place per axis and is
+ *    checked at exactly those widths by altana_test.mjs.
+ *
+ * PERFORMANCE: this thing lives on every screen for the whole session, so animation is restricted
+ * to transform and opacity, which the compositor handles without repainting. No animated filters,
+ * no box-shadow animation, no JS rAF loop. Everything pauses when the tab is hidden.
+ */
+
+:root {
+  --altana-size: 56px;
+  --altana-inset: 20px;          /* distance from the viewport edges at rest */
+  --altana-dock-clearance: 84px; /* room above the mobile dock so the dot never sits on it */
+}
+
+#altana {
+  position: fixed;
+  z-index: 60;                   /* above content, below modals (which sit at 100+) */
+  width: var(--altana-size);
+  height: var(--altana-size);
+  right: var(--altana-inset);
+  bottom: var(--altana-inset);
+  border: 0;
+  padding: 0;
+  background: none;
+  cursor: grab;
+  -webkit-tap-highlight-color: transparent;
+  /* touch-action:none lets the drag handler own the gesture so dragging the dot never scrolls
+     the page underneath it on a phone. */
+  touch-action: none;
+  /* NO transform here. See hazard 1 above. Position is driven by left/top when dragged. */
+}
+#altana[hidden] { display: none; }
+#altana:active { cursor: grabbing; }
+
+/* Below the rail/dock breakpoint the mobile dock owns the bottom strip. */
+@media (max-width: 1180px) {
+  #altana { bottom: var(--altana-dock-clearance); }
+}
+
+/* The face itself. Separate element so it can be transformed freely without touching #altana. */
+.altana-face {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 14px;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: .82;                                  /* "lightly visible" at rest, Fred's word */
+  transition: opacity .35s ease, transform .35s ease;
+  animation: altana-breathe 6.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+/* The glow. A separate ring behind the face so the pulse never repaints the artwork. */
+.altana-halo {
+  position: absolute;
+  inset: -6px;
+  border-radius: 18px;
+  pointer-events: none;
+  background: radial-gradient(closest-side, var(--altana-glow, rgba(120,200,255,.55)), transparent 72%);
+  opacity: 0;
+  transition: opacity .4s ease;
+  animation: altana-halo-pulse 6.5s ease-in-out infinite;
+}
+
+/* ---- states, set by altana.js -------------------------------------------------------------- */
+
+#altana:hover .altana-face,
+#altana:focus-visible .altana-face { opacity: 1; transform: scale(1.06); }
+#altana:focus-visible { outline: 2px solid var(--altana-glow, #78c8ff); outline-offset: 3px; }
+
+/* Thinking: the dot rotates slowly, the way the ring of marks around each face already implies. */
+#altana[data-state="thinking"] .altana-face { opacity: 1; animation: altana-think 2.6s linear infinite; }
+#altana[data-state="thinking"] .altana-halo { opacity: .9; animation: altana-halo-pulse 2.6s ease-in-out infinite; }
+
+/* Speaking: a quicker breath, no rotation, so it reads as talking rather than working. */
+#altana[data-state="speaking"] .altana-face { opacity: 1; animation: altana-breathe 1.5s ease-in-out infinite; }
+#altana[data-state="speaking"] .altana-halo { opacity: .75; animation: altana-halo-pulse 1.5s ease-in-out infinite; }
+
+/* Attention: one shimmer, then back to idle. Deliberately finite: a permanently pulsing badge is
+   the kind of thing people learn to ignore, and then it is worth nothing when it matters. */
+#altana[data-state="attention"] .altana-face { opacity: 1; animation: altana-nudge .9s ease-in-out 3; }
+#altana[data-state="attention"] .altana-halo { opacity: .85; }
+
+/* Arrival: she fades up rather than popping in. */
+#altana[data-enter] .altana-face { animation: altana-arrive .6s cubic-bezier(.2,.8,.3,1) both, altana-breathe 6.5s ease-in-out .6s infinite; }
+
+@keyframes altana-breathe {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.045); }
+}
+@keyframes altana-halo-pulse {
+  0%, 100% { opacity: .28; }
+  50%      { opacity: .62; }
+}
+@keyframes altana-think {
+  from { transform: rotate(0deg) scale(1.02); }
+  to   { transform: rotate(360deg) scale(1.02); }
+}
+@keyframes altana-nudge {
+  0%, 100% { transform: scale(1) rotate(0deg); }
+  25%      { transform: scale(1.08) rotate(-4deg); }
+  75%      { transform: scale(1.08) rotate(4deg); }
+}
+@keyframes altana-arrive {
+  from { opacity: 0; transform: scale(.6); }
+  to   { opacity: .82; transform: scale(1); }
+}
+
+/*
+ * Motion is a preference, not a decoration. Everything above collapses to a plain fade here: the
+ * dot still CHANGES on state (so the information survives) but nothing moves.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .altana-face, .altana-halo,
+  #altana[data-state] .altana-face, #altana[data-state] .altana-halo,
+  #altana[data-enter] .altana-face { animation: none !important; }
+  #altana[data-state="thinking"] .altana-face,
+  #altana[data-state="speaking"] .altana-face { opacity: 1; }
+  #altana[data-state="thinking"] .altana-halo,
+  #altana[data-state="speaking"] .altana-halo,
+  #altana[data-state="attention"] .altana-halo { opacity: .7; }
+}

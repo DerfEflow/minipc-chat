@@ -24,6 +24,12 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["devboot-images.mjs"],
       "port": 8288
+    },
+    {
+      "name": "altana-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["ops/altana-preview.mjs"],
+      "port": 8991
     }
   ]
 }
