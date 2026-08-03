@@ -444,11 +444,11 @@ The model is chosen per query. The user never sees a choice.
 |---|---|---|---|
 | General chat (the default path) | `openai/gpt-oss-20b` | NVIDIA, free | **PASS.** Floor 4096 enforced in `REASONING_FLOOR` |
 | Science and math | `deepseek/deepseek-r1` | OpenRouter | **PASS** (floor 8192, banned from fast mode) |
-| Literary | ~~`writer/palmyra-creative-122b`~~ | NVIDIA | **DEAD ON THE ACCOUNT**: "Function not found for account". Listed in /v1/models, not invokable on Fred's key |
+| Literary | `arcee-ai/trinity-large-thinking` | OpenRouter | **APPROVED 2026-08-03.** Replaces palmyra-creative-122b, dead on the account |
 | Creative | `deepseek/deepseek-v4-flash` | DeepSeek direct | **PASS** (floor 1024) |
 | Quick and dirty | `nvidia/nemotron-nano-12b-v2-vl` | NVIDIA, free | **PASS**, and seated in the catalog: answers, real tool call, names the red swatch |
-| Personal, empathetic, high EQ | ~~`meta/llama-3.3-70b-instruct`~~ | NVIDIA | **UNUSABLE INTERACTIVELY.** Available and tool-capable, but **31.6s to first token**, and a second run returned nothing at all before a 120s timeout |
-| Theological and philosophical | ~~`nvidia/llama-3.1-nemotron-70b-instruct`~~ | NVIDIA | **DEAD ON THE ACCOUNT**, same "Function not found" |
+| Personal, empathetic, high EQ | `nvidia/nemotron-3-super-120b-a12b` | NVIDIA, free | **APPROVED 2026-08-03.** Replaces llama-3.3-70b, which is available and tool-capable but takes **31.6s to first token** and returned nothing at all on a second run before a 120s timeout. Fastest seat measured, 0.7s |
+| Theological and philosophical | `nvidia/nemotron-3-ultra-550b-a55b` | NVIDIA, free | **APPROVED 2026-08-03.** Replaces llama-3.1-nemotron-70b, dead on the account. The 550B reasoner; its slower first token is acceptable where users expect thinking |
 | Business | `z-ai/glm-5.2` | NVIDIA, free | **PASS** |
 
 ### THREE routes need Fred's re-pick, and latency is why one of them moved
@@ -468,10 +468,12 @@ Two failure modes, and they are different problems:
 | `nvidia/nemotron-3-ultra-550b-a55b` | 7.6s | 1.1s |
 | `meta/llama-3.3-70b-instruct` | 31.6s | no output, 120s timeout |
 
-**Proposals, not decisions.** All three are already catalog seats, all probed clean, all free on the NVIDIA lane, and all three are distinct models so Fred keeps the separation he asked for:
+**APPROVED by Fred 2026-08-03** ("That's good"). All three are existing catalog seats, all probed clean, all distinct models so the separation he asked for survives:
 - **Literary** → `arcee-ai/trinity-large-thinking`, the surviving creative seat, kept for exactly this work.
 - **Personal, empathetic, high EQ** → `nvidia/nemotron-3-super-120b-a12b`, the fastest thing measured and warm enough for the job.
 - **Theological and philosophical** → `nvidia/nemotron-3-ultra-550b-a55b`, the 550B deep reasoner, whose slower first token is acceptable where users expect thinking.
+
+The routing table is now fully populated and every seat in it has answered a live probe. **The table is a decision record, not an implementation:** Phase 6 builds the router that reads it, and it cannot start before Phase 3, whose complexity gate is the same classifier.
 
 **Also from that probe run:** `mistral-medium-3.5-128b` and `llama-guard-4-12b` timed out on the dev tier; `nemotron-parse` rejects plain-text input by design ("The model does not support text input"), so the document-parsing lane needs a document-shaped probe, which is Phase 5 work, not a failure.
 
