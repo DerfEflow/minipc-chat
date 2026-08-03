@@ -3256,6 +3256,18 @@ function startLongRun(T, store, id) {
   if (m.state !== "ready") return { error: "job is " + m.state + " (" + (m.reason || "no reason recorded") + ")" + (m.state === "paused" ? "; resume it first" : "") };
   // Jobs created before the glue phase (or seeded server-side) may carry no model. Answer
   // honestly instead of throwing: the state flip already happened, only the driver declines.
+  // A job whose model was RETIRED by a prune resumes on the mapped survivor (W1 in the SOW: the
+  // fallback map must cover the job resume path, not just chat). The substitution rides the job's
+  // own ledger so the swap is on the record, never silent. The meta on disk keeps the original id
+  // on purpose: every future resume re-resolves through the same map, deterministically.
+  if (m.model && !modelById(m.model)) {
+    const sub = resolveModelId(m.model);
+    if (sub) {
+      try { store.appendLedger(id, { kind: "model_fallback", from: m.model, to: sub,
+        note: "the job's saved model was retired from the lineup; resuming on the mapped survivor" }); } catch {}
+      m.model = sub;
+    }
+  }
   if (!m.model || !modelById(m.model)) return { error: "this job has no runnable model on its meta; recreate it with a catalog model" };
   const RT = { isOwner: !!T.isOwner, role: T.role, email: T.email, uid: T.uid };
   const deps = makeRunDeps({ store, jobId: id, T: RT, billing, users: usersStore });
