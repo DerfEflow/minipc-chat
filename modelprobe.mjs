@@ -54,7 +54,10 @@ export const ENDPOINTS = {
    */
   openai:     { url: "https://api.openai.com/v1/chat/completions",           family: "openai-chat", verified: null, toolsNotRepresentative: true },
   anthropic:  { url: "https://api.anthropic.com/v1/messages",                family: "anthropic",   verified: null },
-  google:     { url: "https://generativelanguage.googleapis.com/v1beta",     family: "google",      verified: null },
+  // Google's OpenAI-compatible lane, live-verified 2026-08-03 (answered + real tool call). The
+  // native generateContent shape is NOT probed here because Dominion doesn't speak it: the server
+  // routes Gemini through this same compatible endpoint, so this is the representative wire.
+  google:     { url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", family: "openai-chat", verified: "2026-08-03" },
 };
 
 /*
@@ -97,7 +100,9 @@ const TIMEOUT_MS = 75000;   // reasoning models think before one word, and a fre
 
 function headersFor(provider, key) {
   if (provider === "anthropic") return { ...UA, "x-api-key": key, "anthropic-version": "2023-06-01" };
-  if (provider === "google") return { ...UA };
+  // google's OpenAI-compatible lane takes a normal Bearer header (live-verified 2026-08-03). An
+  // earlier draft returned no auth here, planned for key-in-query on the native lane, and every
+  // Gemini probe came back a bare HTTP 400.
   return { ...UA, authorization: "Bearer " + key };
 }
 
@@ -231,7 +236,6 @@ export async function probeModel({ provider, id, wireId, key, label = "" }) {
   };
   if (!ep) { rec.err = "no endpoint mapping for provider '" + provider + "'"; return rec; }
   if (!key) { rec.err = "no key for provider '" + provider + "'"; return rec; }
-  if (ep.family === "google") { rec.err = "google probe not implemented: no AI Studio key existed to verify the shape against"; return rec; }
 
   const headers = headersFor(provider, key);
   const call = ep.family === "anthropic" ? callAnthropic : callOpenAiChat;

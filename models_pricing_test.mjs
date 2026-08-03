@@ -82,6 +82,29 @@ t("every model that does NOT offer fast mode is unmarked, not defaulted", () => 
   }
 });
 
+t("Gemini prices match Google's published AI Studio rates of 2026-08-03", () => {
+  // Read from ai.google.dev/gemini-api/docs/pricing the day the lane was wired. The oddity worth
+  // pinning on purpose: 3.6 Flash is newer AND cheaper on output than 3.5 Flash ($7.50 vs $9.00),
+  // which is why 3.5 Flash holds no catalog seat at all.
+  const flash = byId("google/gemini-3.6-flash");
+  assert.equal(flash.inCost, 1.50, "3.6 Flash input is $1.50 per million");
+  assert.equal(flash.outCost, 7.50, "3.6 Flash output is $7.50 per million");
+  assert.equal(flash.cacheHitCost, 0.15, "3.6 Flash cached input is $0.15 per million");
+
+  const pro = byId("google/gemini-3.1-pro-preview");
+  assert.equal(pro.inCost, 2.00, "3.1 Pro input is $2 per million at the base (<=200k) tier");
+  assert.equal(pro.outCost, 12.00, "3.1 Pro output is $12 per million at the base tier");
+
+  const lite = byId("google/gemini-3.5-flash-lite");
+  assert.equal(lite.inCost, 0.30, "Flash-Lite input is $0.30 per million");
+  assert.equal(lite.outCost, 2.50, "Flash-Lite output is $2.50 per million");
+
+  for (const m of [flash, pro, lite]) {
+    assert.equal(m.provider, "google", m.id + " rides the AI Studio lane");
+    assert.ok(m.directId && !m.directId.includes("/"), m.id + " directId is the bare AI Studio id");
+  }
+});
+
 t("no catalog row carries a negative or absurd price", () => {
   for (const m of CATALOG) {
     const i = Number(m.inCost), o = Number(m.outCost);
@@ -92,4 +115,4 @@ t("no catalog row carries a negative or absurd price", () => {
   }
 });
 
-console.log(`\n${passed}/6 checks passed - the published prices are pinned, and fast mode costs what it costs`);
+console.log(`\n${passed}/7 checks passed - the published prices are pinned, and fast mode costs what it costs`);

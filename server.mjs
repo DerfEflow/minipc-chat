@@ -619,6 +619,16 @@ const ANTHROPIC_KEY = cfgGet("ANTHROPIC_API_KEY", cfgGet("CLAUDE_ANTHROPIC_KEY",
 // while a key has not been minted yet.
 const MOONSHOT_KEY = cfgGet("MOONSHOT_API_KEY", cfgGet("MOONSHOT_KEY", ""));
 const NVIDIA_KEY = cfgGet("NVIDIA_API_KEY", cfgGet("NVIDIA_KEY", ""));
+/*
+ * Google AI Studio (Fred's decision 2026-08-02: AI Studio, not Vertex, "for now"). This is a MODEL
+ * key and deliberately NOT the Workspace OAuth pair above it in the wallet: google.mjs's Gmail /
+ * Drive / Calendar connector runs on per-user OAuth, while Gemini chat turns run on this app key,
+ * and conflating the two credentials is how a chat model ends up smelling like it can read mail.
+ * The Generative Language service exposes an OpenAI-compatible lane, LIVE-VERIFIED 2026-08-03
+ * (gemini-3.5-flash answered "ready" and emitted a real write_note tool call on this exact URL),
+ * so the same streamer serves it and no google-specific transport exists to rot.
+ */
+const GOOGLE_AISTUDIO_KEY = cfgGet("GOOGLE_AI_STUDIO_API_KEY", "");
 // One endpoint config per provider. All of these speak the OpenAI-compatible chat-completions
 // format, so a single streamer serves them — only base URL, key, and a couple of headers differ.
 const PROVIDER_CFG = {
@@ -629,6 +639,7 @@ const PROVIDER_CFG = {
   anthropic:  { url: cfgGet("ANTHROPIC_URL", "https://api.anthropic.com/v1/messages"), key: () => ANTHROPIC_KEY, label: "Anthropic (direct)", extraHeaders: {}, wantUsage: false },
   moonshot:   { url: cfgGet("MOONSHOT_URL", "https://api.moonshot.ai/v1/chat/completions"), key: () => MOONSHOT_KEY, label: "Moonshot (direct)", extraHeaders: {}, wantUsage: false },
   nvidia:     { url: cfgGet("NVIDIA_URL", "https://integrate.api.nvidia.com/v1/chat/completions"), key: () => NVIDIA_KEY, label: "NVIDIA (direct)", extraHeaders: {}, wantUsage: false },
+  google:     { url: cfgGet("GOOGLE_AISTUDIO_URL", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"), key: () => GOOGLE_AISTUDIO_KEY, label: "Google AI Studio (direct)", extraHeaders: {}, wantUsage: false },
 };
 /*
  * Resolve-at-call-time provider routing (SOW docs/PROVIDER-CACHING-SOW.md, W1). A model may
@@ -639,7 +650,10 @@ const PROVIDER_CFG = {
  * "needs a provider key". Applies only to OpenAI-DIALECT providers; the openai and anthropic
  * native branches keep their explicit no-key errors (those models never had an OpenRouter row).
  */
-const OPENROUTER_FALLBACK_PROVIDERS = new Set(["moonshot", "nvidia"]);
+// google joins (2026-08-03): the catalog ids for Gemini use OpenRouter's google/ slugs, so the
+// same key-absent fallback holds — no AI Studio key on a box means those models ride OpenRouter
+// under their own ids rather than erroring.
+const OPENROUTER_FALLBACK_PROVIDERS = new Set(["moonshot", "nvidia", "google"]);
 // Live-learned parameter quirks (Fred, 2026-07-30). A provider's 400-with-a-named-parameter used
 // to be repaired for ONE resend and forgotten, so every fresh attempt re-earned the same 400
 // (kimi-k3: three identical "temperature" rejections in one 14:13 turn, live log). The rejection

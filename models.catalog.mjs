@@ -151,6 +151,31 @@ export const MODELS = [
   { id: "minimax/minimax-m2.5", name: "MiniMax M2.5", origin: "MiniMax (Shanghai)",
     category: "Frontier / Flagship", params: "456B (MoE)", paramsB: 456, inCost: 0.12, outCost: 0.48, ctx: 204000,
     specialty: "Cheap capable all-rounder for high-volume work" },
+  /*
+   * GOOGLE AI STUDIO, direct (Fred 2026-08-02: "use Google studio for now"; wired 2026-08-03).
+   * The OpenAI-compatible lane was LIVE-VERIFIED before these rows existed: gemini-3.5-flash
+   * answered and emitted a real write_note tool call on the exact endpoint in PROVIDER_CFG.
+   * Prices: ai.google.dev/gemini-api/docs/pricing, read 2026-08-03; pinned by models_pricing_test.
+   * ctx/maxOut: the live /v1beta/models list the same day (1048576 in / 65536 out for all three).
+   * Ids are OpenRouter's google/ slugs on purpose: no AI Studio key = the call rides OpenRouter
+   * unchanged (resolveProviderCfg fallback), same doctrine as the NVIDIA and Moonshot lanes.
+   * Seats follow the curation doctrine: 3.6-flash beat 3.5-flash on BOTH age and output price
+   * ($7.50 vs $9.00), so 3.5-flash gets no seat; lite is the budget axis; 3.1-pro is the pro axis.
+   * cacheHitCost = the published cached-input rate; the cost math bills it only on cache tokens
+   * the provider actually counts. vision/reasoning flags: set from the 2026-08-03 live probe.
+   */
+  { id: "google/gemini-3.6-flash", name: "Gemini 3.6 Flash", origin: "Google (AI Studio direct)", provider: "google", directId: "gemini-3.6-flash",
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.50, outCost: 7.50, cacheHitCost: 0.15, ctx: 1048576, maxOut: 65536, reasoning: true,
+    specialty: "Google's newest flash: fast frontier work with a 1M window, cheaper output than its 3.5 sibling" },
+  // 3.1 Pro doubles its price above 200k input tokens ($4/$18); the catalog's flat cost model
+  // carries the base tier, so rare >200k turns under-bill. Known, documented, revisit if long-doc
+  // pro work becomes common.
+  { id: "google/gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", origin: "Google (AI Studio direct)", provider: "google", directId: "gemini-3.1-pro-preview",
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.00, outCost: 12.00, cacheHitCost: 0.20, ctx: 1048576, maxOut: 65536, reasoning: true,
+    specialty: "Google's pro tier: deep multimodal reasoning over the full 1M window" },
+  { id: "google/gemini-3.5-flash-lite", name: "Gemini 3.5 Flash-Lite", origin: "Google (AI Studio direct)", provider: "google", directId: "gemini-3.5-flash-lite",
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 0.30, outCost: 2.50, cacheHitCost: 0.03, ctx: 1048576, maxOut: 65536, reasoning: true,
+    specialty: "Cheapest Gemini: high-volume utility work on the same 1M window" },
   // FREE LANE (ARSENAL Wave 2, live-probed 2026-07-29): NVIDIA's developer endpoint serves this
   // exact id with tool calls verified. With NVIDIA_API_KEY present the call rides free and bills
   // $0 (transport-aware cost math); without it, OpenRouter at the prices below, unchanged.
@@ -431,6 +456,7 @@ const REASONING_FLOOR = {
   "tencent/hy3-preview": 4096,              // worst 1024
   "moonshotai/kimi-k3": 2048,               // worst 512
   "openai/gpt-5.6-luna": 1024,              // worst 256
+  "google/gemini-3.1-pro-preview": 1024,    // silent at 64, recovered by 256 (probed 2026-08-03)
   "openai/gpt-5.5": 1024,                   // worst 256
   "anthropic/claude-sonnet-5": 1024,        // worst 256
   "deepseek/deepseek-v4-pro": 1024,         // worst 256 (owner default)
