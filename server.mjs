@@ -1361,10 +1361,57 @@ const forgeStore = createForgeStore({ dir: dataPath("forge") });
 //
 // dataPath("guide") IS DELIBERATE AND MUST NOT BECOME "altana". The complaint book is live user
 // data, and pointing this at a new directory would silently orphan every complaint ever filed.
-// Simplify My Chat: the stripped-down surface for people who use AI as a chatbot and a search
-// engine. It reads its own provider keys from env at construction, because server.mjs's PROVIDER_CFG
-// is private to this module and duplicating it here would be a second copy that silently drifts.
+/*
+ * Simplify My Chat: the stripped-down surface for people who use AI as a chatbot and a search
+ * engine. It reads its own provider keys from env at construction, because server.mjs's
+ * PROVIDER_CFG is private to this module and duplicating it here would be a second copy that
+ * silently drifts.
+ *
+ * OPEN, AND IT COSTS MONEY WHILE IT STAYS OPEN (found 2026-08-03): this handler does not meter.
+ * There is no meterTurn, no cost calculation, and no credit deduction anywhere in simplify.mjs.
+ * The route gate checks that a guest HAS credits and then never spends any, so every Simplify turn
+ * is served free. Several of its routes are free provider lanes, but chat and websearch both land
+ * on Claude Haiku, which is billed to Dominion on every turn.
+ *
+ * Fred's "no budget limit on Simplify" decision is about the per-conversation CAP and is honored at
+ * the route. Whether these turns should be metered like every other turn is a separate question and
+ * it is his, because it changes what a customer is charged. Until he answers, this is a known and
+ * deliberate revenue leak rather than an oversight nobody noticed.
+ */
 const simplifyChat = createSimplifyChatHandler({ env: process.env });
+
+/*
+ * PAY FOR WHAT YOU USE, WITH NO CAP (Fred, 2026-08-03, verbatim: "they need to pay for what they
+ * use with no cap"). The cap half is honored at the route, which creates no session budget. This is
+ * the paying half, and it closes the leak described above the handler.
+ *
+ * PER REQUEST, NEVER MODULE SCOPE. The first version of this held the tenant in a module-level
+ * variable that the route set just before calling the handler. That is a cross-tenant billing bug
+ * waiting for two people to use Simplify at once: the handler awaits a model response, another
+ * request overwrites the variable while it waits, and the wrong account is charged. Node being
+ * single threaded does not help, because `await` is exactly where another request gets to run.
+ * The tenant is therefore captured in a closure built for this one request.
+ *
+ * Metering lives HERE rather than in simplify.mjs so the cost math has one home, beside meterTurn
+ * and the ledger. simplify.mjs reports what the provider said; this decides what it costs.
+ */
+function simplifyBilling(T) {
+  return async ({ modelId, usage, question, answer }) => {
+    // catalogCallCost already returns 0 for the free NVIDIA transport, so a free-lane route costs
+    // the user nothing without a special case. meterTurn is a no-op for the owner and single-tenant.
+    const costUsd = catalogCallCost(modelById(modelId), usage);
+    await meterTurn(T, costUsd, question, answer);
+    try {
+      const cap = outLimitFor(modelId, "normal");
+      usageLimits.record({
+        model: modelId, mode: "simplify", ceiling: cap, modelCeiling: cap,
+        usedTokens: (usage && (usage.completion_tokens ?? usage.output_tokens)) ?? null,
+        finishReason: "", emptyOutput: !(String(answer || "").trim().length > 0),
+        reasoningFloor: REASONING_FLOOR[modelId] || null,
+      });
+    } catch {}
+  };
+}
 const altanaStore = createAltanaStore({ dir: dataPath("guide") });
 const altana = createAltana({ knowledgePath: join(HERE, "docs", "ALTANA-KNOWLEDGE.md"), store: altanaStore, log: (m) => console.log(m) });
 const handsHub = createHandsHub({
@@ -10360,13 +10407,23 @@ const server = http.createServer(async (req, res) => {
        * Simplify is a thinner surface and not an ungated one: a guest still needs an account, an
        * invite, and credits, exactly as on the main chat. The difference is that this replies with
        * JSON, because the event stream has not started yet at this point.
+       *
+       * NO SESSION BUDGET HERE, AND THAT IS DELIBERATE (Fred, 2026-08-03): "I don't want there to
+       * be a budget limit set at all when using the simplify interface." The whole point of this
+       * surface is that a person who wants a chatbot never meets a control panel, and a budget is a
+       * control panel. Anyone who wants a per-conversation cap uses the regular interface, which
+       * has one. Do not add `sessionBudgets.ensure` to this route.
+       *
+       * WHAT THAT DOES NOT MEAN: it is not a decision that Simplify turns are free. See the note
+       * above `simplifyChat` about metering, which is a separate open question for Fred.
        */
       const T = resolveTenant(req);
       if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
       if (T.status === "paused" || T.status === "locked") return sjson(res, 403, { error: "account " + T.status });
       if (!T.isOwner && !T.invited) return sjson(res, 403, { error: "needs_invite" });
       if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) return sjson(res, 402, { error: "needs_credits" });
-      return simplifyChat(req, res);
+      // The tenant is captured HERE, in a closure for this one request. See simplifyBilling.
+      return simplifyChat(req, res, { onTurnBilled: simplifyBilling(T) });
     }
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
     if (path === "/chat/fire-alarm" && req.method === "POST") return handleFireAlarm(req, res);

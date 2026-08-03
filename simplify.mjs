@@ -347,7 +347,12 @@ function readCappedBody(req, capBytes) {
  */
 export function createSimplifyChatHandler({ env = process.env } = {}) {
   const keys = keysFromEnv(env);
-  return async function handleSimplifyChat(req, res) {
+  /*
+   * onTurnBilled is passed PER REQUEST, never at construction. The caller closes over the tenant
+   * for this one request, so two people using Simplify at once can never bill each other. See the
+   * simplifyBilling note in server.mjs for the race this shape exists to prevent.
+   */
+  return async function handleSimplifyChat(req, res, { onTurnBilled = null } = {}) {
     let raw;
     try {
       raw = await readCappedBody(req, 262144);
@@ -418,6 +423,38 @@ export function createSimplifyChatHandler({ env = process.env } = {}) {
     if (!result || !result.ok) {
       sse({ type: "error", message: (result && result.error) || "The model didn't answer that time. Try again." });
     }
+
+    /*
+     * PAY FOR WHAT YOU USE, WITH NO CAP (Fred, 2026-08-03).
+     *
+     * This surface shipped UNMETERED. It had no meterTurn, no cost calculation and no credit
+     * deduction anywhere, while the route gate checked that a guest HAS credits and then never
+     * spent any. Several Simplify routes are free provider lanes, but chat and websearch both land
+     * on Claude Haiku, which Dominion pays for on every turn. So every one of those turns was
+     * served free, and the leak was invisible because the gate LOOKED like billing.
+     *
+     * Metering happens through a callback the server supplies rather than here, because billing
+     * belongs in server.mjs next to meterTurn and the ledger. A second copy of the cost math living
+     * in this file is a copy that drifts.
+     *
+     * A FAILED TURN IS NOT CHARGED. `result.ok` false means the provider never answered, and
+     * charging for silence is the surprise this app refuses. Usage is passed through exactly as the
+     * provider reported it, so a turn with no usage row bills nothing rather than bills a guess.
+     */
+    if (result && result.ok && typeof onTurnBilled === "function") {
+      try {
+        await onTurnBilled({
+          modelId: resolved.modelId,
+          usage: result.usage || null,
+          question: userMessage,
+          answer: result.content || "",
+        });
+      } catch (e) {
+        // Metering must never take the user's answer down with it. They already have their reply.
+        console.warn("[simplify] metering failed: " + ((e && e.message) || e));
+      }
+    }
+
     sse({ type: "done" });
     try { res.end(); } catch {}
   };

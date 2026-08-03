@@ -159,3 +159,70 @@ await t("dominion-simplify.css has balanced braces and no dangling rule", () => 
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
+
+/* ---- Simplify carries NO session budget, by Fred's decision ---------------------------------- */
+await t("no session budget is ever created for Simplify (Fred, 2026-08-03)", () => {
+  /*
+   * "I don't want there to be a budget limit set at all when using the simplify interface." The
+   * point of this surface is that someone who wants a chatbot never meets a control panel, and a
+   * budget IS a control panel. Anyone wanting a per-conversation cap uses the regular interface.
+   *
+   * Pinned because it is currently true by ACCIDENT rather than by design: nothing in simplify.mjs
+   * touches budgets, so a later hand could add one without noticing it had been decided against.
+   */
+  const src = readFileSync(new URL("./simplify.mjs", import.meta.url), "utf8");
+  for (const forbidden of ["sessionBudgets", "sessionBudget", "ensure(", "recordSpend"]) {
+    assert.ok(!src.includes(forbidden), `simplify.mjs must not touch budgets, found "${forbidden}"`);
+  }
+  const server = readFileSync(new URL("./server.mjs", import.meta.url), "utf8");
+  const rawRoute = server.slice(server.indexOf('path === "/api/simplify/chat"'), server.indexOf('path === "/chat/stop"'));
+  assert.ok(rawRoute.length > 200, "the Simplify route block was not found where expected");
+  /*
+   * Strip comments before checking, the same way the model-picker check above does and for the same
+   * reason. The route carries a comment that says, in English, "do not add sessionBudgets.ensure to
+   * this route". The sentence explaining the rule must not fail the rule.
+   */
+  const route = rawRoute.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  assert.ok(!/sessionBudgets\.ensure/.test(route), "the Simplify route must never create a session budget");
+  // Paying is NOT capping. Fred, 2026-08-03: "they need to pay for what they use with no cap."
+  assert.match(route, /onTurnBilled:\s*simplifyBilling\(T\)/,
+    "every Simplify turn must be metered, with the tenant captured per request");
+  // The identity gate DOES stay: no budget is not the same as no door.
+  assert.match(route, /T\.role === "anon"/, "an anonymous caller must still be refused");
+  assert.match(route, /needs_invite/, "an uninvited guest must still be refused");
+});
+
+/* ---- every turn is metered, and the tenant cannot be crossed --------------------------------- */
+await t("Simplify meters each turn, skips failed ones, and cannot bill the wrong tenant", async () => {
+  /*
+   * This surface shipped UNMETERED: no meterTurn, no cost math, no deduction, while the route gate
+   * checked that a guest HAS credits and then spent none. Chat and websearch both route to Claude
+   * Haiku, which Dominion pays for, so those turns were served free.
+   *
+   * The tenant is captured PER REQUEST in a closure. A module-scoped variable set just before the
+   * call would be a cross-tenant billing bug: the handler awaits the model, a second request
+   * overwrites the variable while it waits, and the wrong account pays.
+   */
+  const src = readFileSync(new URL("./simplify.mjs", import.meta.url), "utf8");
+  assert.match(src, /function handleSimplifyChat\(req, res, \{ onTurnBilled = null \} = \{\}\)/,
+    "the billing callback must arrive per request, never at construction");
+  assert.match(src, /if \(result && result\.ok && typeof onTurnBilled === "function"\)/,
+    "a turn the provider never answered must not be charged");
+
+  const server = readFileSync(new URL("./server.mjs", import.meta.url), "utf8");
+  assert.match(server, /function simplifyBilling\(T\)/, "billing math belongs beside meterTurn, not in simplify.mjs");
+  assert.ok(!/let simplifyBillingTenant/.test(server), "a module-scoped tenant is the cross-billing bug this shape prevents");
+
+  // Two tenants, interleaved, each awaiting: nobody may pay for anybody else's turn.
+  const billed = [];
+  const make = (email) => async ({ modelId }) => {
+    await new Promise((r) => setTimeout(r, 15));
+    billed.push({ email, modelId });
+  };
+  const alice = make("alice@test.com"), bob = make("bob@test.com");
+  await Promise.all([alice({ modelId: "for-alice" }), bob({ modelId: "for-bob" }), alice({ modelId: "for-alice-2" })]);
+  for (const b of billed) {
+    assert.ok(b.modelId.includes(b.email.split("@")[0]), `${b.email} was billed for ${b.modelId}`);
+  }
+  assert.equal(billed.length, 3);
+});
