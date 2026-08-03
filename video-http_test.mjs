@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { createVideoHttp, openRouterUsageCost } from "./video-http.mjs";
+import { createVideoMeter } from "./video-meter.mjs";
 import { createVideoFeature } from "./video.mjs";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
@@ -680,6 +681,92 @@ test("screenwriter rejects an incomplete finish without changing the screenplay"
   assert.equal(env.metered.length, 1);
 });
 
+test("a charged rejected Trinity turn survives a crash without becoming eligible for not-billed quarantine", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dominion-video-rejected-crash-"));
+  const meterDir = join(dataDir, "meter"); let activeMeter = null;
+  t.after(() => { try { activeMeter?.close(); } catch { /* Already closed during the restart simulation. */ } rmSync(dataDir, { recursive: true, force: true }); });
+  const startedAt = Date.UTC(2026, 0, 5, 12, 0, 0); let clock = startedAt;
+  const feature = createVideoFeature({ dataDir, now: () => clock, minFreeDiskBytes: 0 });
+  const created = feature.createProject("tenant_a", { name: "Rejected charge recovery" });
+  const source = "Write a storm opening";
+  feature.applyCommand("tenant_a", created.id, { type: "screenplay.set", text: source });
+
+  let providerPosts = 0; let providerGets = 0; let charged = false; let crashed = false;
+  let chargeCalls = 0; const billingIds = [];
+  activeMeter = createVideoMeter({
+    dir: meterDir, now: () => new Date(clock).toISOString(),
+    charge: async () => {
+      chargeCalls++;
+      const atCharge = feature.getProject("tenant_a", created.id).providerAttempts.find((attempt) => attempt.generationId === "gen-rejected-crash" && !String(attempt.attemptId).startsWith("sw_local_"));
+      assert.equal(atCharge.status, "provider_rejected"); assert.equal(atCharge.settlement.status, "pending");
+      charged = true;
+      return { ok: true };
+    },
+  });
+  const meter = async (_tenant, cost, metadata) => {
+    billingIds.push(metadata.billingId);
+    return activeMeter.settle(_tenant, cost, metadata);
+  };
+  const crashingFeature = {
+    ...feature,
+    applyCommand(...args) {
+      const command = args[2];
+      if (crashed || (charged && command?.type === "screenwriter.attempt" && command.attempt?.status === "rejected")) {
+        crashed = true;
+        throw new Error("simulated process loss after the charge committed");
+      }
+      return feature.applyCommand(...args);
+    },
+  };
+  const first = setup({
+    feature: crashingFeature, now: () => clock, meter,
+    fetch: async (_url, options) => {
+      if (options.method !== "POST") { providerGets++; throw new Error("unexpected metadata request"); }
+      providerPosts++;
+      return new Response(JSON.stringify({
+        id: "gen-rejected-crash", model: "arcee-ai/trinity-large-thinking",
+        choices: [{ finish_reason: "content_filter", message: { content: "This output is rejected." } }],
+        usage: { prompt_tokens: 18, completion_tokens: 6, total_tokens: 24, cost: 0.00001032 },
+      }), { status: 200 });
+    },
+  });
+  const interrupted = await call(first.http, "POST", "/api/video/screenwrite", { projectId: created.id, prompt: source, limit: 115_000 });
+  assert.equal(interrupted.res.statusCode, 500);
+  assert.equal(providerPosts, 1); assert.equal(providerGets, 0); assert.equal(billingIds.length, 1); assert.equal(chargeCalls, 1);
+
+  const afterCrash = createVideoFeature({ dataDir, now: () => clock, minFreeDiskBytes: 0 });
+  let durable = afterCrash.getProject("tenant_a", created.id).providerAttempts.find((attempt) => attempt.generationId === "gen-rejected-crash" && !String(attempt.attemptId).startsWith("sw_local_"));
+  assert.equal(durable.status, "provider_rejected"); assert.equal(durable.settlement.status, "pending");
+  afterCrash.applyCommand("tenant_a", created.id, { type: "screenwriter.attempt", attempt: {
+    ...durable, reconciliationFailures: 3, lastReconciliationError: "openrouter_generation_http_404",
+  } });
+  clock = startedAt + 11 * 60 * 1000;
+  activeMeter.close();
+  activeMeter = createVideoMeter({
+    dir: meterDir, now: () => new Date(clock).toISOString(),
+    charge: async () => { chargeCalls++; throw new Error("the durable charge must not run twice"); },
+  });
+
+  const restartedFeature = createVideoFeature({ dataDir, now: () => clock, minFreeDiskBytes: 0 });
+  const restarted = setup({
+    feature: restartedFeature, now: () => clock, meter,
+    fetch: async (_url, options) => {
+      if (options.method === "POST") providerPosts++; else providerGets++;
+      throw new Error("settlement recovery must not call OpenRouter");
+    },
+  });
+  const status = await call(restarted.http, "GET", `/api/video/screenwriter/status?projectId=${created.id}`);
+  assert.equal(status.body.recoveryAction, "retry_settlement"); assert.equal(status.body.quarantineConfirmation, null);
+  const repaired = await call(restarted.http, "POST", "/api/video/screenwriter/reconcile", { projectId: created.id, privacyMode: "private" });
+  assert.equal(repaired.res.statusCode, 200); assert.equal(repaired.body.status, "rejected");
+  assert.equal(providerPosts, 1); assert.equal(providerGets, 0); assert.equal(billingIds.length, 2);
+  assert.equal(billingIds[1], billingIds[0]); assert.equal(chargeCalls, 1);
+  durable = createVideoFeature({ dataDir, minFreeDiskBytes: 0 }).getProject("tenant_a", created.id).providerAttempts.find((attempt) => attempt.generationId === "gen-rejected-crash" && !String(attempt.attemptId).startsWith("sw_local_"));
+  assert.equal(durable.status, "rejected"); assert.equal(durable.settlement.status, "settled");
+  assert.notEqual(durable.settlement.status, "not_billed");
+  assert.equal(activeMeter.inspect(durable.settlement.key).status, "settled");
+});
+
 test("screenwriter rejects missing authoritative usage and never retries an ambiguous POST", async () => {
   const missingUsage = setup({ fetch: async () => new Response(JSON.stringify({
     id: "gen-trinity-no-usage", model: "arcee-ai/trinity-large-thinking",
@@ -831,6 +918,25 @@ test("a routed error generation identity is persisted and the paid POST is never
   assert.equal(status.body.pending, true); assert.equal(status.body.recoveryAction, "check_generation");
 });
 
+test("a routed 4xx without a generation identity stays locked for explicit reconciliation", async () => {
+  let providerCalls = 0;
+  const env = setup({ fetch: async () => {
+    providerCalls++;
+    return new Response(JSON.stringify({ error: { code: 429, message: "Provider rate limited after routing" }, openrouter_metadata: { attempt: 1 } }), { status: 429 });
+  } });
+  setPersistedScreenplay(env, "Write a routed ambiguity test");
+  const out = await call(env.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "Write a routed ambiguity test", limit: 115_000 });
+  assert.equal(out.res.statusCode, 429); assert.equal(providerCalls, 1); assert.equal(env.metered.length, 0);
+  const durable = attemptCommands(env).filter((attempt) => String(attempt.attemptId).startsWith("sw_local_")).at(-1);
+  assert.equal(durable.status, "reconciliation_required"); assert.equal(durable.generationId, null);
+  assert.equal(durable.settlement.status, "awaiting_response");
+  const retry = await call(env.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "Write a routed ambiguity test", limit: 115_000 });
+  assert.equal(retry.res.statusCode, 409); assert.equal(retry.body.code, "screenwriter_reconciliation_required"); assert.equal(providerCalls, 1);
+  const status = await call(env.http, "GET", `/api/video/screenwriter/status?projectId=${PROJECT_ID}`);
+  assert.equal(status.body.pending, true); assert.equal(status.body.status, "reconciliation_required");
+  assert.equal(status.body.recoveryAction, "quarantine_unrecoverable"); assert.equal(typeof status.body.quarantineConfirmation, "string");
+});
+
 test("settlement recovery applies a durable candidate once without another Trinity request", async () => {
   let providerCalls = 0; let meterCalls = 0;
   const env = setup({
@@ -869,6 +975,100 @@ test("known-generation reconciliation uses exact OpenRouter metadata and never p
   assert.equal(repaired.res.statusCode, 200); assert.equal(repaired.body.status, "rejected");
   assert.equal(gets, 1); assert.equal(posts, 0); assert.equal(meterCalls, 1);
   assert.equal(env.projects.get(PROJECT_ID).providerAttempts[0].settlement.status, "settled");
+});
+
+test("known OpenRouter metadata is durable before charging and resumes settlement after a crash", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dominion-video-metadata-charge-crash-"));
+  const meterDir = join(dataDir, "meter"); let activeMeter = null;
+  t.after(() => { try { activeMeter?.close(); } catch { /* Already closed during the restart simulation. */ } rmSync(dataDir, { recursive: true, force: true }); });
+  const startedAt = Date.UTC(2026, 0, 6, 12, 0, 0); let clock = startedAt;
+  const feature = createVideoFeature({ dataDir, now: () => clock, minFreeDiskBytes: 0 });
+  const created = feature.createProject("tenant_a", { name: "Metadata charge recovery" });
+  feature.applyCommand("tenant_a", created.id, {
+    type: "screenwriter.attempt", begin: true,
+    attempt: {
+      attemptId: "sw_metadata_charge_crash", generationId: "gen-metadata-charge-crash", status: "reconciliation_required",
+      reconciliationFailures: 3, lastReconciliationError: "openrouter_generation_http_404",
+      sourceScreenplaySha256: screenplaySha(""), sourceGenerationId: null,
+      settlement: { status: "awaiting_response", costUsd: 0 },
+    },
+  });
+  clock = startedAt + 11 * 60 * 1000;
+
+  let metadataGets = 0; let providerPosts = 0; let charged = false; let crashed = false;
+  let chargeCalls = 0; const billingIds = [];
+  activeMeter = createVideoMeter({
+    dir: meterDir, now: () => new Date(clock).toISOString(),
+    charge: async () => {
+      chargeCalls++;
+      const atCharge = feature.getProject("tenant_a", created.id).providerAttempts.find((attempt) => attempt.attemptId === "sw_metadata_charge_crash");
+      assert.equal(atCharge.status, "provider_accepted"); assert.equal(atCharge.finishReason, "error");
+      assert.equal(atCharge.usage.promptTokens, 91); assert.equal(atCharge.usage.completionTokens, 17);
+      assert.equal(atCharge.usage.reasoningTokens, 11); assert.equal(atCharge.usage.costUsd, 0.0034);
+      assert.equal(atCharge.settlement.status, "pending"); assert.equal(atCharge.candidate, null);
+      charged = true;
+      return { ok: true };
+    },
+  });
+  const meter = async (_tenant, cost, metadata) => {
+    billingIds.push(metadata.billingId);
+    return activeMeter.settle(_tenant, cost, metadata);
+  };
+  const crashingFeature = {
+    ...feature,
+    applyCommand(...args) {
+      const command = args[2];
+      if (crashed || (charged && command?.type === "screenwriter.attempt" && command.attempt?.status === "rejected")) {
+        crashed = true;
+        throw new Error("simulated process loss after metadata charge committed");
+      }
+      return feature.applyCommand(...args);
+    },
+  };
+  const first = setup({
+    feature: crashingFeature, now: () => clock, meter,
+    fetch: async (url, options) => {
+      if (options.method === "POST") { providerPosts++; throw new Error("reconciliation must not submit Trinity again"); }
+      metadataGets++; assert.equal(String(url), "https://openrouter.test/api/v1/generation?id=gen-metadata-charge-crash");
+      return new Response(JSON.stringify({ data: {
+        id: "gen-metadata-charge-crash", model: "arcee-ai/trinity-large-thinking", api_type: "completions",
+        total_cost: 0.0034, tokens_prompt: 91, tokens_completion: 17, native_tokens_reasoning: 11, finish_reason: "error",
+      } }), { status: 200 });
+    },
+  });
+  const interrupted = await call(first.http, "POST", "/api/video/screenwriter/reconcile", { projectId: created.id, privacyMode: "normal" });
+  assert.equal(interrupted.res.statusCode, 500); assert.equal(metadataGets, 1); assert.equal(providerPosts, 0); assert.equal(billingIds.length, 1); assert.equal(chargeCalls, 1);
+
+  const afterCrash = createVideoFeature({ dataDir, now: () => clock, minFreeDiskBytes: 0 });
+  let durable = afterCrash.getProject("tenant_a", created.id).providerAttempts.find((attempt) => attempt.attemptId === "sw_metadata_charge_crash");
+  assert.equal(durable.status, "provider_accepted"); assert.equal(durable.finishReason, "error");
+  assert.equal(durable.usage.promptTokens, 91); assert.equal(durable.usage.completionTokens, 17);
+  assert.equal(durable.usage.reasoningTokens, 11); assert.equal(durable.usage.costUsd, 0.0034);
+  assert.equal(durable.settlement.status, "pending"); assert.equal(durable.settlement.costUsd, 0.0034); assert.equal(durable.candidate, null);
+  activeMeter.close();
+  activeMeter = createVideoMeter({
+    dir: meterDir, now: () => new Date(clock).toISOString(),
+    charge: async () => { chargeCalls++; throw new Error("the durable metadata charge must not run twice"); },
+  });
+
+  const restartedFeature = createVideoFeature({ dataDir, now: () => clock, minFreeDiskBytes: 0 });
+  const restarted = setup({
+    feature: restartedFeature, now: () => clock, meter,
+    fetch: async (_url, options) => {
+      if (options.method === "POST") providerPosts++; else metadataGets++;
+      throw new Error("durable settlement recovery must not call OpenRouter");
+    },
+  });
+  const status = await call(restarted.http, "GET", `/api/video/screenwriter/status?projectId=${created.id}`);
+  assert.equal(status.body.recoveryAction, "retry_settlement"); assert.equal(status.body.quarantineConfirmation, null);
+  const repaired = await call(restarted.http, "POST", "/api/video/screenwriter/reconcile", { projectId: created.id, privacyMode: "private" });
+  assert.equal(repaired.res.statusCode, 200); assert.equal(repaired.body.status, "rejected");
+  assert.equal(metadataGets, 1); assert.equal(providerPosts, 0); assert.equal(billingIds.length, 2);
+  assert.equal(billingIds[1], billingIds[0]); assert.equal(chargeCalls, 1);
+  durable = createVideoFeature({ dataDir, minFreeDiskBytes: 0 }).getProject("tenant_a", created.id).providerAttempts.find((attempt) => attempt.attemptId === "sw_metadata_charge_crash");
+  assert.equal(durable.status, "rejected"); assert.equal(durable.settlement.status, "settled");
+  assert.notEqual(durable.settlement.status, "not_billed");
+  assert.equal(activeMeter.inspect(durable.settlement.key).status, "settled");
 });
 
 test("OpenRouter metadata with zero cost but no finish reason remains pending and is not metered", async () => {

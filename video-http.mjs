@@ -55,8 +55,11 @@ function definitiveProviderHttpRejection(error) {
   const match = String(error?.code || "").match(/_http_(\d{3})$/);
   const status = Number(error?.upstreamStatus || match?.[1]);
   if (error?.providerGenerationId || Number(error?.providerUsage?.cost) > 0) return false;
-  if (status >= 400 && status < 500 && status !== 408) return true;
-  return Number.isInteger(error?.providerRouterAttempt) && error.providerRouterAttempt === 0;
+  if (Number.isInteger(error?.providerRouterAttempt)) {
+    if (error.providerRouterAttempt > 0) return false;
+    if (error.providerRouterAttempt === 0) return true;
+  }
+  return status >= 400 && status < 500 && status !== 408;
 }
 function failWithScreenwriterAttempt(status, code, message, attempt) {
   const error = new VideoHttpError(status, code, message);
@@ -621,7 +624,7 @@ export function createVideoHttp({
     if (!attempt) return null;
     if (new Set(["screenwriter_generation_id_mismatch", "screenwriter_generation_conflict"]).has(String(attempt.rejectionCode || ""))) return "quarantine_unrecoverable";
     if (String(attempt.status || "") === "settlement_failed" && String(attempt?.settlement?.errorCode || "").toUpperCase() === "VIDEO_SETTLEMENT_REPAIR_REQUIRED") return "retry_settlement";
-    if (attempt.generationId && new Set(["provider_accepted", "settlement_failed", "recoverable_stale_unbilled", "recoverable_stale_settled"]).has(String(attempt.status || ""))) return "retry_settlement";
+    if (attempt.generationId && new Set(["provider_accepted", "provider_rejected", "settlement_failed", "recoverable_stale_unbilled", "recoverable_stale_settled"]).has(String(attempt.status || ""))) return "retry_settlement";
     const firstSeen = Date.parse(String(attempt.createdAt || attempt.updatedAt || ""));
     if (attempt.generationId && Number(attempt.reconciliationFailures || 0) >= 3 && durableGenerationVerificationFailure(attempt.lastReconciliationError) && (!Number.isFinite(firstSeen) || Number(now()) - firstSeen >= 10 * 60 * 1000)) return "quarantine_unrecoverable";
     if (attempt.generationId) return "check_generation";
@@ -1130,7 +1133,7 @@ export function createVideoHttp({
       if (new Set(["screenwriter_generation_id_mismatch", "screenwriter_generation_conflict"]).has(String(attempt.rejectionCode || ""))) fail(409, "screenwriter_operator_reconciliation_required", "OpenRouter returned conflicting generation identities for one Trinity request. Automatic settlement is disabled to prevent duplicate charging; an operator must reconcile the linked provider records.");
       const usage = storedScreenwriterUsage(attempt);
       const candidate = attempt.candidate && typeof attempt.candidate === "object" ? clone(attempt.candidate) : null;
-      const settlementRecovery = new Set(["provider_accepted", "settlement_failed", "recoverable_stale_unbilled", "recoverable_stale_settled"]).has(String(attempt.status || ""));
+      const settlementRecovery = new Set(["provider_accepted", "provider_rejected", "settlement_failed", "recoverable_stale_unbilled", "recoverable_stale_settled"]).has(String(attempt.status || ""));
 
       if (settlementRecovery) {
         if (!attempt.generationId) fail(409, "screenwriter_operator_reconciliation_required", "This saved Trinity result has no stable provider generation identity. It remains preserved for operator reconciliation and was not charged again.");
@@ -1186,6 +1189,15 @@ export function createVideoHttp({
       let settlement = { status: "not_billed", key: null, costUsd: 0, errorCode: null };
       let status = "provider_http_rejected";
       if (record.usage.cost > 0) {
+        attempt = {
+          ...attempt,
+          status: "provider_accepted",
+          usage: record.usage,
+          finishReason: record.finishReason,
+          settlement: { status: "pending", key: null, costUsd: record.usage.cost, errorCode: null },
+          candidate: null,
+        };
+        await feature.applyCommand(tenantId, projectId, { type: "screenwriter.attempt", attempt });
         try {
           const metered = await maybeMeterProvider(tenant, openrouter, record.usage, { kind: "video_screenwrite", provider: "openrouter", model: SCREENWRITER_MODEL, generationId: attempt.generationId });
           settlement = attemptSettlement(metered, record.usage);
