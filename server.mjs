@@ -5442,7 +5442,7 @@ function machinesBlock(T) {
 
 
 function systemPrompt(persona, modeFrag, wolfeTier = "ember", {
-  withTools = true, machines = "", mode = "normal", executionDirective = "",
+  withTools = true, machines = "", mode = "normal",
 } = {}) {
   // Tool-less turns (as_fred voice work, chat-bench models) get a LEAN prompt: identity, house
   // style, Wolfe Logic, mode, persona. The tool doctrine below is dead weight when no tool schemas
@@ -5494,10 +5494,20 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", {
     "- No profanity unless the user has already used it in this conversation. Then you may match their level, never exceed it, and never become sexual, obscene, or blasphemous.",
     "- Never use the Lord's name in vain. Never use \"God\" as an expletive or an emphasizer, in any phrasing, under any circumstances.",
   ].join("\n");
-  // The execution manager is deliberately concise. The former Furnace path appended the complete
-  // 48K-character framework on every round, crowding the user's repo and suppressing native model
-  // reasoning. Forge remains the user's process specification, layered over the model's judgment.
-  s += "\n\n" + (executionDirective || forgeFrameworkPrompt(wolfeTier));
+  /*
+   * The execution manager is deliberately concise. The former Furnace path appended the complete
+   * 48K-character framework on every round, crowding the user's repo and suppressing native model
+   * reasoning. Forge remains the user's process specification, layered over the model's judgment.
+   *
+   * ONLY the stable framework lives here (fixed 2026-08-03). The per-turn EXECUTION MANAGER block
+   * used to be concatenated into this string, and it interpolates the turn's goal, so message zero
+   * changed on every request and provider prompt caching NEVER hit: cacheprefix_probe.mjs caught
+   * the two turns differing at character 3101, exactly the Goal line, and cacheprobe.mjs showed
+   * zero cache reads even 25 seconds apart. The volatile directive now rides its own system
+   * message AFTER history (see the assembly site), so system + history form a byte-stable prefix
+   * the provider can actually cache. DeepSeek bills cached input at ~1/120th of fresh.
+   */
+  s += "\n\n" + forgeFrameworkPrompt(wolfeTier);
   // Operating Standards — Fred's house rules for a broadly-permissioned agent. These inform the
   // model's JUDGMENT (the code carve-out is the only hard wall). Set 2026-07-12. Tool-less turns
   // skip them along with the file/project doctrine: no hands, no hands-rules.
@@ -7577,7 +7587,10 @@ async function handleChat(req, res) {
       endpoint: cloudModel && providerOf(cloudModel) === "openai" ? "responses" : "chat_completions",
     },
   });
-  const executionDirective = executionManagerPrompt(taskContract, executionPolicy) + "\n\n" + forgeFrameworkPrompt(wolfeTier);
+  // Volatile by construction (it carries this turn's goal), so it must NOT enter the system
+  // message: it rides its own message after history. forgeFrameworkPrompt no longer needs
+  // appending here because systemPrompt now always includes it.
+  const executionDirective = executionManagerPrompt(taskContract, executionPolicy);
   opts.executionPolicy = executionPolicy;
   opts.forgeMode = forgeEnabled;
   /*
@@ -7649,7 +7662,6 @@ async function handleChat(req, res) {
     withTools: attachTools,
     machines: attachTools ? machinesBlock(T) : "",
     mode,
-    executionDirective,
   }) }];
   // Off-but-available connectors, by NAME only (Fred, 2026-07-19). Without this, a disabled
   // connector is indistinguishable from a missing capability: the model has no schema for it, so
@@ -7704,6 +7716,16 @@ async function handleChat(req, res) {
   // the local path flattens them to inlined text files + honest image markers, so Ollama only
   // ever receives plain string content.
   messages.push(...historyWindow.messages.map((m) => (cloudModel ? m : flattenAttachmentsForText(m))));
+  /*
+   * EXECUTION MANAGER, placed AFTER history on purpose (2026-08-03, Fred's go). It interpolates
+   * this turn's goal, so it changes every turn; ahead of history it made message zero differ on
+   * every request and provider prompt caching never hit once (Phase 0,
+   * docs/ASSISTANT-AND-BUILD-CORE-SOW.md). Behind history, each turn's request is a byte-stable
+   * extension of the last and the whole preamble + transcript reads from cache. Late placement is
+   * also the pattern this file already trusts for instructions that must win: the as_fred
+   * directive below sits last precisely because "top-of-prompt placement proved too weak".
+   */
+  if (executionDirective) messages.push({ role: "system", content: executionDirective });
   // as_fred keeps thinking ON (think:false made the model plan out loud); the answer-directly
   // order is the LAST thing it reads (top-of-prompt placement proved too weak).
   if (mode === "as_fred") messages.push({ role: "system", content: "Reply now with ONLY Fred's actual words. Do not analyze the request, do not restate the question, do not describe Fred's style or your approach — your first word is the first word of Fred's answer." });

@@ -36,9 +36,9 @@ const KEYS = {
   anthropic: wallet.ANTHROPIC_API_KEY || wallet.CLAUDE_ANTHROPIC_KEY,
   moonshot: wallet.MOONSHOT_API_KEY || wallet.MOONSHOT_KEY,
   openrouter: wallet.OPENROUTER_API_KEY,
-  // Deliberately not falling back to another app's Gemini key: borrowing one crosses quota and
-  // billing between products and hides which app spent what.
-  google: wallet.GOOGLE_AI_STUDIO_KEY || wallet.DOMINION_AI_GOOGLE_AI_STUDIO_KEY,
+  // Dominion's own AI Studio key, minted 2026-08-03. Deliberately not falling back to another
+  // app's Gemini key: borrowing one crosses quota and billing between products.
+  google: wallet.GOOGLE_AI_STUDIO_API_KEY,
 };
 
 const pattern = process.argv[2] ? new RegExp(process.argv[2], "i") : null;

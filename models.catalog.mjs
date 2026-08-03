@@ -409,11 +409,42 @@ export const visionModelNames = (limit = 6) => MODELS.filter((m) => m.vision).sl
 // selected model's native output window; Dominion must not quietly starve a
 // frontier model and then mistake the resulting boundary for task completion.
 const OUT_MODE_CEIL = { fast: 2048 };   // any mode not listed -> the model's full maxOut
+
+/*
+ * MEASURED STARVATION FLOORS (probed live 2026-08-03, twice; see docs/MODEL-RECORDS.json).
+ * A reasoning model bills its hidden thinking against the output budget. Under a tight ceiling it
+ * spends the whole allowance thinking and returns an EMPTY string, not a short answer. Ten of the
+ * forty-four shipped models did exactly that at a 64-token ceiling, and the ceiling each one needs
+ * to recover MOVED between runs (gpt-oss-20b: 1024 then 512; trinity: 512 then 2048), so these
+ * floors are 4x the worst observed, not the observed value. Fred's decision 2026-08-03: R1 is
+ * banned from fast mode's 2048 cap; the same measured evidence protects the rest of the list.
+ * A mode ceiling may CHUNK a reply (the server auto-continues), but a chunk smaller than the floor
+ * can be 100% reasoning, and a turn that burns 2048 tokens to emit nothing is the failure Fred
+ * named: "we can avoid a bunch of disappointed people right off the bat".
+ */
+const REASONING_FLOOR = {
+  "deepseek/deepseek-r1": 8192,             // no text at ANY ceiling <= 2048 in one run
+  "arcee-ai/trinity-large-thinking": 8192,  // worst observed floor 2048 = the fast cap exactly
+  "moonshotai/kimi-k2.6": 4096,             // worst 1024
+  "openai/gpt-oss-20b": 4096,               // worst 1024
+  "minimax/minimax-m2.5": 4096,             // worst 1024
+  "tencent/hy3-preview": 4096,              // worst 1024
+  "moonshotai/kimi-k3": 2048,               // worst 512
+  "openai/gpt-5.6-luna": 1024,              // worst 256
+  "openai/gpt-5.5": 1024,                   // worst 256
+  "anthropic/claude-sonnet-5": 1024,        // worst 256
+  "deepseek/deepseek-v4-pro": 1024,         // worst 256 (owner default)
+  "deepseek/deepseek-v4-flash": 1024,       // worst 256 (tenant default)
+};
+
 export function outLimitFor(id, mode) {
   const m = BY_ID.get(id);
   const cap = (m && m.maxOut) || DEFAULT_MAX_OUT;
   const ceil = OUT_MODE_CEIL[mode];
-  return ceil ? Math.min(cap, ceil) : cap;
+  if (!ceil) return cap;
+  // A mode ceiling never dips below a measured starvation floor: brevity is a request for a short
+  // ANSWER, and an empty reply is not a short answer.
+  return Math.min(cap, Math.max(ceil, REASONING_FLOOR[id] || 0));
 }
 
 // Cheap fast model for internal utility calls (chat titles, short summaries) so they never block.

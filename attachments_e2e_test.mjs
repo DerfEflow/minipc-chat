@@ -120,7 +120,10 @@ try {
     ] });
     assert(orBodies.length === before + 1, "provider should be called exactly once, saw " + (orBodies.length - before));
     const msgs = orBodies[orBodies.length - 1].messages;
-    const user = msgs[msgs.length - 1];
+    // Last USER message, not last message: since 2026-08-03 the volatile EXECUTION MANAGER
+    // directive rides BEHIND history (cache prefix fix, cacheprefix_test.mjs), so the tail of the
+    // wire payload is a system message. The attachment invariants are about the user turn.
+    const user = msgs.filter((m) => m.role === "user").slice(-1)[0];
     assert(Array.isArray(user.content), "user content should be a parts array");
     const img = user.content.find((p) => p.type === "image_url");
     assert(img && img.image_url && img.image_url.url === PNG, "image_url part must carry the exact data URL");
@@ -136,7 +139,7 @@ try {
       { role: "user", content: "Summarize the file.", attachments: [{ kind: "text", name: "notes.md", text: "alpha bravo charlie" }] },
     ] });
     assert(orBodies.length === before + 1, "provider should be called once");
-    const user = orBodies[orBodies.length - 1].messages.slice(-1)[0];
+    const user = orBodies[orBodies.length - 1].messages.filter((m) => m.role === "user").slice(-1)[0];
     assert(typeof user.content === "string", "content must stay a plain string for text-only models");
     assert(user.content.includes("[Attached file: notes.md]") && user.content.includes("alpha bravo charlie"), "fenced file block missing");
     assert(evs.some((e) => e.type === "done"), "done should arrive");
@@ -164,7 +167,7 @@ try {
     const before = orBodies.length;
     const evs = await chat(OWNER, { model: TEXT_MODEL, mode: "normal", messages: [{ role: "user", content: "plain hello" }] });
     assert(orBodies.length === before + 1, "provider called once");
-    const user = orBodies[orBodies.length - 1].messages.slice(-1)[0];
+    const user = orBodies[orBodies.length - 1].messages.filter((m) => m.role === "user").slice(-1)[0];
     assert(user.content === "plain hello", "string content must pass through byte-identical");
     assert(tokensOf(evs).includes("Seen."), "answer streams");
   });

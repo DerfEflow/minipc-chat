@@ -48,12 +48,10 @@ async function listDirect(provider, keys) {
     return new Set(((await r.json()).data || []).map((m) => m.id));
   }
   /*
-   * Google AI Studio (added 2026-08-03). UNVERIFIED SHAPE: no AI Studio key existed when this was
-   * written, so the parse below has never seen a real response. It is written to fail SAFE — an
-   * unexpected body yields an empty set, which throws here and marks the provider "unchecked"
-   * rather than declaring every Google model dead. Confirm against a live call the moment a key
-   * lands, and delete this warning when it has actually run.
-   * Generative Language returns names as "models/<id>"; both forms are accepted.
+   * Google AI Studio (added 2026-08-03, VERIFIED LIVE the same day once Fred minted
+   * GOOGLE_AI_STUDIO_API_KEY: 116 models parsed). Generative Language returns names as
+   * "models/<id>"; both forms are accepted. Still fails SAFE: an unexpected body yields an empty
+   * set, which throws and marks the provider "unchecked" rather than declaring models dead.
    */
   if (provider === "google") {
     if (!keys.google) return null;

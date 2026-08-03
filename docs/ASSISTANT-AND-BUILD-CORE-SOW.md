@@ -193,14 +193,13 @@ Volatile content is not the problem. Volatile content sitting AHEAD of stable co
 
 That way each turn's cache covers the system block plus every prior history message, and only the tail is fresh. It also matches the prefix stability doctrine already written into `docs/PROVIDER-CACHING-SOW.md` on 07-28.
 
-**This is a high blast radius change and is NOT being made unilaterally.** It alters what every model sees, on every turn, for every user, and it moves instructions from the top of the context to the bottom. Models generally follow late instructions at least as well as early ones, so the likely behavioural effect is neutral-to-positive, but "likely" is not a standard that should be applied to the whole app without Fred saying go. **Decision required.**
+**FIXED 2026-08-03, on Fred's go ("Go and fix"), and PROVEN LIVE.**
 
-**Remaining work once approved:**
-1. Split the system assembly so the execution directive is emitted as its own message rather than concatenated into the system string.
-2. Pin it with a test asserting round N+1's messages are a byte-stable extension of round N's, so this cannot silently return.
-3. Re-run `cacheprobe.mjs` for live proof.
+1. `systemPrompt` no longer accepts an execution directive; it always embeds the stable `forgeFrameworkPrompt(wolfeTier)`. The volatile EXECUTION MANAGER block rides its own system message AFTER history, next to the as_fred directive that already trusted late placement ("top-of-prompt placement proved too weak").
+2. Pinned: `cacheprefix_probe.mjs` now asserts the invariant (turn N+1 must extend turn N byte-for-byte, directive allowed only as the tail, and a changing top-level request field also fails) and exits nonzero on violation; `cacheprefix_test.mjs` runs it as part of the standard gate, so one innocent `s += goal` ahead of history turns the suite red.
+3. Live proof, same day: `cacheprobe.mjs` against real DeepSeek reports **turn 2 read 768 tokens from cache, hitPct 65-66%**, versus zero on every prior run. Per-turn cost in the probe fell by more than half. The 07-28 SOW's D4 proof target, open since 07-19, is met.
 
-**Exit criterion:** a two-round call reports `readTokens > 0` on round two, and a test fails if the prefix churns again.
+**Note for Phase 2:** the retrieved-context block (`ctxInfo.block`) still sits ahead of history and varies with retrieval, so turns that retrieve break the prefix at that point. Fast/simple turns, the high-volume path, skip retrieval and now cache end to end. Deciding whether retrieved context can ride behind history too is Phase 2's prefix-discipline work, not snuck in here.
 
 ---
 
@@ -265,7 +264,7 @@ The internal `id` is deliberately the OpenRouter slug so a model falls back to O
 
 No dead ids across OpenRouter (337 live), OpenAI (131), Anthropic (11), or DeepSeek (2). **`anthropic/claude-opus-4-8` is real**, which resolves a doubt raised earlier in this session.
 
-**The audit does not cover NVIDIA or Google at all.** That remains Phase A's job, and it is why the three ids above had to be checked by hand.
+**Audit coverage closed 2026-08-03:** `catalogaudit.mjs` now checks NVIDIA (102 live models; the lane had been silently skipped, which is how a whole free fleet shipped unaudited) and Google AI Studio (116 live models, live the moment Fred minted `GOOGLE_AI_STUDIO_API_KEY`; `GOOGLE_AI_STUDIO_PROJECT_NAME` and `_PROJECT_NUMBER` ride alongside it in the wallet). Google serves 58 generateContent-capable models; the roster candidates (`gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.1-pro-preview`, `gemini-3.5-flash-lite`, all 1M in / 65k out) enter the catalog only after live pricing is verified, because prices are customer-facing and pinned by test.
 
 Pricing still needs verification: the catalog prices `nemotron-3-ultra-550b-a55b` and GLM 5.2 while marking other NVIDIA entries free. On the developer tier those figures may be wrong in Fred's favor.
 
@@ -506,7 +505,9 @@ Same prompt, same models, swings of up to four times. Trinity, the one OpenRoute
 
 **This is hard evidence for Fred's instinct to leave limits generous.** These ceilings cannot be tuned tightly because they are not stable properties. Any limit set from a single measurement will be wrong on some later turn, and the failure mode is not a truncated answer, it is a completely empty reply. Whatever gets set needs headroom above the worst ever observed, not the last observed.
 
-**DeepSeek R1 specifically, since Fred kept it deliberately and routed it to science and math.** It is not broken. Probed directly at 2048 it answered correctly, spending 912 output tokens: about 860 of reasoning and 54 of answer, with 3,438 characters of thinking returned alongside. The reasoning is billed to the same completion budget. So R1 needs roughly a thousand tokens before it says a word, on a one-sentence puzzle, and its margin at 2048 is thin enough to vanish on a harder question. **Dominion's fast mode caps output at exactly 2048.** R1 must not run in fast mode, and its Simplify route needs a ceiling well above it.
+**DeepSeek R1 specifically, since Fred kept it deliberately and routed it to science and math.** It is not broken. Probed directly at 2048 it answered correctly, spending 912 output tokens: about 860 of reasoning and 54 of answer, with 3,438 characters of thinking returned alongside. The reasoning is billed to the same completion budget. So R1 needs roughly a thousand tokens before it says a word, on a one-sentence puzzle, and its margin at 2048 is thin enough to vanish on a harder question. **Dominion's fast mode caps output at exactly 2048.**
+
+**IMPLEMENTED 2026-08-03, Fred's decision ("Ban R1 from fast mode").** `outLimitFor` now carries `REASONING_FLOOR`, a measured per-model minimum below which a mode ceiling may never dip: a mode ceiling is a request for a short ANSWER, and an empty reply is not a short answer. R1's floor is 8192, so fast mode can never hand it the 2048 cap; the same measured evidence sets floors for the other eleven starvers at 4x their worst observed (because the floors moved between runs). The floor only raises mode ceilings, never widens an un-ceilinged mode, and never exceeds a model's `maxOut`. Pinned by six new assertions in `model_execution_limits_test.mjs` (19 total).
 
 **The trap that makes "monitor and narrow later" fail.** If limits are raised and usage is logged, but the moment a turn *hits* a limit is not logged, the collected distribution is censored by the very caps being tuned. Several hundred turns later the data says nobody exceeded 400 messages, which is indistinguishable from turns having been silently clipped at 400. A naturally short turn and a starved turn look identical in a usage log that only records what got through.
 

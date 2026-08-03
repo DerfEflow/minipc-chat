@@ -23,9 +23,10 @@ const r = await runCatalogAudit({
   anthropic: wallet.ANTHROPIC_API_KEY || wallet.CLAUDE_ANTHROPIC_KEY,
   deepseek: wallet.DEEPSEEK_AI_DOMINION_UI_APIKEY || wallet.DEEPSEEK_API_KEY,
   nvidia: wallet.NVIDIA_API_KEY || wallet.NVIDIA_API_KEY_6_MONTHS,
-  // Dominion's own AI Studio key. Deliberately NOT falling back to another app's Gemini key:
-  // borrowing one crosses quota and billing between products and hides which app spent what.
-  google: wallet.GOOGLE_AI_STUDIO_KEY || wallet.DOMINION_AI_GOOGLE_AI_STUDIO_KEY,
+  // Dominion's own AI Studio key (minted by Fred 2026-08-03; GOOGLE_AI_STUDIO_PROJECT_NAME and
+  // _PROJECT_NUMBER ride alongside it in the wallet). Deliberately NOT falling back to another
+  // app's Gemini key: borrowing one crosses quota and billing between products.
+  google: wallet.GOOGLE_AI_STUDIO_API_KEY,
 });
 
 console.log("checked:", r.checkedAt);

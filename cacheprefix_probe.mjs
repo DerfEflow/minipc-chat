@@ -102,41 +102,58 @@ console.log("turn 1 messages: " + a.messages.length + "   turn 2 messages: " + b
 console.log("");
 
 /*
- * A cacheable second turn is a byte-stable EXTENSION of the first: message i must be identical for
- * every i the two share. The first index where they differ is where the cache dies, and everything
- * after it is billed fresh no matter how much of it was really the same.
+ * THE INVARIANT (SOW Phase 0, fix approved by Fred 2026-08-03): turn one's request, minus its
+ * volatile tail, must be a byte-identical prefix of turn two's request. The tail is the per-turn
+ * EXECUTION MANAGER directive, which is allowed to change because it rides BEHIND history; the
+ * cache covers everything ahead of it. Any drift inside the shared prefix is the defect this
+ * probe exists to catch coming back, and it exits nonzero so cacheprefix_test.mjs can pin it.
  */
-let firstDiff = -1;
-const shared = Math.min(a.messages.length, b.messages.length);
-for (let i = 0; i < shared; i++) {
-  const x = JSON.stringify(a.messages[i]);
+const isDirective = (m) => m && m.role === "system" && /^EXECUTION MANAGER\n/.test(String(m.content || ""));
+const prefixOf = (list) => {
+  const out = [...list];
+  while (out.length && isDirective(out[out.length - 1])) out.pop();
+  return out;
+};
+const p1 = prefixOf(a.messages);
+let broken = false;
+
+if (!a.messages.some(isDirective)) {
+  // The directive vanishing entirely would silently delete the persistence/authorization rules.
+  console.log("FAIL: no EXECUTION MANAGER message found in turn 1 — the directive was lost, not moved.");
+  broken = true;
+}
+if (p1.length >= b.messages.length) {
+  console.log(`FAIL: turn 2 (${b.messages.length} messages) does not extend turn 1's prefix (${p1.length}).`);
+  broken = true;
+}
+for (let i = 0; i < p1.length && i < b.messages.length; i++) {
+  const x = JSON.stringify(p1[i]);
   const y = JSON.stringify(b.messages[i]);
   const same = x === y;
-  const role = a.messages[i].role;
-  console.log(`  [${i}] ${role.padEnd(9)} ${same ? "IDENTICAL" : "DIFFERS"}  (${x.length} vs ${y.length} chars)`);
-  if (!same && firstDiff < 0) firstDiff = i;
+  console.log(`  [${i}] ${p1[i].role.padEnd(9)} ${same ? "IDENTICAL" : "DIFFERS"}  (${x.length} vs ${y.length} chars)`);
+  if (!same) {
+    broken = true;
+    const xs = String(p1[i].content || ""), ys = String(b.messages[i].content || "");
+    let k = 0; while (k < xs.length && k < ys.length && xs[k] === ys[k]) k++;
+    console.log("      first differing character at offset " + k + " of " + xs.length + "/" + ys.length);
+    console.log("      turn1: ..." + JSON.stringify(xs.slice(Math.max(0, k - 60), k + 90)));
+    console.log("      turn2: ..." + JSON.stringify(ys.slice(Math.max(0, k - 60), k + 90)));
+  }
 }
 
-if (firstDiff < 0) {
-  console.log("\nPREFIX IS STABLE across the shared messages. The cache miss is NOT prompt drift;");
-  console.log("look at request-level fields next (below) and at how the provider is being called.");
-} else {
-  console.log(`\nPREFIX BREAKS AT MESSAGE ${firstDiff} (role=${a.messages[firstDiff].role}).`);
-  const x = String(a.messages[firstDiff].content || "");
-  const y = String(b.messages[firstDiff].content || "");
-  let k = 0; while (k < x.length && k < y.length && x[k] === y[k]) k++;
-  console.log("first differing character at offset " + k + " of " + x.length + "/" + y.length);
-  console.log("  turn1: ..." + JSON.stringify(x.slice(Math.max(0, k - 60), k + 90)));
-  console.log("  turn2: ..." + JSON.stringify(y.slice(Math.max(0, k - 60), k + 90)));
-}
+console.log("");
+console.log(broken
+  ? "PREFIX BROKEN — the provider will cache nothing past the first differing byte."
+  : `PREFIX STABLE: turn 2 extends turn 1's first ${p1.length} message(s) byte-for-byte; only the ${a.messages.length - p1.length} directive message(s) ride behind history and re-bill.`);
 
 // Request-level fields matter too: some providers key their cache on more than the messages.
 console.log("\nrequest fields (turn1 -> turn2):");
 for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
   if (k === "messages") continue;
   const x = JSON.stringify(a[k]), y = JSON.stringify(b[k]);
+  if (x !== y) broken = true;   // a changing top-level field (model, thinking, effort) also kills the cache
   console.log("  " + k.padEnd(20) + (x === y ? "same  " + String(x).slice(0, 60) : "DIFFERS  " + String(x).slice(0, 40) + "  ->  " + String(y).slice(0, 40)));
 }
 
 cleanup();
-process.exit(0);
+process.exit(broken ? 1 : 0);
