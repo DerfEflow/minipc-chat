@@ -92,6 +92,23 @@ const u1 = { role: "user", content: "Reply with exactly the word: alpha" };
 const t1 = await turn([u1]);
 if (t1.error) { console.error("turn 1 errored: " + JSON.stringify(t1.error)); cleanup(); process.exit(1); }
 const a1 = { role: "assistant", content: t1.answer || "alpha" };
+
+/*
+ * Optional gap between the two turns: node cacheprobe.mjs [delaySeconds]
+ *
+ * Added 2026-08-03 as step one of the Phase 0 cache work, and it exists to disprove THIS PROBE
+ * before anyone goes hunting through prompt assembly. Turn two normally fires seconds after turn
+ * one, so a zero-hit result could mean our prefix churns, or simply that the provider's cache
+ * write had not landed yet. Those two explanations cost very different amounts to chase. If hits
+ * appear with a delay, the prompt is fine and the probe was too fast. If hits stay at zero with a
+ * comfortable gap, the defect is ours and the bisect is justified.
+ */
+const delaySec = Math.max(0, Number(process.argv[2]) || 0);
+if (delaySec) {
+  console.log("waiting " + delaySec + "s before turn two, to let any provider-side cache write land");
+  await new Promise((r) => setTimeout(r, delaySec * 1000));
+}
+
 const t2 = await turn([u1, a1, { role: "user", content: "Now reply with exactly the word: beta" }]);
 if (t2.error) { console.error("turn 2 errored: " + JSON.stringify(t2.error)); cleanup(); process.exit(1); }
 

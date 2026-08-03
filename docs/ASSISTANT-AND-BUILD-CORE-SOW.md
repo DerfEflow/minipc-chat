@@ -155,11 +155,50 @@ Turn two shares roughly 1169 tokens of prefix with turn one and reads none of it
 
 **Why this outranks everything else on the list:** Wolfe EMBER wraps every turn, on every model, for every user. A churning prefix means the app pays full freight on a ~600 word preamble plus the whole feature index, house style block, kept-promise block and operating standards, on every single call it serves.
 
-**Work, in order:**
-1. **Rule out the probe first.** The probe fires turn two seconds after turn one. Re-run with a delay inserted to confirm DeepSeek's cache write has landed. Cheapest possible way to avoid hunting a defect that is not there.
-2. If it still misses, bisect the assembled system prompt across two consecutive rounds and diff them byte for byte. Prime suspects in assembly order: `featureIndex()`, `flywheel.activePrompts("global")` and `activePrompts("mode")` (ordering is not obviously deterministic), `machinesBlock()`, and the versioned prompt overlays appended at the tail.
-3. Freeze the canonical prefix order and pin it with a test that asserts round N+1's assembled messages are a byte-stable extension of round N.
-4. Promote `cacheprobe.mjs` from a manual script into something that runs and proves itself.
+### CAUSE FOUND, 2026-08-03
+
+**Step 1, ruling out the probe: done, and it is not the probe.** `cacheprobe.mjs` now takes an optional delay (`node cacheprobe.mjs 25`). Re-run with a 25 second gap so any provider-side cache write had ample time to land: **still zero hits.** The defect is ours.
+
+**Step 2, reading the bytes: done.** `cacheprefix_probe.mjs` is new. It boots the real server with `DEEPSEEK_URL` pointed at a local capture endpoint, sends two turns, and diffs the request bodies message by message. Nothing reaches a provider and nothing is billed. Result:
+
+```
+  [0] system     DIFFERS  (4970 vs 4973 chars)
+  [1] user       IDENTICAL
+
+PREFIX BREAKS AT MESSAGE 0 (role=system).
+first differing character at offset 3101 of 4896
+  turn1: "...EXECUTION MANAGER\nTask: simple. Forge: ember.\nGoal: Reply with exactly the word: alpha\n..."
+  turn2: "...EXECUTION MANAGER\nTask: simple. Forge: ember.\nGoal: Now reply with exactly the word: beta\n..."
+```
+
+**The cause is one line.** `execution-policy.mjs:476`, inside `executionManagerPrompt`:
+
+```js
+`Goal: ${compactText(contract.objective, 900)}`,
+```
+
+The user's objective, up to 900 characters of it, is interpolated into the EXECUTION MANAGER block, and `server.mjs:5500` appends that block to the **system message**. The objective changes every turn. So message zero, the very first thing in the prefix, is different on every single request, for every user, on every model.
+
+**Why zero hits rather than partial hits.** Roughly 3,100 characters sit before the goal line and never change, which is about 775 tokens that a token-block cache could still have matched. Getting exactly zero says the provider is treating the system message as one unit: change any byte of it and none of it caches, and because it is message zero, nothing after it can cache either. The whole request is billed fresh, every time.
+
+**What it costs.** Every turn in the app pays full freight on the entire stable preamble: Wolfe EMBER, the feature index, the house style block, the kept promise, the operating standards. On DeepSeek V4 Pro, cached input is priced at roughly one hundred and twentieth of fresh input.
+
+### The fix, and why it needs Fred
+
+Volatile content is not the problem. Volatile content sitting AHEAD of stable content is. The repair is to restructure the message list so the cacheable part is a genuine stable prefix:
+
+**Today:** `[system: stable + VOLATILE GOAL + stable] [history] [user]`
+
+**Target:** `[system: entirely stable] [history, append-only] [execution directive with the goal] [user]`
+
+That way each turn's cache covers the system block plus every prior history message, and only the tail is fresh. It also matches the prefix stability doctrine already written into `docs/PROVIDER-CACHING-SOW.md` on 07-28.
+
+**This is a high blast radius change and is NOT being made unilaterally.** It alters what every model sees, on every turn, for every user, and it moves instructions from the top of the context to the bottom. Models generally follow late instructions at least as well as early ones, so the likely behavioural effect is neutral-to-positive, but "likely" is not a standard that should be applied to the whole app without Fred saying go. **Decision required.**
+
+**Remaining work once approved:**
+1. Split the system assembly so the execution directive is emitted as its own message rather than concatenated into the system string.
+2. Pin it with a test asserting round N+1's messages are a byte-stable extension of round N's, so this cannot silently return.
+3. Re-run `cacheprobe.mjs` for live proof.
 
 **Exit criterion:** a two-round call reports `readTokens > 0` on round two, and a test fails if the prefix churns again.
 
