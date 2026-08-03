@@ -1,0 +1,446 @@
+================================================================================
+NVIDIA ENDPOINT AUDIT
+Captured 2026-08-02 for the Dominion AI assistant-build-core SOW, Phase A.
+================================================================================
+
+
+PART 1. HOW THIS WAS CAPTURED
+--------------------------------------------------------------------------------
+
+Source:   GET https://integrate.api.nvidia.com/v1/models
+Auth:     NVIDIA_API_KEY from the local wallet, read at runtime, never printed
+Returned: 102 models
+Date:     2026-08-02
+
+This is the live list the endpoint actually serves, not a list from documentation
+and not a list from memory. That distinction is the Phase A evidence rule.
+
+IMPORTANT LIMIT OF THIS DATA: the /v1/models response returns identifiers only.
+It carries no capability information. It does not say whether a model supports
+tool calling, what its real context window is, whether it accepts images, or
+whether it is free or billed on the developer tier. Every judgment in Part 4 and
+Part 5 below is therefore a PROPOSAL TO PROBE, not a finding.
+
+
+PART 2. THE FULL LIST, AS RETURNED (102)
+--------------------------------------------------------------------------------
+
+  1  01-ai/yi-large
+  2  adept/fuyu-8b
+  3  ai21labs/jamba-1.5-large-instruct
+  4  aisingapore/sea-lion-7b-instruct
+  5  baai/bge-m3
+  6  bigcode/starcoder2-15b
+  7  databricks/dbrx-instruct
+  8  deepseek-ai/deepseek-coder-6.7b-instruct
+  9  deepseek-ai/deepseek-v4-flash
+ 10  deepseek-ai/deepseek-v4-pro
+ 11  google/codegemma-1.1-7b
+ 12  google/codegemma-7b
+ 13  google/deplot
+ 14  google/diffusiongemma-26b-a4b-it
+ 15  google/gemma-2b
+ 16  google/gemma-3-12b-it
+ 17  google/gemma-3-4b-it
+ 18  google/gemma-4-31b-it
+ 19  google/recurrentgemma-2b
+ 20  ibm/granite-3.0-3b-a800m-instruct
+ 21  ibm/granite-3.0-8b-instruct
+ 22  ibm/granite-34b-code-instruct
+ 23  ibm/granite-8b-code-instruct
+ 24  meta/codellama-70b
+ 25  meta/llama2-70b
+ 26  meta/llama-3.1-70b-instruct
+ 27  meta/llama-3.1-8b-instruct
+ 28  meta/llama-3.2-11b-vision-instruct
+ 29  meta/llama-3.2-1b-instruct
+ 30  meta/llama-3.2-3b-instruct
+ 31  meta/llama-3.2-90b-vision-instruct
+ 32  meta/llama-3.3-70b-instruct
+ 33  meta/llama-guard-4-12b
+ 34  microsoft/kosmos-2
+ 35  microsoft/phi-3.5-moe-instruct
+ 36  microsoft/phi-3-vision-128k-instruct
+ 37  minimaxai/minimax-m3
+ 38  mistralai/codestral-22b-instruct-v0.1
+ 39  mistralai/mistral-7b-instruct-v0.3
+ 40  mistralai/mistral-large
+ 41  mistralai/mistral-large-2-instruct
+ 42  mistralai/mistral-medium-3.5-128b
+ 43  mistralai/mistral-nemotron
+ 44  mistralai/mixtral-8x22b-v0.1
+ 45  moonshotai/kimi-k2.6
+ 46  nvidia/ai-synthetic-video-detector
+ 47  nvidia/cosmos-reason2-8b
+ 48  nvidia/embed-qa-4
+ 49  nvidia/ising-calibration-1.5-31b
+ 50  nvidia/llama-3.1-nemoguard-8b-content-safety
+ 51  nvidia/llama-3.1-nemoguard-8b-topic-control
+ 52  nvidia/llama-3.1-nemotron-51b-instruct
+ 53  nvidia/llama-3.1-nemotron-70b-instruct
+ 54  nvidia/llama-3.1-nemotron-nano-8b-v1
+ 55  nvidia/llama-3.1-nemotron-nano-vl-8b-v1
+ 56  nvidia/llama-3.1-nemotron-safety-guard-8b-v3
+ 57  nvidia/llama-3.1-nemotron-ultra-253b-v1
+ 58  nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1
+ 59  nvidia/llama-3.2-nv-embedqa-1b-v1
+ 60  nvidia/llama-3.3-nemotron-super-49b-v1
+ 61  nvidia/llama-3.3-nemotron-super-49b-v1.5
+ 62  nvidia/llama3-chatqa-1.5-70b
+ 63  nvidia/llama-nemotron-embed-1b-v2
+ 64  nvidia/llama-nemotron-embed-vl-1b-v2
+ 65  nvidia/mistral-nemo-minitron-8b-8k-instruct
+ 66  nvidia/nemoretriever-parse
+ 67  nvidia/nemotron-3.5-content-safety
+ 68  nvidia/nemotron-3-embed-1b
+ 69  nvidia/nemotron-3-nano-30b-a3b
+ 70  nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
+ 71  nvidia/nemotron-3-super-120b-a12b
+ 72  nvidia/nemotron-3-ultra-550b-a55b
+ 73  nvidia/nemotron-4-340b-instruct
+ 74  nvidia/nemotron-4-340b-reward
+ 75  nvidia/nemotron-mini-4b-instruct
+ 76  nvidia/nemotron-nano-12b-v2-vl
+ 77  nvidia/nemotron-nano-3-30b-a3b
+ 78  nvidia/nemotron-parse
+ 79  nvidia/neva-22b
+ 80  nvidia/nvclip
+ 81  nvidia/nv-embedcode-7b-v1
+ 82  nvidia/nv-embedqa-e5-v5
+ 83  nvidia/nv-embedqa-mistral-7b-v2
+ 84  nvidia/nv-embed-v1
+ 85  nvidia/nvidia-nemotron-nano-9b-v2
+ 86  nvidia/riva-translate-4b-instruct
+ 87  nvidia/riva-translate-4b-instruct-v1.1
+ 88  nvidia/riva-translate-4b-instruct-v2
+ 89  nvidia/vila
+ 90  nv-mistralai/mistral-nemo-12b-instruct
+ 91  openai/gpt-oss-120b
+ 92  openai/gpt-oss-20b
+ 93  poolside/laguna-xs-2.1
+ 94  snowflake/arctic-embed-l
+ 95  stepfun-ai/step-3.7-flash
+ 96  thinkingmachines/inkling
+ 97  writer/palmyra-creative-122b
+ 98  writer/palmyra-fin-70b-32k
+ 99  writer/palmyra-med-70b
+100  writer/palmyra-med-70b-32k
+101  z-ai/glm-5.2
+102  zyphra/zamba2-7b-instruct
+
+
+PART 3. THE SAME 102, SORTED INTO WHAT THEY ARE
+--------------------------------------------------------------------------------
+
+A. DUPLICATES A PROVIDER DOMINION ALREADY HAS DIRECT (3)
+   Excluded by your rule. No redundant endpoints.
+
+   moonshotai/kimi-k2.6                    you hold a Moonshot key
+   deepseek-ai/deepseek-v4-pro             direct to DeepSeek, your owner default
+   deepseek-ai/deepseek-v4-flash           direct to DeepSeek, your guest default
+
+
+B. GENERAL CHAT AND REASONING, CURRENT GENERATION (16)
+   The pool the user-facing shortlist is drawn from.
+
+   nvidia/nemotron-3-ultra-550b-a55b
+   nvidia/nemotron-3-super-120b-a12b
+   nvidia/nemotron-3-nano-30b-a3b
+   nvidia/nemotron-nano-3-30b-a3b          note: near-identical id to the above
+   nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
+   nvidia/nvidia-nemotron-nano-9b-v2
+   openai/gpt-oss-120b
+   openai/gpt-oss-20b
+   google/gemma-4-31b-it
+   z-ai/glm-5.2
+   mistralai/mistral-medium-3.5-128b
+   mistralai/mistral-nemotron
+   ai21labs/jamba-1.5-large-instruct
+   minimaxai/minimax-m3
+   stepfun-ai/step-3.7-flash
+   thinkingmachines/inkling
+
+
+C. GENERAL CHAT, PRIOR GENERATION (8)
+   Working models, superseded by something in group B.
+
+   nvidia/llama-3.1-nemotron-ultra-253b-v1
+   nvidia/llama-3.3-nemotron-super-49b-v1
+   nvidia/llama-3.3-nemotron-super-49b-v1.5
+   nvidia/llama-3.1-nemotron-70b-instruct
+   nvidia/llama-3.1-nemotron-51b-instruct
+   nvidia/llama-3.1-nemotron-nano-8b-v1
+   meta/llama-3.3-70b-instruct
+   mistralai/mistral-large-2-instruct
+
+
+D. VISION AND MULTIMODAL (9)
+
+   nvidia/nemotron-nano-12b-v2-vl
+   nvidia/llama-3.1-nemotron-nano-vl-8b-v1
+   meta/llama-3.2-90b-vision-instruct
+   meta/llama-3.2-11b-vision-instruct
+   microsoft/phi-3-vision-128k-instruct
+   microsoft/kosmos-2
+   nvidia/neva-22b
+   nvidia/vila
+   adept/fuyu-8b
+
+
+E. DOCUMENT AND CHART PARSING (3)
+   The highest-value group here. Not user-facing models.
+
+   nvidia/nemotron-parse
+   nvidia/nemoretriever-parse
+   google/deplot                           charts and plots to structured data
+
+
+F. EMBEDDINGS AND RETRIEVAL (12)
+   Infrastructure for retriever.mjs and the two rerank probes.
+
+   baai/bge-m3
+   nvidia/nv-embed-v1
+   nvidia/nv-embedqa-e5-v5
+   nvidia/nv-embedqa-mistral-7b-v2
+   nvidia/nv-embedcode-7b-v1               code-specific
+   nvidia/embed-qa-4
+   nvidia/nemotron-3-embed-1b
+   nvidia/llama-nemotron-embed-1b-v2
+   nvidia/llama-nemotron-embed-vl-1b-v2
+   nvidia/llama-3.2-nv-embedqa-1b-v1
+   nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1
+   snowflake/arctic-embed-l
+   nvidia/nvclip                           image embeddings
+
+
+G. SAFETY, MODERATION AND SCORING (6)
+
+   meta/llama-guard-4-12b
+   nvidia/nemotron-3.5-content-safety
+   nvidia/llama-3.1-nemoguard-8b-content-safety
+   nvidia/llama-3.1-nemoguard-8b-topic-control
+   nvidia/llama-3.1-nemotron-safety-guard-8b-v3
+   nvidia/nemotron-4-340b-reward           scores answers, not a chat model
+
+
+H. DOMAIN AND TASK SPECIALISTS (11)
+
+   writer/palmyra-creative-122b            creative writing
+   writer/palmyra-fin-70b-32k              finance
+   writer/palmyra-med-70b                  medical
+   writer/palmyra-med-70b-32k              medical, longer context
+   nvidia/cosmos-reason2-8b                physical and spatial reasoning
+   nvidia/riva-translate-4b-instruct       translation
+   nvidia/riva-translate-4b-instruct-v1.1  translation
+   nvidia/riva-translate-4b-instruct-v2    translation
+   nvidia/ai-synthetic-video-detector      deepfake detection
+   nvidia/ising-calibration-1.5-31b        unclear purpose, needs research
+   google/diffusiongemma-26b-a4b-it        diffusion language model, experimental
+
+
+I. CODING SPECIALISTS (7)
+
+   poolside/laguna-xs-2.1
+   mistralai/codestral-22b-instruct-v0.1
+   bigcode/starcoder2-15b
+   deepseek-ai/deepseek-coder-6.7b-instruct
+   ibm/granite-34b-code-instruct
+   ibm/granite-8b-code-instruct
+   meta/codellama-70b
+   google/codegemma-7b
+   google/codegemma-1.1-7b
+
+
+J. LEGACY SHELF (24)
+   Old generations. Recommended: do not add. They make the picker worse.
+
+   meta/llama2-70b
+   meta/llama-3.1-70b-instruct
+   meta/llama-3.1-8b-instruct
+   meta/llama-3.2-3b-instruct
+   meta/llama-3.2-1b-instruct
+   01-ai/yi-large
+   databricks/dbrx-instruct
+   mistralai/mixtral-8x22b-v0.1
+   mistralai/mistral-7b-instruct-v0.3
+   mistralai/mistral-large
+   microsoft/phi-3.5-moe-instruct
+   ibm/granite-3.0-8b-instruct
+   ibm/granite-3.0-3b-a800m-instruct
+   google/gemma-2b
+   google/gemma-3-4b-it
+   google/gemma-3-12b-it
+   google/recurrentgemma-2b
+   nvidia/nemotron-4-340b-instruct
+   nvidia/nemotron-mini-4b-instruct
+   nvidia/mistral-nemo-minitron-8b-8k-instruct
+   nvidia/llama3-chatqa-1.5-70b
+   nv-mistralai/mistral-nemo-12b-instruct
+   aisingapore/sea-lion-7b-instruct
+   zyphra/zamba2-7b-instruct
+
+
+PART 4. THE SHORTLIST
+--------------------------------------------------------------------------------
+
+USER-FACING, FIRST TIER (6)
+Probe these first. If they pass, this alone is a good NVIDIA lane.
+
+   nvidia/nemotron-3-ultra-550b-a55b
+       The current flagship of the newest Nemotron generation. If any free model
+       here is going to carry real work, this is it.
+
+   nvidia/nemotron-3-super-120b-a12b
+       The mid tier of the same generation. Cheaper to run, likely faster.
+
+   openai/gpt-oss-120b
+       OpenAI's open-weight model. Users recognise the name, which matters in a
+       picker, and it is a different lineage from everything else on the list.
+
+   google/gemma-4-31b-it
+       Newest Gemma. Complements the Gemini models you are adding through AI
+       Studio rather than duplicating them: Gemma is open weight, Gemini is not.
+
+   z-ai/glm-5.2
+       Already in your catalog through OpenRouter. Moving it here keeps the model
+       and removes its cost when OpenRouter is pruned.
+
+   mistralai/mistral-medium-3.5-128b
+       Current Mistral. Rounds out the lineup with a European lab.
+
+
+USER-FACING, SECOND TIER (7)
+Probe after the first tier. These are chosen for being different, not for being
+better.
+
+   ai21labs/jamba-1.5-large-instruct
+       Hybrid architecture, unusually long context. Architecturally unlike
+       anything else in the catalog.
+
+   nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
+       Omni plus explicit reasoning in a small model. Interesting shape.
+
+   writer/palmyra-creative-122b
+       A creative-writing specialist. Adjacent to your Trinity work and to the
+       novel.
+
+   stepfun-ai/step-3.7-flash
+       Novel lab, worth a look.
+
+   thinkingmachines/inkling
+       Novel lab, worth a look.
+
+   nvidia/cosmos-reason2-8b
+       Physical and spatial reasoning. Adjacent to the aerial measurement work in
+       Alpha Estimator.
+
+   nvidia/nemotron-nano-12b-v2-vl
+       Vision, current generation, small enough to be cheap.
+
+
+PROBE WITH HISTORY IN MIND (1)
+
+   minimaxai/minimax-m3
+       Your notes record a live MiniMax failure on 2026-07-12 where the model
+       reasoned without ever speaking. Worth probing, worth watching for exactly
+       that.
+
+
+NON-PICKER LANES (recommended, wired as infrastructure)
+
+   Document parsing:  nvidia/nemotron-parse, nvidia/nemoretriever-parse,
+                      google/deplot
+       Closes a real gap. On-device extraction in attach-extract.mjs flattens
+       table structure into a single run of text and cannot read a scanned PDF at
+       all. That module already has an OCR path waiting for an engine.
+
+   Embeddings:        baai/bge-m3, nvidia/nv-embedqa-e5-v5,
+                      nvidia/nv-embedcode-7b-v1
+       Feeds retriever.mjs and the two rerank probes. Removes a recurring cost.
+
+   Safety:            meta/llama-guard-4-12b, nvidia/nemotron-3.5-content-safety
+       You serve guests. Free guarding is worth having wired.
+
+
+PART 5. THE VARIABLES USED TO SORT THAT LIST
+--------------------------------------------------------------------------------
+
+These are the criteria, in the order they were applied. Change any of them and
+the shortlist changes.
+
+V1. REDUNDANCY AGAINST A DIRECT PROVIDER          weight: hard exclude
+    Your stated rule. If Dominion already reaches the model through that vendor's
+    own API, the NVIDIA copy is dropped. Removed Kimi and both DeepSeeks.
+
+V2. GENERATION CURRENCY                            weight: hard exclude
+    If a newer model from the same family is on the same endpoint, the older one
+    goes. This is what emptied group J. It is a judgment about naming and version
+    numbers, not about measured quality.
+
+V3. PICKER HYGIENE                                 weight: high
+    A curated dozen beats a wall of 102. A user scrolling a long list of
+    near-identical names picks worse, not better. This is the reason the
+    shortlist is short rather than generous.
+
+V4. CAPABILITY DOMINION DOES NOT ALREADY HAVE      weight: high
+    Ranked a model up if it does something the current catalog cannot: document
+    parsing, spatial reasoning, free embeddings, guarding.
+
+V5. COST                                           weight: high
+    Free or near-free only, which is your framing. NOT VERIFIED per model. The
+    model list does not report pricing.
+
+V6. ARCHITECTURAL AND VENDOR DIVERSITY             weight: medium
+    Preferred one strong model from several labs over several from one lab. A
+    catalog of six Nemotrons fails differently than a catalog of six labs, and
+    correlated failure across a whole lane is worse than any single weak model.
+
+V7. NAME RECOGNITION                               weight: medium
+    A user picking a model reads the name. "gpt-oss" and "Gemma" carry meaning to
+    people who have never heard of Nemotron. This is a product criterion, not a
+    technical one.
+
+V8. ADJACENCY TO YOUR OTHER WORK                   weight: medium
+    Ranked up where a model touches something you already do: creative writing,
+    spatial reasoning for aerial measurement, code embeddings.
+
+V9. PRIOR INCIDENT HISTORY                         weight: flag, not exclude
+    MiniMax stays on the list with its 2026-07-12 failure attached rather than
+    being silently dropped.
+
+
+WHAT WAS NOT USED, BECAUSE THE DATA DOES NOT EXIST YET
+--------------------------------------------------------------------------------
+
+None of the following were available, and all of them outrank everything in
+Part 5. Any of them could overturn the shortlist entirely.
+
+  - TOOL CALLING. Whether a model emits a real tool call or merely describes one.
+    For build and IDE work this is pass or fail, and it is unknown for every
+    model above. A model that cannot call a tool is useless to the Crucible no
+    matter how good it reads.
+
+  - REAL CONTEXT WINDOW. Not in the list response.
+
+  - PROVIDER OUTPUT CEILING per request, and whether reasoning tokens consume it.
+
+  - RATE LIMITS on your developer tier. You report them as far beyond current
+    need. Phase A records the actual figures.
+
+  - FREE VERSUS BILLED status per model on your tier.
+
+  - IMAGE SUPPORT, confirmed rather than inferred from a name containing "vl" or
+    "vision".
+
+  - MEASURED QUALITY. No benchmark was consulted and none is claimed. Every
+    quality-flavoured word in Part 4 is a guess about a model's role, not a
+    finding about its ability.
+
+fleet_probe.mjs already answers three of these (does it answer, does it emit a
+real tool call, does it accept an image) for NVIDIA and Moonshot. Phase A extends
+it to the full shortlist and adds the output-ceiling and reasoning-budget checks.
+
+
+================================================================================
+END
+================================================================================
