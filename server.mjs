@@ -33,7 +33,7 @@ import { routeOf, escalateForContext, consumeNeeds, askSliceOf, NO_RETRIEVAL_RE 
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
-import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL, BATTALION_COPY, BATTALION_ROSTER } from "./models.catalog.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL, BATTALION_COPY, BATTALION_ROSTER, resolveModelId } from "./models.catalog.mjs";
 import { createBattalion } from "./battalion.mjs";
 import { continuationContext, createLoopWatch, contextExceeded, emptyResponseInstruction, reasoningOnlyPause, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
 import { TOOLBOX_OPEN_NAME, withToolbox, openToolbox } from "./toolbox.mjs";
@@ -5780,7 +5780,10 @@ const fmtCostRange = (lo, hi) => (Math.abs(hi - lo) < 0.005 ? "≈ " + fmtUsd((l
 const OUT_BAND = { fast: [80, 220], normal: [300, 800], draft: [1200, 3000], deep_think: [1200, 3000], long_context: [1500, 3500] };
 function estimatePreflight(input = {}, isOwner = false) {
   const history = Array.isArray(input.messages) ? input.messages : [];
-  const forced = (typeof input.model === "string" && input.model && input.model !== "auto" && input.model !== "local") ? input.model : "";
+  // resolveModelId: a saved preference naming a model the 2026-08-03 prune removed estimates as
+  // its mapped survivor, so the preflight chip prices the model the turn will actually ride.
+  const forcedRaw = (typeof input.model === "string" && input.model && input.model !== "auto" && input.model !== "local") ? input.model : "";
+  const forced = forcedRaw ? (resolveModelId(forcedRaw) || forcedRaw) : "";
   const explicitLocal = (input.model === "local");
   const reqMode = typeof input.mode === "string" ? input.mode : "auto";
   const lastUser = [...history].reverse().find((m) => m && m.role === "user");
@@ -5876,7 +5879,11 @@ function readRawBody(req, maxBytes = 25 * 1024 * 1024) {
 // credits), the privacy allow-list is honored refuse-not-substitute (Trusted and Private
 // both OCR through the Anthropic vision model; Private is the Anthropic-direct lane since
 // 2026-07-30), pages are capped, and non-owner cost is charged to their credits like any turn.
-const OCR_MODEL = cfgGet("OCR_MODEL", "qwen/qwen3-vl-8b-instruct");
+// Default moved off qwen3-vl-8b when the 2026-08-03 prune retired it. Gemini 3.5 Flash-Lite is
+// the surviving cheap vision seat ($0.30/$2.50, vision verified by probe the same day), and a
+// configured override naming any retired model resolves to its mapped survivor rather than
+// silently breaking the whole OCR feature.
+const OCR_MODEL = resolveModelId(cfgGet("OCR_MODEL", "google/gemini-3.5-flash-lite")) || "google/gemini-3.5-flash-lite";
 const OCR_MODEL_TRUSTED = cfgGet("OCR_MODEL_TRUSTED", "anthropic/claude-haiku-4-5");
 const OCR_MAX_PAGES = 12;
 const OCR_PROMPT = "Transcribe ALL text on this scanned or photographed page verbatim, top to bottom, left to right. Preserve line breaks and table alignment where you can (use tabs between columns). Output ONLY the transcription — no commentary, no summary. If the page contains no text, output exactly: (blank page)";
@@ -7129,7 +7136,16 @@ async function handleChat(req, res) {
   const personaStyle = typeof input.persona === "string" ? input.persona.slice(0, 2000) : "";
   const userTemp = (typeof input.temperature === "number" && input.temperature >= 0 && input.temperature <= 2) ? input.temperature : undefined;
   const reqMode = typeof input.mode === "string" ? input.mode : "auto";
-  const forced = (typeof input.model === "string" && input.model && input.model !== "auto" && input.model !== "local") ? input.model : "";
+  const forcedRaw = (typeof input.model === "string" && input.model && input.model !== "auto" && input.model !== "local") ? input.model : "";
+  /*
+   * Saved preferences survive the 2026-08-03 prune. A removed id resolves to its mapped survivor
+   * (REMOVED_MODEL_FALLBACKS) instead of failing isCloudModel and silently dropping to auto,
+   * which was the old behaviour and is exactly the "silent swap" this file's own fallback
+   * doctrine forbids. The substitution is announced on the wire below, once routing has settled.
+   */
+  const forced = forcedRaw ? (resolveModelId(forcedRaw) || forcedRaw) : "";
+  const modelSubstituted = forced && forcedRaw && forced !== forcedRaw
+    ? { from: forcedRaw, to: forced } : null;
   // "local" is an EXPLICIT owner pick (Command Deck / Private-mode work); "auto" (or no pick) is NOT.
   // The owner-auto block below routes Auto to the real default engine, never the local Qwen.
   const explicitLocal = (input.model === "local");
@@ -7148,6 +7164,14 @@ async function handleChat(req, res) {
       sse({ type: "stopped", reason: "privacy_mode_block" });
       return endStream();
     }
+  }
+  // Tell the user their pruned pick was substituted, in words, before any tokens stream. A saved
+  // model quietly answering in a different voice with no explanation reads as the app breaking.
+  if (modelSubstituted && cloudModel) {
+    const sub = modelById(modelSubstituted.to);
+    sse({ type: "model_fallback", from: modelSubstituted.from, to: modelSubstituted.to,
+      text: "Heads up: the model saved for this chat (" + modelSubstituted.from + ") was retired from the lineup. " +
+        "This turn runs on " + ((sub && sub.name) || modelSubstituted.to) + " instead — the closest current seat. Pick any model to make a new choice sticky." });
   }
   // Multi-tenant gates on the identity resolved above (`T`). Owner short-circuits to the globals
   // (path unchanged); when MULTI_TENANT is off, this is always the owner. Refuse anon / paused /

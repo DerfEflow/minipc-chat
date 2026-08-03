@@ -166,8 +166,11 @@ const TERMINAL = (evs) => evs.some((e) => e === "done" || e === "stopped" || e =
 // 3. Wildfire, armed on a model that is not on the roster. This is the precise code that crashed:
 //    the block reads forgeExtra, and reading it too early is what took production down.
 {
+  // Was mistral-nemo until the 2026-08-03 prune retired it (and its fallback maps to GLM 5.2,
+  // which IS rostered — using it would break this test's whole premise). Trinity is the surviving
+  // catalog seat that is tool-capable, OpenRouter-reachable in a keyless boot, and NOT rostered.
   const t = await turn({ messages: [{ role: "user", content: "build the project" }],
-                         model: "mistralai/mistral-nemo", wildfire: true }, { email: OWNER });
+                         model: "arcee-ai/trinity-large-thinking", wildfire: true }, { email: OWNER });
   assert.ok(t.events.includes("wildfire"), "expected a wildfire event, got: " + t.events.join(","));
   assert.equal(t.detail.wildfire.kind, "fallback", "a non-rostered model should fall back to on-demand tools");
   assert.match(t.detail.wildfire.text, /toolbox_open/i, "the fallback should explain how capabilities remain available");

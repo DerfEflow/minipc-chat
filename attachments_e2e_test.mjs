@@ -28,8 +28,12 @@ const PORT = 8700 + (process.pid * 3) % 300;
 const MOCK_OLLAMA = PORT + 1;
 const MOCK_OR = PORT + 2;
 const OWNER = "owner@test.com";
-const VISION_MODEL = "qwen/qwen3-vl-8b-instruct";        // openrouter, vision:true, toolCapable (category)
-const TEXT_MODEL = "qwen/qwen3-235b-a22b-2507";          // openrouter, no vision
+// 2026-08-03 prune: qwen3-vl and qwen3-235b left the catalog. These two must be seats the mock
+// OpenRouter endpoint can serve in a keyless test boot: nano-12b-vl rides the nvidia lane, whose
+// missing key falls back to OpenRouter (the mock); Trinity is OpenRouter-native. DeepSeek/OpenAI/
+// Anthropic seats would refuse outright here ("no key"), which is why neither default is used.
+const VISION_MODEL = "nvidia/nemotron-nano-12b-v2-vl";   // vision:true, tools probed live
+const TEXT_MODEL = "arcee-ai/trinity-large-thinking";    // openrouter, toolCapable, no vision
 const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 let passed = 0, failed = 0;
@@ -108,9 +112,9 @@ try {
   await t("catalog payload carries verified vision flags", async () => {
     const r = await req("GET", "/api/models", { email: OWNER });
     const all = (r.body.groups || []).flatMap((g) => g.models);
-    const vl = all.find((m) => m.id === VISION_MODEL), q235 = all.find((m) => m.id === TEXT_MODEL);
-    assert(vl && vl.vision === true, "qwen3-vl should be vision:true");
-    assert(q235 && q235.vision === false, "qwen3-235b should be vision:false");
+    const vl = all.find((m) => m.id === VISION_MODEL), txt = all.find((m) => m.id === TEXT_MODEL);
+    assert(vl && vl.vision === true, "nemotron-nano-12b-vl should be vision:true");
+    assert(txt && !txt.vision, "trinity should not claim vision");
   });
 
   await t("picture + vision model -> multimodal parts reach the provider, answer streams", async () => {
@@ -232,7 +236,7 @@ try {
     assert(r.status === 200, "expected 200, got " + r.status + " " + JSON.stringify(r.body));
     assert(orBodies.length === before + 2, "one provider call per page (got " + (orBodies.length - before) + ")");
     const call = orBodies[orBodies.length - 1];
-    assert(call.model === "qwen/qwen3-vl-8b-instruct", "normal-mode OCR should use the cheap vision model");
+    assert(call.model === "google/gemini-3.5-flash-lite", "normal-mode OCR should use the cheap surviving vision seat");
     const user = call.messages.find((m) => m.role === "user");
     assert(Array.isArray(user.content) && user.content.some((p) => p.type === "image_url"), "page image must reach the provider");
     assert(JSON.stringify(call.messages).includes("Transcribe ALL text"), "OCR instruction missing");

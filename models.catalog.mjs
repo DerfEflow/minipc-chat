@@ -25,13 +25,13 @@ export const CATALOG_UPDATED = "2026-07-27";   // provider-native context/output
 // context, tool-capable, served direct to DeepSeek. Picked over the old Qwen 235B all-rounder.
 export const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
 
-// The default model for EVERYONE ELSE using the interface (non-owner tenants). Fred's rule: always
-// Hermes 4 70B: neutral, steerable, minimal moralizing. They can still switch to any model their
-// privacy mode allows; this is just what they land on and what they fall back to.
+// The default model for EVERYONE ELSE using the interface (non-owner tenants). They can still
+// switch to any model their privacy mode allows; this is just what they land on and fall back to.
 // Guest default (Fred, 2026-07-17): DeepSeek V4 Flash: tool-capable, 1M context, cheapest strong
-// engine, served direct to DeepSeek. (Replaced Hermes 4 70B, whose OpenRouter hosts cannot run tools.)
+// engine, served direct to DeepSeek. (Replaced Hermes 4 70B, whose OpenRouter hosts could not run
+// tools; Hermes itself left the catalog entirely in the 2026-08-03 prune.)
 export const TENANT_DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
-// Which default a caller lands on: the owner keeps the global default, everyone else gets Hermes.
+// Which default a caller lands on: the owner keeps the global default, everyone else the tenant one.
 export const defaultModelFor = (isOwner) => (isOwner ? DEFAULT_MODEL : TENANT_DEFAULT_MODEL);
 
 // Per-CALL output ceiling when a model doesn't set its own maxOut. 8K is a safe chunk for every
@@ -148,9 +148,15 @@ export const MODELS = [
   { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-pro",
     category: "Frontier / Flagship", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.43, outCost: 0.87, cacheHitCost: 0.003625, ctx: 1000000, maxOut: 384000, reasoning: true,
     specialty: "Near-frontier reasoning + code at ~1/30th flagship price (direct to DeepSeek)" },
-  { id: "minimax/minimax-m2.5", name: "MiniMax M2.5", origin: "MiniMax (Shanghai)",
-    category: "Frontier / Flagship", params: "456B (MoE)", paramsB: 456, inCost: 0.12, outCost: 0.48, ctx: 204000,
-    specialty: "Cheap capable all-rounder for high-volume work" },
+  /*
+   * PHASE 1 PRUNE, 2026-08-03 (Fred's order 2026-08-02: all free-thinking models out, OpenRouter
+   * down to named survivors). 23 rows removed; the approved cut list and the per-model fallback
+   * for saved preferences live in REMOVED_MODEL_FALLBACKS below. Survivors on OpenRouter: Trinity
+   * (creative), Qwen3 Coder (kept by Fred with its corrected 262k window), DeepSeek R1 (no direct
+   * route exists; Fred: "I dont want to lose it"). Grok was cut by name: "I am going to leave out
+   * Grok." MiniMax M2.5 fell to M3 on the free lane; Qwen3 235B's daily-driver job belongs to the
+   * defaults now.
+   */
   /*
    * GOOGLE AI STUDIO, direct (Fred 2026-08-02: "use Google studio for now"; wired 2026-08-03).
    * The OpenAI-compatible lane was LIVE-VERIFIED before these rows existed: gemini-3.5-flash
@@ -182,12 +188,6 @@ export const MODELS = [
   { id: "z-ai/glm-5.2", name: "GLM 5.2", origin: "Zhipu AI (Tsinghua spinout)", provider: "nvidia", directId: "z-ai/glm-5.2",
     category: "Frontier / Flagship", params: "355B (MoE)", paramsB: 355, inCost: 0.45, outCost: 3.31, ctx: 1048576,
     specialty: "Strong coder + long-horizon planning (FREE via NVIDIA when keyed)" },
-  { id: "qwen/qwen3-235b-a22b-2507", name: "Qwen3 235B", origin: "Alibaba",
-    category: "Frontier / Flagship", params: "235B (MoE·22B active)", paramsB: 235, inCost: 0.09, outCost: 0.10, ctx: 262144, maxOut: 16384,
-    specialty: "Fast, dirt-cheap, strong: the default daily driver" },
-  { id: "x-ai/grok-4.20", name: "Grok 4.20", origin: "xAI (Musk)",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.25, outCost: 2.50, ctx: 2000000, maxOut: 32768, reasoning: true,
-    specialty: "Frontier quality, 2M context, least hedgy of the majors" },
 
   // ---- Reasoning & Math ---------------------------------------------------------------------
   { id: "deepseek/deepseek-r1", name: "DeepSeek R1", origin: "DeepSeek (China)",
@@ -201,9 +201,6 @@ export const MODELS = [
   { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-ultra-550b-a55b",
     category: "Reasoning & Math", params: "550B (MoE·55B active)", paramsB: 550, inCost: 0.42, outCost: 2.61, ctx: 1000000, maxOut: 16384, reasoning: true,
     specialty: "Deep STEM reasoning when you need the big gun" },
-  { id: "qwen/qwen3-8b", name: "Qwen3 8B", origin: "Alibaba",
-    category: "Reasoning & Math", params: "8B", paramsB: 8, inCost: 0.05, outCost: 0.40, ctx: 128000, reasoning: true,
-    specialty: "Tiny thinking-mode model; cheap step-by-step math (Apache 2.0)" },
   { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-flash",
     category: "Reasoning & Math", params: "undisclosed (MoE)", paramsB: null, inCost: 0.05, outCost: 0.24, cacheHitCost: 0.0028, ctx: 1000000, maxOut: 384000, reasoning: true,
     specialty: "Cheapest strong reasoning/math+code engine, direct to DeepSeek" },
@@ -220,102 +217,29 @@ export const MODELS = [
   { id: "qwen/qwen3-coder", name: "Qwen3 Coder", origin: "Alibaba",
     category: "Coding", params: "480B (MoE·35B active)", paramsB: 480, inCost: 0.22, outCost: 1.80, ctx: 262144, maxOut: 32768,
     specialty: "Agentic coding across a large repo: 262k window (Apache 2.0)" },
-  { id: "mistralai/codestral-2508", name: "Codestral 25.08", origin: "Mistral AI (France)",
-    category: "Coding", params: "~22B", paramsB: 22, inCost: 0.30, outCost: 0.90, ctx: 256000,
-    specialty: "Fast code-completion specialist" },
-
-  // ---- Science & Technical ------------------------------------------------------------------
-  { id: "mistralai/mistral-small-24b-instruct-2501", name: "Mistral Small 3", origin: "Mistral AI (France)",
-    category: "Science & Technical", params: "24B", paramsB: 24, inCost: 0.05, outCost: 0.08, ctx: 32000, toolCapable: false,   // audited: no tool endpoints
-    specialty: "Excellent cheap technical/science Q&A; fully fine-tunable (Apache 2.0)" },
-  { id: "mistralai/mistral-small-3.2-24b-instruct", name: "Mistral Small 3.2", origin: "Mistral AI (France)",
-    category: "Science & Technical", vision: true, params: "24B", paramsB: 24, inCost: 0.08, outCost: 0.20, ctx: 128000,
-    specialty: "Fast cheap scripting/technical helper (OpenSCAD, three.js)" },
 
   // ---- Creative & Writing -------------------------------------------------------------------
-  // ctx corrected 32000 -> 16384 on 2026-08-03 against OpenRouter's live list. Scheduled for
-  // removal in the Phase 1 prune, but an overclaim is live in production until that lands, and
-  // the history budget is sized from this number.
-  { id: "anthracite-org/magnum-v4-72b", name: "Magnum v4 72B", origin: "Anthracite (open collective)",
-    category: "Creative & Writing", params: "72B", paramsB: 72, inCost: 3.00, outCost: 5.00, ctx: 16384,
-    specialty: "Literary prose: a collective reproducing Claude's writing feel" },
-  { id: "sao10k/l3.3-euryale-70b", name: "Euryale 70B (L3.3)", origin: "Sao10k (community)",
-    category: "Creative & Writing", params: "70B", paramsB: 70, inCost: 0.65, outCost: 0.75, ctx: 131072,
-    specialty: "Vivid, uninhibited fiction; distinct character voices" },
-  { id: "thedrummer/skyfall-36b-v2", name: "Skyfall 36B v2", origin: "TheDrummer (community)",
-    category: "Creative & Writing", params: "36B", paramsB: 36, inCost: 0.55, outCost: 0.80, ctx: 32000,
-    specialty: "Longer-form scripts with narrative stamina" },
   { id: "arcee-ai/trinity-large-thinking", name: "Trinity Large Thinking", origin: "Arcee AI",
     category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.25, outCost: 0.80, ctx: 262144, toolCapable: true,   // audited: tool endpoints live
     specialty: "Expressive creative writing (already in Command Deck notes)" },
-  { id: "thedrummer/rocinante-12b", name: "Rocinante 12B", origin: "TheDrummer (community)",
-    category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.17, outCost: 0.43, ctx: 65536,
-    specialty: "Cheapest free-thinking storyteller: punches above 12B" },
-  // LIVE-PROBED 2026-07-21 and DOWNGRADED to chat-only. OpenRouter's `supported_parameters` advertises
-  // "tools" for this model, which is why the weekly audit passed it, but the host serving it was never
-  // started with --enable-auto-tool-choice/--tool-call-parser: every tool_choice (omitted, auto,
-  // required) returns HTTP 400. Worse, with tool_choice "none" it answers "I have written the text
-  // HELLO to the file..." having called nothing at all. A model that narrates machine work it cannot
-  // perform is the exact failure this catalog exists to prevent, so the flag follows the probe, not
-  // the provider's metadata. Re-probe before flipping it back.
-  { id: "thedrummer/unslopnemo-12b", name: "UnslopNemo 12B", origin: "TheDrummer (community)",
-    category: "Creative & Writing", params: "12B", paramsB: 12, inCost: 0.40, outCost: 0.40, ctx: 32000, toolCapable: false,
-    specialty: "'De-slopped': kills purple-prose GPT-isms" },
-  { id: "tencent/hy3-preview", name: "Tencent Hy3", origin: "Tencent",
-    category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.06, outCost: 0.21, ctx: 262144, toolCapable: true,   // audited: tools live; ctx was 8x understated
-    specialty: "Ultra-cheap, surprisingly vivid creative chat for volume" },
-
-  // ---- Free-Thinking (Fred 2026-07-18: renamed from "Uncensored / Blunt", because the old label
-  // sounded nefarious; same models, same chat-only bench) ---------------------------------------
-  { id: "nousresearch/hermes-4-405b", name: "Hermes 4 405B", origin: "Nous Research (open collective)",
-    category: "Free-Thinking", params: "405B", paramsB: 405, inCost: 1.00, outCost: 3.00, ctx: 131072,
-    specialty: "Neutral, steerable, minimal moralizing: obeys your system prompt" },
-  { id: "microsoft/wizardlm-2-8x22b", name: "WizardLM-2 8x22B", origin: "Microsoft",
-    category: "Free-Thinking", params: "141B (MoE·8x22B)", paramsB: 141, inCost: 0.62, outCost: 0.62, ctx: 65536,
-    specialty: "Relatively unfiltered MoE; a piece of open-model history" },
-  // AUDITED 2026-07-17 (tools_audit.mjs): NO OpenRouter endpoint for Hermes 4 70B supports tool use,
-  // whatever the model card claims. Sending tools = "No endpoints found that support tool use".
-  // It stays the guest default for its voice; tool work needs a TOOLS-badged model.
-  { id: "nousresearch/hermes-4-70b", name: "Hermes 4 70B", origin: "Nous Research (open collective)",
-    category: "Free-Thinking", params: "70B", paramsB: 70, inCost: 0.13, outCost: 0.40, ctx: 131072, toolCapable: false,
-    specialty: "Reflective, non-preachy dialogue; toggleable reasoning" },
-  { id: "thedrummer/cydonia-24b-v4.1", name: "Cydonia 24B v4.1", origin: "TheDrummer (community)",
-    category: "Free-Thinking", params: "24B", paramsB: 24, inCost: 0.30, outCost: 0.50, ctx: 131072,
-    specialty: "Characterful, unfiltered; sharp dialogue with no hand-wringing" },
-  // OpenRouter retired the ":free" variant of this model on 2026-07-19; the paid id is the same
-  // model and every call to the old id 404s. Context is 128k, not the 32k the free tier carried.
-  // The free way to experiment now lives in Open & Trainable (Gemma 4 31B, genuinely $0), which is
-  // an honest home for it: nothing free on OpenRouter today is an uncensored finetune, so parking
-  // a mainstream aligned model in this category to keep a $0 slot would mislabel what it is.
-  { id: "cognitivecomputations/dolphin-mistral-24b-venice-edition", name: "Dolphin Mistral 24B", origin: "Cognitive Computations (Eric Hartford)",
-    category: "Free-Thinking", params: "24B", paramsB: 24, inCost: 0.20, outCost: 0.90, ctx: 128000,
-    specialty: "The classic de-censored Dolphin finetune, shipped by Venice as an uncensored build" },
 
   // ---- Vision / Multimodal ------------------------------------------------------------------
   // FREE LANE (Wave 2, live-probed 2026-07-29: answers with tools AND vision on NVIDIA's id).
   { id: "minimax/minimax-m3", name: "MiniMax M3", origin: "MiniMax (Shanghai)", provider: "nvidia", directId: "minimaxai/minimax-m3",
     category: "Vision / Multimodal", vision: true, params: "undisclosed (MoE)", paramsB: null, inCost: 0.10, outCost: 1.21, ctx: 1048576,
     specialty: "Strongest visual understanding here (image/video reasoning; FREE via NVIDIA when keyed)" },
-  { id: "qwen/qwen3-vl-8b-instruct", name: "Qwen3-VL 8B", origin: "Alibaba",
-    category: "Vision / Multimodal", vision: true, params: "8B", paramsB: 8, inCost: 0.08, outCost: 0.50, ctx: 128000,
-    specialty: "Image/style critique, art analysis, prompt-writing (text+vision)" },
-
-  // ---- Web / Research -----------------------------------------------------------------------
-  { id: "perplexity/sonar-pro", name: "Perplexity Sonar Pro", origin: "Perplexity",
-    category: "Web / Research", vision: true, params: "undisclosed (Llama-based)", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 200000, toolCapable: false,   // audited: no tool endpoints; its web search is BUILT IN
-    specialty: "Live web search with citations baked in: 'what's true right now'" },
+  // Quick free vision seat (probed 2026-08-03 on Fred's NVIDIA key: answers, real tool call, and
+  // NAMED the red swatch). Seated for the Simplify quick-and-dirty route; earns its place as the
+  // only small fast vision model on the free lane.
+  { id: "nvidia/nemotron-nano-12b-v2-vl", name: "Nemotron Nano 12B VL", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-nano-12b-v2-vl",
+    category: "Vision / Multimodal", vision: true, params: "12B", paramsB: 12, inCost: 0, outCost: 0, ctx: 131072,
+    specialty: "Small fast free vision: quick looks and quick answers (FREE via NVIDIA)" },
 
   // ---- Open & Trainable ---------------------------------------------------------------------
-  { id: "meta-llama/llama-4-maverick", name: "Llama 4 Maverick", origin: "Meta",
-    category: "Open & Trainable", vision: true, params: "400B (MoE·17B active)", paramsB: 400, inCost: 0.15, outCost: 0.60, ctx: 1000000,
-    specialty: "The trunk of the whole open-source tree; 1M context" },
-  // OLMo 3 32B Think REMOVED 2026-07-30. The live sweep and three direct probes all answered
-  // 404 "No endpoints found": OpenRouter still lists the model but no host serves it, so every
-  // pick of it was a guaranteed dead turn. Offering a model nobody can run is worse than a
-  // shorter list. Re-add when a provider carries it again (weekly audit re-checks).
-  { id: "google/gemma-4-31b-it:free", name: "Gemma 4 31B", origin: "Google (open weights)",
-    category: "Open & Trainable", vision: true, params: "31B", paramsB: 31, inCost: 0, outCost: 0, ctx: 262144,
-    specialty: "Capable FREE baseline to sanity-check everything against" },
+  // OLMo 3 32B Think REMOVED 2026-07-30 (listed but unserved: every pick was a dead turn).
+  // Gemma 4 31B :free REMOVED 2026-08-03 by the same doctrine: "Provider returned error" on both
+  // full roster probes and a 75s timeout on the NVIDIA id. Three strikes across two days is a
+  // dead seat, not a bad day. Re-add when the weekly audit sees it answer again.
   { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 3 Super", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-super-120b-a12b",
     category: "Open & Trainable", params: "120B (MoE·12B active)", paramsB: 120, inCost: 0, outCost: 0, ctx: 1000000,
     specialty: "The largest FREE model here: 1M context, tools, and no cost to run" },
@@ -333,10 +257,50 @@ export const MODELS = [
   { id: "nvidia/nemotron-3-nano-omni-30b-a3b", name: "Nemotron 3 Nano Omni", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     category: "Vision / Multimodal", vision: true, params: "30B (MoE·3B active)", paramsB: 30, inCost: 0, outCost: 0, ctx: 131072, reasoning: true,
     specialty: "FREE multimodal reasoner with tools: quick looks at images without spending anything" },
-  { id: "mistralai/mistral-nemo", name: "Mistral Nemo", origin: "Mistral AI (France)",
-    category: "Open & Trainable", params: "12B", paramsB: 12, inCost: 0.02, outCost: 0.04, ctx: 128000,
-    specialty: "Cheapest warm conversational base: ideal to fine-tune your own (Apache 2.0)" },
 ];
+
+/*
+ * SAVED-PREFERENCE FALLBACKS for the 2026-08-03 prune (SOW Phase 1: "every saved preference
+ * pointing at a removed model must resolve at read time to a surviving model"). Without this, a
+ * user whose saved pick was pruned silently drops to auto-routing, which is a silent swap: the
+ * exact thing ORCHESTRATOR_FALLBACKS' own comment calls a lie. The server resolves through
+ * resolveModelId and TELLS the user which substitution happened.
+ * Mapping logic per row: free-thinking picks land on the biggest FREE seat (Fred: "in those
+ * instances fall back to a free model"); everything else lands on the surviving seat closest in
+ * job, not in size.
+ */
+export const REMOVED_MODEL_FALLBACKS = {
+  // Free-Thinking (Fred's rule: fall back to a free model)
+  "nousresearch/hermes-4-405b": "nvidia/nemotron-3-super-120b-a12b:free",
+  "nousresearch/hermes-4-70b": "nvidia/nemotron-3-super-120b-a12b:free",
+  "microsoft/wizardlm-2-8x22b": "nvidia/nemotron-3-super-120b-a12b:free",
+  "thedrummer/cydonia-24b-v4.1": "nvidia/nemotron-3-super-120b-a12b:free",
+  "cognitivecomputations/dolphin-mistral-24b-venice-edition": "nvidia/nemotron-3-super-120b-a12b:free",
+  // Creative & Writing -> the surviving creative seat
+  "anthracite-org/magnum-v4-72b": "arcee-ai/trinity-large-thinking",
+  "sao10k/l3.3-euryale-70b": "arcee-ai/trinity-large-thinking",
+  "thedrummer/skyfall-36b-v2": "arcee-ai/trinity-large-thinking",
+  "thedrummer/rocinante-12b": "arcee-ai/trinity-large-thinking",
+  "thedrummer/unslopnemo-12b": "arcee-ai/trinity-large-thinking",
+  "tencent/hy3-preview": "arcee-ai/trinity-large-thinking",
+  // Frontier
+  "x-ai/grok-4.20": "google/gemini-3.1-pro-preview",       // big-window frontier pick
+  "minimax/minimax-m2.5": "minimax/minimax-m3",            // same family, free lane
+  "qwen/qwen3-235b-a22b-2507": "deepseek/deepseek-v4-flash", // the daily-driver job
+  // Coding / Reasoning / Science / Vision / Web / Open
+  "mistralai/codestral-2508": "qwen/qwen3-coder",
+  "qwen/qwen3-8b": "deepseek/deepseek-v4-flash",
+  "mistralai/mistral-small-24b-instruct-2501": "deepseek/deepseek-v4-flash",
+  "mistralai/mistral-small-3.2-24b-instruct": "google/gemini-3.5-flash-lite",  // cheap + vision
+  "qwen/qwen3-vl-8b-instruct": "nvidia/nemotron-nano-12b-v2-vl",              // small cheap vision
+  "perplexity/sonar-pro": "google/gemini-3.6-flash",       // any model can call web_search
+  "meta-llama/llama-4-maverick": "minimax/minimax-m3",     // cheap 1M-ctx vision
+  "mistralai/mistral-nemo": "z-ai/glm-5.2",                // utility work moved with UTILITY_MODEL
+  "google/gemma-4-31b-it:free": "nvidia/nemotron-3-super-120b-a12b:free",  // free stays free
+};
+// Live id -> itself. Removed id -> its mapped survivor. Unknown -> "" (never invent a model).
+export const resolveModelId = (id) =>
+  BY_ID.has(id) ? id : (REMOVED_MODEL_FALLBACKS[String(id || "")] || "");
 
 // ---- normalization --------------------------------------------------------------------------
 
@@ -402,13 +366,14 @@ const WILDFIRE_ROSTER = new Set([
   "moonshotai/kimi-k2.6",
   "deepseek/deepseek-v4-pro",
   "deepseek/deepseek-r1",
-  "qwen/qwen3-235b-a22b-2507",
   "qwen/qwen3-coder",
-  "x-ai/grok-4.20",
   "z-ai/glm-5.2",
   "openai/gpt-4o",
   "nvidia/nemotron-3-ultra-550b-a55b",
-]);
+  // Gemini seats joined 2026-08-03 with the lane: tools live-probed on the wire Dominion uses.
+  "google/gemini-3.6-flash",
+  "google/gemini-3.1-pro-preview",
+]);   // qwen3-235b and grok-4.20 left with the 2026-08-03 prune
 
 // Stamp it onto every model record so it rides the /api/models payload to the picker without a
 // second lookup. Runs AFTER finalize(), so toolCapable is already resolved.
@@ -474,7 +439,9 @@ export function outLimitFor(id, mode) {
 }
 
 // Cheap fast model for internal utility calls (chat titles, short summaries) so they never block.
-export const UTILITY_MODEL = "mistralai/mistral-nemo";
+// Was mistral-nemo until the 2026-08-03 prune; GLM 5.2 took the job because it is free on the
+// NVIDIA lane, probed clean (answers, tools, no starvation), and needs no reasoning headroom.
+export const UTILITY_MODEL = "z-ai/glm-5.2";
 
 /* BATTALION (ARSENAL Wave 6, docs/BATTALION-SOW.md). Fred's copy, verbatim, no quality
  * qualifier. The roster is the "handpicked" in his sentence: free-lane seats ONLY, each admitted
@@ -534,7 +501,7 @@ export const isOrchestratorApproved = (id) => {
 // without a key, and TELLS THE USER which substitution happened (a silent swap is a lie).
 export const ORCHESTRATOR_FALLBACKS = [
   "deepseek/deepseek-v4-pro", "anthropic/claude-sonnet-5", "openai/gpt-5.6-terra",
-  "moonshotai/kimi-k2.6", "qwen/qwen3-235b-a22b-2507",
+  "moonshotai/kimi-k2.6", "google/gemini-3.6-flash",   // gemini took qwen3-235b's slot in the prune
 ];
 
 export function catalogByCategory() {

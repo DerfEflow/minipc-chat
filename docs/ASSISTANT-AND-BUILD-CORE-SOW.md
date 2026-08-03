@@ -221,7 +221,11 @@ Applies to every model Dominion keeps, now and later:
 
 **DeepSeek direct serves exactly two models:** `deepseek-v4-flash` and `deepseek-v4-pro`. **DeepSeek R1 is not available direct**, and it is not on the NVIDIA endpoint either. By the rule above it therefore survives on OpenRouter, since there is no other route to it. Fred wants it kept: it remains highly rated for science and math and he values how it reasons.
 
-### The cut: 25 of 44, all OpenRouter
+### The cut: EXECUTED 2026-08-03
+
+23 rows removed (the table below, minus the three survivors). The catalog stands at **25 seats**: 21 survivors plus three Gemini seats plus Nemotron Nano 12B VL. Alongside the removals: `REMOVED_MODEL_FALLBACKS` + `resolveModelId` map every removed id to its closest surviving seat, the server resolves saved preferences through it at both entry points and **announces the substitution to the user** (`model_fallback` event) instead of silently dropping to auto, `UTILITY_MODEL` moved from the removed mistral-nemo to GLM 5.2 (free lane, probed clean), the Wildfire roster shed its two cut members and gained the two probed Gemini seats, and Gemini 3.6 Flash took the pruned Qwen3 235B's slot in `ORCHESTRATOR_FALLBACKS`. Gemma 4 31B `:free` was cut by the OLMo doctrine rather than the plan: it failed three live probes across two days ("Provider returned error" twice on OpenRouter, a 75s timeout on the NVIDIA id), and a seat nobody can invoke is worse than a shorter list.
+
+### The cut as planned: 25 of 44, all OpenRouter
 
 | Category | Removed |
 |---|---|
@@ -286,9 +290,14 @@ Four causes, all fixable:
 
 **The fix.** Stop asking one string to be a table. The custom panel is where the design goes: the model name on its own line in a strong weight, then a quiet second line carrying provider, context, price and capability in aligned columns with tabular numerals so figures stack vertically. Capability becomes one of the SVG glyphs the app already ships rather than an emoji. Availability stops being appended text and becomes row state: dimmed, with a small tag. The native `<select>` keeps the name plus one qualifier only, because it is a keyboard and mobile fallback and does not need to carry everything.
 
-### Remaining Phase 1 work
-1. Sweep the dead Ollama transport out of `server.mjs`. Local Qwen is already gone from the catalog; this removes the machinery behind it. Note `wolfe-logic.mjs`'s EMBER comment still says "including local Qwen" and needs the same correction.
-2. Add the NVIDIA lane properly. Per the 07-28 research, `integrate.api.nvidia.com` is an OpenAI-compatible rate-limited dev tier with no first-party production per-token API, so label it honestly and keep the cost-zeroing that already exists. Caching does not apply to these endpoints and the SOW should stop implying it might.
+### Remaining Phase 1 work (status 2026-08-03)
+
+**Done in this wave:** the prune itself (see above), the fallback map with in-app disclosure, Google models, UTILITY and OCR reseats, roster and orchestrator updates. **Auto was found already redefined**: the server's own comment at the routing site says "The owner-auto block below routes Auto to the real default engine, never the local Qwen", so item 5 became a verification rather than a build.
+
+**Still open, each its own work block:**
+1. Sweep the dead Ollama transport out of `server.mjs`. Local Qwen is already gone from the catalog; this removes the machinery behind it. Note `wolfe-logic.mjs`'s EMBER comment still says "including local Qwen" and needs the same correction. **Sized during the prune: ~130 references across 26 files, and the keyless TEST HARNESS boots against a mock Ollama, so the sweep must re-point the test transport too. Not a side-job.**
+2. The model dropdown redesign (spec above).
+3. **Open wargame item:** the fallback map is applied on the chat and preflight paths. The job RESUME path (an in-flight build that named a removed model) still needs the same resolve, and W1 calls this out.
 3. ~~Add Google models via AI Studio~~ **DONE 2026-08-03.** Three seats, each earned under the curation doctrine: `google/gemini-3.6-flash` (main flash; newer AND cheaper on output than 3.5-flash, which therefore holds no seat), `google/gemini-3.1-pro-preview` (pro axis), `google/gemini-3.5-flash-lite` (budget axis). All three ride Google's OpenAI-compatible lane through the existing streamer (`PROVIDER_CFG.google`), live-verified before wiring: answer, real tool call, and vision confirmed by probe on all three; 3.1-pro's starvation floor measured (silent at 64, recovers by 256, floored at 1024). Prices read from the published pricing page the same day and pinned by a seventh check in `models_pricing_test.mjs`. Key-absent fallback to OpenRouter verified: all three catalog ids exist as OpenRouter slugs. Vertex remains a later migration; nothing wired here resists it. **Deploy note: set `GOOGLE_AI_STUDIO_API_KEY` on Railway prod, or the lane silently rides OpenRouter (functional, but not direct).**
 4. **Fallback map, non-optional.** Every saved preference pointing at a removed model must resolve at read time to a surviving model. Without it, users hit a dead reference on their next message. Free thinking models fall back to a surviving free model (the NVIDIA free endpoints).
 5. **Redefine Auto.** It previously ran local Qwen. It needs an explicit new definition now that the local lane is gone.
@@ -408,16 +417,22 @@ The abandoned project is at `F:\Claude Sandbox\Projects\BillyGoatImage`, and wha
 
 The model is chosen per query. The user never sees a choice.
 
-| Query class | Model | Lane |
-|---|---|---|
-| General chat (the default path) | `openai/gpt-oss-20b` | NVIDIA, free. **Needs `max_tokens` >= 1024, see below.** |
-| Science and math | `deepseek/deepseek-r1` | OpenRouter, kept for this |
-| Literary | `writer/palmyra-creative-122b` | NVIDIA, free |
-| Creative | `deepseek/deepseek-v4-flash` | DeepSeek direct |
-| Quick and dirty | `nvidia/nemotron-nano-12b-v2-vl` | NVIDIA |
-| Personal, empathetic, high EQ | `meta/llama-3.3-70b-instruct` | NVIDIA |
-| Theological and philosophical | `nvidia/llama-3.1-nemotron-70b-instruct` | NVIDIA |
-| Business | `z-ai/glm-5.2` | NVIDIA |
+| Query class | Model | Lane | Probe status 2026-08-03 |
+|---|---|---|---|
+| General chat (the default path) | `openai/gpt-oss-20b` | NVIDIA, free | **PASS.** Floor 4096 enforced in `REASONING_FLOOR` |
+| Science and math | `deepseek/deepseek-r1` | OpenRouter | **PASS** (floor 8192, banned from fast mode) |
+| Literary | ~~`writer/palmyra-creative-122b`~~ | NVIDIA | **DEAD ON THE ACCOUNT**: "Function not found for account". Listed in /v1/models, not invokable on Fred's key |
+| Creative | `deepseek/deepseek-v4-flash` | DeepSeek direct | **PASS** (floor 1024) |
+| Quick and dirty | `nvidia/nemotron-nano-12b-v2-vl` | NVIDIA, free | **PASS**, and seated in the catalog: answers, real tool call, names the red swatch |
+| Personal, empathetic, high EQ | `meta/llama-3.3-70b-instruct` | NVIDIA | **PARTIAL**: answered, tool probe timed out at 75s. Re-probe before ship |
+| Theological and philosophical | ~~`nvidia/llama-3.1-nemotron-70b-instruct`~~ | NVIDIA | **DEAD ON THE ACCOUNT**, same "Function not found" |
+| Business | `z-ai/glm-5.2` | NVIDIA, free | **PASS** |
+
+**Two routes are dead and need Fred's re-pick.** The account serves a subset of what `/v1/models` lists; four shortlist candidates (palmyra-creative, nemotron-70b-instruct, jamba-1.5-large, cosmos-reason2) all return "Function not found for account". Proposals, not decisions:
+- **Literary** → `arcee-ai/trinity-large-thinking`. It is the surviving creative seat, it was kept for exactly this kind of work, and with palmyra dead the planned palmyra-versus-flash head-to-head collapses to Trinity-versus-flash, which Fred can still taste-test.
+- **Theological and philosophical** → `nvidia/nemotron-3-super-120b-a12b:free` (probed clean, free, strong reasoner), or `meta/llama-3.3-70b-instruct` doubling up if its re-probe passes, at the cost of the two-fine-tunes distinction Fred wanted.
+
+**Also from that probe run:** `mistral-medium-3.5-128b` and `llama-guard-4-12b` timed out on the dev tier; `nemotron-parse` rejects plain-text input by design ("The model does not support text input"), so the document-parsing lane needs a document-shaped probe, which is Phase 5 work, not a failure.
 
 ### General chat: 20B, decided on the evidence
 

@@ -11,14 +11,16 @@ import { MODELS, isBroadCapable, broadCapableIds, broadCapableNames, isToolCapab
 let passed = 0;
 const ok = (n) => { console.log("  PASS  " + n); passed++; };
 
+// 2026-08-03: qwen3-235b and grok-4.20 left with the Phase 1 prune (Fred cut Grok by name); the
+// two probed Gemini seats joined with the AI Studio lane. 16 seats then, 16 seats now.
 const EXPECTED = [
   "openai/gpt-5.6-sol", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna",
   "anthropic/claude-opus-4-8", "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4-5",
   "moonshotai/kimi-k3", "moonshotai/kimi-k2.6",
   "deepseek/deepseek-v4-pro", "deepseek/deepseek-r1",
-  "qwen/qwen3-235b-a22b-2507", "qwen/qwen3-coder",
-  "x-ai/grok-4.20", "z-ai/glm-5.2", "openai/gpt-4o",
+  "qwen/qwen3-coder", "z-ai/glm-5.2", "openai/gpt-4o",
   "nvidia/nemotron-3-ultra-550b-a55b",
+  "google/gemini-3.6-flash", "google/gemini-3.1-pro-preview",
 ];
 
 // 1. every rostered id still exists in the catalog
