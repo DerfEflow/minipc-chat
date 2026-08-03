@@ -201,7 +201,9 @@ Applies to every model Dominion keeps, now and later:
 
 ### OpenRouter survivors (3)
 
-`arcee-ai/trinity-large-thinking`, `qwen/qwen3-coder` (agentic coding with a 1M window, and NVIDIA's coding shelf tops out well below it), `deepseek/deepseek-r1`.
+`arcee-ai/trinity-large-thinking`, `qwen/qwen3-coder`, `deepseek/deepseek-r1`. **Fred kept all three on 2026-08-03**, including Qwen3 Coder after the live audit showed its context is 262,144 rather than the 1,000,000 the catalog claims and the 1M window had been the argument for it.
+
+Fix the catalog's context figure as part of this phase. A number that is wrong by a factor of four drives real decisions: the context selector takes 58% of whatever the catalog says the window is, so a model claiming 1M gets handed roughly 564,000 tokens of history against a real ceiling of 262,144.
 
 ### Catalog id check: NO defects. An earlier claim in this document was wrong.
 
@@ -299,6 +301,12 @@ The largest piece and the reason the rest of this exists. Fred, verbatim: Forge 
 
 **Model:** GPT-5.6 Luna, already in the catalog, no new integration.
 
+**Hard constraint found by probe, 2026-08-03.** Luna cannot call tools through OpenAI's chat/completions endpoint. The provider's own words:
+
+> Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to none.
+
+Altana is defined by having hands, and its hands are the `toolbox.mjs` drawer, so this is load-bearing rather than a detail. **Two consequences.** First, Altana must route through `openairesponses.mjs`, which Dominion already uses for OpenAI, so the path exists and simply must not be bypassed. Second, there is a real tradeoff hiding in that error message: tools work either through the Responses API, or by setting `reasoning_effort` to none, which would strip the reasoning that makes Luna worth choosing. Take the Responses API, and pin it with a test, because "Altana silently lost its tools" is a failure that looks like the model being unhelpful rather than like a bug.
+
 **Capabilities:**
 - Broad awareness of app state, the user's work, their intent, available tools and settings.
 - Advisory: where a control is, which model to pick and why, how the Crucible works.
@@ -364,7 +372,7 @@ The model is chosen per query. The user never sees a choice.
 
 | Query class | Model | Lane |
 |---|---|---|
-| General chat (the default path) | `openai/gpt-oss-120b` | NVIDIA, free. **See the timeout warning below before locking this in.** |
+| General chat (the default path) | `openai/gpt-oss-20b` | NVIDIA, free. **Needs `max_tokens` >= 1024, see below.** |
 | Science and math | `deepseek/deepseek-r1` | OpenRouter, kept for this |
 | Literary | `writer/palmyra-creative-122b` | NVIDIA, free |
 | Creative | `deepseek/deepseek-v4-flash` | DeepSeek direct |
@@ -373,7 +381,15 @@ The model is chosen per query. The user never sees a choice.
 | Theological and philosophical | `nvidia/llama-3.1-nemotron-70b-instruct` | NVIDIA |
 | Business | `z-ai/glm-5.2` | NVIDIA |
 
-### Warning on the general chat pick, found in the catalog 2026-08-03
+### General chat: 20B, decided on the evidence
+
+**Fred, 2026-08-03: "For chat, lets just wire the 20b version. It will be faster and better for that task."** That sidesteps the 120B timeout below entirely, and the 20B is already in the catalog with tools live-verified.
+
+**It carries one hard requirement.** Probed 2026-08-03: `gpt-oss-20b` is a reasoning model that spends its output budget on hidden thinking before it says anything. At a 64-token ceiling it returns an empty string. It recovered at 512 in one run and 1024 in another, spending 351 and 387 tokens respectively and finishing cleanly both times.
+
+**So the floor is not a preference, and it is not a fixed number either.** Two runs of the same probe gave two different recovery ceilings, which means the safe setting is a margin above the worst observed, not the observed value. **Set Simplify's general chat route to at least 1024 output tokens.** Dominion's fast mode caps output at 2,048, which clears it, so the danger is only if Simplify introduces a tighter cap for speed. It must not.
+
+### Warning on the 120B, found in the catalog 2026-08-03
 
 `models.catalog.mjs` carries this note from the Wave 2 free-fleet probe, verbatim:
 

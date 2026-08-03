@@ -42,7 +42,17 @@ export const ENDPOINTS = {
   deepseek:   { url: "https://api.deepseek.com/v1/chat/completions",         family: "openai-chat", verified: "2026-08-03" },
   moonshot:   { url: "https://api.moonshot.ai/v1/chat/completions",          family: "openai-chat", verified: null },
   openrouter: { url: "https://openrouter.ai/api/v1/chat/completions",        family: "openai-chat", verified: null },
-  openai:     { url: "https://api.openai.com/v1/chat/completions",           family: "openai-chat", verified: null },
+  /*
+   * OPENAI CAVEAT, and it is a real limitation of this record rather than a detail.
+   * Dominion calls OpenAI through the RESPONSES api (openairesponses.mjs), not chat/completions.
+   * This probe uses chat/completions, so OpenAI answers/vision/starvation results transfer, and
+   * TOOL results DO NOT. Live proof, 2026-08-03, probing gpt-5.6-luna here:
+   *   "Function tools with reasoning_effort are not supported for gpt-5.6-luna in
+   *    /v1/chat/completions. To use function tools, use /v1/responses."
+   * So a tools=false on any openai model in this record means "not through this endpoint", never
+   * "cannot call tools". Marked on the record so nobody reads it the wrong way.
+   */
+  openai:     { url: "https://api.openai.com/v1/chat/completions",           family: "openai-chat", verified: null, toolsNotRepresentative: true },
   anthropic:  { url: "https://api.anthropic.com/v1/messages",                family: "anthropic",   verified: null },
   google:     { url: "https://generativelanguage.googleapis.com/v1beta",     family: "google",      verified: null },
 };
@@ -106,10 +116,30 @@ function errText(status, j) {
 
 /* ---- per-family calls -------------------------------------------------------------------- */
 
+/*
+ * Which parameter names the output ceiling. OpenAI's GPT-5.x family REJECTS max_tokens outright
+ * and demands max_completion_tokens; every other OpenAI-compatible provider here takes max_tokens.
+ * Discovered by asking rather than hardcoded, because a hardcoded guess is what made the first
+ * roster run report four OpenAI models as dead when they were fine. The answer is remembered per
+ * model and lands in the record, since "parameters that cause a hard error if sent" is one of the
+ * fields Phase A is supposed to capture.
+ */
+const outParamFor = new Map();
+
 async function callOpenAiChat({ url, headers, id, messages, maxOut, tools, signal }) {
-  const body = { model: id, messages, max_tokens: maxOut };
-  if (tools) { body.tools = TOOL_DEF; body.tool_choice = "auto"; }
-  const { status, j } = await post(url, headers, body, signal);
+  const build = (param) => {
+    const b = { model: id, messages, [param]: maxOut };
+    if (tools) { b.tools = TOOL_DEF; b.tool_choice = "auto"; }
+    return b;
+  };
+  let param = outParamFor.get(id) || "max_tokens";
+  let { status, j } = await post(url, headers, build(param), signal);
+  if (status !== 200 && /max_completion_tokens/.test(errText(status, j))) {
+    param = "max_completion_tokens";
+    ({ status, j } = await post(url, headers, build(param), signal));
+  }
+  outParamFor.set(id, param);
+  j.__outParam = param;
   const choice = j.choices && j.choices[0];
   const msg = choice && choice.message;
   const u = j.usage || {};
@@ -124,12 +154,33 @@ async function callOpenAiChat({ url, headers, id, messages, maxOut, tools, signa
     // on the message instead. Both are checked because both are shapes Dominion already handles.
     reasonTokens: Number((u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) || 0)
       || (msg && typeof msg.reasoning_content === "string" ? -1 : 0),
+    outParam: j.__outParam || "max_tokens",
     err: status === 200 ? "" : errText(status, j),
   };
 }
 
+/*
+ * Anthropic does not speak OpenAI's image_url block. It wants
+ * {type:"image", source:{type:"base64", media_type, data}} with the data: prefix stripped.
+ * The first roster run sent OpenAI-shaped blocks to the Messages API and recorded all four Claude
+ * models as "catalog says vision; probe was refused an image", which was the probe failing, not
+ * the catalog lying. Recording that as a catalog contradiction would have sent someone to fix a
+ * correct flag. Converted here so the probe asks each provider in its own language.
+ */
+function toAnthropicContent(content) {
+  if (!Array.isArray(content)) return content;
+  return content.map((part) => {
+    if (part && part.type === "image_url") {
+      const url = String((part.image_url && part.image_url.url) || "");
+      const m = url.match(/^data:([^;]+);base64,(.*)$/);
+      if (m) return { type: "image", source: { type: "base64", media_type: m[1], data: m[2] } };
+    }
+    return part;
+  });
+}
+
 async function callAnthropic({ url, headers, id, messages, maxOut, tools, signal }) {
-  const body = { model: id, max_tokens: maxOut, messages };
+  const body = { model: id, max_tokens: maxOut, messages: messages.map((m) => ({ ...m, content: toAnthropicContent(m.content) })) };
   if (tools) body.tools = TOOL_DEF_ANTHROPIC;
   const { status, j } = await post(url, headers, body, signal);
   const blocks = Array.isArray(j.content) ? j.content : [];
@@ -164,6 +215,7 @@ export async function probeModel({ provider, id, wireId, key, label = "" }) {
     endpoint: ep ? ep.url : null,
     family: ep ? ep.family : null,
     endpointVerified: ep ? ep.verified : null,
+    outputParam: null,    // which parameter this provider accepts for the output ceiling
     answers: false,
     tools: null,
     acceptsImage: null,   // the payload was not rejected
@@ -188,14 +240,19 @@ export async function probeModel({ provider, id, wireId, key, label = "" }) {
   try {
     // 1. Does it answer at all?
     const a = await run({ messages: [{ role: "user", content: "Reply with the single word: ready" }], maxOut: 64 });
+    rec.outputParam = a.outParam || null;
     rec.answers = a.ok && a.text.trim().length > 0;
     if (!a.ok) { rec.err = a.err; return rec; }
-    if (!rec.answers) rec.notes.push("HTTP 200 with empty content on a trivial prompt");
+    if (!rec.answers) rec.notes.push("HTTP 200 with empty content on a trivial prompt (a reasoning model can spend 64 tokens thinking about one word)");
 
     // 2. Does it emit a REAL tool call? Prose describing the tool is a failure, not a pass.
     const t = await run({ messages: [{ role: "user", content: "Write the note HELLO using the tool." }], maxOut: 128, tools: true });
     rec.tools = !!(t.toolCalls.length && t.toolCalls[0].function && /write_note/.test(t.toolCalls[0].function.name));
     if (t.status !== 200) rec.notes.push("tool probe: " + t.err);
+    if (ep.toolsNotRepresentative) {
+      rec.toolsNotRepresentative = true;
+      rec.notes.push("TOOL RESULT NOT REPRESENTATIVE: probed on " + ep.url + ", but Dominion calls this provider through the Responses API");
+    }
 
     /*
      * 3. Reasoning budget. A deliberately tight ceiling on a prompt that needs working out.
@@ -239,7 +296,14 @@ export async function probeModel({ provider, id, wireId, key, label = "" }) {
      * and false on the second, and reporting that as "vision" would be a false finding.
      * Last in the sequence because a 400 here must not cost us the three findings above.
      */
-    const v = await run({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: RED_PNG } }, { type: "text", text: "What colour is this image? Answer with one word." }] }], maxOut: 32 });
+    /*
+     * The ceiling here must clear the model's starvation floor, or a reasoning model burns the
+     * allowance thinking and returns an empty string that looks exactly like blindness. The first
+     * roster run used 32 and produced "did not name the colour" for every starving model, which
+     * measured the ceiling rather than the eyes. Use the recovery ceiling when one was found.
+     */
+    const imgCeiling = Math.max(1024, rec.recoversAt || 0);
+    const v = await run({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: RED_PNG } }, { type: "text", text: "What colour is this image? Answer with one word." }] }], maxOut: imgCeiling });
     rec.acceptsImage = v.ok;
     rec.seesImage = v.ok ? /\bred\b|crimson|scarlet/i.test(v.text) : false;
     rec.vision = rec.seesImage;

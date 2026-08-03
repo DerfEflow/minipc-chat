@@ -184,9 +184,17 @@ export const MODELS = [
     specialty: "Cheapest strong reasoning/math+code engine, direct to DeepSeek" },
 
   // ---- Coding -------------------------------------------------------------------------------
+  /*
+   * ctx corrected 1000000 -> 262144 on 2026-08-03, measured against OpenRouter's live model list.
+   * Not cosmetic. server.mjs derives contextTokens straight from this figure and the compactor
+   * then targets roughly half of it, so the old number handed this model about 512k tokens of
+   * history against a real 262k ceiling: a provider-side overflow on long repo work rather than a
+   * clean compaction. Overclaiming context is the dangerous direction of drift, which is why
+   * catalogaudit now raises it as a problem instead of a note.
+   */
   { id: "qwen/qwen3-coder", name: "Qwen3 Coder", origin: "Alibaba",
-    category: "Coding", params: "480B (MoE·35B active)", paramsB: 480, inCost: 0.22, outCost: 1.80, ctx: 1000000, maxOut: 32768,
-    specialty: "Agentic coding with a 1M window: whole-repo work (Apache 2.0)" },
+    category: "Coding", params: "480B (MoE·35B active)", paramsB: 480, inCost: 0.22, outCost: 1.80, ctx: 262144, maxOut: 32768,
+    specialty: "Agentic coding across a large repo: 262k window (Apache 2.0)" },
   { id: "mistralai/codestral-2508", name: "Codestral 25.08", origin: "Mistral AI (France)",
     category: "Coding", params: "~22B", paramsB: 22, inCost: 0.30, outCost: 0.90, ctx: 256000,
     specialty: "Fast code-completion specialist" },
@@ -200,8 +208,11 @@ export const MODELS = [
     specialty: "Fast cheap scripting/technical helper (OpenSCAD, three.js)" },
 
   // ---- Creative & Writing -------------------------------------------------------------------
+  // ctx corrected 32000 -> 16384 on 2026-08-03 against OpenRouter's live list. Scheduled for
+  // removal in the Phase 1 prune, but an overclaim is live in production until that lands, and
+  // the history budget is sized from this number.
   { id: "anthracite-org/magnum-v4-72b", name: "Magnum v4 72B", origin: "Anthracite (open collective)",
-    category: "Creative & Writing", params: "72B", paramsB: 72, inCost: 3.00, outCost: 5.00, ctx: 32000,
+    category: "Creative & Writing", params: "72B", paramsB: 72, inCost: 3.00, outCost: 5.00, ctx: 16384,
     specialty: "Literary prose: a collective reproducing Claude's writing feel" },
   { id: "sao10k/l3.3-euryale-70b", name: "Euryale 70B (L3.3)", origin: "Sao10k (community)",
     category: "Creative & Writing", params: "70B", paramsB: 70, inCost: 0.65, outCost: 0.75, ctx: 131072,

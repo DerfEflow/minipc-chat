@@ -81,7 +81,9 @@ for (const m of targets) {
 const problems = [];
 for (const r of records) {
   const c = r.catalogClaims;
-  if (r.answers && r.tools === false && modelById(r.catalogId) && modelById(r.catalogId).toolCapable) {
+  // Skip the tool check where the probe admits its endpoint is not the one Dominion uses; a
+  // finding the instrument knows it cannot support is not a finding.
+  if (r.answers && r.tools === false && !r.toolsNotRepresentative && modelById(r.catalogId) && modelById(r.catalogId).toolCapable) {
     problems.push({ id: r.catalogId, kind: "tool-mislabel", note: "catalog says tool-capable; probe got no tool call" });
   }
   if (r.answers && r.vision === false && c.vision) {

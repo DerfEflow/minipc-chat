@@ -104,8 +104,23 @@ export async function runCatalogAudit(keys = {}) {
       const supportsImages = ((l.architecture && l.architecture.input_modalities) || []).includes("image");
       if (m.vision && !supportsImages) { result.ok = false; result.problems.push({ kind: "vision-mislabel", id: m.id, note: "flagged vision but OpenRouter reports no image input" + (special ? " · " + special : "") }); }
       else if (!m.vision && supportsImages) result.notes.push({ kind: "vision-undersell", id: m.id, note: "accepts image input but not flagged vision" });
+      /*
+       * Context drift is ASYMMETRIC and used to be reported as if it were not (fixed 2026-08-03).
+       * server.mjs sets contextTokens from the catalog figure and the compactor targets about half
+       * of it, so a catalog that OVERCLAIMS hands the model more history than it can hold and the
+       * provider rejects the call. That is a launch-day problem. A catalog that UNDERCLAIMS merely
+       * wastes window, which is a note. Found by qwen3-coder: catalog 1000000, live 262144, so
+       * long repo work was being handed roughly 512k tokens against a real 262k ceiling.
+       */
       const liveCtx = l.context_length || 0;
-      if (m.ctx && liveCtx && Math.abs(m.ctx - liveCtx) / liveCtx > 0.5) result.notes.push({ kind: "ctx-drift", id: m.id, note: `catalog ${m.ctx} vs live ${liveCtx}` });
+      if (m.ctx && liveCtx) {
+        if (m.ctx > liveCtx * 1.1) {
+          result.ok = false;
+          result.problems.push({ kind: "ctx-overclaim", id: m.id, note: `catalog ${m.ctx} vs live ${liveCtx}; the history budget is sized from the catalog, so long turns overflow` + (special ? " · " + special : "") });
+        } else if (liveCtx > m.ctx * 1.5) {
+          result.notes.push({ kind: "ctx-underclaim", id: m.id, note: `catalog ${m.ctx} vs live ${liveCtx}; safe, but window is being wasted` });
+        }
+      }
     } else {
       const s = directSets[m.provider];
       if (!s) continue;   // unchecked provider

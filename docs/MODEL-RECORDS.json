@@ -1,111 +1,156 @@
 {
-  "generatedAt": "2026-08-03T01:41:57.041Z",
+  "generatedAt": "2026-08-03T01:56:17.318Z",
   "note": "Phase A per-model record. Live probe results only. A null field means the probe could not establish it, never an assumption.",
-  "probed": 3,
+  "probed": 4,
   "problems": [
     {
-      "id": "openai/gpt-oss-20b",
+      "id": "openai/gpt-5.6-luna",
+      "kind": "tool-mislabel",
+      "note": "catalog says tool-capable; probe got no tool call"
+    },
+    {
+      "id": "anthropic/claude-sonnet-5",
       "kind": "budget-eater",
-      "note": "reasoning eats the output budget; needs max_tokens >= 512 to return any text"
+      "note": "reasoning eats the output budget; needs max_tokens >= 256 to return any text"
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash",
+      "kind": "budget-eater",
+      "note": "reasoning eats the output budget; needs max_tokens >= 256 to return any text"
     }
   ],
   "records": [
     {
-      "catalogId": "nvidia/nemotron-3-ultra-550b-a55b",
-      "wireId": "nvidia/nemotron-3-ultra-550b-a55b",
-      "provider": "nvidia",
-      "label": "Nemotron 3 Ultra",
-      "probedAt": "2026-08-03T01:40:45.404Z",
-      "endpoint": "https://integrate.api.nvidia.com/v1/chat/completions",
+      "catalogId": "openai/gpt-5.6-luna",
+      "wireId": "gpt-5.6-luna",
+      "provider": "openai",
+      "label": "GPT-5.6 Luna",
+      "probedAt": "2026-08-03T01:55:51.225Z",
+      "endpoint": "https://api.openai.com/v1/chat/completions",
       "family": "openai-chat",
-      "endpointVerified": "2026-08-03",
+      "endpointVerified": null,
+      "outputParam": "max_completion_tokens",
       "answers": true,
-      "tools": true,
-      "acceptsImage": false,
-      "seesImage": false,
-      "vision": false,
-      "reasoningReported": true,
+      "tools": false,
+      "acceptsImage": true,
+      "seesImage": true,
+      "vision": true,
+      "reasoningReported": false,
       "budgetEater": false,
       "recoversAt": null,
-      "outTokensAtCeiling": 64,
-      "finishAtCeiling": "length",
+      "outTokensAtCeiling": 50,
+      "finishAtCeiling": "stop",
       "err": "",
       "notes": [
-        "image probe: ValueError: Received multimodal data but multimodal processing is not enabled. Use --enable-multimodal flag to enable multimodal processing."
+        "tool probe: Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effor"
       ],
       "catalogClaims": {
-        "ctx": 1000000,
-        "maxOut": 16384,
+        "ctx": 1050000,
+        "maxOut": 128000,
         "reasoning": true,
-        "vision": false,
-        "inCost": 0.42,
-        "outCost": 2.61
+        "vision": true,
+        "inCost": 0.2,
+        "outCost": 1.2
       }
     },
     {
-      "catalogId": "nvidia/nemotron-3-super-120b-a12b:free",
-      "wireId": "nvidia/nemotron-3-super-120b-a12b",
-      "provider": "nvidia",
-      "label": "Nemotron 3 Super",
-      "probedAt": "2026-08-03T01:41:31.117Z",
-      "endpoint": "https://integrate.api.nvidia.com/v1/chat/completions",
-      "family": "openai-chat",
-      "endpointVerified": "2026-08-03",
-      "answers": true,
-      "tools": true,
-      "acceptsImage": false,
-      "seesImage": false,
-      "vision": false,
-      "reasoningReported": true,
-      "budgetEater": false,
-      "recoversAt": null,
-      "outTokensAtCeiling": 64,
-      "finishAtCeiling": "length",
-      "err": "",
-      "notes": [
-        "image probe: ValueError: Received multimodal data but multimodal processing is not enabled. Use --enable-multimodal flag to enable multimodal processing."
-      ],
-      "catalogClaims": {
-        "ctx": 1000000,
-        "maxOut": 8192,
-        "reasoning": false,
-        "vision": false,
-        "inCost": 0,
-        "outCost": 0
-      }
-    },
-    {
-      "catalogId": "openai/gpt-oss-20b",
-      "wireId": "openai/gpt-oss-20b",
-      "provider": "nvidia",
-      "label": "GPT-OSS 20B",
-      "probedAt": "2026-08-03T01:41:36.313Z",
-      "endpoint": "https://integrate.api.nvidia.com/v1/chat/completions",
-      "family": "openai-chat",
-      "endpointVerified": "2026-08-03",
+      "catalogId": "anthropic/claude-sonnet-5",
+      "wireId": "claude-sonnet-5",
+      "provider": "anthropic",
+      "label": "Claude Sonnet 5",
+      "probedAt": "2026-08-03T01:55:54.450Z",
+      "endpoint": "https://api.anthropic.com/v1/messages",
+      "family": "anthropic",
+      "endpointVerified": null,
+      "outputParam": null,
       "answers": true,
       "tools": true,
       "acceptsImage": true,
+      "seesImage": true,
+      "vision": true,
+      "reasoningReported": true,
+      "budgetEater": true,
+      "recoversAt": 256,
+      "outTokensAtCeiling": 64,
+      "finishAtCeiling": "max_tokens",
+      "err": "",
+      "notes": [
+        "STARVATION: spent 64 output tokens and returned no text at a 64-token ceiling",
+        "recovers at max_tokens=256 (spent 256, finish=max_tokens)"
+      ],
+      "catalogClaims": {
+        "ctx": 1000000,
+        "maxOut": 128000,
+        "reasoning": true,
+        "vision": true,
+        "inCost": 3,
+        "outCost": 15
+      }
+    },
+    {
+      "catalogId": "anthropic/claude-haiku-4-5",
+      "wireId": "claude-haiku-4-5-20251001",
+      "provider": "anthropic",
+      "label": "Claude Haiku 4.5",
+      "probedAt": "2026-08-03T01:56:08.360Z",
+      "endpoint": "https://api.anthropic.com/v1/messages",
+      "family": "anthropic",
+      "endpointVerified": null,
+      "outputParam": null,
+      "answers": true,
+      "tools": true,
+      "acceptsImage": true,
+      "seesImage": true,
+      "vision": true,
+      "reasoningReported": false,
+      "budgetEater": false,
+      "recoversAt": null,
+      "outTokensAtCeiling": 64,
+      "finishAtCeiling": "max_tokens",
+      "err": "",
+      "notes": [],
+      "catalogClaims": {
+        "ctx": 200000,
+        "maxOut": 64000,
+        "reasoning": true,
+        "vision": true,
+        "inCost": 1,
+        "outCost": 5
+      }
+    },
+    {
+      "catalogId": "deepseek/deepseek-v4-flash",
+      "wireId": "deepseek-v4-flash",
+      "provider": "deepseek",
+      "label": "DeepSeek V4 Flash",
+      "probedAt": "2026-08-03T01:56:11.310Z",
+      "endpoint": "https://api.deepseek.com/v1/chat/completions",
+      "family": "openai-chat",
+      "endpointVerified": "2026-08-03",
+      "outputParam": "max_tokens",
+      "answers": true,
+      "tools": true,
+      "acceptsImage": false,
       "seesImage": false,
       "vision": false,
       "reasoningReported": true,
       "budgetEater": true,
-      "recoversAt": 512,
+      "recoversAt": 256,
       "outTokensAtCeiling": 64,
       "finishAtCeiling": "length",
       "err": "",
       "notes": [
         "STARVATION: spent 64 output tokens and returned no text at a 64-token ceiling",
-        "recovers at max_tokens=512 (spent 351, finish=stop)",
-        "accepted the image payload but did not name the colour; answered: \"\""
+        "recovers at max_tokens=256 (spent 125, finish=stop)",
+        "image probe: Failed to deserialize the JSON body into the target type: messages[0]: unknown variant `image_url`, expected `text` at line 1 column 309"
       ],
       "catalogClaims": {
-        "ctx": 131072,
-        "maxOut": 8192,
+        "ctx": 1000000,
+        "maxOut": 384000,
         "reasoning": true,
         "vision": false,
-        "inCost": 0,
-        "outCost": 0
+        "inCost": 0.05,
+        "outCost": 0.24
       }
     }
   ]
