@@ -48,8 +48,77 @@
     Motion here is transform and opacity only, so the compositor does the work and nothing repaints. Animation pauses when the tab is hidden, and collapses to a plain fade if the operating system is set to reduce motion. The dot is mounted on <code>&lt;body&gt;</code> so no transformed ancestor can capture it, and it clears the mobile dock below 1180px.
   </div>
 
+  <h2>The conversation</h2>
+  <p class="sub" style="max-width:72ch">
+    Click the dot to open the panel. <code>/altana/ask</code> is mocked below (no server, no keys,
+    no real model call) so the whole loop is exercisable here: type <code>settings</code> to see a
+    clientActions batch, <code>delete</code> to see the confirm round-trip, <code>slow</code> to see
+    a fallback notice plus a blocked tool, or <code>fail</code> to see the honest error path.
+  </p>
+
 <script type="module">
   import { altanaMount, altanaState, faceForSignIn, ALTANA_FACES } from "/altana.js";
+
+  /*
+   * Mock /altana/ask so the panel's whole loop (ask, clientActions, confirm, fallback, blocked,
+   * failure) is exercisable without a server, keys, or a real model call. Shaped exactly like the
+   * server contract in server.mjs's handleAltana: always JSON, always the same top-level keys.
+   */
+  const realFetch = window.fetch.bind(window);
+  window.fetch = async (url, init) => {
+    if (typeof url !== "string" || !url.endsWith("/altana/ask")) return realFetch(url, init);
+    const body = JSON.parse((init && init.body) || "{}");
+    const q = String(body.question || "").toLowerCase();
+    const json = (obj) => ({ ok: true, status: 200, json: async () => obj });
+
+    if (q.includes("fail")) return Promise.reject(new Error("mock: simulated network failure"));
+    if (q.includes("settings")) {
+      return json({
+        reply: "Here is what I can see and do on this screen.", logged: null,
+        clientActions: [
+          { type: "echo_settings" },
+          { type: "help", text: "Ask me to open a screen, list your work, or change a setting." },
+          { type: "work_list", items: [{ id: "1", title: "Elm Street re-roof" }, { id: "2", title: "Bay Ave gutter estimate" }] },
+        ],
+        model: "nvidia/mock", lane: "free", billed: false, fallback: null, confirm: [], blocked: [],
+      });
+    }
+    if (q.includes("delete")) {
+      if (!body.confirm) {
+        return json({
+          reply: "That removes it for good. Confirm and I will do it.", logged: null, clientActions: [],
+          model: "nvidia/mock", lane: "free", billed: false, fallback: null,
+          confirm: [{ token: "demo-token-1", tool: "delete_thing", question: "Delete this for good?" }],
+          blocked: [],
+        });
+      }
+      return json({
+        reply: "Deleted.", logged: null,
+        clientActions: [{ type: "open_screen", screen: "work" }],
+        model: "nvidia/mock", lane: "free", billed: false, fallback: null, confirm: [], blocked: [],
+      });
+    }
+    if (q.includes("slow")) {
+      return json({
+        reply: "I found an answer, but two things you should know about this turn.", logged: null,
+        clientActions: [],
+        model: "openai/luna", lane: "fallback", billed: true,
+        fallback: { type: "model_fallback", from: "nvidia", to: "luna", text: "My usual seat did not answer, so this turn may be slower or may cost a little." },
+        confirm: [],
+        blocked: [{ tool: "send_email", reason: "email tools are refused for guests in this preview" }],
+      });
+    }
+    return json({
+      reply: "This is a mock reply from the preview page, not a real model call.", logged: null,
+      clientActions: [], model: "nvidia/mock", lane: "free", billed: false, fallback: null, confirm: [], blocked: [],
+    });
+  };
+
+  // Anything public/app.js would normally apply. The preview has no app.js, so this just proves
+  // the dispatch contract works: every clientActions entry becomes one document-level event.
+  document.addEventListener("altana:action", (e) => {
+    console.log("[altana-preview] altana:action received:", e.detail);
+  });
 
   const grid = document.getElementById("faces");
   ALTANA_FACES.forEach((f, i) => {

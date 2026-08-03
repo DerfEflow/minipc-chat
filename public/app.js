@@ -3747,3 +3747,243 @@ function speakAnswer(text) { voice.speak(text); }
     sel.focus();                                          // older engines: at least focus it
   });
 })();
+
+/*
+ * ============================================================================================
+ * ALTANA CLIENT ACTIONS (additive, 2026-08-03). altana.js dispatches one "altana:action"
+ * CustomEvent on `document` per action the server said Altana performed (see altana.js's
+ * dispatchAction()). The server deliberately does not own client-side settings, so nothing she
+ * reports is real until this listener applies it through the SAME controls a user would use and
+ * reports back what actually happened. Without this, "I switched your theme" was a sentence with
+ * nothing behind it.
+ *
+ * `detail` is reachable by anything running on the page, not only altana.js, so it is treated as
+ * untrusted input end to end: `type` and `setting` are checked against fixed allow-lists built
+ * with Object.create(null) (a hostile key like "__proto__" or "constructor" cannot resolve to an
+ * inherited value), every value is type- and length-bounded before it ever touches a control, and
+ * nothing here assigns a caller-supplied key into an object, into localStorage, or into eval.
+ *
+ * echo_settings / help / work_list are read-only and carry their own payload; Altana's own panel
+ * already renders them straight off the response (see altana.js's comment on dispatchAction), so
+ * this listener recognizes those types but deliberately does not act on them or report a result,
+ * to avoid becoming a second, competing renderer for the same data.
+ * ============================================================================================
+ */
+(function altanaActionsInit() {
+  if (typeof document === "undefined" || typeof document.addEventListener !== "function") return;
+
+  // Mirrors altana.mjs's ALTANA_SETTABLE_SETTINGS. The server is the authoritative gate:
+  // screenToolCall() there already refuses any set_setting whose key is not on that exact list
+  // before this event ever fires. This copy exists only because the event is public on
+  // `document` and reachable by anything else on the page, so the server check cannot be the only
+  // line of defense. Keep in sync with altana.mjs by hand; altana_actions_test.mjs imports the
+  // real list directly so drift between the two shows up as a failing test.
+  /*
+   * Mirrors ALTANA_SETTABLE_SETTINGS in altana.mjs, which is the authoritative gate. Trimmed to
+   * three on 2026-08-03: the other nine had no control anywhere in this app to drive, so listing
+   * them let her accept "make the text bigger" and report success while changing nothing.
+   * altana_actions_test.mjs walks the REAL server list and fails if an entry has no client path
+   * here, so these two cannot drift apart quietly.
+   */
+  const SETTABLE_SETTINGS = ["privacy_mode", "model", "sound"];
+
+  const isBoundedString = (v, maxLen) => typeof v === "string" && v.length > 0 && v.length <= maxLen;
+
+  function report(type, ok, reason) {
+    try {
+      const payload = { type: String(type), ok: !!ok };
+      if (reason) payload.reason = String(reason).slice(0, 300);
+      document.dispatchEvent(new CustomEvent("altana:action-result", { detail: payload }));
+    } catch {}
+  }
+
+  // Sets a <select>'s value ONLY if it matches one of that element's real options, then fires the
+  // native "change" event so whatever listener already owns persistence/repaint for that control
+  // (declared earlier in this file) runs exactly as it would for a user's own pick. This never
+  // duplicates that logic; it triggers it.
+  function applySelectSetting(elementId, value, label) {
+    if (!isBoundedString(value, 200)) return { ok: false, reason: label + " value must be a short string" };
+    const el = document.getElementById(elementId);
+    if (!el || !("value" in el)) return { ok: false, reason: "no " + label + " control on this page" };
+    const options = el.options ? Array.from(el.options) : [];
+    if (!options.some((o) => o && o.value === value)) {
+      return { ok: false, reason: '"' + value + '" is not a valid ' + label + " option" };
+    }
+    el.value = value;
+    try { el.dispatchEvent(new Event("change")); } catch {}
+    return { ok: true };
+  }
+
+  function boolFromValue(value) {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number" && Number.isFinite(value)) return value !== 0;
+    if (typeof value === "string") {
+      const s = value.trim().toLowerCase();
+      if (["on", "true", "1", "yes", "enabled"].includes(s)) return true;
+      if (["off", "false", "0", "no", "disabled"].includes(s)) return false;
+    }
+    return null;
+  }
+
+  // sound: reuses the app's existing auto-speak toggle (the mic bar's speaker button) by clicking
+  // the SAME element a user taps. Its own click handler persists dominion.speak.v1, repaints the
+  // icon, and stops playback on off, all unchanged, rather than being reimplemented here.
+  function applySoundSetting(value) {
+    const desired = boolFromValue(value);
+    if (desired === null) return { ok: false, reason: "sound value must be on/off" };
+    const btn = document.getElementById("speak");
+    if (!btn) return { ok: false, reason: "no sound control on this page" };
+    let current = false;
+    try { current = localStorage.getItem("dominion.speak.v1") === "1"; } catch {}
+    if (current !== desired) { try { btn.click(); } catch {} }
+    return { ok: true };
+  }
+
+  const SETTING_HANDLERS = Object.assign(Object.create(null), {
+    privacy_mode: (value) => applySelectSetting("privacy-mode", value, "privacy mode"),
+    model: (value) => applySelectSetting("model", value, "model"),
+    sound: applySoundSetting,
+  });
+
+  function applySetting(setting, value) {
+    if (!isBoundedString(setting, 64) || !SETTABLE_SETTINGS.includes(setting)) {
+      return { ok: false, reason: "not a setting Altana may change" };
+    }
+    // A legitimate value here is always a string, boolean, or finite number. A function, an
+    // array, or a nested object is never what any of these settings take, hostile or not, so it
+    // is rejected before it can reach a control.
+    if (value === undefined || value === null || typeof value === "function" || typeof value === "object") {
+      return { ok: false, reason: '"' + setting + '" was sent a value of the wrong shape' };
+    }
+    const handler = SETTING_HANDLERS[setting];
+    if (!handler) return { ok: false, reason: '"' + setting + '" has no client control yet' };
+    return handler(value);
+  }
+
+  // open_screen: reuse the app's own open*/close* functions verbatim. Those are top-level
+  // `function` declarations earlier in this file, which makes them properties of `window`, so
+  // calling them here does not duplicate a single line of what they do. altana.mjs's tool schema
+  // takes any free-text screen id from the model, so an id this app does not recognize fails
+  // honestly instead of guessing at a mapping.
+  function callGlobal(name) {
+    try { if (typeof window[name] === "function") { window[name](); return true; } } catch {}
+    return false;
+  }
+  const SCREEN_OPENERS = Object.assign(Object.create(null), {
+    chat: () => {
+      const closers = ["closeSettings", "closeMemory", "closePersona", "closeTools",
+        "closeArtifacts", "closeImprove", "closeModelPanel", "closeSidebar"];
+      let any = false;
+      for (const fn of closers) if (callGlobal(fn)) any = true;
+      return true;   // "go to chat" is honest even if nothing was open to close
+    },
+    settings: () => callGlobal("openSettings"),
+    memory: () => callGlobal("openMemory"),
+    persona: () => callGlobal("openPersona"),
+    tools: () => callGlobal("openTools"),
+    artifacts: () => callGlobal("openArtifacts"),
+    improve: () => callGlobal("openImprove"),
+    model: () => callGlobal("openModelPanel"),
+    models: () => callGlobal("openModelPanel"),
+  });
+  SCREEN_OPENERS.home = SCREEN_OPENERS.chat;
+
+  function applyOpenScreen(screen) {
+    if (!isBoundedString(screen, 64)) return { ok: false, reason: "screen id must be a short string" };
+    const opener = SCREEN_OPENERS[screen.toLowerCase()];
+    if (!opener) return { ok: false, reason: '"' + screen + '" is not a screen this app can open yet' };
+    return opener() ? { ok: true } : { ok: false, reason: '"' + screen + '" control is not on this page' };
+  }
+
+  // Types Altana may send, exactly. Anything else (including no type, or a non-string type) is
+  // ignored, never thrown, because `detail` reaches this listener from anything running on the
+  // page, not only altana.js.
+  const KNOWN_TYPES = new Set(["set_setting", "open_screen", "echo_settings", "help", "work_list"]);
+
+  function handleAltanaAction(ev) {
+    const detail = ev && ev.detail;
+    if (!detail || typeof detail !== "object" || Array.isArray(detail)) return;
+    const type = detail.type;
+    if (typeof type !== "string" || !KNOWN_TYPES.has(type)) return;
+
+    if (type === "set_setting") {
+      const r = applySetting(detail.setting, detail.value);
+      report("set_setting", r.ok, r.reason);
+      return;
+    }
+    if (type === "open_screen") {
+      const r = applyOpenScreen(detail.screen);
+      report("open_screen", r.ok, r.reason);
+      return;
+    }
+    // echo_settings / help / work_list: intentionally not acted on here; see file header comment.
+  }
+
+  document.addEventListener("altana:action", handleAltanaAction);
+
+  // Exposed only so a standalone test can exercise the exact functions above without re-deriving
+  // them from scratch; nothing in the running app reads this back.
+  if (typeof window !== "undefined") {
+    window.__altanaActionsTestHooks = {
+      handleAltanaAction, applySetting, applyOpenScreen, SETTABLE_SETTINGS: SETTABLE_SETTINGS.slice(),
+    };
+  }
+
+  /*
+   * WHAT ALTANA KNOWS. public/altana.js calls this before every question and sends whatever comes
+   * back. Without it she receives only the page title, which makes an assistant whose entire value
+   * is knowing the app state into a generic chatbot that happens to hold tools.
+   *
+   * Four rules, and each one is load-bearing:
+   *
+   * 1. OMIT RATHER THAN GUESS. A field that is missing costs her nothing. A field that is invented
+   *    poisons the answer, and she has no way to tell the difference.
+   * 2. ONLY ALLOW-LISTED SETTINGS. She has no reason to see a setting she cannot change, and
+   *    altana-context.mjs redacts on assembly as the second wall. Not sending it is the first.
+   * 3. NOTHING SENSITIVE, EVER. No email, no account id, no token, no billing figure. That rule is
+   *    Fred's exclusion list and it starts here rather than at the redactor.
+   * 4. IT MUST NEVER THROW. The panel calls this on the send path, so an exception here would take
+   *    her ability to answer with it. The whole body is wrapped and returns undefined on any error.
+   */
+  if (typeof window !== "undefined") {
+    window.dominionAltanaContext = function dominionAltanaContext() {
+      try {
+        const ctx = {};
+        const el = (id) => (typeof document !== "undefined" ? document.getElementById(id) : null);
+        const val = (id) => { const n = el(id); const v = n && n.value; return typeof v === "string" && v ? v : null; };
+
+        const title = typeof document !== "undefined" && typeof document.title === "string" ? document.title.slice(0, 120) : "";
+        if (title) ctx.screenTitle = title;
+
+        // The surface she is floating over, read from whichever panel is actually open right now.
+        const open = [
+          ["settings", "smodal"], ["memory", "memmodal"], ["persona", "personamodal"],
+          ["tools", "toolsmodal"], ["artifacts", "artmodal"], ["improve", "improvemodal"],
+        ].find(([, id]) => { const n = el(id); return n && n.hidden === false; });
+        ctx.surface = open ? open[0] : "chat";
+
+        const mode = val("mode"); if (mode) ctx.mode = mode;
+        const privacy = val("privacy-mode"); if (privacy) ctx.privacyMode = privacy;
+
+        // Settings, filtered to the list she may act on. The model select is the one that matters:
+        // it is the difference between her saying "you are on Luna" and her guessing.
+        const settings = {};
+        if (privacy) settings.privacy_mode = privacy;
+        const model = val("model"); if (model) settings.model = model;
+        const speak = el("speak");
+        if (speak && speak.getAttribute) {
+          const on = speak.getAttribute("aria-pressed");
+          if (on === "true" || on === "false") settings.sound = on === "true" ? "on" : "off";
+        }
+        if (Object.keys(settings).length) ctx.settings = settings;
+
+        /*
+         * NO `activity` FIELD. app.js tracks no history of what the user has been doing, and
+         * building a tracker to feed her is a bigger change than turning her on. Omitted honestly
+         * rather than filled with something that looks like activity and is not.
+         */
+        return ctx;
+      } catch { return undefined; }
+    };
+  }
+})();

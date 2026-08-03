@@ -145,7 +145,12 @@ export function altanaMount(opts = {}) {
   };
   el.addEventListener("pointerup", endDrag);
   el.addEventListener("pointercancel", endDrag);
-  el.addEventListener("click", (e) => { if (moved) { e.preventDefault(); e.stopPropagation(); } });
+  // A click that follows a drag is the user parking the dot, not asking to talk to her. `moved`
+  // already exists above for exactly this distinction; a click WITHOUT it opens the panel.
+  el.addEventListener("click", (e) => {
+    if (moved) { e.preventDefault(); e.stopPropagation(); return; }
+    try { togglePanel(doc); } catch {}
+  });
 
   on(typeof window !== "undefined" ? window : null, "resize", () => {
     const r = el.getBoundingClientRect();
@@ -206,4 +211,303 @@ export function altanaState(state, doc = document) {
   if (!state || state === "idle") { el.removeAttribute("data-state"); return; }
   el.dataset.state = state;
   if (state === "attention") setTimeout(() => { if (el.dataset.state === "attention") el.removeAttribute("data-state"); }, 2900);
+}
+
+/*
+ * ============================================================================================
+ * THE PANEL: the conversation Altana opens into. Everything below is dark exactly as long as the
+ * dot itself is dark, because none of it runs until a click reaches the handler above, and that
+ * handler only exists on a mounted dot. Turning `enabled` on is still the only switch.
+ *
+ * THE ONE RULE THAT MATTERS MOST HERE: this file never marks a settings change, a screen change,
+ * or anything else as done on its own say-so. The reply text is Altana's, but every side effect
+ * she actually performed arrives as a `clientActions` entry, and this file's only job with those
+ * is to dispatch `altana:action` on `document` (public/app.js listens and applies it) and, for the
+ * three read-only kinds that carry their own payload, show that payload here too. Skipping the
+ * dispatch would let her SAY a setting changed while nothing changed, which is the one outcome
+ * this build is built to avoid.
+ * ============================================================================================
+ */
+
+const ALTANA_ASK_URL = "/altana/ask";
+
+/*
+ * Optional integration point. This file does not own app state and does not reach into app.js
+ * internals (a separate agent owns that file). If some other module wants to hand Altana real
+ * surface/settings/activity, it can set `window.dominionAltanaContext = () => ({...})` any time
+ * before a question is sent. Nothing here assumes it exists: as of this build no such hook is
+ * wired up anywhere, so every field it would supply is simply absent, and absent is correct.
+ * `screenTitle` still gets a real value from `document.title` even with no hook at all.
+ */
+function gatherContext(doc) {
+  const out = {};
+  try {
+    const win = typeof window !== "undefined" ? window : null;
+    if (win && typeof win.dominionAltanaContext === "function") {
+      const c = win.dominionAltanaContext() || {};
+      if (c.mode != null) out.mode = c.mode;
+      if (c.privacyMode != null) out.privacyMode = c.privacyMode;
+      if (c.surface != null) out.surface = c.surface;
+      if (c.screenTitle != null) out.screenTitle = c.screenTitle;
+      if (c.settings && typeof c.settings === "object") out.settings = c.settings;
+      if (Array.isArray(c.activity)) out.activity = c.activity;
+    }
+  } catch {}
+  try {
+    if (out.screenTitle == null && doc && typeof doc.title === "string" && doc.title) out.screenTitle = doc.title;
+  } catch {}
+  try {
+    if (out.surface == null && doc && doc.body && doc.body.dataset && doc.body.dataset.surface) out.surface = doc.body.dataset.surface;
+  } catch {}
+  return out;
+}
+
+function buildAskBody(question, doc) {
+  return Object.assign({ question }, gatherContext(doc));
+}
+
+/*
+ * The only place a network call is made. Always POST, always JSON, never assumes the server
+ * answered anything but 200 + JSON per the contract, and treats anything else (a thrown fetch, a
+ * non-JSON body, a JSON body that is not an object) as one failure the caller handles the same way.
+ */
+async function postAsk(body) {
+  const res = await fetch(ALTANA_ASK_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!data || typeof data !== "object") throw new Error("altana: malformed response");
+  return data;
+}
+
+/*
+ * Client-owned preferences and screens: the server does not hold them, so the only correct move
+ * here is to relay the intent, verbatim, once per action, in order. public/app.js is the other
+ * half of this contract and decides what each type means; this file does not interpret them.
+ */
+function dispatchAction(action, doc) {
+  try { doc.dispatchEvent(new CustomEvent("altana:action", { detail: action })); } catch {}
+}
+
+const panels = new WeakMap();
+
+function ensurePanel(doc) {
+  let state = panels.get(doc);
+  if (state) return state;
+
+  const root = doc.createElement("div");
+  root.id = "altana-panel";
+  root.hidden = true;
+  root.setAttribute("role", "dialog");
+  root.setAttribute("aria-modal", "true");
+  root.setAttribute("aria-label", "Altana");
+
+  const inner = doc.createElement("div");
+  inner.className = "altana-panel-inner";
+
+  const head = doc.createElement("div");
+  head.className = "altana-panel-head";
+  const title = doc.createElement("span");
+  title.className = "altana-panel-title";
+  title.textContent = "Altana";
+  const closeBtn = doc.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "altana-panel-close";
+  closeBtn.setAttribute("aria-label", "Close");
+  closeBtn.textContent = "×";
+  head.append(title, closeBtn);
+
+  const log = doc.createElement("div");
+  log.className = "altana-panel-log";
+  log.setAttribute("role", "log");
+  log.setAttribute("aria-live", "polite");
+
+  const form = doc.createElement("form");
+  form.className = "altana-panel-form";
+  const input = doc.createElement("input");
+  input.type = "text";
+  input.className = "altana-panel-input";
+  input.setAttribute("aria-label", "Ask Altana");
+  input.setAttribute("placeholder", "Ask Altana");
+  const sendBtn = doc.createElement("button");
+  sendBtn.type = "submit";
+  sendBtn.className = "altana-panel-send";
+  sendBtn.textContent = "Send";
+  form.append(input, sendBtn);
+
+  inner.append(head, log, form);
+  root.append(inner);
+  doc.body.appendChild(root);
+
+  state = { root, log, input, form, closeBtn, sending: false };
+  panels.set(doc, state);
+
+  closeBtn.addEventListener("click", () => { try { closePanel(doc); } catch {} });
+  doc.addEventListener("keydown", (e) => {
+    if (e && e.key === "Escape" && state.root.hidden === false) { try { closePanel(doc); } catch {} }
+  });
+  form.addEventListener("submit", (e) => {
+    try { e.preventDefault(); } catch {}
+    if (state.sending) return;
+    const q = String(input.value || "").trim();
+    if (!q) return;
+    input.value = "";
+    submitQuestion(doc, q);
+  });
+
+  return state;
+}
+
+function openPanel(doc) {
+  const state = ensurePanel(doc);
+  state.root.hidden = false;
+  state.root.setAttribute("data-enter", "");
+  setTimeout(() => { try { state.root.removeAttribute("data-enter"); } catch {} }, 320);
+  try { state.input.focus(); } catch {}
+  return state;
+}
+function closePanel(doc) {
+  const state = panels.get(doc);
+  if (!state) return;
+  state.root.hidden = true;
+}
+function togglePanel(doc) {
+  const state = panels.get(doc);
+  if (state && state.root.hidden === false) closePanel(doc);
+  else openPanel(doc);
+}
+
+function appendMessage(doc, kind, text) {
+  const state = panels.get(doc);
+  if (!state || !text) return null;
+  const row = doc.createElement("div");
+  row.className = "altana-msg altana-msg-" + kind;
+  row.textContent = String(text);
+  state.log.append(row);
+  return row;
+}
+
+function appendWorkList(doc, items) {
+  const state = panels.get(doc);
+  if (!state) return;
+  const list = Array.isArray(items) ? items : [];
+  const row = doc.createElement("div");
+  row.className = "altana-msg altana-msg-altana altana-worklist";
+  const label = doc.createElement("div");
+  label.className = "altana-worklist-label";
+  label.textContent = list.length ? "Open items" : "No open items.";
+  row.append(label);
+  if (list.length) {
+    const ul = doc.createElement("ul");
+    ul.className = "altana-worklist-items";
+    for (const it of list) {
+      const li = doc.createElement("li");
+      li.textContent = String((it && it.title) || "(untitled)");
+      ul.append(li);
+    }
+    row.append(ul);
+  }
+  state.log.append(row);
+}
+
+/*
+ * The confirmation round-trip. `entry.token` is never sent anywhere except from inside this Yes
+ * handler, and only once, and only for the exact entry the user clicked. `originalBody` is the
+ * whole request object from the ask that produced this confirmation, captured by closure at the
+ * moment it arrived; resending it with `confirm` added is what makes the resend IDENTICAL rather
+ * than a fresh guess at what the user meant.
+ */
+function appendConfirm(doc, entry, originalBody) {
+  const state = panels.get(doc);
+  if (!state || !entry) return;
+  const row = doc.createElement("div");
+  row.className = "altana-msg altana-msg-confirm";
+  const q = doc.createElement("div");
+  q.className = "altana-confirm-q";
+  q.textContent = String(entry.question || "Confirm this action?");
+  const actions = doc.createElement("div");
+  actions.className = "altana-confirm-actions";
+  const yes = doc.createElement("button");
+  yes.type = "button"; yes.className = "altana-confirm-yes"; yes.textContent = "Yes";
+  const no = doc.createElement("button");
+  no.type = "button"; no.className = "altana-confirm-no"; no.textContent = "No";
+  yes.addEventListener("click", () => {
+    yes.disabled = true; no.disabled = true;
+    row.className += " altana-confirm-done";
+    confirmAction(doc, originalBody, entry.token);
+  });
+  no.addEventListener("click", () => {
+    yes.disabled = true; no.disabled = true;
+    row.className += " altana-confirm-done";
+    appendMessage(doc, "system", "Cancelled.");
+  });
+  actions.append(yes, no);
+  row.append(q, actions);
+  state.log.append(row);
+}
+
+/*
+ * One place applies a server response, whether it came from the first ask or from a confirmed
+ * resend, so the two paths cannot drift apart. `requestBody` is threaded through purely so a NEW
+ * confirmation (rare, but the contract allows it) can still resend the right thing.
+ */
+function handleAskResult(doc, data, requestBody) {
+  if (data.reply) appendMessage(doc, "altana", data.reply);
+
+  const actions = Array.isArray(data.clientActions) ? data.clientActions : [];
+  for (const action of actions) {
+    if (!action || !action.type) continue;
+    dispatchAction(action, doc);
+    if (action.type === "help") appendMessage(doc, "altana", action.text);
+    else if (action.type === "work_list") appendWorkList(doc, action.items);
+    else if (action.type === "echo_settings") appendMessage(doc, "system", "Checked your current settings.");
+  }
+
+  if (data.fallback && data.fallback.text) appendMessage(doc, "system", data.fallback.text);
+
+  const blocked = Array.isArray(data.blocked) ? data.blocked : [];
+  for (const b of blocked) {
+    if (!b) continue;
+    appendMessage(doc, "system", "Blocked: " + (b.tool || "a tool") + ". " + (b.reason || "no reason given") + ".");
+  }
+
+  const confirm = Array.isArray(data.confirm) ? data.confirm : [];
+  for (const c of confirm) appendConfirm(doc, c, requestBody);
+}
+
+async function submitQuestion(doc, question) {
+  const state = panels.get(doc);
+  if (!state) return;
+  appendMessage(doc, "user", question);
+  state.sending = true;
+  altanaState("thinking", doc);
+  try {
+    const body = buildAskBody(question, doc);
+    const data = await postAsk(body);
+    handleAskResult(doc, data, body);
+  } catch {
+    appendMessage(doc, "error", "I could not reach Altana just now. Please try again.");
+  } finally {
+    state.sending = false;
+    altanaState("idle", doc);
+  }
+}
+
+async function confirmAction(doc, originalBody, token) {
+  const state = panels.get(doc);
+  if (!state) return;
+  state.sending = true;
+  altanaState("thinking", doc);
+  try {
+    const body = Object.assign({}, originalBody, { confirm: [token] });
+    const data = await postAsk(body);
+    handleAskResult(doc, data, originalBody);
+  } catch {
+    appendMessage(doc, "error", "I could not confirm that action. Please try again.");
+  } finally {
+    state.sending = false;
+    altanaState("idle", doc);
+  }
 }

@@ -130,10 +130,152 @@
 @media (prefers-reduced-motion: reduce) {
   .altana-face, .altana-halo,
   #altana[data-state] .altana-face, #altana[data-state] .altana-halo,
-  #altana[data-enter] .altana-face { animation: none !important; }
+  #altana[data-enter] .altana-face,
+  #altana-panel[data-enter] .altana-panel-inner { animation: none !important; }
   #altana[data-state="thinking"] .altana-face,
   #altana[data-state="speaking"] .altana-face { opacity: 1; }
   #altana[data-state="thinking"] .altana-halo,
   #altana[data-state="speaking"] .altana-halo,
   #altana[data-state="attention"] .altana-halo { opacity: .7; }
+}
+
+/*
+ * ============================================================================================
+ * THE PANEL. Same two hazards as the dot: mounted on <body> for the same fixed-position-trap
+ * reason (see the top of this file), and animation restricted to transform/opacity for the same
+ * compositor-only reason. altana_test.mjs's keyframe scan covers this file as a whole, not just
+ * the dot's own rules, so a new keyframe here that animated anything else would fail the same test.
+ *
+ * Brass, glass, glow: same family as dominion-ui.css and the dominion-cinematic-0*.css sheets
+ * (cut-corner clip-paths, thin cyan glass borders, a copper accent for actionable controls), but
+ * expressed with its own variables rather than importing theirs. This file ships standalone (the
+ * ops/altana-preview.html page never loads dominion-ui.css) and must never depend on a sheet that
+ * might not be present.
+ * ============================================================================================
+ */
+:root {
+  --altana-panel-w: min(378px, calc(100vw - 28px));
+  --altana-panel-h: min(72vh, 620px);
+  --altana-ink: #eaf3fb;
+  --altana-ink-soft: #b9cddd;
+  --altana-muted: #7d90a3;
+  --altana-line: rgba(150, 214, 255, .22);
+  --altana-copper: #f2c48f;
+  --altana-copper-line: rgba(247, 177, 112, .4);
+  --altana-danger: #ff9d8a;
+}
+
+#altana-panel {
+  position: fixed;
+  z-index: 61;                    /* above the dot, still below modals */
+  right: var(--altana-inset);
+  bottom: calc(var(--altana-inset) + var(--altana-size) + 14px);
+  width: var(--altana-panel-w);
+  height: var(--altana-panel-h);
+  display: flex;
+  pointer-events: none;            /* the inner card owns interaction; this box only positions it */
+}
+#altana-panel[hidden] { display: none; }
+
+.altana-panel-inner {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+  border: 1px solid var(--altana-line);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, .05), transparent 12%),
+    linear-gradient(150deg, rgba(9, 26, 38, .92), rgba(3, 10, 16, .94) 60%);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, .6), inset 0 1px 0 rgba(230, 248, 255, .1);
+  backdrop-filter: blur(10px) saturate(1.3);
+  clip-path: polygon(14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px);
+  color: var(--altana-ink-soft);
+  font: 400 13.5px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+}
+#altana-panel[data-enter] .altana-panel-inner {
+  animation: altana-panel-arrive .28s cubic-bezier(.2, .8, .3, 1) both;
+}
+
+.altana-panel-head {
+  display: flex; align-items: center; justify-content: space-between; flex: none;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--altana-line);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .04), transparent);
+}
+.altana-panel-title {
+  font: 700 11px/1 system-ui, sans-serif; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--altana-ink);
+}
+.altana-panel-close {
+  width: 26px; height: 26px; display: grid; place-items: center;
+  border: 1px solid var(--altana-line); border-radius: 7px;
+  background: rgba(255, 255, 255, .03); color: var(--altana-ink-soft);
+  font: 600 15px/1 system-ui, sans-serif; cursor: pointer;
+}
+.altana-panel-close:hover { color: var(--altana-ink); border-color: rgba(230, 248, 255, .4); }
+
+.altana-panel-log {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 9px;
+  padding: 12px 14px;
+}
+.altana-panel-log:empty::before {
+  content: "Ask Altana anything about this screen.";
+  color: var(--altana-muted); font-style: italic;
+}
+
+.altana-msg { max-width: 92%; padding: 8px 11px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; }
+.altana-msg-user { align-self: flex-end; background: rgba(120, 180, 255, .14); border: 1px solid rgba(150, 200, 255, .28); color: var(--altana-ink); }
+.altana-msg-altana { align-self: flex-start; background: rgba(255, 255, 255, .04); border: 1px solid var(--altana-line); color: var(--altana-ink-soft); }
+.altana-msg-system { align-self: stretch; background: rgba(247, 177, 112, .08); border: 1px solid var(--altana-copper-line); color: var(--altana-copper); font-size: 12.5px; }
+.altana-msg-error { align-self: stretch; background: rgba(255, 110, 90, .1); border: 1px solid rgba(255, 140, 120, .4); color: var(--altana-danger); font-size: 12.5px; }
+.altana-msg-confirm { align-self: stretch; border: 1px solid var(--altana-line); border-radius: 10px; padding: 10px 11px; background: rgba(255, 255, 255, .03); }
+.altana-confirm-q { margin-bottom: 8px; color: var(--altana-ink); }
+.altana-confirm-actions { display: flex; gap: 8px; }
+.altana-confirm-actions button { flex: 1; padding: 6px 10px; border-radius: 7px; font: 600 12px/1 system-ui, sans-serif; cursor: pointer; }
+.altana-confirm-actions button:disabled { opacity: .5; cursor: default; }
+.altana-confirm-yes { border: 1px solid rgba(150, 255, 140, .5); background: rgba(90, 255, 80, .1); color: #b7ffab; }
+.altana-confirm-no { border: 1px solid rgba(255, 140, 120, .5); background: rgba(255, 90, 80, .1); color: #ffb3a6; }
+.altana-confirm-done .altana-confirm-actions { display: none; }
+
+.altana-worklist-label { margin-bottom: 6px; font-weight: 600; color: var(--altana-ink); }
+.altana-worklist-items { margin: 0; padding-left: 18px; }
+.altana-worklist-items li { margin: 2px 0; }
+
+.altana-panel-form {
+  flex: none; display: flex; gap: 8px; padding: 11px 12px;
+  border-top: 1px solid var(--altana-line);
+  background: linear-gradient(0deg, rgba(255, 255, 255, .03), transparent);
+}
+.altana-panel-input {
+  flex: 1 1 auto; min-width: 0; padding: 8px 11px; border-radius: 8px;
+  border: 1px solid var(--altana-line); background: rgba(2, 10, 17, .6); color: var(--altana-ink);
+  font: inherit;
+}
+.altana-panel-input:focus-visible { outline: 2px solid rgba(120, 210, 255, .7); outline-offset: 1px; }
+.altana-panel-send {
+  flex: none; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--altana-copper-line); background: rgba(247, 177, 112, .12); color: var(--altana-copper);
+  font: 700 12px/1 system-ui, sans-serif;
+}
+.altana-panel-send:hover { background: rgba(247, 177, 112, .2); }
+
+@keyframes altana-panel-arrive {
+  from { opacity: 0; transform: translateY(10px) scale(.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Below the rail/dock breakpoint, same clearance the dot itself uses (see altana.js header). */
+@media (max-width: 1180px) {
+  #altana-panel { bottom: calc(var(--altana-dock-clearance) + var(--altana-size) + 14px); }
+}
+/* Phones: a bottom-sheet-style card spanning the safe width rather than a floating corner card. */
+@media (max-width: 480px) {
+  #altana-panel {
+    right: 10px; left: 10px; width: auto;
+    bottom: calc(var(--altana-dock-clearance) + var(--altana-size) + 10px);
+    height: min(66vh, 560px);
+  }
 }

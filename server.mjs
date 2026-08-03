@@ -5504,8 +5504,37 @@ async function handleAltana(req, res, u) {
       })();
     }
 
+    /*
+     * A TOOL TURN COMES BACK WITH NO WORDS, and silence is not an answer.
+     *
+     * Measured live: "What can you help me with?" returns good prose and no actions. "Please switch
+     * my privacy mode to trusted" returns the correct action and an EMPTY reply, because a
+     * tool-calling turn on the Responses API carries the call rather than prose. The user would
+     * watch something happen and be told nothing.
+     *
+     * The obvious fix, a second model round carrying the tool results, doubles the latency and the
+     * cost of every action for a sentence anyone can write. So the sentence is written here.
+     *
+     * IT IS PHRASED AS INTENT, NEVER AS SUCCESS, and that is the whole point. The server only
+     * REQUESTS these changes; public/app.js applies them against the app's real controls and
+     * answers with altana:action-result, which is the only thing that knows whether it worked. A
+     * server that said "Done, switched to trusted" would be claiming an outcome it cannot see, and
+     * that is the exact failure this build has spent its whole length hunting.
+     */
+    const spokenFor = (a) => {
+      if (a.type === "set_setting") return "Setting " + String(a.setting).replace(/_/g, " ") + " to " + String(a.value) + ".";
+      if (a.type === "open_screen") return "Opening " + String(a.screen) + ".";
+      if (a.type === "echo_settings") return "Checking your current settings.";
+      if (a.type === "help") return "Looking that up in what I know.";
+      if (a.type === "work_list") return "Pulling up your saved work.";
+      return "";
+    };
+    const spokenReply = String(reply || "").trim()
+      || clientActions.map(spokenFor).filter(Boolean).join(" ")
+      || "";
+
     return sjson(res, 200, {
-      reply, logged, clientActions,
+      reply: spokenReply, logged, clientActions,
       model: r.usage.model, lane: r.usage.lane, billed: r.usage.billed,
       // F7: the SAME { type:"model_fallback", from, to, text } shape the SSE path already emits.
       fallback: r.fallback || null,

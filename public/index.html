@@ -603,10 +603,17 @@
   <script src="/dominion-simplify.js?v=1"></script>
   <script type="module">
     import { altanaMount } from "/altana.js";
-    // Altana ships DARK. The flag stays false until her brain (altana.mjs) is wired and answering,
-    // because a dot that floats over every screen and does nothing is the Knowledge Vault mistake
-    // again: three buttons that opened three empty rooms.
-    altanaMount({ enabled: false });
+    /*
+     * ALTANA IS LIVE (2026-08-03). She shipped dark first, and the flag only moved once every part
+     * of the loop existed: her brain answers on /altana/ask, the dot opens into a panel, the panel
+     * dispatches altana:action, and app.js applies those actions through the app's own controls and
+     * reports back whether they landed. The rule this order came from is that a dot which floats
+     * over every screen and does nothing is the Knowledge Vault mistake again, three buttons that
+     * opened three empty rooms.
+     *
+     * Set this to false to show her out of the building without a deploy.
+     */
+    altanaMount({ enabled: true });
   </script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>
 </body>

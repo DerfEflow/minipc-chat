@@ -29,13 +29,16 @@
  *      an instruction, every write tool is hard-blocked for that step regardless of what the model
  *      decides to do (wargame F3).
  *
- * THE SEATS, decided and measured 2026-08-03 against the live APIs:
- *   PRIMARY  deepseek-ai/deepseek-v4-pro on NVIDIA's integrate endpoint. Free on the developer
- *            tier, and it emits real tool calls (verified: a set_setting call came back).
- *   FALLBACK openai/gpt-5.6-luna. Its tools work ONLY through /v1/responses, where tools are
- *            declared FLAT. Luna on chat/completions cannot call tools at all, so constructing a
- *            chat/completions request for Luna is a defect and this module throws on it rather
- *            than shipping a silently toolless assistant (wargame F4).
+ * THE SEATS, decided and measured 2026-08-03 against the live APIs. Read the block above
+ * ALTANA_SEATS for the latency numbers that set this order, and do not reverse it without new
+ * measurements:
+ *   PRIMARY  openai/gpt-5.6-luna, about 1 second to first token. Its tools work ONLY through
+ *            /v1/responses, where tools are declared FLAT. Luna on chat/completions cannot call
+ *            tools at all, so constructing a chat/completions request for Luna is a defect and
+ *            this module throws on it rather than shipping a silently toolless assistant (F4).
+ *   FALLBACK deepseek-ai/deepseek-v4-pro on NVIDIA's free lane. It emits real tool calls and it
+ *            takes 62 to 86 seconds to first token, per turn, with no warm-up. Acceptable when
+ *            the alternative is no assistant at all; never acceptable as the seat a user waits on.
  *
  * FAILOVER IS A REQUIREMENT, NOT A NICETY. During the adoption probe NVIDIA returned HTTP 529 for
  * a sibling model and four shortlisted models on this account are listed by the API yet answer
@@ -125,19 +128,30 @@ export function exclusionFor(name) {
  * Every entry here is cosmetic, behavioural or preference-shaped. None of them costs money, none
  * of them identifies a person, none of them is a credential.
  */
+/*
+ * ONLY WHAT THE APP CAN ACTUALLY DO. Trimmed from twelve to three on 2026-08-03, and the cut is
+ * the honest half of shipping her.
+ *
+ * The first version of this list was written from what an assistant OUGHT to be able to change.
+ * When the client wiring was built, nine of the twelve had no control anywhere in the app to drive:
+ * there is no theme system (Dominion is dark-only), no font-size preference, no reduced-motion
+ * toggle, no notifications, no autoscroll switch, no cost-display preference, no interface-mode
+ * switch in app.js, and no crew toggle. `altana_enabled` belongs to public/altana.js rather than
+ * to the app.
+ *
+ * Leaving them listed would have let her accept "make the text bigger", announce that she had done
+ * it, and change nothing. This whole build has been a run of finding machinery that reports success
+ * it never delivered, and a settings list longer than the app is the same bug in a new costume.
+ *
+ * TO ADD ONE BACK: build the control in the app first, wire it in public/app.js's altana:action
+ * listener, then add the key here. In that order. altana_actions_test.mjs walks this list and fails
+ * if an entry has no client path, so the test enforces the order rather than trusting anyone to
+ * remember it.
+ */
 export const ALTANA_SETTABLE_SETTINGS = [
-  "theme",              // light / dark / system
-  "interface_mode",     // beginner / vibe / engineer
-  "privacy_mode",       // the existing privacy allow-list mode
-  "model",              // which model answers this chat
-  "reduced_motion",
-  "font_size",
-  "autoscroll",
-  "show_costs",         // whether per-turn cost is displayed. Displaying is not spending.
-  "notifications",
-  "crew_enabled",       // agent-army on or off
-  "altana_enabled",     // she can show herself out
-  "sound",
+  "privacy_mode",       // the existing privacy allow-list mode, driven through the real #privacy-mode select
+  "model",              // which model answers this chat, driven through the real #model select
+  "sound",              // maps to the existing auto-speak toggle, the only audio control the app has
 ];
 
 /*
@@ -528,18 +542,32 @@ export function screenToolCall(call, { confirmations = [], injectionFlagged = fa
  * the exact defect F4 names, and it is the kind that is invisible in production: she answers, she
  * just never acts again.
  */
+/*
+ * ORDER REVERSED 2026-08-03 BY MEASUREMENT, on Fred's decision. Luna leads; the free lane catches.
+ *
+ * Altana was seated on NVIDIA's free lane because free is free and NVIDIA hosts in the US, which
+ * answers the residency worry that routing straight to DeepSeek raises. The cost half of that
+ * reasoning did not survive contact with a stopwatch. Eight sequential calls to the free lane,
+ * alternating a tiny prompt with a realistic Altana-sized one:
+ *
+ *   first token: 81.4s 69.2s 62.7s 85.6s 72.2s 68.2s 67.9s, and the eighth timed out at 120s
+ *   first half average 71.1s, second half average 73.5s
+ *   tiny 71.0s vs realistic 74.3s
+ *
+ * Two things there matter more than the headline. The second half is SLOWER than the first, so
+ * there is no warm-up to hide behind and no prewarming trick can help. And payload size barely
+ * moves it, so the context block is not the cause. It is per turn, on every user input.
+ *
+ * Luna on the same payloads in the same minutes: 1.4s, 1.4s, 1.4s, 0.8s, 1.4s, 1.0s. Roughly sixty
+ * times faster for about a dollar per thousand turns. Luna is also a US provider, so the security
+ * half of the original reasoning survives the swap untouched.
+ *
+ * The free lane KEEPS ITS SEAT as the fallback rather than being deleted. It is genuinely fine
+ * where nobody is watching a cursor, and when OpenAI is down a slow answer beats a dark assistant.
+ * Failover already announces the seat change, and the announcement now reads the other way round:
+ * the fallback is the free one, so a user is told the turn may be slow rather than that it costs.
+ */
 export const ALTANA_SEATS = [
-  {
-    lane: "nvidia-deepseek-v4-pro",
-    model: "deepseek-ai/deepseek-v4-pro",
-    catalogId: "deepseek/deepseek-v4-pro",
-    api: "chat",
-    provider: "nvidia",
-    url: "https://integrate.api.nvidia.com/v1/chat/completions",
-    keyNames: ["NVIDIA_API_KEY", "NVIDIA_KEY"],
-    billed: false,
-    label: "DeepSeek V4 Pro on NVIDIA (free lane)",
-  },
   {
     lane: "openai-luna",
     model: "gpt-5.6-luna",
@@ -550,6 +578,29 @@ export const ALTANA_SEATS = [
     keyNames: ["OPENAI_API_KEY"],
     billed: true,
     label: "GPT-5.6 Luna on OpenAI Responses",
+    // It answers in about a second. A longer budget here only makes a user wait longer before the
+    // failover they are already going to get.
+    timeoutMs: 30000,
+  },
+  {
+    lane: "nvidia-deepseek-v4-pro",
+    model: "deepseek-ai/deepseek-v4-pro",
+    catalogId: "deepseek/deepseek-v4-pro",
+    api: "chat",
+    provider: "nvidia",
+    url: "https://integrate.api.nvidia.com/v1/chat/completions",
+    keyNames: ["NVIDIA_API_KEY", "NVIDIA_KEY"],
+    billed: false,
+    // Named so the failover notice tells the user what they are actually about to experience.
+    label: "DeepSeek V4 Pro on NVIDIA (free lane, slow)",
+    slow: true,
+    /*
+     * 180s, and this number is the difference between a fallback and a decoration. Measured first
+     * token on this lane is 62 to 86 seconds and a tool call has to follow it. Under the old shared
+     * 60s budget every failover to this seat aborted before it could answer, so the safety net
+     * existed in the code and could never once have caught anything.
+     */
+    timeoutMs: 180000,
   },
 ];
 
@@ -669,9 +720,16 @@ export function fallbackNotice(from, to, reason) {
   return {
     type: "model_fallback",
     from: from.catalogId, to: to.catalogId,
+    /*
+     * Both directions are stated, because the seat order flipped on 2026-08-03 and the surprise
+     * worth preventing flipped with it. Falling from free to paid is a cost surprise. Falling from
+     * paid to the free lane is a SPEED surprise, and a 70-second wait with no explanation reads as
+     * the app being broken. Whichever way it goes, say the thing the user is about to notice.
+     */
     text: "Heads up: Altana's usual seat (" + from.label + ") did not answer" + (reason ? " (" + reason + ")" : "") +
       ". This turn ran on " + to.label + " instead" +
-      (from.billed === false && to.billed ? ", which is a paid seat rather than the free one" : "") +
+      (from.billed === false && to.billed ? ", which is a paid seat rather than the free one"
+        : to.slow ? ", which is the free lane and can take a minute or more to answer" : "") +
       ". Her abilities are unchanged.",
     reason: reason || "",
     billedChange: from.billed === false && to.billed === true,
@@ -725,7 +783,22 @@ export async function runAltanaTurn({
     const call = seat.api === "responses" ? responses : chat;
     let r;
     try {
-      r = await call(seat, { messages, tools, apiKey, timeoutMs, maxTokens });
+      /*
+       * PER-SEAT TIMEOUT, and this was a real defect before it existed.
+       *
+       * One shared 60s budget meant the free lane could NEVER succeed: it needs 62 to 86 seconds
+       * to emit a first token, so every failover to it aborted at 60s and the fallback was
+       * decoration that looked like a safety net. A caller-supplied timeoutMs still wins, so tests
+       * and callers keep full control; otherwise each seat gets the budget its own measured
+       * latency requires.
+       *
+       * Note the two are deliberately asymmetric in BOTH directions. Luna answers in about a
+       * second, so a long budget there would only delay the failover a user is waiting through.
+       * The free lane is slow enough that a short budget guarantees it never lands.
+       */
+      const seatTimeout = timeoutMs !== undefined && timeoutMs !== null ? timeoutMs
+        : (seat.timeoutMs || 60000);
+      r = await call(seat, { messages, tools, apiKey, timeoutMs: seatTimeout, maxTokens });
     } catch (e) {
       r = norm({ error: String((e && e.message) || e) });
     }
