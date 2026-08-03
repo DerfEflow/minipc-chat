@@ -447,13 +447,31 @@ The model is chosen per query. The user never sees a choice.
 | Literary | ~~`writer/palmyra-creative-122b`~~ | NVIDIA | **DEAD ON THE ACCOUNT**: "Function not found for account". Listed in /v1/models, not invokable on Fred's key |
 | Creative | `deepseek/deepseek-v4-flash` | DeepSeek direct | **PASS** (floor 1024) |
 | Quick and dirty | `nvidia/nemotron-nano-12b-v2-vl` | NVIDIA, free | **PASS**, and seated in the catalog: answers, real tool call, names the red swatch |
-| Personal, empathetic, high EQ | `meta/llama-3.3-70b-instruct` | NVIDIA | **PARTIAL**: answered, tool probe timed out at 75s. Re-probe before ship |
+| Personal, empathetic, high EQ | ~~`meta/llama-3.3-70b-instruct`~~ | NVIDIA | **UNUSABLE INTERACTIVELY.** Available and tool-capable, but **31.6s to first token**, and a second run returned nothing at all before a 120s timeout |
 | Theological and philosophical | ~~`nvidia/llama-3.1-nemotron-70b-instruct`~~ | NVIDIA | **DEAD ON THE ACCOUNT**, same "Function not found" |
 | Business | `z-ai/glm-5.2` | NVIDIA, free | **PASS** |
 
-**Two routes are dead and need Fred's re-pick.** The account serves a subset of what `/v1/models` lists; four shortlist candidates (palmyra-creative, nemotron-70b-instruct, jamba-1.5-large, cosmos-reason2) all return "Function not found for account". Proposals, not decisions:
-- **Literary** → `arcee-ai/trinity-large-thinking`. It is the surviving creative seat, it was kept for exactly this kind of work, and with palmyra dead the planned palmyra-versus-flash head-to-head collapses to Trinity-versus-flash, which Fred can still taste-test.
-- **Theological and philosophical** → `nvidia/nemotron-3-super-120b-a12b:free` (probed clean, free, strong reasoner), or `meta/llama-3.3-70b-instruct` doubling up if its re-probe passes, at the cost of the two-fine-tunes distinction Fred wanted.
+### THREE routes need Fred's re-pick, and latency is why one of them moved
+
+Two failure modes, and they are different problems:
+
+**Dead on the account.** `/v1/models` lists 102 models; the ACCOUNT invokes fewer. `palmyra-creative-122b`, `llama-3.1-nemotron-70b-instruct`, `jamba-1.5-large-instruct` and `cosmos-reason2-8b` all return "Function not found for account". **A model list is a menu, not an inventory.**
+
+**Alive but too slow to use.** `meta/llama-3.3-70b-instruct` answers and emits real tool calls, so every capability probe passed it. Then a latency measurement on the path it would actually run showed **31.6s to first token, and a second run that produced nothing before timing out at 120s.** Recorded because the lesson generalises: capability probes ask CAN it, and an interactive route also needs HOW FAST. The first probe called this "partial, tool probe timed out at 75s", which was a generous reading of a bad signal.
+
+**Latency baseline, measured 2026-08-03** (first token, two runs, streaming, same prompt):
+
+| Model | Run 1 | Run 2 |
+|---|---|---|
+| `nvidia/nemotron-3-super-120b-a12b` | 0.7s | 3.4s |
+| `z-ai/glm-5.2` | 2.1s | 1.6s |
+| `nvidia/nemotron-3-ultra-550b-a55b` | 7.6s | 1.1s |
+| `meta/llama-3.3-70b-instruct` | 31.6s | no output, 120s timeout |
+
+**Proposals, not decisions.** All three are already catalog seats, all probed clean, all free on the NVIDIA lane, and all three are distinct models so Fred keeps the separation he asked for:
+- **Literary** → `arcee-ai/trinity-large-thinking`, the surviving creative seat, kept for exactly this work.
+- **Personal, empathetic, high EQ** → `nvidia/nemotron-3-super-120b-a12b`, the fastest thing measured and warm enough for the job.
+- **Theological and philosophical** → `nvidia/nemotron-3-ultra-550b-a55b`, the 550B deep reasoner, whose slower first token is acceptable where users expect thinking.
 
 **Also from that probe run:** `mistral-medium-3.5-128b` and `llama-guard-4-12b` timed out on the dev tier; `nemotron-parse` rejects plain-text input by design ("The model does not support text input"), so the document-parsing lane needs a document-shaped probe, which is Phase 5 work, not a failure.
 
