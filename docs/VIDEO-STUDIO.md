@@ -245,8 +245,10 @@ single-writer settlement and project-lock contract. Do not add replicas or run a
 process until the meter/feature locks are replaced with a distributed transaction design.
 
 Railway config grants the old deployment 330 seconds between SIGTERM and SIGKILL. The PID-1 entrypoint
-forwards SIGTERM to both Node and `cloudflared`; the tunnel uses a 320-second grace period, stops new
-edge requests, and drains active streams while Node allows up to 310 seconds for durable provider
-turns and then waits for HTTP response completion. These ordered deadlines sit above the video-team
-chat's 240-second aggregate deadline and OpenRouter Trinity's 300-second request timeout, leaving
-Railway a final forced-shutdown margin.
+forwards SIGTERM to both Node and `cloudflared`; the tunnel uses Cloudflare's maximum supported
+180-second grace period, stops new edge requests, and drains active streams while Node allows up to
+310 seconds for durable provider turns and then waits for HTTP response completion. Node and
+Railway therefore outlive the video-team chat's 240-second aggregate deadline and OpenRouter
+Trinity's 300-second request timeout. If Cloudflare closes an older edge stream at its 180-second
+ceiling, the provider turn still reaches the durable ledger and the client resumes through status
+and reconciliation on the replacement deployment. Railway retains a final forced-shutdown margin.

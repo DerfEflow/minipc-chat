@@ -1,8 +1,9 @@
 #!/bin/sh
 # Dominion AI — container entrypoint and PID-1 shutdown supervisor. The named tunnel and Node
-# must receive SIGTERM together: cloudflared stops accepting new edge traffic while its long-lived
-# request drains, and Node finishes the matching durable provider checkpoint before Railway's
-# 330-second SIGKILL deadline.
+# must receive SIGTERM together: cloudflared stops accepting new edge traffic and drains for its
+# platform maximum of 180 seconds, while Node keeps finishing the matching durable provider
+# checkpoint before Railway's 330-second SIGKILL deadline. A longer provider turn is recovered from
+# the durable ledger after the browser reconnects to the replacement deployment.
 set -eu
 
 cloudflared_pid=""
@@ -37,7 +38,7 @@ trap forward_shutdown TERM INT
 
 if [ -n "${TUNNEL_TOKEN:-}" ]; then
   echo "[start] launching cloudflared tunnel -> localhost:${PORT:-8088}"
-  cloudflared tunnel --no-autoupdate --grace-period 320s run --token "$TUNNEL_TOKEN" &
+  cloudflared tunnel --no-autoupdate --grace-period 180s run --token "$TUNNEL_TOKEN" &
   cloudflared_pid=$!
 else
   echo "[start] TUNNEL_TOKEN unset — running app without the tunnel (local/dev mode)"
