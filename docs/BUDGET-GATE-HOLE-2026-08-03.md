@@ -1,5 +1,24 @@
 # The session budget gate can be skipped by omitting one field
 
+> ## CLOSED 2026-08-03 BY FRED'S DECISION: "I dont need a cap."
+>
+> **Do not "fix" this.** Everything below is an accurate description of the behavior and a wrong
+> description of its importance. It was written as a defect report because a skippable spend guard
+> looks like one. Fred does not want a per-conversation cap on his own account, so a path that
+> reaches a provider without one is the behavior he wants rather than a hole in the one he asked for.
+>
+> **What is NOT affected, and is the reason this is safe to leave:** every non-owner turn is still
+> metered and charged through `meterTurn`, on the main chat and now on Simplify too. Nobody gets free
+> usage. The session budget is a CAP a user opts into from the normal interface, which sends a
+> `chatId`, so anyone who wants one still gets one.
+>
+> **The only account this leaves uncapped is Fred's**, deliberately, at his instruction.
+>
+> A future session that reads the analysis below and decides to require `chatId` would be reversing a
+> decision the owner made with the facts in front of him. If the requirement ever changes, change it
+> here first.
+
+
 **Found:** 2026-08-03, by the lane D reviewer, while attacking an unrelated claim.
 **Confirmed independently by the integrator** by reading every line cited below.
 **Status: NOT FIXED. It needs Fred's decision, because every available fix changes how spend is capped.**

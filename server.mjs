@@ -7625,6 +7625,20 @@ async function handleChat(req, res) {
   const sbEmail = T.isOwner ? SB_OWNER_KEY : T.email;
   const sbCredit = !T.isOwner && T.role === "credit";
   const sbBalance = sbCredit ? billing.balance(T.email) : Number.MAX_SAFE_INTEGER;
+  /*
+   * A REQUEST WITHOUT A chatId GETS NO SESSION BUDGET, AND THAT IS INTENDED (Fred, 2026-08-03).
+   *
+   * This was written up as a defect, because a spend guard you can skip by omitting one field looks
+   * exactly like one. Fred read the analysis and answered "I dont need a cap." So it stays.
+   *
+   * What makes it safe is what happens elsewhere: every non-owner turn is metered and charged
+   * through `meterTurn` regardless of this block, so no one gets free usage. The session budget is
+   * an opt-in CAP, and the normal interface always sends a chatId, so anyone who wants one has one.
+   * The only account left uncapped is the owner's, deliberately.
+   *
+   * See docs/BUDGET-GATE-HOLE-2026-08-03.md before changing this. Requiring chatId here would
+   * reverse an owner decision made with the facts in hand.
+   */
   if (chatId) {
     SB = sessionBudgets.ensure(sbEmail, chatId, { isOwner: T.isOwner, kind: "chat",
       title: typeof input.chatTitle === "string" ? input.chatTitle.slice(0, 120) : "", balance: sbBalance });
