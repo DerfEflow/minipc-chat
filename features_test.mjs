@@ -89,7 +89,7 @@ t("the controls the map points at exist in the interface", () => {
   for (const label of ["The Foundry", "Forge Dial", "The Crucible", "Video Generation"]) {
     if (!cinematicJs.includes(label)) throw new Error("the rail is missing its " + label + " entry");
   }
-  if (!cinematicJs.includes("Coming Soon")) throw new Error("the video button lost its Coming Soon honesty");
+  if (!cinematicJs.includes("window.DominionVideo?.open")) throw new Error("the video rail entry is not wired to the live studio");
   if (existsSync(join(HERE, "public", "dominion-compass.js"))) throw new Error("the compass came back; the rail replaced it");
   // The beginner surface the crucible entry describes, control by control.
   const beginnerJs = readFileSync(join(HERE, "public", "dominion-beginner.js"), "utf8");

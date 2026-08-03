@@ -109,8 +109,8 @@
       go: () => { if (window.ideModeAllowed && !window.ideModeAllowed()) return;
         window.ideModeSetEngaged && window.ideModeSetEngaged(true);
         window.openIdeMode && window.openIdeMode(); } },
-    // Fred is building video generation later; the button is a visible promise, honestly inert.
-    { id: "video", label: "Video Generation", sub: "Coming Soon", icon: "M5 6h9v12H5zM14 10l5-3v10l-5-3z", soon: true },
+    { id: "video", label: "Video Generation", sub: "Studio and editor", subShort: "Video", icon: "M5 6h9v12H5zM14 10l5-3v10l-5-3z",
+      go: () => { if (window.DominionVideo?.open) window.DominionVideo.open(); else document.getElementById("dv-launch")?.click(); } },
   ];
   function railButton(d, compact) {
     const b = document.createElement("button");

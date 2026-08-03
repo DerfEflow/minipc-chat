@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AUDIO_TRACK_LIMIT, SOCIAL_PRESETS, VIDEO_TRACK_LIMIT, assertPathInside, buildAudioPeakCommand, buildContactSheetCommand,
   buildDiagnosticsCommands, buildExportPlan, buildExtractAudioCommand, buildProxyCommand, buildThumbnailCommand,
-  buildTimelineFiltergraph, chooseVideoEncoder, detectMediaCapabilities, escapeFilterValue, isPathInside, parseAudioPeakData,
+  buildTimelineFiltergraph, chooseVideoEncoder, createVideoMediaProcessor, detectMediaCapabilities, escapeFilterValue, isPathInside, parseAudioPeakData,
   parseDiagnostics, probeMedia, runProcess, socialPreset,
 } from "./video-media.mjs";
 
@@ -62,6 +62,39 @@ await test("configured media binary failure falls back to PATH", async () => {
 await test("probe JSON validation works with a mock runner", async () => {
   const good = await probeMedia("C:/project/in.mp4", { projectRoot: "C:/project", runner: async () => ({ stdout: JSON.stringify({ format: { duration: "1.2" }, streams: [{ codec_type: "video" }] }) }) }); assert.equal(good.duration, 1.2);
   await assert.rejects(() => probeMedia("C:/project/in.mp4", { projectRoot: "C:/project", runner: async () => ({ stdout: "not json" }) }));
+});
+await test("generated output requires video while imports can be verified as audio-only media", async () => {
+  const runner = async (command, args) => {
+    if (args.includes("-encoders")) return { stdout: " V..... libx264\n A..... aac\n", stderr: "" };
+    if (args.includes("-show_streams")) return { stdout: JSON.stringify({ format: { duration: "2" }, streams: [{ codec_type: "audio" }] }), stderr: "" };
+    return { stdout: "version", stderr: "" };
+  };
+  const processor = createVideoMediaProcessor({ runner, env: {} });
+  const audio = await processor.verify({ path: "C:/project/audio.mp3", projectRoot: "C:/project", requireVideo: false }); assert.equal(audio.audio.length, 1);
+  await assert.rejects(() => processor.verify({ path: "C:/project/audio.mp3", projectRoot: "C:/project" }), (error) => error.code === "INVALID_VIDEO_OUTPUT");
+});
+await test("failed export verification removes the renamed final output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dominion-video-media-"));
+  try {
+    const input = join(root, "input.mp4"); const output = join(root, "output.mp4"); await writeFile(input, "source");
+    const runner = async (_command, args) => {
+      if (args.includes("-encoders")) return { stdout: " V..... libx264\n A..... aac\n", stderr: "" };
+      if (args.includes("-show_streams")) return { stdout: JSON.stringify({ format: { duration: "2" }, streams: [{ codec_type: "audio" }] }), stderr: "" };
+      if (args.includes("-version")) return { stdout: "version", stderr: "" };
+      await writeFile(args.at(-1), "render"); return { stdout: "", stderr: "" };
+    };
+    const processor = createVideoMediaProcessor({ runner, env: {} });
+    await assert.rejects(processor.exportTimeline({ inputs: [input], videoClips: [{ inputIndex: 0, duration: 1 }], audioClips: [], output, preset: "youtube", projectRoot: root, duration: 1 }), (error) => error.code === "INVALID_VIDEO_OUTPUT");
+    await assert.rejects(access(output));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+await test("an explicit zero-byte download budget rejects before network or partial-file work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dominion-video-zero-budget-")); let fetches = 0;
+  try {
+    const processor = createVideoMediaProcessor({ fetchImpl: async () => { fetches++; throw new Error("must not fetch"); } });
+    await assert.rejects(processor.download({ url: "https://provider.invalid/video.mp4", destination: join(root, "video.mp4"), maxBytes: 0 }), (error) => error.code === "STORAGE_QUOTA_EXCEEDED");
+    assert.equal(fetches, 0); await assert.rejects(access(join(root, "video.mp4")));
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 await test("optional real ffmpeg/ffprobe capability smoke probe", async () => { const d = await detectMediaCapabilities(); assert.equal(typeof d.ffmpegAvailable, "boolean"); });
 

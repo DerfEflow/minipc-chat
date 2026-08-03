@@ -133,6 +133,12 @@ import { createTenantResolver, filterToolDefs, toolAllowedFor, FORGE_TOOLS } fro
 import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors.mjs";
 import { createAccessVerifier } from "./accessjwt.mjs";
 import { createImagesFeature } from "./images.mjs";
+import { createVideoFeature } from "./video.mjs";
+import { createVideoHttp } from "./video-http.mjs";
+import { createVideoMediaProcessor } from "./video-media.mjs";
+import { createVideoMeter } from "./video-meter.mjs";
+import { createVideoChargeSettler } from "./video-billing.mjs";
+import { createVideoWorkspace } from "./video-workspace.mjs";
 import { shapeCloudParams, paramRetryAdjust, TOOL_CAP } from "./cloudparams.mjs";
 import { createChatSync } from "./chatsync.mjs";
 import { unkeptIntent, intentNudge } from "./intentguard.mjs";
@@ -380,7 +386,8 @@ const TYPES = {
   ".webmanifest": "application/manifest+json; charset=utf-8",
   ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon",
   ".webp": "image/webp", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-  ".mp4": "video/mp4",
+  ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac", ".ogg": "audio/ogg",
   // Self-hosted Domine (the Crucible's reading face). Served as font/woff2 rather than falling
   // through to octet-stream: some proxies refuse to compress or cache an unknown type, and it costs
   // one line to be correct.
@@ -5909,6 +5916,86 @@ const imagesFeature = createImagesFeature({
   log: (m) => console.log("[dominion-ai] " + m),
 });
 
+// Dominion Video owns durable project state, provider jobs, exact-once metering, and local FFmpeg
+// rendering. It deliberately has one narrow server seam so the large chat server is not also the
+// editor implementation. Runware credentials are read lazily, which keeps rotation/redeploys safe.
+function videoSonnetCost(usage = {}) {
+  // Anthropic's Sonnet 5 introductory rates expire at 00:00 UTC on 2026-09-01. Keep the transition
+  // deterministic and separately account for cache reads/writes (they are not part of input_tokens).
+  const intro = Date.now() < Date.parse("2026-09-01T00:00:00Z");
+  const rates = intro
+    ? { input: 2, output: 10, cache5m: 2.5, cache1h: 4, cacheRead: 0.2 }
+    : { input: 3, output: 15, cache5m: 3.75, cache1h: 6, cacheRead: 0.3 };
+  const input = Math.max(0, Number(usage.input_tokens) || 0);
+  const output = Math.max(0, Number(usage.output_tokens) || 0);
+  const cacheRead = Math.max(0, Number(usage.cache_read_input_tokens) || 0);
+  const cacheBreakdown = usage.cache_creation && typeof usage.cache_creation === "object" ? usage.cache_creation : {};
+  const cache5mReported = Math.max(0, Number(cacheBreakdown.ephemeral_5m_input_tokens) || 0);
+  const cache1h = Math.max(0, Number(cacheBreakdown.ephemeral_1h_input_tokens) || 0);
+  const cacheCreated = Math.max(0, Number(usage.cache_creation_input_tokens) || cache5mReported + cache1h);
+  const cache5m = Math.max(cache5mReported, cacheCreated - cache1h);
+  return +((input * rates.input + output * rates.output + cacheRead * rates.cacheRead
+    + cache5m * rates.cache5m + cache1h * rates.cache1h) / 1e6).toFixed(8);
+}
+
+const videoMediaProcessor = createVideoMediaProcessor({});
+const settleVideoCharge = createVideoChargeSettler({
+  multiTenant: MULTI_TENANT,
+  billing,
+  users: usersStore,
+  creditsForCostUsd,
+});
+const videoMeter = createVideoMeter({
+  dir: dataPath("video"),
+  charge: settleVideoCharge,
+});
+const videoFeature = createVideoFeature({
+  dataDir: dataPath("video"),
+  runwareApiKey: () => cfgGet("RUNWARE_VIDEO_GEN_DOMINION_API_KEY", ""),
+  runwareBaseUrl: cfgGet("RUNWARE_VIDEO_API_BASE", "https://api.runware.ai/v1"),
+  nvidiaApiKey: NVIDIA_KEY,
+  nvidiaBaseUrl: cfgGet("NVIDIA_VIDEO_AI_BASE", "https://integrate.api.nvidia.com/v1"),
+  mediaProcessor: videoMediaProcessor,
+  billingGate: async ({ tenant: T }) => {
+    if (!T) return { allowed: false, message: "Sign in before generating video." };
+    if (!MULTI_TENANT || T.isOwner) return { allowed: true, owner: true };
+    if (T.role !== "credit" || !T.email) return { allowed: false, message: "Video generation requires a credit account with auto top-up." };
+    const account = billing.account(T.email);
+    if (!account.autorecharge) return { allowed: false, message: "Enable auto top-up before generating video." };
+    if (!account.hasCard) return { allowed: false, message: "Add a payment method before generating video." };
+    if (!billing.canChat(T.email) || !(Number(account.balance) > 0)) return { allowed: false, message: "Add credits before generating video." };
+    return { allowed: true, account };
+  },
+});
+const videoTemporaryCleanupTimer = setInterval(() => {
+  try { videoFeature.cleanupExpiredTemporaryProjects(); } catch { /* The next access retries cleanup. */ }
+}, 60 * 60 * 1000);
+videoTemporaryCleanupTimer.unref?.();
+const videoWorkspace = createVideoWorkspace({ feature: videoFeature, processor: videoMediaProcessor });
+const videoHttp = createVideoHttp({
+  feature: videoFeature,
+  media: videoWorkspace,
+  resolveTenant,
+  billing: { account: (email) => billing.account(email), canChat: (email) => billing.canChat(email) },
+  meter: (T, costUsd, metadata) => videoMeter.settle(T, costUsd, metadata),
+  screenContent,
+  runware: { apiKey: () => cfgGet("RUNWARE_VIDEO_GEN_DOMINION_API_KEY", "") },
+  nvidia: {
+    apiKey: () => NVIDIA_KEY,
+    baseUrl: cfgGet("NVIDIA_VIDEO_AI_BASE", "https://integrate.api.nvidia.com/v1"),
+    directorModel: "deepseek-ai/deepseek-v4-pro",
+    visualModel: "nvidia/nemotron-3-ultra-550b-a55b",
+    palmyraEnabled: String(cfgGet("DOMINION_PALMYRA_ENABLED", "0")) === "1",
+    costForUsage: () => 0, // NVIDIA's configured developer endpoint is presently free.
+  },
+  anthropic: {
+    apiKey: () => ANTHROPIC_KEY,
+    baseUrl: cfgGet("ANTHROPIC_VIDEO_BASE", "https://api.anthropic.com"),
+    model: "claude-sonnet-5",
+    costForUsage: (usage) => videoSonnetCost(usage),
+  },
+});
+
 async function handleOcr(req, res) {
   const json = (code, o) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(o)); };
   const raw = await readRawBody(req, 32 * 1024 * 1024);
@@ -9649,6 +9736,7 @@ const server = http.createServer(async (req, res) => {
     if (path.startsWith("/guide/")) return handleGuide(req, res, u);
     if (path === "/connectors" || path.startsWith("/connectors/")) return handleConnectors(req, res, u);
 
+    if (path === "/api/video" || path.startsWith("/api/video/")) return videoHttp.handle(req, res, u);
     if (path === "/api/ocr" && req.method === "POST") return handleOcr(req, res);
     if (path === "/api/images/config" && req.method === "GET") return imagesFeature.handleConfig(req, res);
     if (path === "/api/images/generate" && req.method === "POST") return imagesFeature.handleGenerate(req, res);

@@ -276,9 +276,9 @@ export function buildExportPlan({ inputs = [], videoClips = [], audioClips = [],
 }
 
 /** Executes a plan safely; only a fully written partial file is atomically renamed. */
-export async function executeExportPlan(plan, { runner = runProcess, signal, onProgress, cleanupPartial = true } = {}) {
+export async function executeExportPlan(plan, { runner = runProcess, signal, onProgress, cleanupPartial = true, maxBytes } = {}) {
   const cleanup = async () => { if (cleanupPartial) await rm(plan.partialOutput, { force: true }).catch(() => {}); };
-  try { await mkdir(dirname(plan.output), { recursive: true }); await runner(plan.command, plan.args, { signal, onProgress }); await access(plan.partialOutput, FS.R_OK); const info = await stat(plan.partialOutput); if (!info.size) throw new MediaError("Encoder produced an empty output", "EMPTY_OUTPUT"); await rename(plan.partialOutput, plan.output); return { output: plan.output, bytes: info.size }; }
+  try { await mkdir(dirname(plan.output), { recursive: true }); await runner(plan.command, plan.args, { signal, onProgress }); await access(plan.partialOutput, FS.R_OK); const info = await stat(plan.partialOutput); if (!info.size) throw new MediaError("Encoder produced an empty output", "EMPTY_OUTPUT"); if (Number(maxBytes) >= 0 && info.size > Number(maxBytes)) throw new MediaError("Export exceeds the remaining project storage limit", "STORAGE_QUOTA_EXCEEDED"); await rename(plan.partialOutput, plan.output); return { output: plan.output, bytes: info.size }; }
   catch (error) { await cleanup(); throw error; }
 }
 
@@ -290,11 +290,15 @@ export function createVideoMediaProcessor({ fetchImpl = globalThis.fetch, env = 
   let capabilityPromise = null;
   const capabilities = () => capabilityPromise ||= detectMediaCapabilities({ env, runner });
 
-  async function download({ url, destination, signal } = {}) {
+  async function download({ url, destination, signal, maxBytes } = {}) {
     if (typeof fetchImpl !== "function") throw new MediaError("Media download is unavailable", "DOWNLOAD_UNAVAILABLE");
     let parsed; try { parsed = new URL(String(url || "")); } catch { throw new MediaError("Provider media URL is invalid", "INVALID_DOWNLOAD_URL"); }
     if (parsed.protocol !== "https:" && !(allowHttp && parsed.protocol === "http:")) throw new MediaError("Provider media URL must use HTTPS", "INVALID_DOWNLOAD_URL");
     destination = resolve(assertText(destination, "download destination"));
+    const configuredLimit = Math.max(1, Number(maxDownloadBytes) || 1024 * 1024 * 1024);
+    const requestedLimit = maxBytes == null ? configuredLimit : Number(maxBytes);
+    if (!Number.isFinite(requestedLimit) || requestedLimit <= 0) throw new MediaError("No project storage remains for this provider download", "STORAGE_QUOTA_EXCEEDED");
+    const limit = Math.max(1, Math.min(configuredLimit, Math.floor(requestedLimit)));
     await mkdir(dirname(destination), { recursive: true });
     const partial = resolve(dirname(destination), `.${basename(destination, extname(destination))}.${randomUUID()}.partial${extname(destination) || ".mp4"}`);
     let bytes = 0;
@@ -302,8 +306,8 @@ export function createVideoMediaProcessor({ fetchImpl = globalThis.fetch, env = 
       const response = await fetchImpl(parsed, { method: "GET", redirect: "follow", signal, headers: { accept: "video/*,application/octet-stream;q=0.8" } });
       if (!response.ok || !response.body) throw new MediaError(`Provider media download failed (${response.status})`, "DOWNLOAD_FAILED");
       const declared = Number(response.headers.get("content-length") || 0);
-      if (declared > maxDownloadBytes) throw new MediaError("Provider media exceeds the project download limit", "DOWNLOAD_TOO_LARGE");
-      const limiter = new Transform({ transform(chunk, encoding, callback) { bytes += chunk.length; callback(bytes > maxDownloadBytes ? new MediaError("Provider media exceeds the project download limit", "DOWNLOAD_TOO_LARGE") : null, chunk); } });
+      if (declared > limit) throw new MediaError("Provider media exceeds the remaining project storage limit", "STORAGE_QUOTA_EXCEEDED");
+      const limiter = new Transform({ transform(chunk, encoding, callback) { bytes += chunk.length; callback(bytes > limit ? new MediaError("Provider media exceeds the remaining project storage limit", "STORAGE_QUOTA_EXCEEDED") : null, chunk); } });
       await pipeline(Readable.fromWeb(response.body), limiter, createWriteStream(partial, { flags: "wx" }));
       if (!bytes) throw new MediaError("Provider returned an empty media file", "EMPTY_DOWNLOAD");
       await rename(partial, destination);
@@ -314,21 +318,26 @@ export function createVideoMediaProcessor({ fetchImpl = globalThis.fetch, env = 
     }
   }
 
-  async function verify({ path, projectRoot } = {}) {
+  async function verify({ path, projectRoot, requireVideo = true } = {}) {
     const caps = await capabilities();
     if (!caps.ffprobeAvailable) throw new MediaError("ffprobe is not installed on this video worker", "FFPROBE_UNAVAILABLE");
     const result = await probeMedia(path, { ffprobe: caps.ffprobe, projectRoot, runner });
-    if (!result.valid || !result.video.length || !(result.duration > 0)) throw new MediaError("The generated file is not a playable video", "INVALID_VIDEO_OUTPUT");
+    if (!result.valid || !(result.duration > 0) || (requireVideo && !result.video.length)) throw new MediaError(requireVideo ? "The generated file is not a playable video" : "The imported file is not playable media", requireVideo ? "INVALID_VIDEO_OUTPUT" : "INVALID_MEDIA_OUTPUT");
     return result;
   }
 
-  async function exportTimeline({ inputs, videoClips, audioClips, output, preset, container, codec, projectRoot, duration, quality, signal, onProgress } = {}) {
+  async function exportTimeline({ inputs, videoClips, audioClips, output, preset, container, codec, projectRoot, duration, quality, signal, onProgress, maxOutputBytes } = {}) {
     const caps = await capabilities();
     if (!caps.ffmpegAvailable || !caps.ffprobeAvailable) throw new MediaError("FFmpeg and ffprobe are required for export", "FFMPEG_UNAVAILABLE");
     const plan = buildExportPlan({ inputs, videoClips, audioClips, output, preset, container, codec, capabilities: caps, projectRoot, ffmpeg: caps.ffmpeg, duration, quality });
-    const rendered = await executeExportPlan(plan, { runner, signal, onProgress });
-    const media = await verify({ path: rendered.output, projectRoot });
-    return { ...rendered, media, encoder: plan.encoder, audioEncoder: plan.audioEncoder, dimensions: plan.dimensions };
+    const rendered = await executeExportPlan(plan, { runner, signal, onProgress, maxBytes: maxOutputBytes });
+    try {
+      const media = await verify({ path: rendered.output, projectRoot });
+      return { ...rendered, media, encoder: plan.encoder, audioEncoder: plan.audioEncoder, dimensions: plan.dimensions };
+    } catch (error) {
+      await rm(rendered.output, { force: true }).catch(() => {});
+      throw error;
+    }
   }
 
   return { capabilities, download, verify, exportTimeline };
