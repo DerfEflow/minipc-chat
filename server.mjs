@@ -136,7 +136,7 @@ import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors
 import { createAccessVerifier } from "./accessjwt.mjs";
 import { createImagesFeature } from "./images.mjs";
 import { createVideoFeature } from "./video.mjs";
-import { createVideoHttp } from "./video-http.mjs";
+import { createVideoHttp, openRouterUsageCost } from "./video-http.mjs";
 import { createVideoMediaProcessor } from "./video-media.mjs";
 import { createVideoMeter } from "./video-meter.mjs";
 import { createVideoChargeSettler } from "./video-billing.mjs";
@@ -6156,8 +6156,6 @@ const videoFeature = createVideoFeature({
   dataDir: dataPath("video"),
   runwareApiKey: () => cfgGet("RUNWARE_VIDEO_GEN_DOMINION_API_KEY", ""),
   runwareBaseUrl: cfgGet("RUNWARE_VIDEO_API_BASE", "https://api.runware.ai/v1"),
-  nvidiaApiKey: NVIDIA_KEY,
-  nvidiaBaseUrl: cfgGet("NVIDIA_VIDEO_AI_BASE", "https://integrate.api.nvidia.com/v1"),
   mediaProcessor: videoMediaProcessor,
   billingGate: async ({ tenant: T }) => {
     if (!T) return { allowed: false, message: "Sign in before generating video." };
@@ -6181,14 +6179,23 @@ const videoHttp = createVideoHttp({
   resolveTenant,
   billing: { account: (email) => billing.account(email), canChat: (email) => billing.canChat(email) },
   meter: (T, costUsd, metadata) => videoMeter.settle(T, costUsd, metadata),
+  settlementAdmin: videoMeter,
   screenContent,
   runware: { apiKey: () => cfgGet("RUNWARE_VIDEO_GEN_DOMINION_API_KEY", "") },
+  openrouter: {
+    apiKey: () => OPENROUTER_KEY,
+    url: OPENROUTER_URL,
+    referer: OPENROUTER_REFERER,
+    title: "Dominion AI",
+    screenwriterModel: "arcee-ai/trinity-large-thinking",
+    timeoutMs: 300_000,
+    costForUsage: (usage) => openRouterUsageCost(usage),
+  },
   nvidia: {
     apiKey: () => NVIDIA_KEY,
     baseUrl: cfgGet("NVIDIA_VIDEO_AI_BASE", "https://integrate.api.nvidia.com/v1"),
     directorModel: "deepseek-ai/deepseek-v4-pro",
     visualModel: "nvidia/nemotron-3-ultra-550b-a55b",
-    palmyraEnabled: String(cfgGet("DOMINION_PALMYRA_ENABLED", "0")) === "1",
     costForUsage: () => 0, // NVIDIA's configured developer endpoint is presently free.
   },
   anthropic: {
@@ -6196,6 +6203,14 @@ const videoHttp = createVideoHttp({
     baseUrl: cfgGet("ANTHROPIC_VIDEO_BASE", "https://api.anthropic.com"),
     model: "claude-sonnet-5",
     costForUsage: (usage) => videoSonnetCost(usage),
+  },
+  privacy: {
+    modeAllows,
+    providerAllowed: (mode, provider) => {
+      const normalized = normalizeMode(mode);
+      if (normalized === "normal") return true;
+      return normalized === "private" ? PRIVATE_PROVIDERS.has(provider) : TRUSTED_PROVIDERS.has(provider);
+    },
   },
 });
 
@@ -10407,9 +10422,14 @@ server.listen(PORT, HOST, () => {
    * lets the process go. The boot-time orphan sweep remains the backstop for hard kills.
    */
   let drainStarted = false;
-  process.on("SIGTERM", () => {
+  process.on("SIGTERM", async () => {
     if (drainStarted) return;
     drainStarted = true;
+    const shutdownDeadline = Date.now() + 325_000;
+    const serverClosed = new Promise((resolveClose) => {
+      try { server.close((error) => resolveClose({ closed: !error, error: error ? String(error.message || error).slice(0, 200) : null })); }
+      catch (error) { resolveClose({ closed: false, error: String(error?.message || error).slice(0, 200) }); }
+    });
     let running = 0;
     try {
       for (const j of CHAT_JOBS.values()) {
@@ -10427,7 +10447,17 @@ server.listen(PORT, HOST, () => {
       }
       console.log(`[dominion-ai] SIGTERM: ${running} running turn(s) checkpointed and sealed for the deploy cutover`);
     } catch (e) { console.log("[dominion-ai] SIGTERM drain failed: " + String(e && e.message || e).slice(0, 200)); }
-    setTimeout(() => process.exit(0), 1200).unref?.();
+    try {
+      const videoDrain = await videoHttp.drain({ timeoutMs: 310_000 });
+      console.log(`[dominion-ai] SIGTERM: video provider drain ${JSON.stringify(videoDrain)}`);
+    } catch (e) { console.log("[dominion-ai] SIGTERM video drain failed: " + String(e && e.message || e).slice(0, 200)); }
+    const closeWaitMs = Math.max(1, shutdownDeadline - Date.now());
+    const closeResult = await Promise.race([
+      serverClosed,
+      new Promise((resolveClose) => setTimeout(() => resolveClose({ closed: false, timedOut: true }), closeWaitMs)),
+    ]);
+    console.log(`[dominion-ai] SIGTERM: HTTP response drain ${JSON.stringify(closeResult)}`);
+    process.exit(0);
   });
   console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed (incl. 6 formatting on the light model)  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON (interactive)" : "auto-approve (LAX, recorded)"}  ·  9-state lifecycle persisted  ·  ${flywheel.stats().activeToolOverlays} active description overlay(s)  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl (${toolRunTail.length} reloaded)`);
   const as = artifacts.stats();

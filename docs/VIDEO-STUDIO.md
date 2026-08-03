@@ -2,13 +2,20 @@
 
 Verified for the August 2026 deployment. This document records the provider contracts that the
 implementation enforces. Provider responses remain authoritative: a request is persisted before it
-is sent, Runware is polled by task UUID, and only the returned `cost` is settled.
+is sent, Runware is polled by task UUID, and provider charges use Runware's returned `cost` or
+OpenRouter's returned `usage.cost` rather than a client estimate. A missing or malformed OpenRouter
+usage cost is rejected without changing the screenplay or charging Dominion credits.
 
 ## Product invariants
 
 - Desktop projects are tenant-scoped, durable until the user deletes them, and checkpoint every
   structural or progress-changing action. Undo, redo, project history, generated media, and exports
   survive a server restart.
+- Every whole-project save, undo, redo, and restore carries the last authoritative project revision.
+  A stale tab cannot overwrite a newer checkpoint. Its complete current local draft is held in
+  memory, editing is paused, and the user must download a preservation JSON artifact before loading
+  the newer server copy. A `beforeunload` guard warns while that artifact has not been downloaded.
+  The artifact is for recovery/audit; it is not presently an in-app import format.
 - A storyboard contains at most 100 scenes. Screenplay text contains at most 115,000 estimated
   tokens and is never compacted.
 - The editor exposes three video tracks and four independently adjustable audio tracks. FFmpeg is
@@ -22,6 +29,9 @@ is sent, Runware is polled by task UUID, and only the returned `cost` is settled
   download, and device save. It cannot create or mutate a durable project.
 - Provider failures are returned with a visible code and message. The system never silently swaps
   one requested AI model for another.
+- Normal privacy mode permits the configured cloud AI transports. Trusted and Private modes refuse
+  OpenRouter and NVIDIA before content screening, billing, or network egress; no alternate model is
+  substituted. Anthropic remains subject to the app-wide direct-provider allow-list.
 - Storage is bounded per project and per tenant, project count and mutation rates are capped, and
   the worker preserves a low-disk reserve. Expired one-off mobile workspaces are cleaned hourly.
 
@@ -75,19 +85,86 @@ has a one-million-token context window; Dominion measures the final request with
 It has text-only hosted input in this workflow and orders image
 and video prompts rather than claiming to render or inspect the final movie.
 
+Each project admits one video-team chat turn at a time before provider egress. The complete turn has
+a 240-second aggregate deadline, all non-idempotent provider POSTs run once, and deploy draining waits
+for the atomic save. If another tab changes the project while the team is working, the director,
+visual-plan, and liaison records remain in project history, but the visual plan is marked
+`quarantined_stale` and cannot replace the newer storyboard. The UI says this explicitly and reloads
+the authoritative project.
+
 Primary reference: [Nemotron 3 Ultra model card and API guidance](https://build.nvidia.com/nvidia/nemotron-3-ultra-550b-a55b/modelcard).
 
-### Palmyra Creative 122B — screenwriter
+### Trinity Large Thinking — screenwriter
 
-The requested model identity remains `writer/palmyra-creative-122b`, with a hard 115,000-token
-total request/project limit and no screenplay compaction. However, a live completion probe against the user's
-NVIDIA free endpoint currently returns unavailable, and Writer deprecated its `palmyra-creative`
-API model on July 13, 2026. Therefore the screenwriter control is explicitly unavailable by default
-and no substitute is silently used. A provisioned compatible endpoint may be enabled with
-`DOMINION_PALMYRA_ENABLED=1` after a successful entitlement test.
+Dominion calls OpenRouter's OpenAI-compatible `POST /api/v1/chat/completions` endpoint with the exact
+model `arcee-ai/trinity-large-thinking`. Trinity is text-only, has a 262,144-token provider window,
+and requires reasoning. Dominion deliberately keeps the stricter 115,000-token total screenwriter
+budget requested for this product, including output headroom, and never compacts screenplay text.
+For each section it enables mandatory thinking, stores the returned reasoning details as opaque
+server-side continuation state, and never exposes that trace to the browser. The first textarea is
+retained as the story brief; Trinity's first section replaces the brief in the editor, and every
+later section is appended atomically to the existing screenplay. Each call allows up to 16,384
+completion tokens when the remaining application budget permits. A `finish_reason` of `length`
+is returned as an explicit resumable partial section and checkpointed without deleting earlier text.
 
-Primary references: [NVIDIA's Palmyra deployment listing](https://build.nvidia.com/writer/palmyra-creative-122b/deploy)
-and [Writer's current model/deprecation table](https://dev.writer.com/home/models).
+The request uses the model's published sampling defaults (`temperature: 0.3`, `top_p: 0.8`) and
+requires every routed provider to honor those parameters. OpenRouter may fail over between providers
+serving the same exact Trinity model, but Dominion rejects a response that does not confirm the exact
+model identity. OpenRouter's returned `usage.cost` is the billing authority, so mandatory reasoning
+tokens and provider-specific routing are charged exactly once without relying on a drifting estimate.
+Dominion never estimates a missing provider charge because Trinity routes can have different prices;
+reasoning tokens are already included in OpenRouter's completion-token accounting.
+A hashed project-scoped `session_id` keeps provider routing stable, but the currently listed Trinity
+endpoints do not advertise implicit prompt caching, so Dominion assumes no cache discount unless the
+returned usage object explicitly reports cached tokens and cost.
+
+Each project permits only one in-flight screenwriter turn. The saved screenplay and prior Trinity
+generation identity are compared again atomically before accepting the provider result, so another
+tab or a user edit can never be overwritten by a stale paid response. Ambiguous network failures are
+not automatically retried because OpenRouter does not expose a request-deduplication contract for
+chat completions; an explicit retry starts only from the unchanged saved checkpoint.
+
+The browser endpoint requires `Accept: text/event-stream`. Dominion sends an immediate progress
+event and a 15-second heartbeat while the upstream OpenRouter request remains non-streaming, then a
+single `result` or structured `error` event. This keeps long mandatory-reasoning turns visible across
+the Cloudflare edge without exposing reasoning. The OpenRouter response body stays under the same
+five-minute abort deadline after headers, is capped at 2 MB, and is never ambiguously retried.
+
+OpenRouter's `X-Generation-Id` is durably recorded as soon as response headers arrive. The body must
+contain the same generation `id`; a missing or conflicting identity is quarantined for reconciliation.
+For a valid response, Dominion stores a bounded server-only recovery candidate before exact metering,
+derives the settlement identity from provider, model, and generation ID, then atomically applies the
+screenplay and clears the candidate. Attempt/settlement records survive creative undo and restore and
+are never returned to the browser. If the event stream disconnects after the server saved a result,
+the editor reloads the authoritative project before it permits another screenplay request.
+
+Dominion requests OpenRouter router metadata on every Trinity call. A routed provider attempt or a
+known generation identity is treated as potentially billable and is never retried. A raw router
+attempt of zero on a definitive HTTP rejection can terminate unbilled. For a known generation,
+reconciliation uses only `GET /api/v1/generation?id=…`; it requires the exact model, completions API
+type, an explicit terminal finish/cancel signal, and authoritative total cost. It never fetches or
+reconstructs provider content. An in-progress metadata row remains locked even when its temporary
+cost is zero.
+
+If OpenRouter returns no safe generation identity or returns conflicting identities, the user gets a
+typed-confirmation recovery dialog. That action preserves the attempt and any bounded candidate in
+history as `operator_quarantined`, records `not_billed`, never retries a provider, and unlocks the
+project. If multiple linked attempts remain, status presents the next confirmation until every
+blocking record is terminal.
+
+A known generation remains on **Check generation** for nonterminal cost/finish metadata, network
+errors, authentication errors, throttling, and provider outages; those conditions never age into a
+user quarantine. Only three durable identity/contract failures (persistent 404, wrong generation,
+wrong model, or wrong API type) over at least ten minutes expose the typed quarantine option. The
+quarantine endpoint performs one final metadata GET: if the record has become valid it refuses the
+quarantine and sends the user back through normal cost reconciliation.
+
+Primary references: [Trinity Large Thinking model page](https://openrouter.ai/arcee-ai/trinity-large-thinking/api),
+[OpenRouter chat completions](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request),
+[reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens), and
+[usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting),
+[router metadata](https://openrouter.ai/docs/guides/features/router-metadata), and
+[generation metadata](https://openrouter.ai/docs/api/api-reference/generations/get-generation).
 
 ### Claude Sonnet 5 — user liaison
 
@@ -104,10 +181,72 @@ Primary references: [Sonnet 5 changes](https://platform.claude.com/docs/en/about
 [vision](https://platform.claude.com/docs/en/build-with-claude/vision), and
 [pricing](https://platform.claude.com/docs/en/about-claude/pricing).
 
+## Settlement repair runbook
+
+This is a financial break-glass path. It is owner-only, operates through the live application
+process, and never invokes the charge callback itself. Do not run it from a second process or direct
+SQLite session. First list held claims:
+
+```http
+GET /api/video/admin/settlements
+```
+
+Inspect one exact key when necessary:
+
+```http
+GET /api/video/admin/settlements?settlementKey=<settlementKey>
+```
+
+Compare that claim with the authoritative Dominion credit/Stripe ledger and provider record. Then
+choose exactly one action by POSTing the shown JSON to `/api/video/admin/settlements`:
+
+- If the ledger proves the charge already occurred, POST:
+
+  ```json
+  {
+    "settlementKey": "<settlementKey>",
+    "action": "mark_settled",
+    "confirmation": "MARK_SETTLED <settlementKey> OPERATOR_VERIFIED_CHARGE_OCCURRED"
+  }
+  ```
+
+- If the ledger proves no charge occurred, release the claim for one normal deterministic retry:
+
+  ```json
+  {
+    "settlementKey": "<settlementKey>",
+    "action": "retry_not_charged",
+    "confirmation": "RETRY_NOT_CHARGED <settlementKey> OPERATOR_VERIFIED_NO_CHARGE"
+  }
+  ```
+
+Never infer either answer from a timeout or error message. After the owner repair, have the affected
+user press **Resolve saved Trinity turn**. The same deterministic billing identity then observes the
+settled row or performs the one verified-safe retry, applies the saved candidate, and unlocks the
+project. Before repair, the same button safely returns the held-repair error and does not charge
+again. The screenwriter status response includes the exact bounded operator reference needed to
+match the held row.
+
+Generation-ID conflicts and missing IDs do not enter this meter runbook because Dominion cannot
+safely correlate or bill them. The affected user instead presses **Review unrecoverable turn**, reads
+the no-recovery/no-Dominion-billing warning, and types the exact server-provided confirmation. Repeat
+if status exposes another linked attempt. No ad-hoc database edit is required.
+
 ## Deployment variables
 
-Required secret variable names are `RUNWARE_VIDEO_GEN_DOMINION_API_KEY`, `NVIDIA_API_KEY`, and
-`ANTHROPIC_API_KEY`. Secret values must live in the deployment platform, never in the repository.
-`DATA_DIR=/data` must point to the mounted Railway volume. `DOMINION_PALMYRA_ENABLED` remains `0`
-until that exact model completes an entitlement probe. Optional `FFMPEG_PATH` and `FFPROBE_PATH`
-may override discovery for non-Debian local validation.
+Required secret variable names are `RUNWARE_VIDEO_GEN_DOMINION_API_KEY`, `OPENROUTER_API_KEY`,
+`NVIDIA_API_KEY`, and `ANTHROPIC_API_KEY`. Secret values must live in the deployment platform, never
+in the repository. `DATA_DIR=/data` must point to the mounted Railway volume. Optional `FFMPEG_PATH`
+and `FFPROBE_PATH` may override discovery for non-Debian local validation.
+
+Production requires `MULTI_TENANT=1`, one application replica, and an attached Railway volume at
+`/data`. Railway does not mount one volume into multiple active deployments, which is part of the
+single-writer settlement and project-lock contract. Do not add replicas or run a second repair
+process until the meter/feature locks are replaced with a distributed transaction design.
+
+Railway config grants the old deployment 330 seconds between SIGTERM and SIGKILL. The PID-1 entrypoint
+forwards SIGTERM to both Node and `cloudflared`; the tunnel uses a 320-second grace period, stops new
+edge requests, and drains active streams while Node allows up to 310 seconds for durable provider
+turns and then waits for HTTP response completion. These ordered deadlines sit above the video-team
+chat's 240-second aggregate deadline and OpenRouter Trinity's 300-second request timeout, leaving
+Railway a final forced-shutdown margin.
