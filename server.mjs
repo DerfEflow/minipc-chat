@@ -199,6 +199,21 @@ const PUBLIC = join(HERE, "public");
 // Bumped every process start (deploy or crash-restart) so the client can detect it's running
 // stale code from a long-lived tab and reload — see /api/version below.
 const BUILD_ID = String(Date.now());
+/*
+ * The COMMIT this process is actually running, which BUILD_ID cannot tell you.
+ *
+ * BUILD_ID is a boot timestamp, so a container that merely restarted is indistinguishable from one
+ * that shipped new code. Every session that has tried to answer "did the deploy land" has hit that
+ * wall, concluded from a fresh timestamp that it had, and been right by luck rather than by
+ * evidence. Railway injects RAILWAY_GIT_COMMIT_SHA into the container at build time, so the
+ * running process can name its own commit and the question becomes answerable from outside.
+ *
+ * Short sha only, and it stays alongside BUILD_ID on an endpoint that is deliberately public
+ * because the PWA update check needs it. A commit hash of a private repo reveals nothing an
+ * attacker can use, and "unknown" is the honest answer anywhere the variable is absent, such as a
+ * local run or the mini-PC.
+ */
+const COMMIT_SHA = String(process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA || "").slice(0, 7) || "unknown";
 
 // ---- config (env -> local .env -> the bridge's shared .env) ----
 function parseEnvFile(p) {
@@ -9850,7 +9865,7 @@ const server = http.createServer(async (req, res) => {
       let runningBuilds = 0;
       try { runningBuilds = ideJobs.runningCount(); } catch {}
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ build: BUILD_ID, runner, runnerApp, runningChatJobs, runningBuilds }));
+      return res.end(JSON.stringify({ build: BUILD_ID, commit: COMMIT_SHA, runner, runnerApp, runningChatJobs, runningBuilds }));
     }
 
     // The live cloud-model catalog (single source of truth). The picker fetches this and renders the
