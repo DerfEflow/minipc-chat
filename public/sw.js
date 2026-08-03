@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v162-dock-reserve";
+const CACHE = "dominion-ai-v169-video-studio";
 const SHELL = [
   "/",
   "/index.html",
@@ -11,6 +11,8 @@ const SHELL = [
   "/dominion-mobile.css?v=1",
   "/dominion-images.css?v=9",
   "/dominion-images.js?v=14",
+  "/dominion-video.css?v=5",
+  "/dominion-video.js?v=7",
   "/dominion-lexicon.js?v=14",
   "/dominion-lenses.css?v=7",
   "/dominion-beginner.css?v=5",
@@ -66,7 +68,7 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   const dyn = ["/chat", "/memory", "/toolruns", "/tool-confirm", "/artifacts", "/mentor", "/ledger", "/evals", "/rules", "/prompts", "/persona", "/finetune", "/reviews", "/pipeline", "/tool-overlays",
-    "/account", "/billing", "/admin", "/forge", "/guide", "/content", "/setup", "/connectors", "/api/images",
+    "/account", "/billing", "/admin", "/forge", "/guide", "/content", "/setup", "/connectors", "/api/images", "/api/video",
     // Dominion Works: live state, workspaces, and the job SSE stream. Caching any of these would
     // show a stale build or replay a finished job as if it were running.
     "/ide",

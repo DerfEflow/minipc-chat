@@ -5,6 +5,13 @@ FROM node:24-slim
 
 WORKDIR /app
 
+# Stable server-side editing/export. Debian's maintained FFmpeg build includes ffprobe and the
+# software H.264/AAC encoders used as the deterministic production path; hardware codecs remain
+# optional accelerators rather than a launch dependency.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # cloudflared: connects app.dominion.tools to this container via the Cloudflare Tunnel (Access in
 # front) with no Railway public domain/cert. Static binary fetched at build time (no apt needed).
 ADD https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 /usr/local/bin/cloudflared
