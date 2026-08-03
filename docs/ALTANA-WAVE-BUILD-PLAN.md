@@ -96,7 +96,9 @@ Verified against the tree at `67b43f2`. **A file appears exactly once.** No two 
 | F1 | She takes a destructive action inside her allowed zone | Confirmation on irreversible-but-not-sensitive actions, on top of Fred's four exclusions (card billing, budgets, PII, secrets, IP) |
 | F2 | A secret or PII reaches her context and she repeats it | Redaction at the ASSEMBLER, not by instruction. A test feeds a fake key through and asserts it never appears in the assembled context |
 | F3 | Prompt injection: a user's file or a web page tells her to flip a setting | Tool results are DATA. Her system prompt states it and a test drives an injected instruction and asserts no tool call fires |
-| F4 | She loses her tools silently (Luna cannot call tools via chat/completions) | She routes through `openairesponses.mjs`. A test asserts the Responses path and fails if a chat/completions call is constructed |
+| F4 | She loses her tools silently on failover (Luna cannot call tools via chat/completions) | Primary is NVIDIA V4 Pro on chat/completions, tools verified. The Luna FALLBACK must route through `openairesponses.mjs`; a test asserts the Responses path is used on failover and fails if a chat/completions call is constructed for Luna |
+| F6 | Her model 529s or goes not-invokable and she is dark on every screen at once | Measured risk, not hypothetical: NVIDIA returned HTTP 529 during the adoption probe and four models on this account are listed but uninvokable. Failover to Luna on 529/404/timeout, and a test drives each of those three responses and asserts a real answer still comes back |
+| F7 | Failover is silent, so a free turn quietly becomes a billed one | The seat change is announced the same way model substitution already is, and the usage record names the lane that actually served the turn |
 | F5 | Removing the Guide breaks live routes | `/guide/ask`, `/guide/complaints`, `/guide/complaint/resolve` all exist and are dispatched at `server.mjs:9808`. They are REPLACED, not deleted, and the complaint store's data survives the rename |
 
 ### H. BigQuery

@@ -346,7 +346,18 @@ The largest piece and the reason the rest of this exists. Fred, verbatim: Forge 
 
 **The Guide is removed, not extended.** Fred, 2026-08-02: the interface was never implemented, nobody ever used it, and as designed it is not worth keeping. Its design was deliberately powerless (no tools, no code access, no secrets, answers only from `docs/GUIDE-KNOWLEDGE.md`, forbidden from acting) which is the exact opposite of what is wanted. One entity, not two.
 
-**Model:** GPT-5.6 Luna, already in the catalog, no new integration.
+**Model, revised by Fred 2026-08-03: NVIDIA-hosted DeepSeek V4 Pro primary, GPT-5.6 Luna as fallback.**
+
+Fred's reasoning, and it is right: Luna was chosen for the security posture of a US provider, and DeepSeek V4 Pro is **open weight**, so NVIDIA hosting it means the weights are DeepSeek's while the inference runs on NVIDIA's infrastructure. That answers the data-residency concern that routing direct to DeepSeek raises, on a stronger model, for free on his developer tier. It also tightens the app generally, since the owner default currently goes direct to DeepSeek.
+
+**Probed before adopting, 2026-08-03.** `deepseek-ai/deepseek-v4-pro` on `integrate.api.nvidia.com`:
+- **Tools work.** A real `set_setting` tool call, not prose describing one. This is pass/fail for Altana, whose whole definition is having hands.
+- **Latency is workable but variable.** First token at 5.4s, 1.9s, 0.84s over three streamed runs.
+- **The tier can refuse.** `deepseek-ai/deepseek-v4-flash` returned **HTTP 529 "Service temporarily overloaded"** during the same run.
+
+**Why the fallback is not optional here.** Altana is on every screen for every user. A model that 529s takes her dark everywhere at once, and four other NVIDIA models on this account are listed but not invokable at all. An always-on assistant needs a production API behind it. So: **V4 Pro on NVIDIA primary; Luna via OpenAI direct on 529, 404, or timeout.** Free in the normal case, billed only when NVIDIA is unavailable, which is cheap insurance. The catalog already has this machinery in `resolveProviderCfg` and `OPENROUTER_FALLBACK_PROVIDERS`; this is a third case of the same pattern rather than a new mechanism.
+
+**Consequence for the transport.** The primary path is plain OpenAI-compatible chat/completions, where tools are verified working. The Responses API constraint below now applies **to the fallback only**, and it still has to be honoured there or Altana silently loses her hands the moment she fails over.
 
 **Hard constraint found by probe, 2026-08-03.** Luna cannot call tools through OpenAI's chat/completions endpoint. The provider's own words:
 
