@@ -23,7 +23,17 @@
 <link rel="stylesheet" href="/dominion-vibe.css?v=19" />
 <link rel="stylesheet" href="/dominion-tour.css?v=3" />
 <link rel="stylesheet" href="/dominion-markdown.css?v=1" />
-<!-- Last on purpose: touch corrections must outrank the width-based sheets above. -->
+<link rel="stylesheet" href="/altana.css?v=1" />
+<link rel="stylesheet" href="/dominion-simplify.css?v=1" />
+<!-- dominion-models.css restructures .model-row and friends, which dominion-cinematic-06.css already
+     declares at the same specificity, so it has to come after that sheet. It does: cinematic-06
+     arrives by @import inside dominion-ui.css near the top of this head. It does NOT need to be the
+     last sheet on the page, which is why it sits above dominion-mobile.css rather than below it. -->
+<link rel="stylesheet" href="/dominion-models.css?v=1" />
+<!-- Last on purpose: touch corrections must outrank the width-based sheets above, and that includes
+     the three sheets added on 2026-08-03. None of them declare a rule this file settles, so the
+     order is uncontested today. Keep this line last anyway: the reason it is last is structural,
+     and mobile_ui_test.mjs fails the build if a later sheet is ever added below it. -->
 <link rel="stylesheet" href="/dominion-mobile.css?v=1" />
 <style>
   /* Session budget window (Fred, 2026-07-25): opaque black, clear white text — money is never ambient. */
@@ -587,6 +597,17 @@
   <script src="/dominion-ui.js?v=40"></script>
   <script src="/dominion-tenant.js?v=5" defer></script>
   <script src="/dominion-orders.js?v=1" defer></script>
+  <script type="module" src="/altana.js?v=1"></script>
+  <!-- Classic script rather than a module, matching dominion-images.js and dominion-ide.js. It is a
+       self-contained IIFE with no imports of its own and only needs to set window.DominionSimplify. -->
+  <script src="/dominion-simplify.js?v=1"></script>
+  <script type="module">
+    import { altanaMount } from "/altana.js";
+    // Altana ships DARK. The flag stays false until her brain (altana.mjs) is wired and answering,
+    // because a dot that floats over every screen and does nothing is the Knowledge Vault mistake
+    // again: three buttons that opened three empty rooms.
+    altanaMount({ enabled: false });
+  </script>
   <script>window.addEventListener("DOMContentLoaded", () => { if (window.DominionTenant) DominionTenant.init(); });</script>
 </body>
 </html>

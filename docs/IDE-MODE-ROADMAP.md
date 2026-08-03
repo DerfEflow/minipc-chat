@@ -176,7 +176,7 @@ answers each one directly, without inventing new machinery where Dominion alread
 - 3.2 Deterministic router first: file-extension and keyword table (css/html/tsx/component paths
   and visual vocabulary to design classes; migrations/server/api to build_code; version bumps and
   renames to mechanical). Confidence rule like heuristicRoute; only ambiguous moves get one
-  classifier call (owner: local qwen3:8b free; guests: one cheap cloud call). Router decisions
+  classifier call (owner: the free local model; guests: one cheap cloud call). Router decisions
   logged in the job stream so users see WHY a model got picked.
 - 3.3 Assignment Board UI: one card per task class showing the assigned model and live price from
   GET /api/models; an All-In-One master switch collapses every class to one model. Persist per

@@ -20,11 +20,100 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = 8975, MOCK = 8976;
-const dataDir = mkdtempSync(join(tmpdir(), "cacheprobe-"));
 
-// Wallet read: value goes into the child env only.
+// Wallet read: values go into the child env (or a direct provider call) only, never to stdout.
 const wallet = readFileSync(join(homedir(), ".app-secrets.env"), "utf8");
-const kv = Object.fromEntries(wallet.split(/\r?\n/).filter((l) => /^[A-Z_]+=/.test(l)).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+const kv = Object.fromEntries(wallet.split(/\r?\n/).filter((l) => /^[A-Z0-9_]+=/.test(l)).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1).trim()]));
+
+/*
+ * ==== MODE: node cacheprobe.mjs providers [filter...] ====
+ *
+ * Wargame C4: caching on Moonshot and NVIDIA was ASSUMED. This measures it. Two turns per model
+ * sharing one large stable prefix, sent straight at each provider's native endpoint with no server
+ * in the way, reading the provider's OWN cache counters. Roughly a cent per full sweep.
+ *
+ * Measured 2026-08-03 (provider-reported turn-two cache reads):
+ *   deepseek-v4-flash   18,048 / 18,109   automatic, nothing required
+ *   gpt-5.6-luna         4,521 /  4,535   automatic above ~1,024 tokens
+ *   gpt-4o               4,352 /  4,536   automatic above ~1,024 tokens
+ *   kimi-k3              4,608 /  4,621   automatic; reporting is per-node and intermittent
+ *   kimi-k2.6            4,096 observed on one turn, absent on a byte-identical repeat
+ *   claude-haiku-4-5     6,304 /  6,317   ONLY with an explicit cache_control breakpoint;
+ *                                          without it, two identical turns both billed full freight
+ *   gemini 3.6 / 3.5     0 at 5.9k AND at 27.3k tokens, on the native endpoint as well as the
+ *                        OpenAI-compat one the server calls (which reports no cache field at all)
+ *   nvidia (3 models)    no cache counters returned at all; two identical turns billed identically
+ *   openrouter (2)       cached_tokens present in the shape and 0 in fact
+ */
+if (process.argv[2] === "providers") {
+  const filters = process.argv.slice(3);
+  const words = (n) => { const w = ["ledger", "invariant", "prefix", "byte", "stable", "retrieval", "history", "directive", "token", "provider", "counter", "evidence", "assembly", "window", "budget", "anchor"]; const o = []; for (let i = 0; i < n; i++) o.push(w[(i * 7 + (i % 13)) % w.length] + "-" + (i % 97)); return o.join(" "); };
+  // ~4,500 tokens clears every published floor (Anthropic 2,048 on Haiku, OpenAI ~1,024,
+  // Google ~1,024, Moonshot 256, DeepSeek 64-token blocks) without buying a large prompt per lane.
+  const PREFIX = "You are a billing-invariant test fixture. Reference corpus follows; do not summarize it.\n" + words(1500);
+  const OA = kv.OPEN_AI_DOMINION_UI_APIKEY || kv.OPENAI_API_KEY;
+  const LANES = [
+    { lane: "openai", model: "gpt-5.6-luna", url: "https://api.openai.com/v1/chat/completions", key: OA, newOai: true, maxOut: 1024 },
+    { lane: "openai", model: "gpt-4o", url: "https://api.openai.com/v1/chat/completions", key: OA },
+    { lane: "deepseek", model: "deepseek-v4-flash", url: "https://api.deepseek.com/chat/completions", key: kv.DEEPSEEK_AI_DOMINION_UI_APIKEY },
+    { lane: "moonshot", model: "kimi-k3", url: "https://api.moonshot.ai/v1/chat/completions", key: kv.MOONSHOT_API_KEY },
+    { lane: "moonshot", model: "kimi-k2.6", url: "https://api.moonshot.ai/v1/chat/completions", key: kv.MOONSHOT_API_KEY },
+    { lane: "google", model: "gemini-3.6-flash", url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", key: kv.GOOGLE_AI_STUDIO_API_KEY },
+    { lane: "nvidia", model: "nvidia/nemotron-3-super-120b-a12b", url: "https://integrate.api.nvidia.com/v1/chat/completions", key: kv.NVIDIA_API_KEY, maxOut: 64 },
+    { lane: "nvidia", model: "openai/gpt-oss-20b", url: "https://integrate.api.nvidia.com/v1/chat/completions", key: kv.NVIDIA_API_KEY, maxOut: 1024 },
+    { lane: "openrouter", model: "qwen/qwen3-coder", url: "https://openrouter.ai/api/v1/chat/completions", key: kv.OPENROUTER_API_KEY },
+    { lane: "anthropic", model: "claude-haiku-4-5-20251001", url: "https://api.anthropic.com/v1/messages", key: kv.ANTHROPIC_API_KEY, anthropic: true, cc: false },
+    { lane: "anthropic", model: "claude-haiku-4-5-20251001", url: "https://api.anthropic.com/v1/messages", key: kv.ANTHROPIC_API_KEY, anthropic: true, cc: true },
+  ];
+  const readOf = (u) => {
+    if (!u) return null;
+    const v = (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens)
+      ?? u.prompt_cache_hit_tokens ?? u.cached_tokens ?? u.cache_read_input_tokens;
+    return v == null ? null : Number(v);
+  };
+  const send = async (e, text) => {
+    if (e.anthropic) {
+      const sys = [{ type: "text", text: PREFIX }];
+      if (e.cc) sys[0].cache_control = { type: "ephemeral" };
+      const r = await fetch(e.url, { method: "POST", headers: { "content-type": "application/json", "x-api-key": e.key, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: e.model, max_tokens: e.maxOut || 16, system: sys, messages: [{ role: "user", content: text }] }), signal: AbortSignal.timeout(180000) });
+      const t = await r.text();
+      if (!r.ok) return { err: r.status + " " + t.slice(0, 200) };
+      return { usage: JSON.parse(t).usage };
+    }
+    const body = { model: e.model, messages: [{ role: "system", content: PREFIX }, { role: "user", content: text }], stream: false };
+    if (e.newOai) body.max_completion_tokens = e.maxOut || 16;
+    else { body.max_tokens = e.maxOut || 16; if (e.lane !== "moonshot") body.temperature = 0; }   // Kimi allows temperature 1 only
+    if (e.lane === "openrouter") body.usage = { include: true };
+    const r = await fetch(e.url, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + e.key }, body: JSON.stringify(body), signal: AbortSignal.timeout(180000) });
+    const t = await r.text();
+    if (!r.ok) return { err: r.status + " " + t.slice(0, 200) };
+    const j = JSON.parse(t);
+    return j.error ? { err: JSON.stringify(j.error).slice(0, 200) } : { usage: j.usage };
+  };
+  for (const e of LANES) {
+    const label = e.lane + "/" + e.model + (e.anthropic ? (e.cc ? " [cache_control]" : " [no cache_control]") : "");
+    if (filters.length && !filters.some((f) => label.includes(f))) continue;
+    if (!e.key) { console.log(label.padEnd(56) + "SKIP (no key in wallet)"); continue; }
+    const a = await send(e, "Reply with the single word: alpha");
+    if (a.err) { console.log(label.padEnd(56) + "ERROR turn1 " + a.err); continue; }
+    await new Promise((r) => setTimeout(r, 6000));   // let the provider-side cache write land
+    const b = await send(e, "Reply with the single word: beta");
+    if (b.err) { console.log(label.padEnd(56) + "ERROR turn2 " + b.err); continue; }
+    // Anthropic's input_tokens EXCLUDES cached and freshly-written tokens; the OpenAI-shaped lanes
+    // include them, so the denominator has to be rebuilt per shape or the percentage lies.
+    const u = b.usage || {};
+    const total = e.anthropic
+      ? (Number(u.input_tokens) || 0) + (Number(u.cache_read_input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0)
+      : (Number(u.prompt_tokens) || 0);
+    const read = readOf(u);
+    console.log(label.padEnd(56) + (read == null ? "no cache counter returned" : "turn2 read " + read + " / " + total + " = " + Math.round((read / total) * 100) + "%"));
+    console.log("      turn2 usage: " + JSON.stringify(u));
+  }
+  process.exit(0);
+}
+
+const dataDir = mkdtempSync(join(tmpdir(), "cacheprobe-"));
 const DS_KEY = kv.DEEPSEEK_AI_DOMINION_UI_APIKEY || "";
 if (!DS_KEY) { console.error("no DeepSeek key in the wallet; probe cannot run"); process.exit(1); }
 

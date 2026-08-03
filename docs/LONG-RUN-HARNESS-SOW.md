@@ -106,8 +106,8 @@ resuming takes.
   unlimited. The tranche is a fuse, never a job cap: cheap models burning $1 slowly is the
   system working, and a paused job resumes with one approval. Amounts are Claude's suggestion
   inside Fred's "never exceed ~$2 for guests" rule; changing them later is a one-line edit.
-- D3. Cheap-judge model: **qwen3-vl** (already the OCR workhorse; same wallet, known pricing).
-  Stays off by default, per-job flag.
+- D3. Cheap-judge model: **google/gemini-3.5-flash-lite** (cheapest vision model after qwen3-vl
+  left the 2026-08-03 prune; same vision capability, known pricing). Stays off by default, per-job flag.
 - D4. Scope: **Crucible builds AND long chat tasks.** A plain chat ask ("review this whole
   app") can be promoted to a job and gets the same ledger, watchdog, validators, and fuses.
   The chat is the surface either way, per the v93 ruling.

@@ -1,0 +1,169 @@
+/* ============================================================================================
+   Dominion cinematic: model dropdown ROW CONTENT (Lane B / RELAUNCH, 2026-08-03).
+
+   Fred, verbatim: "The way the text has been formatted made it look really messy and amateur."
+
+   dominion-cinematic-06.css owns the row SHELL (the framed, scrollable, grouped panel; see
+   .model-panel / .model-group there). This sheet owns what goes INSIDE a row: a name, a short
+   plain-language purpose, and the facts that matter (context window, speed tier, price tier),
+   each on its own line, instead of one run-on string of params/context/price squeezed together.
+   That squeeze was the actual defect: dominion-cinematic-06.css's .mr-meta line rendered
+   "671B (MoE·37B active) · 1M" as one string, and .mr-tag rendered a raw "$X/$Y" figure with no
+   comparison point. Neither ever showed the catalog's specialty line at all.
+
+   Loaded as a RAW <link> tag at the index.html level, deliberately last in the sheet order, per
+   the house rule set after the touch-css defect: an @import inside dominion-ui.css once made a
+   whole stylesheet invisible to grep and to document.styleSheets for four days, because nothing
+   that builds navigation was named in index.html. A raw tag is grep-able and wins the cascade by
+   load order alone (see docs/wiring/lane-b-dropdown.md for the exact line and placement).
+
+   Depends on the palette :root already declares in dominion-cinematic-01.css (--energy, --cyan,
+   --copper-hot, --danger, --ink-soft, --glass-line, and the rest). This sheet declares no
+   variables of its own, so its colors can never drift out of step with the rest of the console.
+
+   Standing rules honored here:
+     - No hard-coded grid column count anywhere (Fred's rule). Every layout below is a single flex
+       row that wraps (flex-wrap), never a `repeat(N, ...)` or a fixed column list.
+     - Only transform and opacity are animated/transitioned.
+     - Nothing here switches an element to fixed positioning, so the ancestor transform/filter trap
+       that breaks a fixed element never applies to anything in this file.
+   ============================================================================================ */
+
+/* ---- row shell: stack head / specialty / facts, replacing cinematic-06's two-track grid --------
+   (.model-row there is a 2-track CSS grid, one auto column beside a flexible one, tuned for one
+   line of name and one line of meta. A specialty line plus a facts row no longer fits that shape,
+   so this later-loaded rule switches the row to a flex column. Same selector, later in the
+   cascade, wins without !important: the same pattern dominion-tenant.css's machine-grant mark
+   relies on.) ---- */
+.model-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+}
+
+/* Name + bench glyph + price tier badge on one line. */
+.mr-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mr-head .mr-price { margin-left: auto; flex: none; }
+.mr-name { min-width: 0; flex: 1 1 auto; }
+.mr-name .mr-text { display: inline-block; max-width: 100%; }
+
+/* ---- the purpose line: the ONE thing being fixed. Plain language (models.catalog.mjs's
+   `specialty` field, already rewritten out of jargon), its own line, never run into the facts
+   below it. A 2-line clamp is a safety net for the longest specialty strings on the narrowest
+   panel width (mobile pins the panel to `left:10px; right:10px`, about 355px on a 375px phone),
+   not a length limit the copy is expected to hit in normal use. ---- */
+.mr-specialty {
+  margin: 0;
+  padding-right: 2px;
+  color: var(--ink-soft, #c6d6e2);
+  opacity: .82;
+  font: 500 11px/1.4 "Bahnschrift", "Segoe UI Variable", "Aptos", system-ui, sans-serif;
+  letter-spacing: .01em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.model-row.is-selected .mr-specialty { opacity: .95; }
+.model-row.is-disabled .mr-specialty { opacity: .5; }
+
+/* ---- the facts row: context window and speed tier as separate small chips, never squeezed into
+   one comma-run string. flex-wrap with no column count, so a long-name model on a narrow panel
+   wraps its chips onto a second line instead of overflowing or forcing a fixed track. ---- */
+.mr-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.mr-fact {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--glass-line, rgba(157, 218, 255, .28));
+  clip-path: polygon(4px 0, 100% 0, 100% calc(100% - 4px), calc(100% - 4px) 100%, 0 100%, 0 4px);
+  background: rgba(4, 14, 24, .5);
+  color: #9fb6c4;
+  font: 600 9.5px/1.3 "Cascadia Mono", "Consolas", monospace;
+  letter-spacing: .03em;
+  white-space: nowrap;
+}
+.model-row:hover .mr-fact { border-color: rgba(139, 231, 255, .4); color: #c3dcea; }
+
+/* ---- price tier badge: a tier a person can compare at a glance ("Free" / "Budget" / "Standard" /
+   "Premium", from models.catalog.mjs's own priceTierOf()), never a raw six-decimal float. Colors
+   reuse the .cost-chip language already established in dominion-ui.css (green = free, cyan/blue =
+   cheap, copper = standard cloud pricing, red = premium) so the same color means the same thing in
+   the pre-send cost chip and in the picker that chose the model. ---- */
+.mr-price {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border: 1px solid rgba(233, 181, 129, .4);
+  border-radius: 3px;
+  color: #f2c48f;
+  font: 700 9.5px/1.2 "Cascadia Mono", "Consolas", monospace;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  transition: transform .12s ease, border-color .12s ease;
+}
+.mr-price--free {
+  border-color: rgba(118, 255, 104, .4);
+  color: var(--energy-hot, #ddffd8);
+  background: rgba(20, 40, 16, .3);
+}
+.mr-price--budget {
+  border-color: rgba(131, 221, 255, .45);
+  color: var(--cyan, #83ddff);
+  background: rgba(8, 26, 36, .3);
+}
+.mr-price--standard {
+  border-color: rgba(233, 181, 129, .45);
+  color: var(--copper-hot, #ffc18a);
+  background: rgba(30, 18, 8, .3);
+}
+.mr-price--premium {
+  border-color: rgba(255, 117, 105, .5);
+  color: var(--danger, #ff7569);
+  background: rgba(36, 10, 8, .32);
+}
+/* Selected/hover states animate transform only (never top/left/width: this row lives inside a
+   panel that itself switches to fixed positioning under 900px in dominion-cinematic-06.css, and
+   animating layout properties there is exactly the kind of thing that fights a fixed ancestor). */
+.model-row:hover .mr-price { transform: translateY(-1px); }
+
+/* ---- key-needed / blocked note: its own line under the facts, not squeezed into the price
+   column it used to share (cinematic-06's .mr-tag, which this file's row shell no longer emits). */
+.mr-note {
+  display: block;
+  margin: 0;
+  color: #8296a6;
+  font: 700 8.5px/1.3 "Bahnschrift", sans-serif;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.model-row.is-blocked .mr-note { color: #e0a06f; }
+
+/* ---- breakpoints: verified at 375px (the narrowest phone this app supports) and desktop widths.
+   The panel itself already switches to fixed positioning at max-width:900px in
+   dominion-cinematic-06.css; nothing here reintroduces a SECOND breakpoint number that has to stay
+   in sync with that one, because every rule above is width-independent (flex-wrap, not a pair of
+   media queries with two edges that can drift apart, the exact shape of the touch-css defect that
+   left this app with no navigation between 721px and 1180px for four days: two numbers that
+   stopped matching). This query only tightens type size on the smallest phones; it changes no
+   layout edge. ---- */
+@media (max-width: 375px) {
+  .mr-specialty { font-size: 10.5px; }
+  .mr-fact, .mr-price { font-size: 9px; padding: 2px 7px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-row:hover .mr-price { transform: none; }
+}

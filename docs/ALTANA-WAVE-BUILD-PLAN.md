@@ -33,7 +33,7 @@ Verified against the tree at `67b43f2`. **A file appears exactly once.** No two 
 | Lane | Owns (exclusive write) | Tier |
 |---|---|---|
 | **A. Ollama sweep** | `hands/hands.mjs`, `memory.mjs`, `retriever.mjs`, `review.mjs`, `routing.mjs`, `watchdog.mjs`, `devboot.mjs`, `devboot-images.mjs`, `ops/live-rig.mjs`, plus the 18 `*_test.mjs` that boot a mock Ollama | sonnet |
-| **B. Dropdown** | `public/dominion-models.css` (new), model-picker region of `public/app.js` **via wiring spec only** | sonnet |
+| **B. Dropdown** | `public/dominion-models.css` (new), `models.catalog.mjs`, `models_dropdown_test.mjs` (new), model-picker region of `public/app.js` **via wiring spec only** | sonnet |
 | **C. Caching (Phase 2)** | `contextwindow.mjs`, `cacheprefix_probe.mjs`, `cacheprobe.mjs` | opus |
 | **D. Limits instrumentation** | `usage-limits.mjs` (new), `idetelemetry.mjs` | sonnet |
 | **E. Sequential MCP + Wolfe** | `sequential.mjs` (new), `wolfe-logic.mjs`, `execution-policy.mjs`, `connectors.mjs` | opus |
@@ -41,19 +41,32 @@ Verified against the tree at `67b43f2`. **A file appears exactly once.** No two 
 | **G. Altana surface** | `public/altana.js`, `public/altana.css`, `ops/altana-preview.html` | sonnet |
 | **H. Google tools** | `google-maps.mjs` (new), `google-bigquery.mjs` (new), `google-people.mjs` (new), `google.mjs` | sonnet |
 | **I. Simplify** | `simplify.mjs` (new), `public/dominion-simplify.css` (new), `public/dominion-simplify.js` (new) | sonnet |
-| **J. Grunt** | stale comments (`wolfe-logic.mjs` EMBER "local Qwen" line is lane E's, so grunt gets the REST), `docs/*` typos, `models.catalog.mjs` specialty strings | haiku |
+| **J. Grunt** | stale comments (`wolfe-logic.mjs` EMBER "local Qwen" line is lane E's, so grunt gets the REST), `docs/*` typos | haiku |
 | **INTEGRATOR** | `server.mjs`, `tools.mjs`, `public/app.js`, `public/index.html`, `toolschema.mjs` | opus |
 
-**Collision note:** lane J must not touch `wolfe-logic.mjs` (lane E owns it) or `models.catalog.mjs` rows that lane H adds. Grunt work is scoped to files no other lane owns, and the grunt brief names them explicitly.
+**Collision note:** lane J must not touch `wolfe-logic.mjs` (lane E owns it) or `models.catalog.mjs` (lane B owns it). Grunt work is scoped to files no other lane owns, and the grunt brief names every forbidden file explicitly rather than describing the rule.
+
+**Ownership correction made at launch, 2026-08-03:** `models.catalog.mjs` moved from lane J to **lane B**. The dropdown redesign is mostly a display-metadata job and the specialty strings live in that file, so the lane rewriting the picker is the lane that must own the text it renders. Lane J's brief bars it from the file by name.
 
 ---
 
-## 3. WAVE ORDER (dependencies are real, not preference)
+## 3. ORDER
+
+**Fred, 2026-08-03, superseding the wave structure below:** *"I see no reason not to do all of it. Forget the waves. Just do everything, beginning to end until its written, finished, tested, committed, and deployed."*
+
+So **nine lanes launched at once**: A, B, C, D, E, F, G, H, J. The file ownership map in §2 is what makes that safe, and it is the only thing that makes it safe. The wargames in §5 were already written for C, D, F and H, so the HIGH lanes carry their discipline into a simultaneous launch rather than waiting for a later wave to grant it.
+
+**One dependency survives, because it is real rather than a preference.** Lane I (Simplify) waits on lane E, because Phase 3's complexity gate and Simplify's route picker are the same classifier. Built side by side we get two routers that disagree with each other. E's brief names the exported classifier signature as a deliverable, so I starts the moment that contract is published.
+
+**Lane A and the harness.** A rewires 18 suites that boot a mock Ollama. Running the full suite mid-sweep would produce results nobody could trust, so every lane runs only its own test files, and the full `run-tests.mjs` runs once at integration when the swarm is quiet.
+
+**Continuous:** the INTEGRATOR drains wiring specs as lanes finish. **Reviewers** run per lane on completion, never in bulk at the end.
+
+### The original wave order, kept for the reasoning
 
 **Wave 1, parallel, no shared files:** A (Ollama), B (dropdown), D (limits), H (Google tools), G (Altana surface polish).
 **Wave 2, after E's router exists:** E (sequential MCP + Wolfe) runs in wave 1 too, but **I (Simplify) waits on it**, because Phase 3's complexity gate and Simplify's route picker are the same classifier. Built in parallel we get two routers that disagree.
 **Wave 3:** C (caching) and F (Altana brain) are the HIGH items, wargamed first (§5), then built.
-**Continuous:** the INTEGRATOR drains wiring specs as lanes finish. **Reviewers** run per lane on completion, never in bulk at the end.
 
 **Lane A runs ALONE against the test harness.** It rewires 18 suites that boot a mock Ollama. If another lane's tests land mid-sweep, neither result can be trusted. A gets the harness to itself; everyone else runs their own suite only until A lands.
 
@@ -126,8 +139,12 @@ Verified against the tree at `67b43f2`. **A file appears exactly once.** No two 
 | L1 | Sequential-thinking MCP: which server, and does it survive the npx launcher fix | `[assumed]` it is the standard package. Lane E verifies before building on it |
 | L2 | Whether the retrieval block can move behind history without quality loss | `[unknown]` — C1 decides it empirically |
 | L3 | Google Ads developer token | `[blocked]` — deferred by Fred, not in this wave |
+| L8 | BigQuery and People cannot be live-proven on this box | `[blocked on Fred]`. The build machine has no `google-oauth.json`, so no owner account has ever completed Google OAuth here, and the two scopes lane H added (`bigquery.readonly`, `contacts.readonly`) postdate any token issued elsewhere. Added-scope reconsent needs an interactive browser, which no agent session has. The refusal and cap logic run for real against a stubbed network reply, so every line of the money-safety path executes. Maps is separately live-proven end to end against the real API |
+| L9 | Two lane briefs I wrote contained wrong premises, and the agents caught both | `[verified]`. I told lane D that `OUT_MODE_CEIL` and `REASONING_FLOOR` were exported when they are private, and I told lane H that Google tools register through `tools.mjs` and `toolschema.mjs` when they register through `connectors.mjs`. Both agents read the code, found the brief wrong, and re-planned rather than building against it. The habit worth keeping is the one that saved lane A: verify the premise of the task, not only the work |
 | L4 | Altana's per-user sign-in counter is per-device (localStorage) | `[known limitation]`, cosmetic, accepted |
 | L5 | Simplify's Billy Goat theme is a rebuild from a 4-line spec, not an extraction | `[user-stated]` intent, confirmed 2026-08-03 |
+| L6 | Altana's `recordSignIn()` has no client-side sign-in moment to hang on | `[verified]` at integration: `grep` for signin, login, and OTP verification across `public/app.js` and `public/dominion-tenant.js` returns nothing. Auth happens at the edge through Cloudflare Access, so the browser never sees a sign-in event. `altanaMount` therefore counts page loads instead, which rotates her face every ten loads rather than every ten sign-ins. Cosmetic, accepted, and it supersedes L4 |
+| L7 | Lane J edited `models.catalog.mjs` after being told the file was forbidden | `[verified]`. Prose only, no code changed, so no functional harm. It did delete the provenance line "probed live 2026-08-03, twice" and replace it with a vaguer claim, which is a real loss on a comment documenting measured starvation floors. Restore at review time once lane B has finished writing the same file |
 
 ---
 
@@ -148,7 +165,7 @@ Stop the wave and report, do not push through:
 
 All checked against the tree on 2026-08-03, tagged per FITS:
 
-- `[verified]` Ollama footprint: **30 files**, 12 source and 18 test. `server.mjs` 83 refs, `hands/hands.mjs` 24.
+- `[verified]` Ollama footprint: **30 files**, 12 source and 18 test. `server.mjs` 83 refs, `hands/hands.mjs` 24. **The count was right and the conclusion drawn from it was wrong.** Lane A proved on 2026-08-03 that this transport is Fred's owner-only zero-egress lane and the keyless test fixture for five suites, so it stays. Counting references told us how big the job was and nothing about whether to do it.
 - `[verified]` The Guide IS wired: imported at `server.mjs:153`, instantiated at 1310-1311, three routes at 5304-5357, dispatched at 9808. An earlier claim in this session that nothing imported it was **wrong**, caused by a malformed grep pattern, and is corrected here.
 - `[verified]` `GUIDE_MODEL` is already `openai/gpt-5.6-luna`, so Altana inherits Luna rather than introducing it.
 - `[verified]` The retrieval block sits at `server.mjs:7832`, ahead of history: the remaining cache-prefix gap.

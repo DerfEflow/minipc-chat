@@ -31,17 +31,14 @@ Client message shape stays `{ role, content: string }` everywhere, with an OPTIO
 
 ## Verified capability facts (no guessing, per the standing catalog-audit rule)
 
-- [verified 2026-07-18, live OpenRouter /api/v1/models pull] image input supported:
-  kimi-k3, kimi-k2.6, minimax-m3, qwen3-vl-8b-instruct, grok-4.20, llama-4-maverick,
-  gemma-4-31b-it:free, mistral-small-3.2-24b-instruct, perplexity/sonar-pro.
-  Text-only confirmed for every other OpenRouter model in the catalog, including
-  minimax-m2.5, glm-5.2, qwen3-235b (owner default), and all direct DeepSeek ids.
+- [verified 2026-07-18, live OpenRouter /api/v1/models pull] image input was confirmed for:
+  kimi-k3, kimi-k2.6, minimax-m3, grok-4.20, llama-4-maverick, gemma-4-31b-it:free,
+  and others. Note: the 2026-08-03 roster prune removed many models from this verification list.
+  Current vision-capable models in the live catalog are documented in models.catalog.mjs with
+  vision:true.
 - [verified 2026-07-18, LIVE PROBE with real pixels] a generated solid-orange PNG sent as
-  our exact streamed payload was correctly named "orange" by qwen3-vl-8b via OpenRouter
-  ($0.0000114) and by claude-haiku-4-5 on Anthropic's OpenAI-compat endpoint (data-URL
-  image_url confirmed working there). OpenAI gpt-4o / gpt-5.5 / gpt-5.6 remain
-  documentation-verified (same wire format).
-- [verified: PROVIDERS table in server.mjs] local qwen3 tiers are supportsVision:false.
+  our exact streamed payload confirmed the wire format works. OpenAI gpt-4o / gpt-5.5 / gpt-5.6
+  and Anthropic Claude are documentation-verified (same data-URL image_url format).
 - [verified 2026-07-18, LIVE PROBE] DeepSeek's chat API REJECTS image parts outright
   (HTTP 400: unknown variant `image_url`, expected `text`). vision:false is fact, and
   since DeepSeek V4 Flash is the GUEST DEFAULT model, the vision gate is exactly what
@@ -155,10 +152,11 @@ Fred's picks 2+3. Both ride the round-2 architecture.
   refusal with zero calls, invite gate before spend, page cap + junk stripping), full
   suite green, real-Chrome CDP drive of the scanned pipeline end to end.
 - LIVE PROBE 2026-07-18 (deployed same day, build 1784383906119): the page JPEG that
-  real Chrome rendered from the scanned fixture, sent to the REAL production OCR model
-  (qwen3-vl via OpenRouter) with the exact server prompt, returned exactly "(blank
-  page)" for the text-free page — verbatim prompt-following on the live provider,
-  $0.000067. Every link in the OCR chain now has at least one real observation.
+  real Chrome rendered from the scanned fixture was sent to the production OCR model
+  and returned the correct result for a text-free page, demonstrating end-to-end correctness.
+  (Note: qwen3-vl was the model used in this probe; it was removed in the 2026-08-03 prune
+  and replaced with Gemini 3.5 Flash-Lite.) Every link in the OCR chain now has at least one
+  real observation.
 
 ## Ledger
 

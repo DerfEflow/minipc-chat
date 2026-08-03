@@ -1,5 +1,33 @@
 /*
- * Dominion AI — the Guide: a read-only support voice that follows the user around the app.
+ * Dominion AI. The Guide. SUPERSEDED BY ALTANA (altana.mjs), 2026-08-03.
+ *
+ * ================================================================================================
+ * WHAT HAPPENED TO THIS FILE, and why it still exists.
+ *
+ * Altana replaces the Guide. She knows the state of the app rather than only the manual, and she
+ * can work its controls rather than only point at them. Everything the Guide did, she does.
+ *
+ * This file was NOT deleted, for two reasons that are both about not losing anything:
+ *
+ *   1. THE ROUTES ARE LIVE. `/guide/ask`, `/guide/complaints` and `/guide/complaint/resolve` are
+ *      served today and dispatched today. They are REPLACED by Altana's handler, not removed, and
+ *      until the wiring spec is applied this module keeps them working exactly as they did.
+ *      Deleting a module whose routes are still dispatched is how a support surface goes dark on
+ *      every screen at once.
+ *   2. THE COMPLAINT BOOK IS REAL DATA. `createGuideStore` is now a thin alias of Altana's store,
+ *      which opens THE SAME FILE with THE SAME TABLE. Nothing is migrated, copied or recreated.
+ *      The safest migration of a live record store is the one that does not happen.
+ *
+ * The shared machinery (knowledge splitting, retrieval, the complaint marker, the store) now
+ * lives in altana.mjs and is re-exported here so that every existing import keeps resolving. What
+ * remains below is only the Guide's own read-only persona, kept intact so the old surface behaves
+ * identically for as long as it is wired.
+ *
+ * ONE LIMIT THE GUIDE HAS AND ALTANA DOES NOT: the Guide could not act, so its safety story was
+ * "it has no verbs". Altana has verbs, so hers is an allow-list, a redacting context assembler, a
+ * confirmation gate and a structural injection guard. See altana.mjs; do not copy this file's
+ * reasoning onto her.
+ * ================================================================================================
  *
  * Fred, 2026-07-31: "I just want an engineer to be able to ask, how do I know my data isnt going
  * to get lost? Or other more technical answer and it knows." So this is not a FAQ bot. It answers
@@ -23,52 +51,24 @@
  * kilobytes; a vector store here would be machinery for its own sake.
  */
 import { readFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import {
+  GUIDE_MODEL as ALTANA_FALLBACK_MODEL,
+  splitKnowledge as altanaSplitKnowledge,
+  retrieve as altanaRetrieve,
+  extractComplaint as altanaExtractComplaint,
+  createAltanaStore,
+} from "./altana.mjs";
 
-export const GUIDE_MODEL = "openai/gpt-5.6-luna";   // Fred's pick: cheap, competent, US company.
+// Unchanged value, new meaning: this is now Altana's FALLBACK seat rather than the only seat.
+// Kept exported because server.mjs imports this name today.
+export const GUIDE_MODEL = ALTANA_FALLBACK_MODEL;
 
-/* ---------- knowledge ---------------------------------------------------------------------- */
+/* ---------- knowledge (now owned by altana.mjs) ---------------------------------------------- */
 
-// Split on "## " headings. Each section keeps its heading, because the heading is the strongest
-// retrieval signal in the file ("DURABILITY: will my work get lost?" answers Fred's own example).
-export function splitKnowledge(text) {
-  const out = [];
-  for (const raw of String(text || "").split(/\n(?=## )/)) {
-    const body = raw.trim();
-    if (!body || body.startsWith("# ")) continue;
-    const title = (body.split("\n")[0] || "").replace(/^#+\s*/, "").trim();
-    out.push({ title, body });
-  }
-  return out;
-}
-
-const STOP = new Set(["the","a","an","is","are","my","i","to","of","and","or","it","that","this","how","do","does","did","can","will","would","what","why","when","if","in","on","for","with","be","get","got","not","no","you","your","me","we","our","from","at","by","so","just","know","about","there","was","were"]);
-const terms = (s) => String(s || "").toLowerCase().match(/[a-z][a-z0-9-]{1,}/g) || [];
-
-/*
- * Pick the sections that actually bear on the question. Scoring counts distinct matching terms
- * rather than raw frequency, so one section repeating a common word does not drown a section that
- * matches several different words in the question.
- */
-export function retrieve(question, sections, max = 4) {
-  const q = [...new Set(terms(question))].filter((w) => !STOP.has(w));
-  if (!q.length) return sections.slice(0, 1);
-  const scored = sections.map((s) => {
-    const hay = (s.title + " " + s.body).toLowerCase();
-    let score = 0;
-    for (const w of q) {
-      if (!hay.includes(w)) continue;
-      score += 1;
-      if (s.title.toLowerCase().includes(w)) score += 2;   // a heading hit is a strong signal
-    }
-    return { s, score };
-  }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
-  // Nothing matched: hand over the never-do rules so the model still refuses correctly.
-  if (!scored.length) return sections.filter((s) => /NEVER DO/i.test(s.title)).slice(0, 1);
-  return scored.slice(0, max).map((x) => x.s);
-}
+// Re-exported, not reimplemented. Two copies of a retrieval function drift, and the version that
+// drifts is always the one nobody is reading.
+export const splitKnowledge = altanaSplitKnowledge;
+export const retrieve = (question, sections, max = 4) => altanaRetrieve(question, sections, max);
 
 export function guideSystemPrompt(knowledgeChunks) {
   return [
@@ -114,53 +114,19 @@ export function guideSystemPrompt(knowledgeChunks) {
   ].join("\n");
 }
 
-// The complaint marker the model emits, pulled out of the reply before anyone sees it.
-const COMPLAINT_RE = /^LOG_COMPLAINT:\s*(.+?)(?:\s*\|\s*EMAIL:\s*(.*?))?\s*$/im;
-
-export function extractComplaint(reply) {
-  const text = String(reply || "");
-  const m = COMPLAINT_RE.exec(text);
-  if (!m) return { reply: text.trim(), complaint: null };
-  const raw = String(m[2] || "").trim();
-  // "none", "n/a", "no" and friends all mean no address, and a thing without an @ is not one.
-  const email = (!raw || /^(none|n\/?a|no|null|-)$/i.test(raw) || !raw.includes("@")) ? "" : raw.slice(0, 200);
-  return {
-    reply: text.replace(COMPLAINT_RE, "").replace(/\n{3,}/g, "\n\n").trim(),
-    complaint: { summary: String(m[1] || "").trim().slice(0, 2000), email },
-  };
-}
+// The complaint marker the model emits, pulled out of the reply before anyone sees it. The parser
+// moved to altana.mjs so both assistants strip the same marker the same way.
+export const extractComplaint = altanaExtractComplaint;
 
 /* ---------- the complaint book -------------------------------------------------------------- */
 
-export function createGuideStore({ dir, now = () => new Date().toISOString() }) {
-  mkdirSync(dir, { recursive: true });
-  const db = new DatabaseSync(join(dir, "guide.db"));
-  db.exec("PRAGMA journal_mode=WAL");
-  db.exec(`CREATE TABLE IF NOT EXISTS complaints (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uid TEXT, userEmail TEXT, contactEmail TEXT,
-    summary TEXT NOT NULL, surface TEXT, createdAt TEXT NOT NULL,
-    alerted INTEGER NOT NULL DEFAULT 0, resolvedAt TEXT )`);
-  const q = {
-    ins: db.prepare("INSERT INTO complaints (uid,userEmail,contactEmail,summary,surface,createdAt,alerted) VALUES (?,?,?,?,?,?,0)"),
-    markAlerted: db.prepare("UPDATE complaints SET alerted=1 WHERE id=?"),
-    recent: db.prepare("SELECT * FROM complaints ORDER BY id DESC LIMIT ?"),
-    open: db.prepare("SELECT COUNT(*) AS n FROM complaints WHERE resolvedAt IS NULL"),
-    resolve: db.prepare("UPDATE complaints SET resolvedAt=? WHERE id=?"),
-  };
-  return {
-    log({ uid = "", userEmail = "", contactEmail = "", summary = "", surface = "" } = {}) {
-      const s = String(summary || "").trim();
-      if (!s) return { ok: false, error: "a complaint needs a description" };
-      const r = q.ins.run(String(uid), String(userEmail), String(contactEmail), s.slice(0, 2000), String(surface).slice(0, 60), now());
-      return { ok: true, id: Number(r.lastInsertRowid) };
-    },
-    markAlerted: (id) => { q.markAlerted.run(Number(id)); },
-    recent: (n = 50) => q.recent.all(Math.max(1, Math.min(500, Number(n) || 50))),
-    openCount: () => Number((q.open.get() || {}).n) || 0,
-    resolve: (id) => { q.resolve.run(now(), Number(id)); return { ok: true }; },
-  };
-}
+/*
+ * F5, the whole of it: an ALIAS, not a reimplementation and not a migration. Altana's store opens
+ * `guide.db` in the same directory and reads the same `complaints` table. Every record filed
+ * through the Guide is still there, still under the same ids, whichever module opens it. The
+ * assistant was renamed. The complaint book was not touched.
+ */
+export const createGuideStore = createAltanaStore;
 
 /* ---------- assembly ------------------------------------------------------------------------ */
 

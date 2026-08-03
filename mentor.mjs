@@ -148,7 +148,7 @@ export function createMentor({ localChat, mainModel, cfg = {} }) {
       if (txt) return txt;
       return JSON.stringify({ recommended_revision: "External mentor error (HTTP " + r.status + "): " + String(r.text).slice(0, 200), revision_priority: "none" });
     }
-    // qwen3 gotcha: format:"json" without think:false collapses to "{}" — always pair them locally.
+    // Local reasoning models: format:"json" without think:false can produce empty output — always pair them.
     const d = await localChat(mainModel, messages, { temperature: 0.3, num_predict: 2000, noTools: true, format: "json", think: false });
     return (d && d.message && d.message.content) || "";
   }

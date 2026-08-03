@@ -1,5 +1,5 @@
 /*
- * altana_test — the presence layer's invariants, pinned.
+ * altana_test: the presence layer's invariants, pinned.
  *
  * Two of these guard scars this repo already carries, and they are the reason this file exists at
  * all rather than the work being "obviously fine":
@@ -14,7 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { faceForSignIn, altanaMount, altanaState, ALTANA_FACES } from "./public/altana.js";
+import { faceForSignIn, altanaMount, altanaState, altanaCheckAnchoring, ALTANA_FACES } from "./public/altana.js";
 
 let passed = 0;
 const ok = (n) => { console.log("  PASS  " + n); passed++; };
@@ -102,7 +102,23 @@ const ok = (n) => { console.log("  PASS  " + n); passed++; };
   ok("setting state before she exists is a no-op, not a crash");
 }
 
-/* ---- 5. the CSS invariants that carry the scars --------------------------------------------- */
+/* ---- 5. the runtime fixed-position-trap guard ------------------------------------------------ */
+{
+  // Nothing mounted yet: the guard must not throw, and must not falsely report a trap.
+  assert.equal(altanaCheckAnchoring(stubDoc()), true, "no element mounted is not a trapped state");
+
+  const d = stubDoc();
+  altanaMount({ doc: d, enabled: true, signins: 0 });
+  const el = d.getElementById("altana");
+  el.offsetParent = null;             // a healthy fixed element: no ancestor is capturing it
+  assert.equal(altanaCheckAnchoring(d), true, "offsetParent === null reads as correctly anchored");
+
+  el.offsetParent = stubEl("div");    // simulate a later script wrapping <body> in a transform
+  assert.equal(altanaCheckAnchoring(d), false, "a non-null offsetParent is reported as trapped");
+  ok("the runtime guard detects the fixed-position trap via offsetParent, without throwing");
+}
+
+/* ---- 6. the CSS invariants that carry the scars --------------------------------------------- */
 {
   const css = readFileSync(new URL("./public/altana.css", import.meta.url), "utf8");
 
@@ -164,4 +180,4 @@ function stubDoc() {
   };
 }
 
-console.log(`\n${passed}/10 checks passed - Altana mounts on body, rotates every ten sign-ins, and ships dark`);
+console.log(`\n${passed}/11 checks passed - Altana mounts on body, rotates every ten sign-ins, guards her own anchoring, and ships dark`);

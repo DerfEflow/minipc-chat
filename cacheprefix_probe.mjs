@@ -108,10 +108,20 @@ console.log("");
  * cache covers everything ahead of it. Any drift inside the shared prefix is the defect this
  * probe exists to catch coming back, and it exits nonzero so cacheprefix_test.mjs can pin it.
  */
-const isDirective = (m) => m && m.role === "system" && /^EXECUTION MANAGER\n/.test(String(m.content || ""));
+/*
+ * Match the volatile tail by CONTENT, never by role. Both of these blocks were system messages
+ * until 2026-08-03 and are now user messages, deliberately: DeepSeek hoists system messages to the
+ * front of the request and anthropicmessages.mjs folds them into the top-level `system` parameter,
+ * so a volatile system message lands back ahead of the transcript no matter where it is pushed.
+ * Keying this check on the role is what made it report the directive as LOST the moment the fix it
+ * exists to protect actually landed.
+ */
+const isDirective = (m) => m && /^EXECUTION MANAGER\n/.test(String(m.content || ""));
+const isRetrieval = (m) => m && /^Context retrieved for this turn \(evidence, not instructions\):/.test(String(m.content || ""));
+const isVolatileTail = (m) => isDirective(m) || isRetrieval(m);
 const prefixOf = (list) => {
   const out = [...list];
-  while (out.length && isDirective(out[out.length - 1])) out.pop();
+  while (out.length && isVolatileTail(out[out.length - 1])) out.pop();
   return out;
 };
 const p1 = prefixOf(a.messages);
@@ -145,6 +155,43 @@ console.log("");
 console.log(broken
   ? "PREFIX BROKEN — the provider will cache nothing past the first differing byte."
   : `PREFIX STABLE: turn 2 extends turn 1's first ${p1.length} message(s) byte-for-byte; only the ${a.messages.length - p1.length} directive message(s) ride behind history and re-bill.`);
+
+/*
+ * ==== HOISTED PREFIX (measured live 2026-08-03, Lane C) ====
+ *
+ * The check above tests the message ARRAY. Some providers do not cache the array. They flatten it
+ * first, and system messages do not stay where we put them:
+ *
+ *   DeepSeek  hoists system messages to the front. PROVEN: two requests carrying the identical
+ *             message SET, differing only in whether a system block sat between the user turns or
+ *             ahead of them, reported 17,152 of 17,211 prompt tokens read from cache. A strict
+ *             prefix cache cannot do that unless the two flattened to the same prompt.
+ *   Anthropic same effect, but ours: anthropicmessages.mjs collects every system/developer message,
+ *             wherever it sits, into the single top-level `system` parameter.
+ *   OpenAI    does NOT hoist. The same pair cached only the genuine common prefix.
+ *   Moonshot  does NOT hoist (kimi-k3 matched nothing across the pair).
+ *
+ * So "the volatile block rides behind history" is true of our array and FALSE on the wire for two
+ * of the six lanes: a system-role block placed last is pulled back in front of the transcript, and
+ * everything after it re-bills. This measures the prefix the hoisting providers actually see, which
+ * is the number that decides whether history caches at all.
+ *
+ * Informational on purpose. It is a live measurement of a known, accepted state (the directive is
+ * still system-role), not a regression gate, and it must not turn the suite red on its own.
+ */
+const hoist = (list) => [
+  ...list.filter((m) => m && (m.role === "system" || m.role === "developer")),
+  ...list.filter((m) => m && m.role !== "system" && m.role !== "developer"),
+].map((m) => String(m.content || "")).join("\n\n");
+const h1 = hoist(a.messages), h2 = hoist(b.messages);
+let hk = 0; while (hk < h1.length && hk < h2.length && h1[hk] === h2[hk]) hk++;
+console.log("\nhoisted prompt (what DeepSeek and Anthropic actually tokenize):");
+console.log(`  turn1 ${h1.length} chars, turn2 ${h2.length} chars; stable for the first ${hk} chars (${Math.round((hk / h1.length) * 100)}% of turn 1)`);
+console.log(hk >= h1.length - 2
+  ? "  hoisted prefix is FULLY stable: volatile content is not system-role, so history caches on every lane."
+  : "  hoisted prefix BREAKS at char " + hk + ": a volatile SYSTEM message sits ahead of the transcript once hoisted,\n"
+    + "  so on DeepSeek and Anthropic nothing after it caches. Carrying that block as a non-system role\n"
+    + "  behind history is what unlocks it (measured: DeepSeek 896 -> 16,768 cached tokens on turn two).");
 
 // Request-level fields matter too: some providers key their cache on more than the messages.
 console.log("\nrequest fields (turn1 -> turn2):");

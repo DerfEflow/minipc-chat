@@ -1171,12 +1171,26 @@ function updateModelTrigger() {
 function modelRowHtml(o, cur, mode) {
   const disabled = o.noKey || o.blocked, sel = o.id === cur;
   const cls = ["model-row"]; if (sel) cls.push("is-selected"); if (disabled) cls.push("is-disabled"); if (o.blocked) cls.push("is-blocked");
-  const price = o.free ? `<span class="mr-price is-free">Free</span>` : (o.price ? `<span class="mr-price">${escapeHtml(o.price)}</span>` : "");
+  const tierCls = "mr-price--" + String(o.priceTier || "").toLowerCase();
+  const price = `<span class="mr-price ${tierCls}">${escapeHtml(o.priceTier || "")}</span>`;
   const note = o.blocked ? `<span class="mr-note">blocked · ${escapeHtml(mode)}</span>` : (o.noKey ? `<span class="mr-note">key needed</span>` : "");
+  const facts = [o.ctxLabel ? o.ctxLabel + " context" : "", o.speedTier || ""].filter(Boolean)
+    .map((f) => `<span class="mr-fact">${escapeHtml(f)}</span>`).join("");
+  /*
+   * The .mr-name > .mr-bench / .mr-name > .mr-text nesting below is load-bearing and must not be
+   * flattened. dominion-tenant.css:572 selects `.mr-name .mr-text.has-machine-grant` for the red
+   * mark that says a model can act on Fred's machines, and that file is not edited here. Changing
+   * the nesting would remove the mark silently, with no error and no failing test.
+   */
   return `<div class="${cls.join(" ")}" data-value="${escapeHtml(o.id)}" ${disabled ? 'aria-disabled="true"' : 'role="option"'}${sel ? ' aria-selected="true"' : ""}>
-    <span class="mr-name"><span class="mr-bench">${o.tool ? "🔧" : "💬"}${o.vis ? "👁" : ""}</span><span class="mr-text${o.broadAccess ? " has-machine-grant" : ""}">${escapeHtml(o.name)}</span></span>
-    <span class="mr-meta">${escapeHtml(o.meta || "")}</span>
-    <span class="mr-tag">${price}${note}</span></div>`;
+    <div class="mr-head">
+      <span class="mr-name"><span class="mr-bench">${o.tool ? "🔧" : "💬"}${o.vis ? "👁" : ""}</span><span class="mr-text${o.broadAccess ? " has-machine-grant" : ""}">${escapeHtml(o.name)}</span></span>
+      ${price}
+    </div>
+    <p class="mr-specialty">${escapeHtml(o.specialty || "")}</p>
+    <div class="mr-facts">${facts}</div>
+    ${note}
+  </div>`;
 }
 
 function renderModelPanel() {
@@ -1190,11 +1204,17 @@ function renderModelPanel() {
     for (const m of g.models) {
       const keyed = m.provider === "openrouter" ? availCache.openrouter : m.provider === "openai" ? availCache.openai : m.provider === "deepseek" ? availCache.deepseek : m.provider === "anthropic" ? availCache.anthropic : true;
       html += modelRowHtml({
-        id: m.id, name: m.name, tool: m.toolCapable, vis: !!m.vision, free: (!m.inCost && !m.outCost), price: fmtPriceShort(m),
+        id: m.id, name: m.name, tool: m.toolCapable, vis: !!m.vision,
         // Owner-only red/bold: the server only sends broadAccess to Fred's payload, so a guest's
         // rows can never carry the class no matter what the client does.
         broadAccess: m.broadAccess === true,
-        meta: [(m.params && m.params !== "undisclosed") ? m.params : null, fmtCtxShort(m.ctx)].filter(Boolean).join(" · "),
+        // specialty, priceTier and speedTier were already stamped on every record by the catalog's
+        // finalize() and already rode /api/models. The picker simply never read them, which is why
+        // a row showed a params-and-context string and nothing about what the model is good for.
+        specialty: m.specialty || "",
+        priceTier: m.priceTier || ((!m.inCost && !m.outCost) ? "Free" : "Standard"),
+        speedTier: m.speedTier || "",
+        ctxLabel: fmtCtxShort(m.ctx),
         noKey: keyed === false, blocked: !providerAllowedClient(mode, m.provider),
       }, cur, mode);
     }

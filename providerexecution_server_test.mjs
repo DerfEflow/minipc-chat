@@ -69,8 +69,16 @@ test("cloud persistence has a finite resumable epoch and accounts nonterminal pr
     "failed provider attempts must be counted before the retry replaces them");
   assert.match(source, /if \(!or\.ok\) \{\s*bumpUsage\(or && or\.usage\)/,
     "the final failed provider response must be counted before checkpointing");
-  assert.match(source, /workStop\(\);\s*bumpUsage\(cont && cont\.usage\);\s*if \(!cont\.ok\)/,
-    "failed output continuations must be counted too");
+  /*
+   * The invariant is ORDER, not adjacency: the continuation's usage must be counted before the
+   * `!cont.ok` branch can leave, or a failed continuation escapes unbilled. This used to require
+   * the three statements to be neighbours, which broke on 2026-08-03 when the token-ceiling
+   * instrumentation was wired in between them. The recorder cannot return early (it is guarded by
+   * `if (cont && cont.ok)`), so the billing order it sits inside is unchanged. Allow intervening
+   * statements, keep bumpUsage pinned immediately after workStop, and keep it ahead of the branch.
+   */
+  assert.match(source, /workStop\(\);\s*bumpUsage\(cont && cont\.usage\);[\s\S]{0,900}?if \(!cont\.ok\)/,
+    "failed output continuations must be counted, and counted before the failure path returns");
   assert.match(source, /const liveCostUsd = \(\) => costTotal \+ catalogCostTotal/,
     "the live session guard must include provider-reported cost, not just reconstructed token cost");
   assert.match(source, /const roundOutputCap = affordableWorkerOutput\(outCap, messages,/,

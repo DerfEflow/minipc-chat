@@ -101,19 +101,19 @@ export const MODELS = [
   { id: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-sol",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 128000, reasoning: true,
     fastTier: true, fastMultiplier: 2,
-    specialty: "Agentic/terminal-coding flagship: the top 'doing' model" },
+    specialty: "Best pick for complex coding and multi-step agent work" },
   { id: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-terra",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.00, outCost: 12.00, ctx: 1050000, maxOut: 128000, reasoning: true,
-    specialty: "Mid-tier GPT-5.6: strong general reasoning, and the value pick for everyday production work" },
+    specialty: "Strong all-round reasoning for everyday work" },
   { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-luna",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 0.20, outCost: 1.20, ctx: 1050000, maxOut: 128000, reasoning: true,
-    specialty: "Fastest and cheapest GPT-5.6: high-volume tool use and multi-step workflows at scale" },
+    specialty: "Fast and cheap for high-volume tasks and automation" },
   { id: "openai/gpt-5.5", name: "GPT-5.5", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.5",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 32768, reasoning: true,
-    specialty: "Prior frontier flagship: reliable heavy knowledge work" },
+    specialty: "Reliable choice for heavy knowledge work" },
   { id: "openai/gpt-4o", name: "GPT-4o", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-4o",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 10.00, ctx: 128000, maxOut: 16384,
-    specialty: "Mature multimodal generalist; dependable, older generation" },
+    specialty: "Dependable all-purpose assistant that can see images" },
   // Kimi K3 (released 2026-07-15): 2.8T open-weight multimodal reasoner, 1M context. Its reasoning is
   // MANDATORY and the ONLY supported effort is "max", and reasoningEffort below is passed on every call
   // (the "new required language"). Draws reasoning tokens from the output budget, so maxOut is large
@@ -127,27 +127,27 @@ export const MODELS = [
   { id: "moonshotai/kimi-k3", name: "Kimi K3", origin: "Moonshot AI (direct)", provider: "moonshot", directId: "kimi-k3",
     category: "Frontier / Flagship", vision: true, params: "2.8T (open-weight MoE)", paramsB: 2800, inCost: 3.00, outCost: 15.00, cacheHitCost: 0.30, ctx: 1048576,
     maxOut: 32768, reasoning: true, reasoningEffort: "max",
-    specialty: "Newest frontier open-weight reasoner: complex coding, long-horizon agentic work, multimodal" },
+    specialty: "Open-weight powerhouse for complex coding and long projects" },
   { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", origin: "Moonshot AI (direct)", provider: "moonshot", directId: "kimi-k2.6",
     category: "Frontier / Flagship", vision: true, params: "1T (MoE·32B active)", paramsB: 1000, inCost: 0.66, outCost: 3.41, cacheHitCost: 0.066, ctx: 262144, maxOut: 16384,
-    specialty: "Agentic tool-use heavyweight; cult favorite for doing things" },
+    specialty: "Built for using tools and getting things done" },
   // Anthropic Claude: DIRECT to the native Messages API for full tool-use, thinking,
   // stop-reason, and usage fidelity. directId = the native Anthropic model id.
   { id: "anthropic/claude-opus-4-8", name: "Claude Opus 4.8", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-opus-4-8",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 25.00, ctx: 1000000, maxOut: 128000, reasoning: true,
-    specialty: "Anthropic flagship: top-tier reasoning + agentic 'doing'; strictest data retention" },
+    specialty: "Top-tier reasoning with the strictest privacy" },
   { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-sonnet-5",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 1000000, maxOut: 128000, reasoning: true,
-    specialty: "Balanced Claude: strong general work at mid cost; no-train direct provider" },
+    specialty: "Well-rounded assistant at a fair price" },
   { id: "anthropic/claude-haiku-4-5", name: "Claude Haiku 4.5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-haiku-4-5-20251001",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 5.00, ctx: 200000, maxOut: 64000, reasoning: true,
-    specialty: "Fast, cheap Claude: quick turns kept off training data (direct)" },
+    specialty: "Fast and cheap for quick back-and-forth" },
   // cacheHitCost: DeepSeek's automatic context caching bills repeated prefixes at ~1/120th of
   // fresh input (verified against published pricing 2026-07-28). The server's cost math applies
   // it only to cache tokens the provider actually counts (prompt_cache_hit_tokens).
   { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-pro",
     category: "Frontier / Flagship", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.43, outCost: 0.87, cacheHitCost: 0.003625, ctx: 1000000, maxOut: 384000, reasoning: true,
-    specialty: "Near-frontier reasoning + code at ~1/30th flagship price (direct to DeepSeek)" },
+    specialty: "Near-flagship reasoning and code at a fraction of the price" },
   /*
    * PHASE 1 PRUNE, 2026-08-03 (Fred's order 2026-08-02: all free-thinking models out, OpenRouter
    * down to named survivors). 23 rows removed; the approved cut list and the per-model fallback
@@ -172,27 +172,27 @@ export const MODELS = [
    */
   { id: "google/gemini-3.6-flash", name: "Gemini 3.6 Flash", origin: "Google (AI Studio direct)", provider: "google", directId: "gemini-3.6-flash",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.50, outCost: 7.50, cacheHitCost: 0.15, ctx: 1048576, maxOut: 65536, reasoning: true,
-    specialty: "Google's newest flash: fast frontier work with a 1M window, cheaper output than its 3.5 sibling" },
+    specialty: "Fast Google model with a huge 1M-token memory" },
   // 3.1 Pro doubles its price above 200k input tokens ($4/$18); the catalog's flat cost model
   // carries the base tier, so rare >200k turns under-bill. Known, documented, revisit if long-doc
   // pro work becomes common.
   { id: "google/gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", origin: "Google (AI Studio direct)", provider: "google", directId: "gemini-3.1-pro-preview",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.00, outCost: 12.00, cacheHitCost: 0.20, ctx: 1048576, maxOut: 65536, reasoning: true,
-    specialty: "Google's pro tier: deep multimodal reasoning over the full 1M window" },
+    specialty: "Google's deep-reasoning model for images, video, and long documents" },
   { id: "google/gemini-3.5-flash-lite", name: "Gemini 3.5 Flash-Lite", origin: "Google (AI Studio direct)", provider: "google", directId: "gemini-3.5-flash-lite",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 0.30, outCost: 2.50, cacheHitCost: 0.03, ctx: 1048576, maxOut: 65536, reasoning: true,
-    specialty: "Cheapest Gemini: high-volume utility work on the same 1M window" },
+    specialty: "Cheapest Google model for simple, high-volume tasks" },
   // FREE LANE (ARSENAL Wave 2, live-probed 2026-07-29): NVIDIA's developer endpoint serves this
   // exact id with tool calls verified. With NVIDIA_API_KEY present the call rides free and bills
   // $0 (transport-aware cost math); without it, OpenRouter at the prices below, unchanged.
   { id: "z-ai/glm-5.2", name: "GLM 5.2", origin: "Zhipu AI (Tsinghua spinout)", provider: "nvidia", directId: "z-ai/glm-5.2",
     category: "Frontier / Flagship", params: "355B (MoE)", paramsB: 355, inCost: 0.45, outCost: 3.31, ctx: 1048576,
-    specialty: "Strong coder + long-horizon planning (FREE via NVIDIA when keyed)" },
+    specialty: "Strong free coder for planning and building" },
 
   // ---- Reasoning & Math ---------------------------------------------------------------------
   { id: "deepseek/deepseek-r1", name: "DeepSeek R1", origin: "DeepSeek (China)",
     category: "Reasoning & Math", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.70, outCost: 2.50, ctx: 163000, maxOut: 16384, reasoning: true,
-    specialty: "Visible chain-of-thought; watch it reason step by step" },
+    specialty: "Shows its reasoning step by step as it thinks" },
   // NVIDIA DIRECT (Fred, 2026-07-28): the build.nvidia.com developer endpoint serves these free
   // (63 free endpoints; Fred: "limits are extremely generous"). While NVIDIA_API_KEY is absent
   // they ride OpenRouter at the prices below; with the key, the server routes direct and bills
@@ -200,10 +200,10 @@ export const MODELS = [
   // the key's first live call; a refused id falls back to OpenRouter out loud.
   { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-ultra-550b-a55b",
     category: "Reasoning & Math", params: "550B (MoE·55B active)", paramsB: 550, inCost: 0.42, outCost: 2.61, ctx: 1000000, maxOut: 16384, reasoning: true,
-    specialty: "Deep STEM reasoning when you need the big gun" },
+    specialty: "Heavyweight for hard math and science problems" },
   { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-flash",
     category: "Reasoning & Math", params: "undisclosed (MoE)", paramsB: null, inCost: 0.05, outCost: 0.24, cacheHitCost: 0.0028, ctx: 1000000, maxOut: 384000, reasoning: true,
-    specialty: "Cheapest strong reasoning/math+code engine, direct to DeepSeek" },
+    specialty: "Cheapest strong option for reasoning, math, and code" },
 
   // ---- Coding -------------------------------------------------------------------------------
   /*
@@ -216,24 +216,24 @@ export const MODELS = [
    */
   { id: "qwen/qwen3-coder", name: "Qwen3 Coder", origin: "Alibaba",
     category: "Coding", params: "480B (MoE·35B active)", paramsB: 480, inCost: 0.22, outCost: 1.80, ctx: 262144, maxOut: 32768,
-    specialty: "Agentic coding across a large repo: 262k window (Apache 2.0)" },
+    specialty: "Built for coding across a large codebase" },
 
   // ---- Creative & Writing -------------------------------------------------------------------
   { id: "arcee-ai/trinity-large-thinking", name: "Trinity Large Thinking", origin: "Arcee AI",
     category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.25, outCost: 0.80, ctx: 262144, toolCapable: true,   // audited: tool endpoints live
-    specialty: "Expressive creative writing (already in Command Deck notes)" },
+    specialty: "A creative-writing specialist for stories and prose" },
 
   // ---- Vision / Multimodal ------------------------------------------------------------------
   // FREE LANE (Wave 2, live-probed 2026-07-29: answers with tools AND vision on NVIDIA's id).
   { id: "minimax/minimax-m3", name: "MiniMax M3", origin: "MiniMax (Shanghai)", provider: "nvidia", directId: "minimaxai/minimax-m3",
     category: "Vision / Multimodal", vision: true, params: "undisclosed (MoE)", paramsB: null, inCost: 0.10, outCost: 1.21, ctx: 1048576,
-    specialty: "Strongest visual understanding here (image/video reasoning; FREE via NVIDIA when keyed)" },
+    specialty: "Best free option for understanding images and video" },
   // Quick free vision seat (probed 2026-08-03 on Fred's NVIDIA key: answers, real tool call, and
   // NAMED the red swatch). Seated for the Simplify quick-and-dirty route; earns its place as the
   // only small fast vision model on the free lane.
   { id: "nvidia/nemotron-nano-12b-v2-vl", name: "Nemotron Nano 12B VL", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-nano-12b-v2-vl",
     category: "Vision / Multimodal", vision: true, params: "12B", paramsB: 12, inCost: 0, outCost: 0, ctx: 131072,
-    specialty: "Small fast free vision: quick looks and quick answers (FREE via NVIDIA)" },
+    specialty: "Small, fast, and free for quick looks at images" },
 
   // ---- Open & Trainable ---------------------------------------------------------------------
   // OLMo 3 32B Think REMOVED 2026-07-30 (listed but unserved: every pick was a dead turn).
@@ -242,7 +242,26 @@ export const MODELS = [
   // dead seat, not a bad day. Re-add when the weekly audit sees it answer again.
   { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 3 Super", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-super-120b-a12b",
     category: "Open & Trainable", params: "120B (MoE·12B active)", paramsB: 120, inCost: 0, outCost: 0, ctx: 1000000,
-    specialty: "The largest FREE model here: 1M context, tools, and no cost to run" },
+    specialty: "The biggest free model here, with a 1M-token memory" },
+  /*
+   * TWO SEATS ADDED 2026-08-03 FOR THE SIMPLIFY ROUTER, both live-probed the same day against
+   * integrate.api.nvidia.com with the production key, first-token latency recorded:
+   *
+   *   llama-3.1-70b-instruct       238ms    the empathetic route
+   *   nemotron-3.5-content-safety  167ms    the safety route
+   *
+   * Fred picked "meta llama 70b" for the empathetic route. The 3.3 generation of that model is
+   * invokable on this account and takes 45.6 SECONDS to produce a first token, which no chat
+   * surface can carry, so the 3.1 generation of the same family and size holds the seat instead.
+   * Recorded here rather than in the router, because a router that names a model the catalog does
+   * not contain is a route that fails at the moment a user needs it.
+   */
+  { id: "meta/llama-3.1-70b-instruct", name: "Llama 3.1 70B", origin: "NVIDIA (direct)", provider: "nvidia", directId: "meta/llama-3.1-70b-instruct",
+    category: "Open & Trainable", params: "70B", paramsB: 70, inCost: 0, outCost: 0, ctx: 131072,
+    specialty: "Warm, plain-spoken answers when the question is personal" },
+  { id: "nvidia/nemotron-3.5-content-safety", name: "Nemotron Content Safety", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3.5-content-safety",
+    category: "Open & Trainable", params: "undisclosed", paramsB: null, inCost: 0, outCost: 0, ctx: 131072, toolCapable: false,
+    specialty: "Handles sensitive and safety questions carefully" },
   /*
    * THE FREE FLEET (ARSENAL Wave 2, docs/ARSENAL-PROGRAM.md). Every row below was LIVE-PROBED on
    * 2026-07-29 against integrate.api.nvidia.com with the production key: it answered, and the
@@ -253,10 +272,10 @@ export const MODELS = [
    */
   { id: "openai/gpt-oss-20b", name: "GPT-OSS 20B", origin: "OpenAI (open weights)", provider: "nvidia", directId: "openai/gpt-oss-20b",
     category: "Open & Trainable", params: "21B (MoE·3.6B active)", paramsB: 21, inCost: 0, outCost: 0, ctx: 131072, reasoning: true,
-    specialty: "OpenAI's open-weight reasoner, FREE via NVIDIA: tools live-verified" },
+    specialty: "OpenAI's free open-weight reasoning model" },
   { id: "nvidia/nemotron-3-nano-omni-30b-a3b", name: "Nemotron 3 Nano Omni", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     category: "Vision / Multimodal", vision: true, params: "30B (MoE·3B active)", paramsB: 30, inCost: 0, outCost: 0, ctx: 131072, reasoning: true,
-    specialty: "FREE multimodal reasoner with tools: quick looks at images without spending anything" },
+    specialty: "Free reasoning model that can also look at images" },
 ];
 
 /*
@@ -304,6 +323,32 @@ export const resolveModelId = (id) =>
 
 // ---- normalization --------------------------------------------------------------------------
 
+/*
+ * Human-readable PRICE TIER, bucketed off outCost (the bigger cost driver on almost every call).
+ * Fred's complaint was raw six-decimal floats in the picker; a tier a person can compare at a
+ * glance replaces that without hiding the real number (fmtPrice/fmtPriceShort still show it).
+ * Boundaries are an editorial call, not a measured constant: $3 and $15 per million output tokens
+ * split the pruned 25-model roster into four groups of comparable size. Revisit if the roster's
+ * price spread shifts enough that a tier stops meaning anything.
+ */
+function priceTierOf(inCost, outCost) {
+  if (!inCost && !outCost) return "Free";
+  if (outCost <= 3) return "Budget";
+  if (outCost <= 15) return "Standard";
+  return "Premium";
+}
+
+/*
+ * Human-readable SPEED TIER, derived from the `reasoning` flag this file already verifies per
+ * model (see the field notes above finalize). A chain-of-thought model spends visible or hidden
+ * turns thinking before it answers; a non-reasoning model replies immediately. That is a real
+ * behavioral difference a user notices while waiting, not a guessed benchmark number, which is
+ * why it is computed from the flag instead of hand-tagged per row.
+ */
+function speedTierOf(reasoning) {
+  return reasoning ? "Reasons first" : "Replies fast";
+}
+
 // Fill routing defaults so every consumer can trust these fields exist:
 //   provider defaults to "openrouter"; directId defaults to the OpenRouter slug (`id`);
 //   toolCapable defaults from the model's category (doing bench vs chatting bench).
@@ -316,7 +361,9 @@ function finalize(m) {
   const reasoningEffort = typeof m.reasoningEffort === "string" ? m.reasoningEffort : "";
   // vision NEVER defaults from category; explicit true only (verified per model; see field notes).
   const vision = m.vision === true;
-  return { ...m, provider, directId, toolCapable, maxOut, reasoning, reasoningEffort, vision };
+  const priceTier = priceTierOf(m.inCost, m.outCost);
+  const speedTier = speedTierOf(reasoning);
+  return { ...m, provider, directId, toolCapable, maxOut, reasoning, reasoningEffort, vision, priceTier, speedTier };
 }
 // Mutate in place so MODELS (exported) carries the normalized fields everywhere.
 for (let i = 0; i < MODELS.length; i++) MODELS[i] = finalize(MODELS[i]);
@@ -398,21 +445,23 @@ export const visionModelNames = (limit = 6) => MODELS.filter((m) => m.vision).sl
 // Fast is the only explicit brevity mode. Normal and all work modes receive the
 // selected model's native output window; Dominion must not quietly starve a
 // frontier model and then mistake the resulting boundary for task completion.
-const OUT_MODE_CEIL = { fast: 2048 };   // any mode not listed -> the model's full maxOut
+export const OUT_MODE_CEIL = { fast: 2048 };   // any mode not listed -> the model's full maxOut
 
 /*
- * MEASURED STARVATION FLOORS (probed live 2026-08-03, twice; see docs/MODEL-RECORDS.json).
+ * MEASURED STARVATION FLOORS (probed live 2026-08-03, twice, against the pre-prune 44-model
+ * roster; see docs/MODEL-RECORDS.json). These numbers are measured rather than estimated, and
+ * that provenance is the reason to trust them.
  * A reasoning model bills its hidden thinking against the output budget. Under a tight ceiling it
- * spends the whole allowance thinking and returns an EMPTY string, not a short answer. Ten of the
- * forty-four shipped models did exactly that at a 64-token ceiling, and the ceiling each one needs
- * to recover MOVED between runs (gpt-oss-20b: 1024 then 512; trinity: 512 then 2048), so these
- * floors are 4x the worst observed, not the observed value. Fred's decision 2026-08-03: R1 is
- * banned from fast mode's 2048 cap; the same measured evidence protects the rest of the list.
- * A mode ceiling may CHUNK a reply (the server auto-continues), but a chunk smaller than the floor
- * can be 100% reasoning, and a turn that burns 2048 tokens to emit nothing is the failure Fred
- * named: "we can avoid a bunch of disappointed people right off the bat".
+ * spends the whole allowance thinking and returns an EMPTY string, not a short answer. Ten of those
+ * models did exactly that at a 64-token ceiling, and the ceiling each one needs to recover MOVED
+ * between runs (gpt-oss-20b: 1024 then 512; trinity: 512 then 2048), so these floors are 4x the
+ * worst observed, not the observed value. Fred's decision 2026-08-03: R1 is banned from fast mode's
+ * 2048 cap; the same measured evidence protects the rest of the list. A mode ceiling may CHUNK a
+ * reply (the server auto-continues), but a chunk smaller than the floor can be 100% reasoning, and
+ * a turn that burns 2048 tokens to emit nothing is the failure Fred named: "we can avoid a bunch of
+ * disappointed people right off the bat".
  */
-const REASONING_FLOOR = {
+export const REASONING_FLOOR = {
   "deepseek/deepseek-r1": 8192,             // no text at ANY ceiling <= 2048 in one run
   "arcee-ai/trinity-large-thinking": 8192,  // worst observed floor 2048 = the fast cap exactly
   "moonshotai/kimi-k2.6": 4096,             // worst 1024

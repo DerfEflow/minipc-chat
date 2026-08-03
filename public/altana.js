@@ -1,5 +1,5 @@
 /*
- * ALTANA — presence layer. Mounts the floating face, animates her states, rotates her look.
+ * ALTANA: presence layer. Mounts the floating face, animates her states, rotates her look.
  *
  * Fred, 2026-08-03: "I have an icon that can pop up when she is interacting... It can rotate
  * through these faces so that she always has a bit of a fresh look for the user every few times
@@ -150,6 +150,7 @@ export function altanaMount(opts = {}) {
   on(typeof window !== "undefined" ? window : null, "resize", () => {
     const r = el.getBoundingClientRect();
     if (el.style.left) place(clamp({ x: r.left, y: r.top }, size));
+    altanaCheckAnchoring(doc);
   });
 
   /*
@@ -164,7 +165,34 @@ export function altanaMount(opts = {}) {
   // MOUNT ON BODY. Not into the app shell, not into a panel. See the header note.
   doc.body.appendChild(el);
   setTimeout(() => el.removeAttribute("data-enter"), 700);
+  altanaCheckAnchoring(doc);
   return el;
+}
+
+/*
+ * Runtime guard for the fixed-position trap (see header note). The CSS test pins the STATIC risk
+ * (no transform on #altana itself); this catches the DYNAMIC risk: some other script wrapping
+ * <body>, or a later stylesheet adding transform/filter/perspective/will-change/contain to an
+ * ancestor after mount. `offsetParent` is null for a correctly-anchored `position: fixed` element
+ * in every major engine; per spec it returns the trapping ancestor instead of null the moment one
+ * exists, which is exactly the failure this guard is built to catch before Altana silently drifts
+ * off her own dot.
+ */
+export function altanaCheckAnchoring(doc = document) {
+  try {
+    const el = doc.getElementById("altana");
+    if (!el || typeof el.offsetParent === "undefined") return true; // nothing mounted, or a non-layout test stub
+    const trapped = el.offsetParent !== null;
+    if (trapped && typeof console !== "undefined" && console.warn) {
+      console.warn(
+        "[altana] position:fixed trap: #altana.offsetParent is",
+        el.offsetParent,
+        "instead of null. An ancestor now carries transform/filter/perspective/will-change/contain " +
+        "and the dot will anchor to that ancestor instead of the viewport."
+      );
+    }
+    return !trapped;
+  } catch { return true; }
 }
 
 /*

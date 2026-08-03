@@ -1,5 +1,6 @@
 # Live proof run, 2026-07-30 evening
 
+Historical record from before the 2026-08-03 prune that reduced the catalog from 44 to 25 models.
 Everything below was produced by driving the REAL server over its real HTTP surface with real
 provider keys and a real hands node. No mocks. Rig: `ops/live-rig.mjs` (devboot + hands node rooted
 at `Z:\dominion-livetest`, `IDE_MODE=all` to mirror production). Raw data: `ops/sweep-results.json`,

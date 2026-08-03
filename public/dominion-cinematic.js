@@ -34,6 +34,28 @@
           <div><b>Dominion Prime</b><small>Core link: stable</small></div>
           <span class="prime-bars"><i></i><i></i><i></i><i></i></span>
         </section>`);
+      /*
+       * GUEST ONLY: Simplify My Chat takes the Knowledge Vault's place (Fred, 2026-08-03: "we could
+       * remove that section from the guest versions completely, and then add a big button for
+       * SIMPLIFY MY CHAT"). Fred keeps the real vault untouched.
+       *
+       * This swaps the section's CONTENTS and keeps the <section class="vault-module"> wrapper, so
+       * the rail spacing rules in dominion-cinematic-02.css keep applying with no CSS edit. Removing
+       * the node outright would mean chasing every sheet that targets the class.
+       *
+       * isOwner is server-verified by GET /account. This is display only, and it uses the same fetch
+       * app.js already makes to strip the Private option from a guest's privacy picker.
+       */
+      fetch("/account").then((r) => r.json()).then((a) => {
+        if (!a || a.isOwner) return;
+        const vault = sidebar.querySelector(".vault-module");
+        if (!vault) return;
+        vault.innerHTML = `<button type="button" class="simplify-launch">SIMPLIFY MY CHAT</button>`;
+        vault.querySelector(".simplify-launch").addEventListener("click", () => {
+          // Guarded rather than assumed present, in case script load order ever changes.
+          if (window.DominionSimplify) window.DominionSimplify.open();
+        });
+      }).catch(() => {});
     }
 
     const brand = document.querySelector(".brand-copy");

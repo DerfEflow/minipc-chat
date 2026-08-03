@@ -242,7 +242,7 @@ test("execution-manager prompt is concise, autonomous, evidence-gated, and cost-
   assert.match(prompt, /truthful evidence/i);
   assert.match(prompt, /never imply an action or test ran when it did not/i);
   assert.match(prompt, /soft thresholds as advisory/i);
-  assert.match(prompt, /paused—not complete/i);
+  assert.match(prompt, /paused and not complete/i);
   assert.doesNotMatch(prompt, /propose every modification|await the user's decision/i);
 });
 

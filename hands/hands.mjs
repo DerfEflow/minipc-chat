@@ -509,6 +509,16 @@ export async function executeJob(tool, args = {}, meta = {}) {
       // ollama_embed; we make the local call and (for chat) stream tokens back so a long 30B answer
       // keeps the hub deadline alive. The full assembled response is the terminal result — truth —
       // and the streamed deltas are live text on top.
+      //
+      // NEITHER of these two is dead code, verified 2026-08-03 (Altana wave, Lane A Ollama sweep).
+      // ollama_chat backs server.mjs's explicit model:"local" pick, Command Deck's lane only since
+      // Local Qwen left the public model picker on 2026-07-30 (privacy.mjs:14-16, server.mjs ~7308-
+      // 7316). It stopped being the "Auto" default in 2026-07-25 and remains a real, tested,
+      // owner-only execution path today (autoroute_test.mjs: "explicit LOCAL still runs on the
+      // local Qwen and streams", passing). ollama_embed backs the persona embedder's offline
+      // fallback, which server.mjs deliberately keeps on Ollama's nomic-embed-text because its
+      // corpus is already embedded in that space (server.mjs ~235-241). Do not remove either
+      // without Fred's say-so.
       case "ollama_chat":
         return await localOllamaChat(args.payload || {}, meta.emit);
       case "ollama_embed":

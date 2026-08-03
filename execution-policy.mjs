@@ -13,6 +13,26 @@ export const FORGE_TIERS = Object.freeze(["ember", "flame", "furnace"]);
 export const DEFAULT_FORGE_TIER = "ember";
 export const EXECUTION_CONTRACT_VERSION = 1;
 
+/*
+ * THE FORGE DIAL IS OFF BY DESIGN. Set 2026-08-03 (SOW Phase 3, item 4). Fred, 2026-08-02:
+ * "we can leave the forge dial now because I have not decided whether I want to let the user
+ * override the automated settings or not. For now, disable it but leave it."
+ *
+ * OFF means: whatever tier the client sends is ignored, and the depth of a turn is decided by the
+ * router's complexity judgment instead (sequential.mjs classifyComplexity + effectiveForgeTier).
+ * The control stays in the tree because the pending decision is whether users may override the
+ * automated setting, and re-enabling a dial that still exists is cheap while rebuilding a deleted
+ * one is not.
+ *
+ * PENDING DECISION: user override of the automated depth. Fred has not made it. Do not flip this
+ * flag to satisfy a test, a stale comment, or a memory of how the dial used to behave. Flip it
+ * only when Fred says users may drive it, and delete this paragraph in the same commit.
+ *
+ * This is the ONE named flag, in ONE place. Anything that wants to know whether the dial is live
+ * imports it from here; nothing re-derives it from a tier string.
+ */
+export const FORGE_DIAL_ENABLED = false;
+
 const TASK_SET = new Set(TASK_CLASSES);
 const FORGE_SET = new Set(FORGE_TIERS);
 
@@ -478,16 +498,39 @@ export function executionManagerPrompt(contract, policy = mapExecutionPolicy({ c
     `Authorization: The user's explicit request authorizes the in-scope actions it names. Do not re-ask for already authorized reads, edits, tests, or named actions. Preserve prohibitions: ${prohibited}. Ask only before: ${confirmations}. Never widen scope silently.`,
     `Persistence: ${policy.persistence.mode}. After a recoverable failure, diagnose it, change approach when useful, and continue. Checkpoint before context or hard limits. Never silently omit requested work.`,
     `Success: ${criteria}. Before claiming completion, provide truthful evidence for: ${contract.completion.requiredEvidence.join(", ")}. Report exact checks and outcomes; never imply an action or test ran when it did not. If anything remains, label the task partial or blocked and state the next resumable action.`,
-    "Cost: Treat estimates and soft thresholds as advisory. Warn clearly, but do not reduce scope, lower correctness, or declare completion to save money. At an actual hard limit, checkpoint and report paused—not complete.",
+    "Cost: Treat estimates and soft thresholds as advisory. Warn clearly, but do not reduce scope, lower correctness, or declare completion to save money. At an actual hard limit, checkpoint and report the work as paused and not complete.",
   ].join("\n");
 }
 
 /*
- * Compact Wolfe Logic overlay. The former Furnace prompt repeated the full source framework on
- * every model round (roughly 48K characters), crowding out the user's files and native reasoning.
- * This preserves the governing process as a manager's specification, while leaving the selected
- * model room to use its own intelligence.
+ * SEQUENTIAL THINKING IS THE FRAMEWORK ABOVE EMBER (2026-08-03, SOW Phase 3, Lane E).
+ *
+ * Fred: Forge mode "does not work well on Dominion AI and after dozens of attempts to get it to
+ * work and fixes that you have made it still does not work well." So the home-grown deep-thinking
+ * passes stop being the mechanism. EMBER (the compact Wolfe core below) remains the floor on every
+ * turn. Above it, the work is driven by the sequential-thinking MCP through sequential.mjs.
+ *
+ * This function still emits the FLAME and FURNACE process text, and that is deliberate rather
+ * than leftover. It is the DEGRADATION PATH: when the MCP cannot start (no npm on the host, no
+ * route to the registry, a spawn failure), sequential.mjs degrades to prompt-only rigor and this
+ * text is what the model gets instead. Depth is never lost with nothing standing in for it, which
+ * is the ordering constraint the SOW calls load-bearing.
+ *
+ * The former Furnace prompt repeated the full source framework on every model round (roughly 48K
+ * characters), crowding out the user's files and native reasoning. Every tier here stays compact.
+ *
+ * PURE FUNCTION OF THE TIER. It has no per-turn interpolation and it must never acquire one: this
+ * string lands in the SYSTEM message ahead of history (server.mjs), and one interpolated goal here
+ * is exactly the defect that made message zero differ on every request and cost weeks of uncached
+ * input. See cacheprefix_test.mjs.
  */
+const SEQUENTIAL_DIRECTIVE = [
+  "SEQUENTIAL THINKING (the primary framework for this task, above the Ember floor):",
+  "Work the problem as an explicit numbered sequence of thoughts. State how many steps you expect, take them one at a time, and revise a numbered step openly when new evidence contradicts it rather than quietly changing course. Adjust the estimate up or down as understanding improves. A step that only restates the previous one is not a step.",
+  "Before acting: name the actual object, the desired end, the hard constraints, the facts in hand, and the unknowns. Decompose the system. Generate competing explanations and stress-test the one you prefer. Only then execute, in dependency order.",
+  "BUILD DISCIPLINE: plan the complete file list with full paths before writing anything. Write one file at a time. Verify each write with a tool call before counting it done. Run the build every few files rather than at the end. Capture exact error text, never a summary of it. Report numeric progress (file N of M). Never say done without a check you actually ran.",
+].join("\n");
+
 export function forgeFrameworkPrompt(value = DEFAULT_FORGE_TIER) {
   const tier = normalizeForgeTier(value);
   const core = [
@@ -499,13 +542,14 @@ export function forgeFrameworkPrompt(value = DEFAULT_FORGE_TIER) {
   if (tier === "ember") return core.join("\n");
 
   core.push(
+    SEQUENTIAL_DIRECTIVE,
     "FLAME PASS: Apply the twelve governing checks: truth over consensus; ordered authority; definitions control conclusions; contradictions expose mechanisms; dwell past the obvious reading; experience is evidence, not a throne; theory must meet reality; seek the person's genuine good; confess and correct errors specifically; make value visible; treat cost as a constraint rather than the purpose; transfer durable structure.",
     "Use the relevant engines: truth/evidence, logic, qualification, forensics, systems, pattern, builder, practical engineering, economics, communication, and forward action. Check scale, abuse, ordinary-user behavior, failure modes, and downstream effects.",
   );
   if (tier === "flame") return core.join("\n");
 
   core.push(
-    "FURNACE PASS: State the actual object, desired end, hard constraints, facts and unknowns. Decompose the system. Generate competing explanations. Stress-test the preferred one. Inspect the full authorized scope, run the smallest meaningful proof, repair failed checks, and repeat until the completion contract is satisfied or a real blocker is evidenced.",
+    "FURNACE PASS: Inspect the full authorized scope, run the smallest meaningful proof, repair failed checks, and repeat until the completion contract is satisfied or a real blocker is evidenced.",
     "Guard against breadth without sequence, elegant plans without implementation, premature certainty, repeated methods after no progress, and calling a checkpoint completion. Preserve the whole vision while executing in dependency order.",
   );
   return core.join("\n");

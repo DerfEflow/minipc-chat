@@ -176,7 +176,7 @@ async function httpRpc(conn, method, params, id, signal) {
  * arguments, and it behaves identically on every platform. Verified launching
  * @modelcontextprotocol/server-postgres, which answered `initialize` correctly.
  */
-function npxLauncher() {
+export function npxLauncher() {
   const dir = dirname(process.execPath);
   for (const p of [join(dir, "node_modules", "npm", "bin", "npx-cli.js"),
                    join(dir, "lib", "node_modules", "npm", "bin", "npx-cli.js"),
@@ -187,26 +187,51 @@ function npxLauncher() {
   return process.platform === "win32" ? null : { cmd: "npx", prefix: [] };
 }
 
-// ---- MCP wire: stdio transport ----------------------------------------------------------------
-function stdioSpawn(entry, cfg, cacheDir) {
-  const fill = (s) => String(s).replace(/\{(\w+)\}/g, (_, k) => cfg[k] || "");
-  const env = { ...process.env, NPM_CONFIG_CACHE: cacheDir, NPM_CONFIG_UPDATE_NOTIFIER: "false" };
-  for (const [k, v] of Object.entries(entry.envTpl || {})) env[k] = fill(v);
-  let cmd = entry.cmd, prefix = [];
-  if (entry.cmd === "npx") {
+export const NPX_UNAVAILABLE =
+  "this server has no npm/npx available, so connectors that run a local server cannot start here";
+
+/*
+ * The launcher fix, as a reusable primitive (2026-08-03, Lane E).
+ *
+ * sequential.mjs runs an npx-launched MCP server too, and the ONE thing that must never be
+ * reimplemented in this repo is this spawn. A second copy would be a second chance to write
+ * `spawn("npx", ...)` or `shell: true` and reintroduce the defect that made five connectors
+ * unstartable for weeks while lying about it as a 90-second timeout. So the wiring lives here,
+ * once, and everything that needs an npx-launched MCP child calls this.
+ *
+ * Returns the same connection record shape stdioRpc/mcpStdioRpc expects, including the DEAD
+ * record when there is no npm, so callers never wait on a process that cannot exist.
+ */
+export function spawnMcpStdio({ command = "npx", argv = [], env: envOverrides = {}, cacheDir = "" } = {}) {
+  const env = { ...process.env, NPM_CONFIG_UPDATE_NOTIFIER: "false", ...envOverrides };
+  if (cacheDir) env.NPM_CONFIG_CACHE = cacheDir;
+  let cmd = command, prefix = [];
+  if (command === "npx") {
     const l = npxLauncher();
     if (!l) {
       // Fail LOUDLY and immediately rather than spawning something that cannot exist. The old
       // path produced a 90-second wait and the words "connector timed out", which told the user
       // nothing and cost them a minute and a half to learn it.
-      const dead = { child: null, pending: new Map(), buf: "", nextId: 1, dead: true,
-        deadReason: "this server has no npm/npx available, so connectors that run a local server cannot start here", lastUsed: Date.now() };
-      return dead;
+      return { child: null, pending: new Map(), buf: "", nextId: 1, dead: true,
+        deadReason: NPX_UNAVAILABLE, lastUsed: Date.now() };
     }
     cmd = l.cmd; prefix = l.prefix;
   }
-  const args = [...prefix, ...(entry.argsTpl || []).map(fill)];
-  const child = spawn(cmd, args, { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  // No shell, ever. argsTpl interpolates user-supplied tokens and connection strings, and on a
+  // shell command line that is an injection point.
+  const args = [...prefix, ...argv];
+  return wireStdioChild(spawn(cmd, args, { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true }));
+}
+
+// ---- MCP wire: stdio transport ----------------------------------------------------------------
+function stdioSpawn(entry, cfg, cacheDir) {
+  const fill = (s) => String(s).replace(/\{(\w+)\}/g, (_, k) => cfg[k] || "");
+  const env = {};
+  for (const [k, v] of Object.entries(entry.envTpl || {})) env[k] = fill(v);
+  return spawnMcpStdio({ command: entry.cmd, argv: (entry.argsTpl || []).map(fill), env, cacheDir });
+}
+
+function wireStdioChild(child) {
   const conn = { child, pending: new Map(), buf: "", nextId: 1, dead: false, deadReason: "", lastUsed: Date.now() };
   child.stdout.on("data", (d) => {
     conn.buf += d.toString("utf8");
@@ -249,9 +274,9 @@ function stdioSpawn(entry, cfg, cacheDir) {
  * well under a second. One shared 90-second timer meant the very first attempt at a connector was
  * the most likely to fail, and it failed with the least useful sentence available.
  */
-const STDIO_FIRST_MS = 180000;   // initialize, which may include a package download
-const STDIO_CALL_MS = 90000;     // every call after that
-function stdioRpc(conn, method, params, notify = false) {
+export const STDIO_FIRST_MS = 180000;   // initialize, which may include a package download
+export const STDIO_CALL_MS = 90000;     // every call after that
+export function stdioRpc(conn, method, params, notify = false) {
   if (conn.dead) return Promise.reject(new Error("connector process is not running: " + conn.deadReason));
   conn.lastUsed = Date.now();
   const msg = { jsonrpc: "2.0", method, ...(params !== undefined ? { params } : {}) };
