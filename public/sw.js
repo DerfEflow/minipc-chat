@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v173-trinity-screenwriter";
+const CACHE = "dominion-ai-v174-video-sketch-layout";
 const SHELL = [
   "/",
   "/index.html",
@@ -19,8 +19,8 @@ const SHELL = [
   "/dominion-mobile.css?v=1",
   "/dominion-images.css?v=9",
   "/dominion-images.js?v=14",
-  "/dominion-video.css?v=5",
-  "/dominion-video.js?v=11",
+  "/dominion-video.css?v=6",
+  "/dominion-video.js?v=12",
   "/dominion-lexicon.js?v=14",
   "/dominion-lenses.css?v=7",
   "/dominion-beginner.css?v=5",

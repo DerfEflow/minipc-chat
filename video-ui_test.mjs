@@ -15,8 +15,25 @@ function includes(source, value, label = value) {
   if (!source.includes(value)) throw new Error(`missing ${label}`);
 }
 
+const uncommentedCss = css.replace(/\/\*[\s\S]*?\*\//g, "");
+function cssDeclarations(selector, property) {
+  const values = [];
+  const rule = /([^{}]+)\{([^{}]*)\}/g;
+  for (const match of uncommentedCss.matchAll(rule)) {
+    const selectors = match[1].split(",").map(value => value.trim());
+    if (!selectors.includes(selector)) continue;
+    const declaration = new RegExp(`(?:^|;)\\s*${property.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\s*:\\s*([^;]+)`, "g");
+    for (const value of match[2].matchAll(declaration)) values.push(value[1].trim());
+  }
+  return values;
+}
+function hasCssDeclaration(selector, property, expected, label = `${selector} ${property}`) {
+  const values = cssDeclarations(selector, property);
+  if (!values.some(value => expected.test(value))) throw new Error(`missing ${label}; found ${values.join(", ") || "no declaration"}`);
+}
+
 test("versioned video assets match the offline shell", () => {
-  for (const asset of ["/dominion-video.css?v=5", "/dominion-video.js?v=11"]) {
+  for (const asset of ["/dominion-video.css?v=6", "/dominion-video.js?v=12"]) {
     includes(html, asset, `${asset} in index`);
     includes(sw, `"${asset}"`, `${asset} in service worker`);
   }
@@ -124,6 +141,69 @@ test("panel, focus, and narrow editor states cannot overlap", () => {
     ".dv-stage{height:300px;flex:0 0 300px;overflow:hidden}",
   ]) includes(css, rule);
   includes(js, "dv-timeline-detail", "compact timeline label");
+});
+
+test("desktop default follows the sketched writer-player-storyboard composition", () => {
+  const baseStart = js.indexOf("function baseMarkup()");
+  const baseEnd = js.indexOf("function captureDrafts()", baseStart);
+  if (baseStart < 0 || baseEnd <= baseStart) throw new Error("base workspace markup could not be isolated");
+  const markup = js.slice(baseStart, baseEnd);
+  const previewMatch = /(?:id|class)="[^"]*\bdv-(?:scene-previews|preview-strip|scene-preview-strip|previews)\b[^"]*"/.exec(markup);
+  const positions = {
+    writer: markup.indexOf('id="dv-writer"'),
+    stage: markup.indexOf('class="dv-stage"'),
+    board: markup.indexOf('id="dv-board"'),
+    previews: previewMatch?.index ?? -1,
+    chat: markup.indexOf('id="dv-chat"'),
+    tray: markup.indexOf('id="dv-tray"'),
+    timeline: markup.indexOf('class="dv-timeline-panel"'),
+  };
+  for (const [name, position] of Object.entries(positions)) if (position < 0) throw new Error(`missing ${name} surface`);
+  const expectedOrder = ["writer", "stage", "board", "previews", "chat", "tray", "timeline"];
+  for (let index = 1; index < expectedOrder.length; index++) {
+    const before = expectedOrder[index - 1], after = expectedOrder[index];
+    if (positions[before] >= positions[after]) throw new Error(`${before} must precede ${after} in the desktop workspace`);
+  }
+  const chatClose = markup.indexOf("</aside>", positions.chat);
+  if (chatClose < 0 || positions.tray < chatClose) throw new Error("the minimized-panel tray must be a separate surface below the chat, not part of the liaison rail");
+  includes(markup, "AI CHAT · Liaison", "wide AI chat label from the sketch");
+
+  const desktopAreas = cssDeclarations(".dv-workspace", "grid-template-areas").find(value => /["']writer\s+(?:stage|player)\s+board["']\s*["']previews\s+previews\s+previews["']\s*["']chat\s+chat\s+chat["']\s*["']tray\s+tray\s+tray["']/.test(value));
+  if (!desktopAreas) throw new Error("desktop layout must explicitly declare writer/player/storyboard, scene previews, wide chat, then tray rows");
+  if (/timeline\s+timeline\s+timeline/.test(desktopAreas)) throw new Error("the secondary timeline must not consume a permanent row in the default sketch layout");
+  hasCssDeclaration(".dv-writer.regular", "grid-area", /^writer$/, "regular screenwriter in the left desktop column");
+  hasCssDeclaration(".dv-stage", "grid-area", /^(?:stage|player)$/, "player in the center desktop column");
+  hasCssDeclaration(".dv-board.regular", "grid-area", /^board$/, "regular storyboard in the right desktop column");
+  const previewSelectors = [".dv-scene-previews", ".dv-preview-strip", ".dv-scene-preview-strip", ".dv-previews"];
+  const previewSelector = previewSelectors.find(selector => cssDeclarations(selector, "grid-area").some(value => value === "previews"));
+  if (!previewSelector) throw new Error("scene preview strip is not assigned to the full-width previews grid area");
+  hasCssDeclaration(previewSelector, "display", /^(?:flex|grid)$/, "visible scene preview strip");
+  hasCssDeclaration(".dv-chat", "grid-area", /^chat$/, "wide chat below all three primary columns");
+  hasCssDeclaration(".dv-tray", "grid-area", /^tray$/, "minimized-panel tray below chat");
+  hasCssDeclaration(".dv-timeline-panel", "display", /^none$/, "timeline hidden from the default sketch layout");
+
+  const rightRail = cssDeclarations(".dv-chat", "grid-column").some(value => /^\d+\s*$/.test(value)) &&
+    cssDeclarations(".dv-chat", "grid-row").some(value => /^1\s*\/\s*(?:3|4|-1)$/.test(value));
+  if (rightRail) throw new Error("liaison chat regressed to the forbidden full-height right rail");
+});
+
+test("storyboard is a visual thumbnail grid rather than a compact text list", () => {
+  hasCssDeclaration(".dv-scenes", "display", /^grid$/, "storyboard grid display");
+  hasCssDeclaration(".dv-scenes", "grid-template-columns", /repeat\(\s*2\s*,\s*minmax\(\s*0\s*,\s*1fr\s*\)\s*\)/, "two-column storyboard thumbnail grid");
+  hasCssDeclaration(".dv-thumb", "aspect-ratio", /^(?:16\s*\/\s*9|1\.777)/, "widescreen storyboard thumbnails");
+  const start = js.indexOf("function paintScenes()");
+  const end = js.indexOf("function paintPanels()", start);
+  if (start < 0 || end <= start) throw new Error("storyboard renderer could not be isolated");
+  const renderer = js.slice(start, end);
+  if (!/(?:<img\b|<video\b|background-image)/.test(renderer)) throw new Error("storyboard cards do not render visual media");
+  if (!/(?:thumbnail|frameImages|\.src\b)/.test(renderer)) throw new Error("storyboard visuals are not sourced from scene or generated media");
+});
+
+test("timeline stays secondary but has a clear reversible editor focus mode", () => {
+  includes(js, "case 'focus': mutate(state.focus?'Exited editor focus':'Entered editor focus'", "reversible editor focus action");
+  includes(js, "state.focus?'↙ Exit player + editor':'⛶ Player + editor'", "clear player and editor focus exit control");
+  includes(js, "node.classList.add(state.panels[p])", "panel states retained across focus render");
+  hasCssDeclaration(".dv-focus-mode .dv-timeline-panel", "display", /^(?:block|grid|flex)$/, "focus mode promotes the secondary timeline into a usable editor surface");
 });
 
 if (!process.exitCode) console.log(`\nvideo UI: ${passed} passed, 0 failed`);
