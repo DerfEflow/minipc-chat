@@ -2819,7 +2819,18 @@ function catalogCallCost(rec, u) {
     ?? u.prompt_cache_hit_tokens ?? u.cached_tokens;
   const cached = Math.max(0, Math.min(Number(cachedRaw) || 0, inTok));
   const hitRate = typeof rec.cacheHitCost === "number" ? rec.cacheHitCost : (rec.inCost || 0);
-  const base = ((inTok - cached) * (rec.inCost || 0) + cached * hitRate + outTok * (rec.outCost || 0)) / 1e6;
+  /*
+   * CACHE WRITES (2026-08-03). Anthropic is the only provider here that charges to CREATE a cache
+   * entry: a 5-minute write costs 1.25x fresh input. Nobody else has a write fee, so a catalog row
+   * without cacheWriteCost falls back to inCost and this term changes nothing for them. Billing a
+   * write as ordinary input would quietly undercharge the first turn of every Anthropic
+   * conversation by a quarter, the same class of mistake as a missing read rate pointed the other
+   * way. Clamped into the uncached remainder so a provider that double-reports cannot bill twice.
+   */
+  const writeRate = typeof rec.cacheWriteCost === "number" ? rec.cacheWriteCost : (rec.inCost || 0);
+  const written = Math.max(0, Math.min(Number(u.cache_creation_input_tokens) || 0, inTok - cached));
+  const fresh = Math.max(0, inTok - cached - written);
+  const base = (fresh * (rec.inCost || 0) + cached * hitRate + written * writeRate + outTok * (rec.outCost || 0)) / 1e6;
   /*
    * FAST LANE (OpenAI service_tier:"fast", 2026-07-30). Twice the price for up to 2.5x the speed.
    * The multiplier is applied to what the call ACTUALLY rode (`u.__fast`, stamped by the execution

@@ -393,7 +393,25 @@ export function buildAnthropicMessagesPayload(model, messages, opts = {}) {
     messages: converted.messages,
     stream: true,
   };
-  if (converted.system) payload.system = converted.system;
+  /*
+   * THE CACHE BREAKPOINT (2026-08-03). Anthropic is the only provider in the catalog whose caching
+   * is not automatic: cacheprobe.mjs measured Claude Haiku reading 6,304 of 6,317 prefix tokens
+   * back WITH an explicit cache_control marker, and two byte-identical turns both billing full
+   * freight WITHOUT one. Until this line, the only cache_control in the entire codebase was in
+   * video-http.mjs, so every Anthropic chat turn paid full price for a prefix it had already sent.
+   *
+   * One breakpoint is enough and it belongs here, at the end of the system prompt. Anthropic
+   * matches the prefix in a fixed order — tools, then system, then messages — so a marker at the
+   * end of system covers the tool definitions as well, and the tool array is the larger half (up
+   * to 128 schemas). Marking system therefore caches both with a single breakpoint of the four
+   * allowed. Below the model's minimum (2,048 tokens on Haiku, 1,024 elsewhere) the marker is
+   * ignored rather than rejected, so a short turn costs nothing extra for carrying it.
+   *
+   * The array form is required: `system` as a bare string has nowhere to hang cache_control.
+   */
+  if (converted.system) {
+    payload.system = [{ type: "text", text: converted.system, cache_control: { type: "ephemeral" } }];
+  }
 
   const effort = effortValue(opts);
   if (opts.thinking !== false && family === "adaptive") {
@@ -505,11 +523,33 @@ function mergeObjects(base, next) {
   return out;
 }
 
+/*
+ * Anthropic reports the three halves of input separately and its `input_tokens` EXCLUDES both
+ * cached reads and cache writes. Every cost path downstream is written against the OpenAI shape,
+ * where `prompt_tokens` is the whole input and `prompt_tokens_details.cached_tokens` is the
+ * discounted slice of it. Left untranslated, a cached Anthropic turn reports a fraction of the
+ * tokens it actually sent, so the cache read bills NOTHING and Dominion eats it. That is the
+ * mirror image of the OpenAI overcharge and it appears the moment caching starts working, which
+ * is why it is fixed in the same change as the breakpoint above.
+ *
+ * The native fields are preserved untouched: videoSonnetCost reads input_tokens,
+ * cache_read_input_tokens and the cache_creation breakdown directly and must keep seeing them.
+ */
 function normalizedUsage(usage) {
   if (!usage || typeof usage !== "object") return null;
   const out = cloneValue(usage);
-  if (typeof out.input_tokens === "number" && typeof out.output_tokens === "number") {
-    out.total_tokens = out.input_tokens + out.output_tokens;
+  const num = (v) => Math.max(0, Number(v) || 0);
+  if (typeof out.input_tokens === "number") {
+    const read = num(out.cache_read_input_tokens);
+    const written = num(out.cache_creation_input_tokens);
+    out.prompt_tokens = num(out.input_tokens) + read + written;
+    if (read) {
+      out.prompt_tokens_details = { ...(out.prompt_tokens_details || {}), cached_tokens: read };
+    }
+  }
+  if (typeof out.output_tokens === "number") out.completion_tokens = num(out.output_tokens);
+  if (typeof out.prompt_tokens === "number" && typeof out.output_tokens === "number") {
+    out.total_tokens = out.prompt_tokens + num(out.output_tokens);
   }
   return out;
 }

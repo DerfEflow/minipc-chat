@@ -328,7 +328,20 @@ await t("stream parser preserves text, thinking, redaction, tools, usage, and si
   assert(result.contentBlocks[1].data === "redacted-opaque", "redacted thinking lost");
   assert(result.toolCalls.length === 1 && result.toolCalls[0].id === "toolu_1", "tool call missing");
   assert(result.toolCalls[0].function.arguments === "{\"cmd\":\"npm test\"}", "tool arguments wrong");
-  assert(result.usage.input_tokens === 31 && result.usage.output_tokens === 27 && result.usage.total_tokens === 58, "usage wrong");
+  /*
+   * total_tokens moved from 58 to 70 on 2026-08-03, and the old number was wrong. This fixture
+   * reports cache_read_input_tokens: 12, and Anthropic's input_tokens EXCLUDES cached reads, so
+   * the turn really sent 31 + 12 = 43 input tokens. The previous assertion added only the 31 and
+   * therefore pinned the defect: twelve tokens that were sent, counted by the provider, and
+   * invisible to every total and every cost path downstream. The native fields must survive
+   * untouched beside the OpenAI-shaped ones, because videoSonnetCost reads them directly.
+   */
+  assert(result.usage.input_tokens === 31 && result.usage.output_tokens === 27, "native usage fields must survive");
+  assert(result.usage.cache_read_input_tokens === 12, "the native cache counter must not be rewritten");
+  assert(result.usage.prompt_tokens === 43, "prompt_tokens must be the WHOLE input: uncached + cache reads + cache writes");
+  assert(result.usage.prompt_tokens_details && result.usage.prompt_tokens_details.cached_tokens === 12,
+    "the cached slice must be visible in the OpenAI shape or it bills at zero");
+  assert(result.usage.total_tokens === 70, "usage wrong");
   assert(result.messageId === "msg_native" && result.providerMessage.content === result.contentBlocks, "provider continuation fields missing");
 
   const next = chatMessagesToAnthropic([

@@ -140,9 +140,15 @@ c("the free NVIDIA transport bills zero no matter what the catalog row says", ()
  * when Fred approves adding cacheHitCost to the OpenAI and Anthropic rows; the first one only says
  * that an absent field means full freight rather than free, which stays true either way.
  */
-const noHitRate = MODELS.find((m) => m.id === "openai/gpt-4o");
-assert.ok(noHitRate && typeof noHitRate.cacheHitCost !== "number",
-  "openai/gpt-4o now carries a cacheHitCost; this assertion needs a different no-rate model");
+/*
+ * 2026-08-03: gpt-4o was the fixture here and now carries a cacheHitCost, exactly as the note
+ * above anticipated. The fixture moves to an OpenRouter row, which lacks a rate for a real reason
+ * rather than an oversight: cacheprobe measured OpenRouter returning cached_tokens as a field
+ * shape and zero in fact, so there is no discount to name. That makes it a permanent example of
+ * the case this assertion exists for, instead of one that was only waiting to be filled in.
+ */
+const noHitRate = MODELS.find((m) => m.provider === "openrouter" && typeof m.cacheHitCost !== "number" && m.inCost > 0);
+assert.ok(noHitRate, "no rate-less priced model left in the catalog; this assertion needs a different fixture");
 
 c("a model with NO cacheHitCost bills cached tokens at full freight, never at zero", () => {
   const inTok = 9_364, cached = 9_088;

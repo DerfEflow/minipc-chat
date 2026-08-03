@@ -98,21 +98,30 @@ export const MODELS = [
    * The multiplier lives beside the price it multiplies so the billing path physically cannot
    * charge standard rates for a call that rode the fast lane.
    */
+  /*
+   * cacheHitCost on the OpenAI-direct lane (2026-08-03). cacheprobe.mjs measured turn-two cache
+   * reads of 4,521/4,535 on Luna and 4,352/4,536 on gpt-4o, so these models ARE returning cached
+   * tokens on every multi-round turn. Without the field, catalogCallCost falls back to inCost and
+   * bills a discounted token at full freight: on gpt-4o that is roughly $20 per thousand turns
+   * charged to customers for tokens OpenAI sold at half price.
+   * The gpt-5.6 family and gpt-5.5 use the platform's 1/10 cached-input rate; gpt-4o predates that
+   * schedule and is billed at half, which is why its ratio differs from its neighbours.
+   */
   { id: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-sol",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 128000, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, cacheHitCost: 0.50, ctx: 1050000, maxOut: 128000, reasoning: true,
     fastTier: true, fastMultiplier: 2,
     specialty: "Best pick for complex coding and multi-step agent work" },
   { id: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-terra",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.00, outCost: 12.00, ctx: 1050000, maxOut: 128000, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.00, outCost: 12.00, cacheHitCost: 0.20, ctx: 1050000, maxOut: 128000, reasoning: true,
     specialty: "Strong all-round reasoning for everyday work" },
   { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.6-luna",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 0.20, outCost: 1.20, ctx: 1050000, maxOut: 128000, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 0.20, outCost: 1.20, cacheHitCost: 0.02, ctx: 1050000, maxOut: 128000, reasoning: true,
     specialty: "Fast and cheap for high-volume tasks and automation" },
   { id: "openai/gpt-5.5", name: "GPT-5.5", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-5.5",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, ctx: 1050000, maxOut: 32768, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 30.00, cacheHitCost: 0.50, ctx: 1050000, maxOut: 32768, reasoning: true,
     specialty: "Reliable choice for heavy knowledge work" },
   { id: "openai/gpt-4o", name: "GPT-4o", origin: "OpenAI (direct)", provider: "openai", directId: "gpt-4o",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 10.00, ctx: 128000, maxOut: 16384,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 2.50, outCost: 10.00, cacheHitCost: 1.25, ctx: 128000, maxOut: 16384,
     specialty: "Dependable all-purpose assistant that can see images" },
   // Kimi K3 (released 2026-07-15): 2.8T open-weight multimodal reasoner, 1M context. Its reasoning is
   // MANDATORY and the ONLY supported effort is "max", and reasoningEffort below is passed on every call
@@ -133,14 +142,25 @@ export const MODELS = [
     specialty: "Built for using tools and getting things done" },
   // Anthropic Claude: DIRECT to the native Messages API for full tool-use, thinking,
   // stop-reason, and usage fidelity. directId = the native Anthropic model id.
+  /*
+   * Anthropic is the ONE provider that charges to WRITE a cache entry, so it needs two numbers.
+   * cacheHitCost is the read rate at 1/10 of input; cacheWriteCost is the 5-minute write at
+   * 1.25x. Both ratios are confirmed inside this repo rather than taken on faith: videoSonnetCost
+   * in server.mjs bills Sonnet 5 at cacheRead 0.3 and cache5m 3.75 against a 3.00 input, which is
+   * exactly 0.1x and 1.25x. A 1-hour write is 2x, and Dominion does not request the 1h TTL.
+   *
+   * These rates only mean anything because chatToAnthropicPayload now sets a cache_control
+   * breakpoint. cacheprobe.mjs measured Haiku caching 6,304 of 6,317 tokens WITH a breakpoint and
+   * nothing at all without one, so before that change every Anthropic turn paid full freight.
+   */
   { id: "anthropic/claude-opus-4-8", name: "Claude Opus 4.8", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-opus-4-8",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 25.00, ctx: 1000000, maxOut: 128000, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 5.00, outCost: 25.00, cacheHitCost: 0.50, cacheWriteCost: 6.25, ctx: 1000000, maxOut: 128000, reasoning: true,
     specialty: "Top-tier reasoning with the strictest privacy" },
   { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-sonnet-5",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 3.00, outCost: 15.00, ctx: 1000000, maxOut: 128000, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 3.00, outCost: 15.00, cacheHitCost: 0.30, cacheWriteCost: 3.75, ctx: 1000000, maxOut: 128000, reasoning: true,
     specialty: "Well-rounded assistant at a fair price" },
   { id: "anthropic/claude-haiku-4-5", name: "Claude Haiku 4.5", origin: "Anthropic (direct)", provider: "anthropic", directId: "claude-haiku-4-5-20251001",
-    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 5.00, ctx: 200000, maxOut: 64000, reasoning: true,
+    category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 1.00, outCost: 5.00, cacheHitCost: 0.10, cacheWriteCost: 1.25, ctx: 200000, maxOut: 64000, reasoning: true,
     specialty: "Fast and cheap for quick back-and-forth" },
   // cacheHitCost: DeepSeek's automatic context caching bills repeated prefixes at ~1/120th of
   // fresh input (verified against published pricing 2026-07-28). The server's cost math applies
