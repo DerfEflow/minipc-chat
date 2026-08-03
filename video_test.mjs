@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +26,7 @@ function suite(overrides = {}) {
   return { dir, calls, api: createVideoFeature({ dataDir: dir, now, billingGate: async () => ({ allowed: true }), runwareApiKey: "test-key", fetch, ...overrides }) };
 }
 function clean(t) { t.after(() => rmSync(t.context.dir, { recursive: true, force: true })); }
+const currentProjectRevision = (api, tenantId, projectId) => api.getClientProject(tenantId, projectId).projectRevision;
 function emptyClientState(project) {
   return {
     project: { id: project.id, name: project.name, model: "google:gemini@omni-flash", purpose: "Campaign", platform: "YouTube", ratio: "16:9", resolution: "720p", format: "mp4", duration: 30 },
@@ -41,7 +43,9 @@ test("CRUD and full checkpoints are tenant-safe and deletion is explicit", (t) =
   const p = api.createProject("alice", { name: "Film" });
   assert.equal(api.listProjects("alice").length, 1); assert.equal(api.listProjects("bob").length, 0);
   const payload = emptyClientState(p); payload.scenes.push({ id: "scene_1", title: "Opening", prompt: "Wind across grass" }); payload.screenplay = "FADE IN. Wind moves through the field.";
-  const saved = api.checkpointProject("alice", p.id, { label: "Opening drafted", state: payload });
+  const emptyHash = createHash("sha256").update("").digest("hex");
+  assert.throws(() => api.checkpointProject("alice", p.id, { label: "Missing revision", state: payload, expectedProjectRevision: currentProjectRevision(api, "alice", p.id) }), (error) => error.code === "video_screenplay_precondition_required" && error.status === 428);
+  const saved = api.checkpointProject("alice", p.id, { label: "Opening drafted", state: payload, expectedScreenplaySha256: emptyHash, expectedProjectRevision: currentProjectRevision(api, "alice", p.id) });
   assert.equal(saved.scenes.length, 1); assert.equal(api.getClientProject("alice", p.id).project.name, "Film");
   assert.equal(api.renameProject("alice", p.id, "New").name, "New"); assert.throws(() => api.deleteProject("alice", p.id), /confirmation/);
   assert.deepEqual(api.deleteProject("alice", p.id, { confirmDelete: true }), { deleted: true, id: p.id });
@@ -50,15 +54,170 @@ test("CRUD and full checkpoints are tenant-safe and deletion is explicit", (t) =
 
 test("history preserves commands, bounded scenes, screenplay tokens, undo and redo", (t) => {
   t.context = suite(); clean(t); const { api } = t.context; const p = api.createProject("a");
+  assert.equal(p.ai.screenwriter.model, "arcee-ai/trinity-large-thinking"); assert.equal(Object.hasOwn(p.ai, "palmyra"), false);
   for (let i = 0; i < 100; i++) api.applyCommand("a", p.id, { type: "scene.add", scene: { id: "scene_" + i } });
   assert.throws(() => api.applyCommand("a", p.id, { type: "scene.add", scene: { id: "scene_101" } }), /100 scenes/);
   api.applyCommand("a", p.id, { type: "screenplay.set", text: "one two three" });
   const restarted = createVideoFeature({ dataDir: t.context.dir });
-  assert.equal(restarted.undo("a", p.id).screenplay.text, "");
+  assert.equal(restarted.undo("a", p.id, currentProjectRevision(restarted, "a", p.id)).screenplay.text, "");
   const restartedAgain = createVideoFeature({ dataDir: t.context.dir });
-  assert.equal(restartedAgain.redo("a", p.id).screenplay.text, "one two three");
+  assert.equal(restartedAgain.redo("a", p.id, currentProjectRevision(restartedAgain, "a", p.id)).screenplay.text, "one two three");
   assert.throws(() => api.applyCommand("a", p.id, { type: "screenplay.set", text: "x ".repeat(115001) }), /115,000/);
   const paths = api.paths("a", p.id); assert.ok(existsSync(paths.events)); assert.match(readFileSync(paths.events, "utf8"), /command.scene.add/); assert.ok(existsSync(paths.checkpoints));
+});
+
+test("legacy Palmyra project state migrates to Trinity and screenplay usage is checkpointed", (t) => {
+  t.context = suite(); clean(t); const { api } = t.context; const project = api.createProject("a"); const file = api.paths("a", project.id).state;
+  const legacy = JSON.parse(readFileSync(file, "utf8"));
+  delete legacy.ai.screenwriter; legacy.ai.palmyra = { model: "writer/palmyra-creative-122b", available: false, state: { priorMarker: "preserved" } };
+  writeFileSync(file, JSON.stringify(legacy));
+  const restarted = createVideoFeature({ dataDir: t.context.dir });
+  const migrated = restarted.getProject("a", project.id);
+  assert.equal(migrated.ai.screenwriter.model, "arcee-ai/trinity-large-thinking");
+  assert.equal(migrated.ai.screenwriter.contextWindow, 115_000); assert.equal(migrated.ai.screenwriter.reasoning, true);
+  assert.equal(migrated.ai.screenwriter.state.priorMarker, "preserved"); assert.equal(Object.hasOwn(migrated.ai, "palmyra"), false);
+  restarted.applyCommand("a", project.id, { type: "screenplay.set", text: "FADE IN.", model: "arcee-ai/trinity-large-thinking", generationId: "gen-1", finishReason: "stop", brief: "A private story brief", generatedSections: 1, sessionId: "dominion-video-writer-private", lastTurn: { userContent: "private prompt", content: "FADE IN.", reasoningDetails: [{ type: "reasoning.text", text: "opaque private reasoning" }] }, usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30, cost: 0.0000192, completion_tokens_details: { reasoning_tokens: 8 } } });
+  const saved = restarted.getProject("a", project.id);
+  assert.equal(saved.ai.screenwriter.state.generationId, "gen-1"); assert.equal(saved.ai.screenwriter.state.usage.reasoningTokens, 8); assert.equal(saved.ai.screenwriter.state.usage.costUsd, 0.0000192);
+  assert.equal(saved.ai.screenwriter.state.lastTurn.reasoningDetails[0].text, "opaque private reasoning");
+  const client = restarted.getClientProject("a", project.id);
+  assert.equal(client.ai.screenwriter.state.generatedSections, 1);
+  assert.equal(client.ai.screenwriter.state.lastFinishReason, "stop");
+  assert.equal(JSON.stringify(client).includes("opaque private reasoning"), false);
+  assert.equal(JSON.stringify(client).includes("A private story brief"), false);
+  assert.equal(JSON.stringify(client).includes("dominion-video-writer-private"), false);
+});
+
+test("screenwriter compare-and-save cannot overwrite a newer screenplay checkpoint", (t) => {
+  t.context = suite(); clean(t); const { api } = t.context; const project = api.createProject("a");
+  const originalHash = createHash("sha256").update("").digest("hex");
+  api.applyCommand("a", project.id, { type: "screenplay.set", text: "USER EDIT SAVED WHILE TRINITY WAS WRITING" });
+  assert.throws(() => api.applyCommand("a", project.id, {
+    type: "screenplay.set", text: "STALE PROVIDER RESULT", model: "arcee-ai/trinity-large-thinking",
+    expectedScreenplaySha256: originalHash, expectedScreenwriterGenerationId: null,
+    generationId: "gen-stale", finishReason: "stop", usage: { cost: 0.001 },
+  }), (error) => error.code === "screenwriter_stale_write" && error.status === 409);
+  assert.equal(api.getProject("a", project.id).screenplay.text, "USER EDIT SAVED WHILE TRINITY WAS WRITING");
+});
+
+test("a stale checkpoint hash cannot overwrite a newer server screenplay", (t) => {
+  t.context = suite(); clean(t); const { api } = t.context; const project = api.createProject("a");
+  const emptyHash = createHash("sha256").update("").digest("hex");
+  api.applyCommand("a", project.id, { type: "screenplay.set", text: "NEWER SERVER SCREENPLAY" });
+  const stale = emptyClientState(project); stale.screenplay = "STALE BROWSER SCREENPLAY";
+  assert.throws(() => api.checkpointProject("a", project.id, {
+    label: "Stale browser checkpoint", state: stale, expectedScreenplaySha256: emptyHash, expectedProjectRevision: currentProjectRevision(api, "a", project.id),
+  }), (error) => error.code === "video_checkpoint_stale" && error.status === 409);
+  assert.equal(api.getProject("a", project.id).screenplay.text, "NEWER SERVER SCREENPLAY");
+});
+
+test("provider pre-submit and canonical ledgers block checkpoints only while unresolved", (t) => {
+  t.context = suite(); clean(t); const { api } = t.context; const project = api.createProject("a");
+  const revision = createHash("sha256").update("").digest("hex"); const state = emptyClientState(project);
+  const local = { attemptId: "sw_local_presubmit", generationId: null, status: "provider_submitting", settlement: { status: "awaiting_response", costUsd: 0 }, sourceScreenplaySha256: revision };
+  api.applyCommand("a", project.id, { type: "screenwriter.attempt", begin: true, attempt: local });
+  assert.throws(() => api.checkpointProject("a", project.id, { state, expectedScreenplaySha256: revision, expectedProjectRevision: currentProjectRevision(api, "a", project.id) }), (error) => error.code === "screenwriter_busy" && error.status === 409);
+  api.applyCommand("a", project.id, { type: "screenwriter.attempt", attempt: { ...local, generationId: "gen-correlated", status: "provider_correlated", settlement: { status: "not_billed", costUsd: 0 } } });
+  assert.doesNotThrow(() => api.checkpointProject("a", project.id, { state, expectedScreenplaySha256: revision, expectedProjectRevision: currentProjectRevision(api, "a", project.id) }));
+
+  const canonical = { attemptId: "sw_canonical", generationId: "gen-correlated", status: "provider_in_progress", settlement: { status: "awaiting_response", costUsd: 0 }, sourceScreenplaySha256: revision };
+  api.applyCommand("a", project.id, { type: "screenwriter.attempt", attempt: canonical });
+  assert.throws(() => api.checkpointProject("a", project.id, { state, expectedScreenplaySha256: revision, expectedProjectRevision: currentProjectRevision(api, "a", project.id) }), (error) => error.code === "screenwriter_busy");
+  api.applyCommand("a", project.id, { type: "screenwriter.attempt", attempt: { ...canonical, status: "provider_contract_rejected", settlement: { status: "not_billed", costUsd: 0 } } });
+  assert.doesNotThrow(() => api.checkpointProject("a", project.id, { state, expectedScreenplaySha256: revision, expectedProjectRevision: currentProjectRevision(api, "a", project.id) }));
+  assert.equal(JSON.stringify(api.getClientProject("a", project.id)).includes("sw_local_presubmit"), false);
+});
+
+test("canonical Trinity success atomically supersedes the local submission and unlocks checkpoints", (t) => {
+  t.context = suite(); clean(t); const { api } = t.context; const project = api.createProject("a");
+  const revision = createHash("sha256").update("").digest("hex");
+  const local = { attemptId: "sw_local_atomic", generationId: null, status: "provider_submitting", sourceScreenplaySha256: revision, sourceGenerationId: null, settlement: { status: "awaiting_response", costUsd: 0 } };
+  const canonical = { attemptId: "sw_canonical_atomic", generationId: "gen-atomic", status: "provider_in_progress", sourceScreenplaySha256: revision, sourceGenerationId: null, settlement: { status: "awaiting_response", costUsd: 0 } };
+  api.applyCommand("a", project.id, { type: "screenwriter.attempt", begin: true, attempt: local });
+  api.applyCommand("a", project.id, { type: "screenwriter.attempt", attempt: canonical, supersedeAttemptId: local.attemptId });
+  let stored = api.getProject("a", project.id).providerAttempts;
+  assert.equal(stored.find((item) => item.attemptId === local.attemptId).status, "provider_correlated");
+  assert.equal(stored.find((item) => item.attemptId === canonical.attemptId).status, "provider_in_progress");
+  api.applyCommand("a", project.id, { type: "screenwriter.attempt", attempt: { ...canonical, status: "provider_accepted", usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cost: 0.001 }, settlement: { status: "settled", costUsd: 0.001 } } });
+  api.applyCommand("a", project.id, { type: "screenplay.set", text: "EXT. HARBOR - DAWN", model: "arcee-ai/trinity-large-thinking", generationId: "gen-atomic", attemptId: canonical.attemptId, expectedScreenplaySha256: revision, expectedScreenwriterGenerationId: null, usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cost: 0.001 }, settlement: { status: "settled", costUsd: 0.001 } });
+  stored = api.getProject("a", project.id).providerAttempts;
+  assert.equal(stored.find((item) => item.attemptId === local.attemptId).status, "provider_correlated");
+  assert.equal(stored.find((item) => item.attemptId === canonical.attemptId).status, "applied");
+  const state = emptyClientState(project); state.screenplay = "EXT. HARBOR - DAWN";
+  assert.doesNotThrow(() => api.checkpointProject("a", project.id, { label: "post-Trinity checkpoint", state, expectedScreenplaySha256: createHash("sha256").update(state.screenplay).digest("hex"), expectedProjectRevision: currentProjectRevision(api, "a", project.id) }));
+});
+
+test("valid large Trinity recovery candidates fit the bounded durable ledger", (t) => {
+  t.context = suite(); clean(t); const { api } = t.context; const project = api.createProject("a");
+  const revision = createHash("sha256").update("").digest("hex");
+  const large = "界".repeat(450_000), brief = "語".repeat(150_000);
+  const attempt = { attemptId: "sw_large_candidate", generationId: "gen-large-candidate", status: "provider_accepted", sourceScreenplaySha256: revision, sourceGenerationId: null, usage: { cost: 0.01 }, settlement: { status: "pending", costUsd: 0.01 }, candidate: { text: large, brief, generatedSections: 1, lastTurn: { userContent: "brief", content: "section" }, finishReason: "stop" } };
+  assert.ok(Buffer.byteLength(JSON.stringify(attempt.candidate), "utf8") > 1_750_000);
+  assert.doesNotThrow(() => api.applyCommand("a", project.id, { type: "screenwriter.attempt", attempt }));
+  assert.equal(api.getProject("a", project.id).providerAttempts.at(-1).candidate.text.length, large.length);
+});
+
+test("load repairs state from an atomic checkpoint written ahead of project.json", (t) => {
+  t.context = suite(); clean(t); const { api, dir } = t.context; const project = api.createProject("a");
+  const revision = createHash("sha256").update("").digest("hex");
+  const local = { attemptId: "sw_local_crash", generationId: null, status: "provider_submitting", sourceScreenplaySha256: revision, sourceGenerationId: null, settlement: { status: "awaiting_response", costUsd: 0 } };
+  api.applyCommand("a", project.id, { type: "screenwriter.attempt", begin: true, attempt: local });
+  const beforeCanonical = readFileSync(api.paths("a", project.id).state, "utf8");
+  const canonical = { attemptId: "sw_canonical_crash", generationId: "gen-crash-recovery", status: "provider_in_progress", sourceScreenplaySha256: revision, sourceGenerationId: null, settlement: { status: "awaiting_response", costUsd: 0 } };
+  api.applyCommand("a", project.id, { type: "screenwriter.attempt", attempt: canonical, supersedeAttemptId: local.attemptId });
+  writeFileSync(api.paths("a", project.id).state, beforeCanonical, "utf8");
+  const restarted = createVideoFeature({ dataDir: dir, minFreeDiskBytes: 0 });
+  const recovered = restarted.getProject("a", project.id);
+  assert.equal(recovered.providerAttempts.find((item) => item.attemptId === local.attemptId).status, "provider_correlated");
+  assert.equal(recovered.providerAttempts.find((item) => item.attemptId === canonical.attemptId).generationId, "gen-crash-recovery");
+  assert.equal(JSON.parse(readFileSync(restarted.paths("a", project.id).state, "utf8")).history.head, recovered.history.head);
+});
+
+test("project revision CAS rejects a stale whole-project checkpoint", (t) => {
+  t.context = suite(); clean(t); const { api } = t.context; const project = api.createProject("a");
+  const client = api.getClientProject("a", project.id); const staleRevision = client.projectRevision;
+  api.applyCommand("a", project.id, { type: "scene.add", scene: { id: "server_scene", title: "Server scene" } });
+  assert.throws(() => api.checkpointProject("a", project.id, { state: client, expectedScreenplaySha256: client.screenplaySha256, expectedProjectRevision: staleRevision }), (error) => error.code === "video_project_revision_stale" && error.status === 409);
+  assert.equal(api.getProject("a", project.id).scenes[0].id, "server_scene");
+});
+
+test("an AI turn atomically applies a matching visual plan and quarantines a stale plan without losing conversation", (t) => {
+  t.context = suite(); clean(t); const { api } = t.context; const project = api.createProject("a");
+  const firstRevision = currentProjectRevision(api, "a", project.id);
+  const first = api.updateAiState("a", project.id, {
+    expectedProjectRevision: firstRevision,
+    director: { model: "deepseek-ai/deepseek-v4-pro", directive: "Open on the harbor.", usage: { total_tokens: 12 } },
+    visualOrchestrator: { model: "nvidia/nemotron-3-ultra-550b-a55b", available: true, plan: { scenes: [{ sceneId: "ai_opening", imagePrompt: "A harbor at blue hour" }] } },
+    liaison: { model: "claude-sonnet-5", reply: "The harbor opening is saved." },
+    visualPlanScenes: [{ sceneId: "ai_opening", title: "Harbor", imagePrompt: "A harbor at blue hour", videoPrompt: "Slow crane down" }],
+    conversation: { at: "2026-01-01T00:00:00.000Z", user: "Open on the harbor", reply: "The harbor opening is saved." },
+  });
+  assert.equal(first.history.head, firstRevision + 1);
+  assert.equal(first.scenes[0].id, "ai_opening");
+  assert.equal(first.ai.visualOrchestrator.state.applyStatus, "applied");
+  assert.deepEqual(first.conversation.map((message) => message.content), ["Open on the harbor", "The harbor opening is saved."]);
+  assert.equal(api.listCheckpoints("a", project.id)[0].type, "ai.turn");
+
+  const staleRevision = currentProjectRevision(api, "a", project.id);
+  api.applyCommand("a", project.id, { type: "scene.add", scene: { id: "newer_user_scene", title: "Newer user edit", prompt: "Do not overwrite" } });
+  const newerScenes = structuredClone(api.getProject("a", project.id).scenes);
+  const beforeStaleTurn = currentProjectRevision(api, "a", project.id);
+  const stale = api.updateAiState("a", project.id, {
+    expectedProjectRevision: staleRevision,
+    director: { model: "deepseek-ai/deepseek-v4-pro", directive: "Replace the storyboard.", usage: { total_tokens: 7 } },
+    visualOrchestrator: { model: "nvidia/nemotron-3-ultra-550b-a55b", available: true, plan: { scenes: [{ sceneId: "stale_ai_scene", imagePrompt: "A stale replacement" }] } },
+    liaison: { model: "claude-sonnet-5", reply: "The plan is preserved but not applied." },
+    visualPlanScenes: [{ sceneId: "stale_ai_scene", imagePrompt: "A stale replacement" }],
+    conversation: { at: "2026-01-01T00:00:01.000Z", user: "Replace it", reply: "The plan is preserved but not applied." },
+  });
+  assert.equal(stale.history.head, beforeStaleTurn + 1);
+  assert.deepEqual(stale.scenes, newerScenes);
+  assert.equal(stale.ai.visualOrchestrator.state.applyStatus, "quarantined_stale");
+  assert.equal(stale.ai.visualOrchestrator.state.plan.scenes[0].sceneId, "stale_ai_scene");
+  assert.equal(stale.ai.director.state.directive, "Replace the storyboard.");
+  assert.equal(stale.ai.liaison.state.reply, "The plan is preserved but not applied.");
+  assert.deepEqual(stale.conversation.slice(-2).map((message) => message.content), ["Replace it", "The plan is preserved but not applied."]);
+  assert.equal(api.listCheckpoints("a", project.id)[0].type, "ai.turn");
 });
 
 test("history and deletion cannot erase provider work or evade settlement", async (t) => {
@@ -66,11 +225,11 @@ test("history and deletion cannot erase provider work or evade settlement", asyn
   const firstCheckpoint = api.listCheckpoints("a", project.id).at(-1).seq;
   const submitted = await api.submitGeneration("a", project.id, validRequest({ idempotencyKey: "retained-job" }));
   assert.equal(api.recoverJobs("a", project.id).length, 1);
-  api.undo("a", project.id); api.undo("a", project.id);
+  api.undo("a", project.id, currentProjectRevision(api, "a", project.id)); api.undo("a", project.id, currentProjectRevision(api, "a", project.id));
   assert.equal(api.recoverJobs("a", project.id)[0].id, submitted.jobId);
-  api.redo("a", project.id);
+  api.redo("a", project.id, currentProjectRevision(api, "a", project.id));
   assert.equal(api.recoverJobs("a", project.id)[0].id, submitted.jobId);
-  api.restoreCheckpoint("a", project.id, firstCheckpoint);
+  api.restoreCheckpoint("a", project.id, firstCheckpoint, currentProjectRevision(api, "a", project.id));
   assert.equal(api.recoverJobs("a", project.id)[0].id, submitted.jobId);
   assert.throws(() => api.deleteProject("a", project.id, { confirmDelete: true }), (error) => error.code === "video_job_in_progress" && error.status === 409);
   const ready = await api.pollJob("a", project.id, submitted.jobId); assert.equal(ready.status, "ready");
@@ -156,12 +315,12 @@ test("a client idempotency key can create only one paid provider job", async (t)
   assert.throws(() => validateVideoRequest(validRequest({ idempotencyKey: "bad key" })), /identity is invalid/);
 });
 
-test("billing, provider errors, retry classification, recovery and Palmyra probe are explicit", async (t) => {
+test("billing, provider errors, retry classification and recovery are explicit", async (t) => {
   let calls = 0; t.context = suite({ billingGate: async () => ({ allowed: false }), fetch: async () => { calls++; return new Response("down", { status: 503 }); } }); clean(t);
   const { api } = t.context; const p = api.createProject("a"); await assert.rejects(api.submitGeneration("a", p.id, validRequest()), /auto top-up/); assert.equal(calls, 0);
   const failing = createVideoFeature({ dataDir: join(t.context.dir, "retry"), runwareApiKey: "test", billingGate: async () => ({ allowed: true }), fetch: async () => new Response(JSON.stringify({ errors: [{ code: "timeoutProvider", message: "try again" }] }), { status: 200 }) });
   const q = failing.createProject("a"); const recoveredSubmit = await failing.submitGeneration("a", q.id, validRequest()); assert.equal(recoveredSubmit.status, "retrying"); assert.equal(recoveredSubmit.recoveredFrom, "timeoutProvider");
-  assert.equal(failing.recoverJobs("a", q.id)[0].status, "retrying"); assert.equal((await failing.probePalmyra()).available, false);
+  assert.equal(failing.recoverJobs("a", q.id)[0].status, "retrying");
   assert.throws(() => parseRunwareEnvelope({ errors: [{ code: "invalidPrompt", message: "bad" }] }, "x"), (error) => error.code === "invalidPrompt");
   assert.throws(() => parseRunwareEnvelope({ data: [{ taskUUID: "another-task", status: "success", videoURL: "https://wrong.invalid" }] }, "expected-task"), (error) => error.code === "runware_task_mismatch");
   assert.equal(classifyVideoRetry({ code: "providerRateLimitExceeded", status: 400 }).retryable, true); assert.equal(classifyVideoRetry({ code: "invalidPrompt", status: 400 }).retryable, false);
@@ -200,12 +359,13 @@ test("director context compacts only at the configured 70 percent boundary", () 
 test("checkpoints preserve per-scene generation settings, bound the timeline, and restore durable history", (t) => {
   t.context = suite(); clean(t); const { api } = t.context; const p = api.createProject("a"); const state = emptyClientState(p);
   state.scenes = [{ id: "scene_1", title: "Reference cut", prompt: "Camera drifts", model: "bytedance:seedance@2.0", duration: 12, mode: "reference", frameImages: ["frame"], referenceImages: ["image"], referenceVideos: ["video"], referenceAudios: ["audio"], generateAudio: false, shots: [{ duration: 4, prompt: "First move" }] }];
-  api.checkpointProject("a", p.id, { label: "scene settings", state });
+  const revision = createHash("sha256").update("").digest("hex");
+  api.checkpointProject("a", p.id, { label: "scene settings", state, expectedScreenplaySha256: revision, expectedProjectRevision: currentProjectRevision(api, "a", p.id) });
   const saved = api.getProject("a", p.id).scenes[0]; assert.equal(saved.duration, 12); assert.deepEqual(saved.frameImages, ["frame"]); assert.deepEqual(saved.referenceVideos, ["video"]); assert.equal(saved.generateAudio, false); assert.deepEqual(saved.shots, [{ duration: 4, prompt: "First move" }]);
   state.clips = [{ id: "bad", trackId: "v1", start: 21599, duration: 2 }];
-  assert.throws(() => api.checkpointProject("a", p.id, { state }), /invalid timing/);
+  assert.throws(() => api.checkpointProject("a", p.id, { state, expectedScreenplaySha256: revision, expectedProjectRevision: currentProjectRevision(api, "a", p.id) }), /invalid timing/);
   const history = api.listCheckpoints("a", p.id); assert.ok(history.length >= 2); api.renameProject("a", p.id, "Changed");
-  api.restoreCheckpoint("a", p.id, history.find((item) => item.label === "scene settings").seq); assert.equal(api.getProject("a", p.id).name, p.name);
+  api.restoreCheckpoint("a", p.id, history.find((item) => item.label === "scene settings").seq, currentProjectRevision(api, "a", p.id)); assert.equal(api.getProject("a", p.id).name, p.name);
 });
 
 test("verified output creates one durable generated clip with real audio facts", async (t) => {

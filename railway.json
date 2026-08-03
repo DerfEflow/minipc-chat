@@ -8,6 +8,7 @@
     "startCommand": "sh /app/start.sh",
     "healthcheckPath": "/api/version",
     "healthcheckTimeout": 60,
+    "drainingSeconds": 330,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5
   }

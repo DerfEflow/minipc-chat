@@ -12,6 +12,7 @@ import { gzipSync, gunzipSync } from "node:zlib";
 
 const MAX_SCENES = 100;
 const MAX_SCREENPLAY_TOKENS = 115000;
+const SCREENWRITER_MODEL = "arcee-ai/trinity-large-thinking";
 const VIDEO_TRACKS = 3;
 const AUDIO_TRACKS = 4;
 const MAX_PROJECT_DURATION = 21600;
@@ -34,11 +35,37 @@ function jobRequiresRetention(job = {}, { requireDelivery = false } = {}) {
   return !Number.isFinite(cost) || cost > 0;
 }
 
+const TERMINAL_SCREENWRITER_ATTEMPT_STATUSES = new Set([
+  "applied",
+  "rejected",
+  "provider_http_rejected",
+  "provider_contract_rejected",
+  "provider_correlated",
+  "quarantined_stale_settled",
+  "operator_quarantined",
+]);
+
+export function screenwriterAttemptBlocksMutation(attempt = {}) {
+  const status = String(attempt.status || "").toLowerCase();
+  if (!TERMINAL_SCREENWRITER_ATTEMPT_STATUSES.has(status)) return true;
+  const settlement = String(attempt.settlement?.status || "").toLowerCase();
+  const cost = Number(attempt.usage?.costUsd ?? attempt.settlement?.costUsd ?? 0);
+  return Number.isFinite(cost) && cost > 0 && !["settled", "skipped", "not_billed"].includes(settlement);
+}
+
+function providerAttemptRequiresRetention(attempt = {}) {
+  if (screenwriterAttemptBlocksMutation(attempt)) return true;
+  const settlement = String(attempt.settlement?.status || "").toLowerCase();
+  const cost = Number(attempt.usage?.costUsd ?? attempt.settlement?.costUsd ?? 0);
+  return Number.isFinite(cost) && cost > 0 && !["settled", "skipped", "not_billed"].includes(settlement);
+}
+
 function restoreProjectSnapshot(current, snapshot) {
   const restored = clone(snapshot);
   for (const field of ["schemaVersion", "id", "tenantId", "createdAt", "temporary", "expiresAt"]) restored[field] = clone(current[field]);
   restored.jobs = clone(current.jobs || []);
   restored.exports = clone(current.exports || []);
+  restored.providerAttempts = clone(current.providerAttempts || []);
   return restored;
 }
 
@@ -122,16 +149,20 @@ function createState({ id, name, tenantId, now, temporary = false }) {
   return { schemaVersion: 1, id, tenantId, name: String(name || "Untitled video").trim().slice(0, 160) || "Untitled video", createdAt: at, updatedAt: at,
     temporary: !!temporary, expiresAt: temporary ? new Date(Number(now()) + 24 * 60 * 60 * 1000).toISOString() : null,
     settings: clone(DEFAULT_SETTINGS), scenes: [], screenplay: { text: "", tokens: 0, limit: MAX_SCREENPLAY_TOKENS, revisions: [] }, timeline: defaultTimeline(), ui: { panels: { writer: "regular", board: "regular" }, focus: false, zoom: 1 }, conversation: [],
-    ai: { palmyra: { model: "writer/palmyra-creative-122b", available: null, state: {} }, visualOrchestrator: { model: "nvidia/nemotron-3-ultra-550b-a55b", state: {} }, director: { model: "deepseek-ai/deepseek-v4-pro", contextWindow: 1000000, compactAtPercent: 70, compactionRequired: false, state: {} }, liaison: { model: "claude-sonnet-5", promptCaching: true, state: {} } },
-    history: { head: 0, undo: [], redo: [] }, jobs: [], exports: [] };
+    ai: { screenwriter: { model: SCREENWRITER_MODEL, contextWindow: MAX_SCREENPLAY_TOKENS, reasoning: true, state: { brief: "", generatedSections: 0, lastTurn: null } }, visualOrchestrator: { model: "nvidia/nemotron-3-ultra-550b-a55b", state: {} }, director: { model: "deepseek-ai/deepseek-v4-pro", contextWindow: 1000000, compactAtPercent: 70, compactionRequired: false, state: {} }, liaison: { model: "claude-sonnet-5", promptCaching: true, state: {} } },
+    history: { head: 0, undo: [], redo: [] }, jobs: [], exports: [], providerAttempts: [] };
 }
 function migrateState(state) {
   state.settings ||= clone(DEFAULT_SETTINGS);
   state.ui ||= { panels: { writer: "regular", board: "regular" }, focus: false, zoom: 1 };
   state.exports ||= [];
+  state.providerAttempts = (Array.isArray(state.providerAttempts) ? state.providerAttempts : []).slice(-100);
   state.conversation ||= [];
   state.ai ||= {};
-  state.ai.palmyra ||= { model: "writer/palmyra-creative-122b", available: null, state: {} };
+  const legacyScreenwriter = state.ai.screenwriter || state.ai.palmyra || {};
+  const legacyScreenwriterState = legacyScreenwriter.state && typeof legacyScreenwriter.state === "object" ? legacyScreenwriter.state : {};
+  state.ai.screenwriter = { model: SCREENWRITER_MODEL, contextWindow: MAX_SCREENPLAY_TOKENS, reasoning: true, state: { ...legacyScreenwriterState, brief: String(legacyScreenwriterState.brief || "").slice(0, 460_000), generatedSections: Math.max(0, Number(legacyScreenwriterState.generatedSections) || 0), lastTurn: legacyScreenwriterState.lastTurn && typeof legacyScreenwriterState.lastTurn === "object" ? legacyScreenwriterState.lastTurn : null } };
+  delete state.ai.palmyra;
   state.ai.visualOrchestrator ||= { model: "nvidia/nemotron-3-ultra-550b-a55b", state: {} };
   state.ai.director ||= { model: "deepseek-ai/deepseek-v4-pro", contextWindow: 1000000, compactAtPercent: 70, compactionRequired: false, state: {} };
   state.ai.liaison ||= { model: "claude-sonnet-5", promptCaching: true, state: {} };
@@ -149,6 +180,8 @@ function assertState(state) {
   migrateState(state);
   if (!state || !PROJECT_ID.test(state.id)) fail("video_project_corrupt", "The video project has an invalid identity.", 409);
   if (!Array.isArray(state.scenes) || state.scenes.length > MAX_SCENES) fail("video_scene_limit", "A project can contain at most 100 scenes.", 409);
+  if (!Array.isArray(state.providerAttempts) || state.providerAttempts.length > 100) fail("video_provider_attempts_invalid", "The project provider-attempt ledger is invalid.", 409);
+  for (const attempt of state.providerAttempts) if (Buffer.byteLength(JSON.stringify(attempt || {}), "utf8") > 8 * 1024 * 1024) fail("video_provider_attempt_invalid", "A provider-attempt record is too large.", 409);
   if (!state.timeline || state.timeline.videoTracks?.length !== VIDEO_TRACKS || state.timeline.audioTracks?.length !== AUDIO_TRACKS) fail("video_timeline_invalid", "Video projects always have three video and four audio tracks.", 409);
   if (!(Number(state.settings?.duration) >= 1) || Number(state.settings.duration) > MAX_PROJECT_DURATION) fail("video_project_duration_invalid", "Project duration is outside the supported range.", 409);
   const tracks = [...state.timeline.videoTracks, ...state.timeline.audioTracks];
@@ -168,10 +201,19 @@ function clientProject(state) {
     const file = clip.mediaFile || jobFiles.get(clip.mediaJobId); const src = file ? `/api/video/media/${encodeURIComponent(state.id)}/${encodeURIComponent(file)}` : null;
     return { ...clone(clip), trackId: track.id, ...(src ? { src } : {}) };
   }));
+  const clientAi = clone(state.ai);
+  const writerState = state.ai?.screenwriter?.state || {};
+  if (clientAi.screenwriter) clientAi.screenwriter.state = {
+    generatedSections: Math.max(0, Number(writerState.generatedSections) || 0),
+    lastFinishReason: String(writerState.finishReason || "").slice(0, 80) || null,
+    truncated: writerState.truncated === true,
+    updatedAt: writerState.updatedAt || null,
+  };
   return {
     project: { id: state.id, name: state.name, ...clone(state.settings), createdAt: state.createdAt, updatedAt: state.updatedAt },
-    screenplay: state.screenplay.text, scenes: clone(state.scenes), tracks, clips, ui: clone(state.ui), messages: clone(state.conversation),
-    ai: clone(state.ai), jobs: state.jobs.map(({ localOutput, providerResponse, request, ...job }) => ({ ...clone(job), hasLocalOutput: !!localOutput, model: request?.model || null, cost: job.cost ?? providerResponse?.cost ?? null })),
+    projectRevision: Number(state.history?.head) || 0,
+    screenplay: state.screenplay.text, screenplaySha256: createHash("sha256").update(state.screenplay.text || "").digest("hex"), scenes: clone(state.scenes), tracks, clips, ui: clone(state.ui), messages: clone(state.conversation),
+    ai: clientAi, jobs: state.jobs.map(({ localOutput, providerResponse, request, ...job }) => ({ ...clone(job), hasLocalOutput: !!localOutput, model: request?.model || null, cost: job.cost ?? providerResponse?.cost ?? null })),
     exports: clone(state.exports || []),
   };
 }
@@ -391,7 +433,7 @@ function submissionRecovery(err) {
   return { state: safeToResubmit ? "retry_safe" : "ack_unknown", safeToResubmit };
 }
 
-export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetch, now = Date.now, billingGate = null, mediaProcessor = {}, runwareApiKey = process.env.RUNWARE_VIDEO_GEN_DOMINION_API_KEY, runwareBaseUrl = "https://api.runware.ai/v1", runwareTimeoutMs = 45_000, runwareRetries = 2, nvidiaApiKey = process.env.NVIDIA_API_KEY, nvidiaBaseUrl = "https://integrate.api.nvidia.com/v1", storageQuotaBytes: configuredStorageQuotaBytes = 2 * 1024 * 1024 * 1024, tenantStorageQuotaBytes: configuredTenantStorageQuotaBytes, maxProjectsPerTenant: configuredMaxProjects = 50, minFreeDiskBytes: configuredMinFreeDiskBytes = 512 * 1024 * 1024 } = {}) {
+export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetch, now = Date.now, billingGate = null, mediaProcessor = {}, runwareApiKey = process.env.RUNWARE_VIDEO_GEN_DOMINION_API_KEY, runwareBaseUrl = "https://api.runware.ai/v1", runwareTimeoutMs = 45_000, runwareRetries = 2, storageQuotaBytes: configuredStorageQuotaBytes = 2 * 1024 * 1024 * 1024, tenantStorageQuotaBytes: configuredTenantStorageQuotaBytes, maxProjectsPerTenant: configuredMaxProjects = 50, minFreeDiskBytes: configuredMinFreeDiskBytes = 512 * 1024 * 1024 } = {}) {
   if (!dataDir) throw new TypeError("dataDir is required");
   const root = resolve(dataDir); mkdirSync(root, { recursive: true });
   const storageQuotaBytes = Math.max(64 * 1024 * 1024, Number(configuredStorageQuotaBytes) || 2 * 1024 * 1024 * 1024);
@@ -448,12 +490,27 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     ensureDiskHeadroom(requested);
     return { usedBytes: used, quotaBytes: storageQuotaBytes, tenantUsedBytes: tenantUsed, tenantQuotaBytes: tenantStorageQuotaBytes, remainingBytes: Math.max(0, Math.min(storageQuotaBytes - used, tenantStorageQuotaBytes - tenantUsed)) };
   }
-  function load(tenantId, id) { const file = stateFile(tenantId, id); if (!existsSync(file)) fail("video_project_missing", "Video project not found.", 404); return assertState(readJson(file)); }
+  function load(tenantId, id) {
+    const file = stateFile(tenantId, id);
+    if (!existsSync(file)) fail("video_project_missing", "Video project not found.", 404);
+    let state = assertState(readJson(file));
+    const checkpointDir = paths(tenantId, id).checkpoints;
+    if (existsSync(checkpointDir)) {
+      const latest = readdirSync(checkpointDir).map((name) => Number(name.match(/^(\d{8})\.json(?:\.gz)?$/)?.[1] || 0)).filter(Number.isInteger).sort((a, b) => b - a)[0] || 0;
+      if (latest > Number(state.history?.head || 0)) {
+        const recovered = assertState(readCheckpoint(paths(tenantId, id), latest));
+        if (recovered.id !== state.id || recovered.tenantId !== state.tenantId || Number(recovered.history?.head || 0) !== latest) fail("video_checkpoint_corrupt", "The newest project checkpoint does not match its authoritative project.", 409);
+        atomicJson(file, recovered);
+        state = recovered;
+      }
+    }
+    return state;
+  }
   function save(tenantId, state) { state.updatedAt = iso(now); assertState(state); atomicJson(stateFile(tenantId, state.id), state); return clone(state); }
   const checkpointName = (seq, compressed = true) => join("", String(seq).padStart(8, "0") + (compressed ? ".json.gz" : ".json"));
   function checkpointSnapshot(state, seq) {
     const snapshot = clone(state);
-    snapshot.history = { head: seq, undo: [], redo: [] };
+    snapshot.history = { head: seq, undo: clone(state.history?.undo || []), redo: clone(state.history?.redo || []) };
     snapshot.screenplay.revisions = (snapshot.screenplay.revisions || []).map(({ text, ...revision }) => revision);
     return snapshot;
   }
@@ -488,7 +545,7 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     for (const entry of projectEntries(tenantId)) {
       try {
         const state = load(tenantId, entry.name);
-        if (!state.temporary || !state.expiresAt || Date.parse(state.expiresAt) > Number(now()) || state.jobs.some((job) => jobRequiresRetention(job, { requireDelivery: true }))) continue;
+        if (!state.temporary || !state.expiresAt || Date.parse(state.expiresAt) > Number(now()) || state.jobs.some((job) => jobRequiresRetention(job, { requireDelivery: true })) || state.providerAttempts.some(providerAttemptRequiresRetention)) continue;
         const target = projectDir(tenantId, state.id);
         if (!within(dir, target) || basename(target) !== state.id) continue;
         rmSync(target, { recursive: true, force: false }); removed += 1;
@@ -539,20 +596,140 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     return recovered.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   }
   function renameProject(tenantId, id, name) { const text = String(name || "").trim(); if (!text || text.length > 160) fail("video_name_invalid", "Project names must be between 1 and 160 characters."); return mutate(tenantId, id, "project.renamed", (s) => { s.name = text; }, { name: text }); }
-  function deleteProject(tenantId, id, { confirmDelete = false } = {}) { if (confirmDelete !== true) fail("video_delete_confirmation_required", "Explicit project deletion confirmation is required."); const dir = projectDir(tenantId, id); if (!existsSync(dir)) fail("video_project_missing", "Video project not found.", 404); if (!within(tenantRoot(tenantId), dir) || basename(dir) !== id) fail("video_path_invalid", "Invalid project path."); const state = load(tenantId, id); if (state.jobs.some((job) => jobRequiresRetention(job, { requireDelivery: state.temporary }))) fail("video_job_in_progress", "This project still has provider work, an unsettled video, or a verified mobile download awaiting delivery. Let Dominion finish before deleting the project.", 409); rmSync(dir, { recursive: true, force: false }); return { deleted: true, id }; }
+  function deleteProject(tenantId, id, { confirmDelete = false } = {}) { if (confirmDelete !== true) fail("video_delete_confirmation_required", "Explicit project deletion confirmation is required."); const dir = projectDir(tenantId, id); if (!existsSync(dir)) fail("video_project_missing", "Video project not found.", 404); if (!within(tenantRoot(tenantId), dir) || basename(dir) !== id) fail("video_path_invalid", "Invalid project path."); const state = load(tenantId, id); if (state.jobs.some((job) => jobRequiresRetention(job, { requireDelivery: state.temporary }))) fail("video_job_in_progress", "This project still has provider work, an unsettled video, or a verified mobile download awaiting delivery. Let Dominion finish before deleting the project.", 409); if (state.providerAttempts.some(providerAttemptRequiresRetention)) fail("video_provider_attempt_in_progress", "This project has a provider request or charge awaiting settlement or repair. Let Dominion finish before deleting the project.", 409); rmSync(dir, { recursive: true, force: false }); return { deleted: true, id }; }
+  function applyVisualPlan(state, rawScenes) {
+    const plan = Array.isArray(rawScenes) ? rawScenes : [];
+    if (!plan.length || plan.length > MAX_SCENES) fail("video_scene_limit", "A visual plan must contain between 1 and 100 scenes.");
+    const previous = new Map(state.scenes.map((scene) => [scene.id, scene]));
+    state.scenes = plan.map((scene, index) => {
+      const id = String(scene?.sceneId || scene?.id || `scene_${index + 1}`); if (!SAFE_ID.test(id.replaceAll("-", "_"))) fail("video_scene_invalid", "Visual plan contains an invalid scene id.");
+      const old = previous.get(id) || {};
+      return { ...old, id, title: String(scene?.title || old.title || `Scene ${index + 1}`).slice(0, 160), prompt: String(scene?.videoPrompt || scene?.imagePrompt || old.prompt || "").slice(0, 32000), imagePrompt: String(scene?.imagePrompt || "").slice(0, 32000), continuity: String(scene?.continuity || "").slice(0, 8000), model: VIDEO_CAPABILITIES[scene?.suggestedVideoModel] ? scene.suggestedVideoModel : old.model || null, status: old.status || "planned" };
+    });
+  }
   function applyCommand(tenantId, id, command = {}) { const type = String(command.type || ""); return mutate(tenantId, id, "command." + type, (s) => {
     if (type === "scene.add") { if (s.scenes.length >= MAX_SCENES) fail("video_scene_limit", "A project can contain at most 100 scenes."); const scene = clone(command.scene || {}); scene.id ||= randomUUID(); if (!SAFE_ID.test(scene.id.replaceAll("-", "_"))) fail("video_scene_invalid", "Invalid scene id."); s.scenes.push(scene); }
     else if (type === "scene.remove") { const index = s.scenes.findIndex((v) => v.id === command.sceneId); if (index < 0) fail("video_scene_missing", "Scene not found.", 404); s.scenes.splice(index, 1); }
-    else if (type === "screenplay.set") { const text = String(command.text || ""); const tokens = tokenCount(text); if (tokens > MAX_SCREENPLAY_TOKENS) fail("video_screenplay_limit", "The screenplay exceeds the 115,000-token project limit."); s.screenplay.revisions.push({ at: iso(now), tokens: s.screenplay.tokens, checkpointSeq: s.history?.head || null, sha256: createHash("sha256").update(s.screenplay.text || "").digest("hex") }); s.screenplay.text = text; s.screenplay.tokens = tokens; }
+    else if (type === "screenwriter.attempt") {
+      const incoming = command.attempt && typeof command.attempt === "object" ? clone(command.attempt) : {};
+      const attemptId = String(incoming.attemptId || "").slice(0, 128);
+      if (!SAFE_ID.test(attemptId)) fail("video_provider_attempt_invalid", "The screenwriter attempt identity is invalid.");
+      if (command.begin === true) {
+        const expectedHash = String(incoming.sourceScreenplaySha256 || "");
+        const currentHash = createHash("sha256").update(s.screenplay?.text || "").digest("hex");
+        const expectedGeneration = String(incoming.sourceGenerationId || "").slice(0, 200) || null;
+        const currentGeneration = String(s.ai?.screenwriter?.state?.generationId || "").slice(0, 200) || null;
+        if (!/^[a-f0-9]{64}$/.test(expectedHash) || currentHash !== expectedHash || currentGeneration !== expectedGeneration) fail("screenwriter_stale_prompt", "The screenplay changed before Trinity provider egress. Refresh the project; no provider request was started.", 409);
+        if (s.providerAttempts.some(screenwriterAttemptBlocksMutation)) fail("screenwriter_reconciliation_required", "This project already has Trinity provider work awaiting completion or reconciliation. No second provider request was started.", 409);
+      }
+      const index = s.providerAttempts.findIndex((attempt) => attempt.attemptId === attemptId);
+      const prior = index >= 0 ? s.providerAttempts[index] : {};
+      const candidate = incoming.candidate === undefined ? prior.candidate : incoming.candidate === null ? null : clone(incoming.candidate);
+      if (candidate && Buffer.byteLength(JSON.stringify(candidate), "utf8") > 8 * 1024 * 1024) fail("video_provider_attempt_invalid", "The recoverable screenwriter candidate is too large to save safely.", 413);
+      const rawUsage = incoming.usage && typeof incoming.usage === "object" ? incoming.usage : prior.usage || {};
+      const rawSettlement = incoming.settlement && typeof incoming.settlement === "object" ? incoming.settlement : prior.settlement || {};
+      const nullableText = (field, limit) => String((Object.hasOwn(incoming, field) ? incoming[field] : prior[field]) ?? "").slice(0, limit) || null;
+      const attempt = {
+        attemptId,
+        generationId: nullableText("generationId", 200),
+        provider: "openrouter",
+        model: SCREENWRITER_MODEL,
+        status: String(incoming.status || prior.status || "recorded").slice(0, 80),
+        rejectionCode: nullableText("rejectionCode", 120),
+        finishReason: nullableText("finishReason", 80),
+        reconciliationFailures: Math.max(0, Math.min(100, Number(incoming.reconciliationFailures ?? prior.reconciliationFailures) || 0)),
+        lastReconciliationError: nullableText("lastReconciliationError", 160),
+        lastReconciledAt: nullableText("lastReconciledAt", 40),
+        sourceScreenplaySha256: /^[a-f0-9]{64}$/.test(String(incoming.sourceScreenplaySha256 || prior.sourceScreenplaySha256 || "")) ? String(incoming.sourceScreenplaySha256 || prior.sourceScreenplaySha256) : null,
+        sourceGenerationId: nullableText("sourceGenerationId", 200),
+        usage: {
+          promptTokens: Math.max(0, Number(rawUsage.promptTokens ?? rawUsage.prompt_tokens) || 0),
+          completionTokens: Math.max(0, Number(rawUsage.completionTokens ?? rawUsage.completion_tokens) || 0),
+          reasoningTokens: Math.max(0, Number(rawUsage.reasoningTokens ?? rawUsage.completion_tokens_details?.reasoning_tokens) || 0),
+          totalTokens: Math.max(0, Number(rawUsage.totalTokens ?? rawUsage.total_tokens) || 0),
+          costUsd: Math.max(0, Number(rawUsage.costUsd ?? rawUsage.cost) || 0),
+        },
+        settlement: {
+          status: String(rawSettlement.status || "not_billed").slice(0, 80),
+          key: String(rawSettlement.key || rawSettlement.settlementKey || "").slice(0, 300) || null,
+          costUsd: Math.max(0, Number(rawSettlement.costUsd ?? rawUsage.costUsd ?? rawUsage.cost) || 0),
+          errorCode: String(rawSettlement.errorCode || "").slice(0, 160) || null,
+        },
+        candidate: candidate || null,
+        createdAt: prior.createdAt || iso(now),
+        updatedAt: iso(now),
+      };
+      if (index >= 0) s.providerAttempts[index] = attempt; else s.providerAttempts.push(attempt);
+      const supersedeAttemptId = String(command.supersedeAttemptId || "").slice(0, 128);
+      if (supersedeAttemptId && supersedeAttemptId !== attemptId && attempt.generationId) {
+        const superseded = s.providerAttempts.find((item) => item.attemptId === supersedeAttemptId);
+        if (superseded) {
+          superseded.generationId = attempt.generationId;
+          superseded.status = "provider_correlated";
+          superseded.rejectionCode = null;
+          superseded.settlement = { status: "not_billed", key: null, costUsd: 0, errorCode: null };
+          superseded.updatedAt = iso(now);
+        }
+      }
+      s.providerAttempts = s.providerAttempts.slice(-100);
+      const candidates = s.providerAttempts.filter((item) => item.candidate);
+      for (const old of candidates.slice(0, -3)) old.candidate = null;
+    }
+    else if (type === "screenplay.set") {
+      const text = String(command.text || ""); const tokens = tokenCount(text);
+      if (tokens > MAX_SCREENPLAY_TOKENS) fail("video_screenplay_limit", "The screenplay exceeds the 115,000-token project limit.");
+      if (command.expectedScreenplaySha256 !== undefined) {
+        const expected = String(command.expectedScreenplaySha256 || "");
+        if (!/^[a-f0-9]{64}$/.test(expected)) fail("video_screenplay_precondition_invalid", "The screenplay save precondition is invalid.", 400);
+        const current = createHash("sha256").update(s.screenplay.text || "").digest("hex");
+        if (current !== expected) fail("screenwriter_stale_write", "The screenplay changed while Trinity was writing. Its result was not allowed to overwrite the newer checkpoint.", 409);
+      }
+      if (Object.hasOwn(command, "expectedScreenwriterGenerationId")) {
+        const expected = String(command.expectedScreenwriterGenerationId || "").slice(0, 200) || null;
+        const current = String(s.ai.screenwriter.state?.generationId || "").slice(0, 200) || null;
+        if (current !== expected) fail("screenwriter_stale_write", "Another Trinity turn completed while this one was running. Its result was not allowed to overwrite the newer checkpoint.", 409);
+      }
+      s.screenplay.revisions.push({ at: iso(now), tokens: s.screenplay.tokens, checkpointSeq: s.history?.head || null, sha256: createHash("sha256").update(s.screenplay.text || "").digest("hex") });
+      s.screenplay.text = text; s.screenplay.tokens = tokens;
+      if (command.model || command.generationId || command.usage || command.finishReason) {
+        const usage = command.usage && typeof command.usage === "object" ? command.usage : {};
+        const lastTurn = command.lastTurn && typeof command.lastTurn === "object" ? clone(command.lastTurn) : null;
+        if (lastTurn && Buffer.byteLength(JSON.stringify(lastTurn), "utf8") > 1_500_000) fail("video_ai_state_large", "The screenwriter continuation state is too large to save safely.", 413);
+        s.ai.screenwriter.state = {
+          model: SCREENWRITER_MODEL,
+          brief: String(command.brief ?? s.ai.screenwriter.state?.brief ?? "").slice(0, 460_000),
+          generatedSections: Math.max(0, Number(command.generatedSections) || Number(s.ai.screenwriter.state?.generatedSections) || 0),
+          lastTurn,
+          sessionId: String(command.sessionId || s.ai.screenwriter.state?.sessionId || "").slice(0, 256) || null,
+          generationId: String(command.generationId || "").slice(0, 200) || null,
+          finishReason: String(command.finishReason || "unknown").slice(0, 80),
+          truncated: command.truncated === true,
+          usage: {
+            promptTokens: Math.max(0, Number(usage.prompt_tokens) || 0),
+            completionTokens: Math.max(0, Number(usage.completion_tokens) || 0),
+            reasoningTokens: Math.max(0, Number(usage.completion_tokens_details?.reasoning_tokens) || 0),
+            totalTokens: Math.max(0, Number(usage.total_tokens) || 0),
+            costUsd: Math.max(0, Number(usage.cost) || 0),
+          },
+          updatedAt: iso(now),
+        };
+        const attempt = s.providerAttempts.find((item) => item.attemptId === command.attemptId)
+          || (!command.attemptId && command.generationId ? s.providerAttempts.find((item) => item.generationId === command.generationId) : null);
+        if (attempt) {
+          attempt.status = "applied";
+          attempt.settlement = {
+            status: String(command.settlement?.status || (Number(usage.cost) > 0 ? "settled" : "skipped")).slice(0, 80),
+            key: String(command.settlement?.settlementKey || command.settlement?.key || "").slice(0, 300) || null,
+            costUsd: Math.max(0, Number(command.settlement?.costUsd ?? usage.cost) || 0),
+            errorCode: null,
+          };
+          attempt.candidate = null;
+          attempt.updatedAt = iso(now);
+        }
+      }
+    }
     else if (type === "visual.plan.apply") {
-      const plan = Array.isArray(command.scenes) ? command.scenes : [];
-      if (!plan.length || plan.length > MAX_SCENES) fail("video_scene_limit", "A visual plan must contain between 1 and 100 scenes.");
-      const previous = new Map(s.scenes.map((scene) => [scene.id, scene]));
-      s.scenes = plan.map((scene, index) => {
-        const id = String(scene?.sceneId || scene?.id || `scene_${index + 1}`); if (!SAFE_ID.test(id.replaceAll("-", "_"))) fail("video_scene_invalid", "Visual plan contains an invalid scene id.");
-        const old = previous.get(id) || {};
-        return { ...old, id, title: String(scene?.title || old.title || `Scene ${index + 1}`).slice(0, 160), prompt: String(scene?.videoPrompt || scene?.imagePrompt || old.prompt || "").slice(0, 32000), imagePrompt: String(scene?.imagePrompt || "").slice(0, 32000), continuity: String(scene?.continuity || "").slice(0, 8000), model: VIDEO_CAPABILITIES[scene?.suggestedVideoModel] ? scene.suggestedVideoModel : old.model || null, status: old.status || "planned" };
-      });
+      applyVisualPlan(s, command.scenes);
     }
     else if (type === "timeline.set") { const timeline = clone(command.timeline); if (!timeline || timeline.videoTracks?.length !== VIDEO_TRACKS || timeline.audioTracks?.length !== AUDIO_TRACKS) fail("video_timeline_invalid", "Exactly three video and four audio tracks are required."); s.timeline = timeline; }
     else if (type === "director.state") { s.ai.director.state = clone(command.state || {}); s.ai.director.compactionRequired = directorCompactionNeeded(command); }
@@ -563,15 +740,30 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     }
     else fail("video_command_unsupported", "Unsupported video project command.");
   }, { command: type }); }
-  function checkpointProject(tenantId, id, { label = "Project checkpoint", state } = {}) {
+  function checkpointProject(tenantId, id, { label = "Project checkpoint", state, expectedScreenplaySha256, expectedProjectRevision } = {}) {
     const safeLabel = String(label || "Project checkpoint").trim().slice(0, 160) || "Project checkpoint";
-    return mutate(tenantId, id, "project.checkpoint", (current) => normalizeClientCheckpoint(current, state), { label: safeLabel });
+    return mutate(tenantId, id, "project.checkpoint", (current) => {
+      assertProjectRevision(current, expectedProjectRevision);
+      if (expectedScreenplaySha256 === undefined) fail("video_screenplay_precondition_required", "A screenplay revision precondition is required before saving a project checkpoint.", 428);
+      const expected = String(expectedScreenplaySha256 || "");
+      if (!/^[a-f0-9]{64}$/.test(expected)) fail("video_screenplay_precondition_invalid", "The screenplay checkpoint precondition is invalid.", 400);
+      const currentHash = createHash("sha256").update(current.screenplay?.text || "").digest("hex");
+      if (currentHash !== expected) fail("video_checkpoint_stale", "The server screenplay changed before this checkpoint could be saved. Refresh the project; the stale browser copy was not written.", 409);
+      if (current.providerAttempts.some(screenwriterAttemptBlocksMutation)) fail("screenwriter_busy", "Trinity provider work is still being completed or reconciled for this project. The checkpoint was not changed.", 409);
+      return normalizeClientCheckpoint(current, state);
+    }, { label: safeLabel });
   }
   function updateAiState(tenantId, id, turn = {}) {
     return mutate(tenantId, id, "ai.turn", (state) => {
+      if (turn.expectedProjectRevision === undefined) fail("video_project_revision_required", "A project revision precondition is required before saving an AI planning turn.", 428);
+      const expectedProjectRevision = Number(turn.expectedProjectRevision);
+      if (!Number.isInteger(expectedProjectRevision) || expectedProjectRevision < 0) fail("video_project_revision_invalid", "The project revision precondition is invalid.", 400);
+      const planStale = Number(state.history?.head || 0) !== expectedProjectRevision;
       for (const role of ["director", "visualOrchestrator", "liaison"]) {
         if (turn[role]) state.ai[role].state = { ...clone(state.ai[role].state || {}), ...clone(turn[role]), updatedAt: iso(now) };
       }
+      if (turn.visualOrchestrator) state.ai.visualOrchestrator.state.applyStatus = turn.visualPlanScenes ? (planStale ? "quarantined_stale" : "applied") : "unavailable";
+      if (turn.visualPlanScenes && !planStale) applyVisualPlan(state, turn.visualPlanScenes);
       const priorTokens = Number(state.ai.director.state?.usedTokens || 0);
       const turnTokens = Number(turn.director?.usage?.total_tokens || turn.director?.usage?.totalTokens || 0);
       state.ai.director.state.usedTokens = turn.director?.compaction ? turnTokens : priorTokens + turnTokens;
@@ -582,7 +774,7 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
         state.conversation.push({ role: "assistant", content: String(turn.conversation.reply || "").slice(0, 100000), at: turn.conversation.at });
         if (state.conversation.length > 500) state.conversation = state.conversation.slice(-500);
       }
-    }, { models: { director: turn.director?.model, visualOrchestrator: turn.visualOrchestrator?.model, liaison: turn.liaison?.model } });
+    }, { models: { director: turn.director?.model, visualOrchestrator: turn.visualOrchestrator?.model, liaison: turn.liaison?.model }, expectedProjectRevision: turn.expectedProjectRevision });
   }
   function recordExport(tenantId, id, record = {}) {
     return mutate(tenantId, id, "export.completed", (state) => {
@@ -617,31 +809,45 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     try { records = readFileSync(p.events, "utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)); } catch { fail("video_history_corrupt", "The video project history is unreadable.", 409); }
     return records.filter((record) => Number.isInteger(record.seq) && (existsSync(join(p.checkpoints, checkpointName(record.seq))) || existsSync(join(p.checkpoints, checkpointName(record.seq, false))))).map((record) => ({ seq: record.seq, at: record.at, type: record.type, label: String(record.payload?.label || record.type).slice(0, 160) })).reverse();
   }
-  function restoreCheckpoint(tenantId, id, seq) {
+  function assertProjectRevision(state, expectedProjectRevision) {
+    if (expectedProjectRevision === undefined) fail("video_project_revision_required", "A project revision precondition is required before changing saved project history.", 428);
+    const expectedRevision = Number(expectedProjectRevision);
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) fail("video_project_revision_invalid", "The project revision precondition is invalid.", 400);
+    if (Number(state.history?.head || 0) !== expectedRevision) fail("video_project_revision_stale", "The server project changed before this action could be saved. Refresh the project; the stale browser action was not applied.", 409);
+    return expectedRevision;
+  }
+  function restoreCheckpoint(tenantId, id, seq, expectedProjectRevision) {
     const number = Number(seq); if (!Number.isInteger(number) || number < 1) fail("video_checkpoint_invalid", "A valid project checkpoint is required.");
     const p = paths(tenantId, id); const snapshot = assertState(readCheckpoint(p, number));
     if (snapshot.id !== id || snapshot.tenantId !== validPart(tenantId, "tenant")) fail("video_checkpoint_invalid", "That checkpoint belongs to another project.", 409);
     return mutate(tenantId, id, "project.restored", (current) => {
+      assertProjectRevision(current, expectedProjectRevision);
+      if (current.providerAttempts.some(screenwriterAttemptBlocksMutation)) fail("screenwriter_busy", "Trinity provider work is still being completed or reconciled for this project. The saved screenplay was not restored.", 409);
       const restored = restoreProjectSnapshot(current, snapshot); restored.history = current.history; return restored;
     }, { restoredSeq: number });
   }
-  function undo(tenantId, id) {
-    const state = load(tenantId, id); const targetSeq = state.history.undo.pop();
+  function undo(tenantId, id, expectedProjectRevision) {
+    const state = load(tenantId, id);
+    assertProjectRevision(state, expectedProjectRevision);
+    if (state.providerAttempts.some(screenwriterAttemptBlocksMutation)) fail("screenwriter_busy", "Trinity provider work is still being completed or reconciled for this project. The saved screenplay was not changed.", 409);
+    const targetSeq = state.history.undo.pop();
     if (!targetSeq) fail("video_undo_empty", "There is no project change to undo.", 409);
     const next = assertState(restoreProjectSnapshot(state, readCheckpoint(paths(tenantId, id), targetSeq)));
     next.history = { head: state.history.head, undo: state.history.undo, redo: [...state.history.redo, state.history.head].slice(-100) };
     event(tenantId, next, "command.undo", { restoredSeq: targetSeq });
     return save(tenantId, next);
   }
-  function redo(tenantId, id) {
-    const state = load(tenantId, id); const targetSeq = state.history.redo.pop();
+  function redo(tenantId, id, expectedProjectRevision) {
+    const state = load(tenantId, id);
+    assertProjectRevision(state, expectedProjectRevision);
+    if (state.providerAttempts.some(screenwriterAttemptBlocksMutation)) fail("screenwriter_busy", "Trinity provider work is still being completed or reconciled for this project. The saved screenplay was not changed.", 409);
+    const targetSeq = state.history.redo.pop();
     if (!targetSeq) fail("video_redo_empty", "There is no project change to restore.", 409);
     const next = assertState(restoreProjectSnapshot(state, readCheckpoint(paths(tenantId, id), targetSeq)));
     next.history = { head: state.history.head, undo: [...state.history.undo, state.history.head].slice(-100), redo: state.history.redo };
     event(tenantId, next, "command.redo", { restoredSeq: targetSeq });
     return save(tenantId, next);
   }
-  function probePalmyra() { if (!nvidiaApiKey) return Promise.resolve({ available: false, model: "writer/palmyra-creative-122b", reason: "missing_nvidia_api_key" }); if (typeof fetchImpl !== "function") return Promise.resolve({ available: false, model: "writer/palmyra-creative-122b", reason: "fetch_unavailable" }); return fetchImpl(nvidiaBaseUrl.replace(/\/$/, "") + "/models", { headers: { Authorization: "Bearer " + nvidiaApiKey } }).then(responseJson).then((body) => ({ available: !!(body.data || body.models || []).find((m) => (m.id || m.name) === "writer/palmyra-creative-122b"), model: "writer/palmyra-creative-122b" })).catch(() => ({ available: false, model: "writer/palmyra-creative-122b", reason: "probe_failed" })); }
   function persistProviderResult(tenantId, projectId, jobId, result, eventType, submission = {}) {
     const status = String(result.status || "processing").toLowerCase();
     return mutate(tenantId, projectId, eventType, (s) => {
@@ -747,7 +953,7 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
   return {
     MAX_SCENES, MAX_SCREENPLAY_TOKENS, VIDEO_TRACKS, AUDIO_TRACKS, capabilities: VIDEO_CAPABILITIES,
     createProject, listProjects, getProject: (tenantId, id) => clone(load(tenantId, id)), getClientProject: (tenantId, id) => clientProject(load(tenantId, id)),
-    renameProject, deleteProject, checkpointProject, listCheckpoints, restoreCheckpoint, updateAiState, recordExport, markJobSettled, markJobDelivered, applyCommand, undo, redo, submitGeneration, pollJob, downloadJobOutput, recoverJobs, recoverTemporaryJobs, probePalmyra, storageBudget, cleanupExpiredTemporaryProjects,
+    renameProject, deleteProject, checkpointProject, listCheckpoints, restoreCheckpoint, updateAiState, recordExport, markJobSettled, markJobDelivered, applyCommand, undo, redo, submitGeneration, pollJob, downloadJobOutput, recoverJobs, recoverTemporaryJobs, storageBudget, cleanupExpiredTemporaryProjects,
     validateVideoRequest, safeError: safeVideoError, paths: (tenantId, id) => ({ ...paths(tenantId, id) }),
   };
 }
