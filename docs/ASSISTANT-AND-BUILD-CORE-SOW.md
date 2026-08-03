@@ -359,6 +359,24 @@ Fred's reasoning, and it is right: Luna was chosen for the security posture of a
 
 **Consequence for the transport.** The primary path is plain OpenAI-compatible chat/completions, where tools are verified working. The Responses API constraint below now applies **to the fallback only**, and it still has to be honoured there or Altana silently loses her hands the moment she fails over.
 
+### Fallback seat, settled by measurement 2026-08-03
+
+Fred raised Sonnet 5 and Nemotron as alternatives to Luna. **Nemotron is ruled out structurally rather than on quality: it lives on NVIDIA, and NVIDIA being overloaded is the failure being fallen back from.** A fallback sharing the primary's failure domain is a second seat on the same bus.
+
+The other three were probed head to head on the exact lane Dominion would use for each. **All three emit a real tool call:**
+
+| Candidate | Lane | Tool call | Latency | Cost per 1M |
+|---|---|---|---|---|
+| GPT-5.6 Luna | OpenAI `/v1/responses` | real | 1,942ms | $0.20 / $1.20 |
+| Claude Haiku 4.5 | Anthropic Messages | real | **1,097ms** | $1 / $5 |
+| Claude Sonnet 5 | Anthropic Messages | real | 1,691ms | $3 / $15 |
+
+**Luna's tool support is now VERIFIED, not inferred.** The earlier entry recorded OpenAI's "use /v1/responses" error as a constraint without ever confirming tools actually work there. They do. That was the only real doubt about Luna and it is gone.
+
+**Decision: Luna stays as the fallback.** It is 5x cheaper than Haiku and 15x cheaper than Sonnet, all three are US providers so Fred's original security reasoning holds for any of them, and Altana's work is short advisory turns and setting flips rather than deep reasoning, so the cheapest capable seat is the proportionate one for a path that should rarely execute.
+
+**When to revisit:** if the fallback should be invisible in quality rather than merely functional, Sonnet 5 is the closest match to a 671B primary and the upgrade is a one-line change. If failover turns out to be frequent rather than rare, that is a signal to fix the primary, not to buy a more expensive spare.
+
 **Hard constraint found by probe, 2026-08-03.** Luna cannot call tools through OpenAI's chat/completions endpoint. The provider's own words:
 
 > Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to none.
