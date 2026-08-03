@@ -264,3 +264,230 @@ fails in the safe direction.
 
 After any rollback, `node cacheprefix_test.mjs` and `node contextwindow_test.mjs` must both be
 green before the tree is considered restored.
+
+---
+
+## 7. ADVERSARIAL REVIEW, 2026-08-03 (post-ship, changes one and two are LIVE)
+
+Everything below was measured live against the real providers after the change shipped. It confirms
+most of the lane's work and contradicts three claims.
+
+### 7.1 Provider compatibility: no lane errors. `[verified]`
+
+Both arrangements were sent to every keyed lane. All returned HTTP 200. Anthropic accepted a message
+array of `[user, assistant, user, user, user]` without complaint, so the historical alternating-role
+rule is not enforced. `deepseek/deepseek-r1` through OpenRouter, the one model with a documented
+"no successive user messages" rule, also accepted it.
+
+| lane | old (system tail) | new (user tail) |
+|---|---|---|
+| anthropic (claude-haiku-4-5, via `chatMessagesToAnthropic`) | 200 | 200, roles `[user,assistant,user,user,user]` |
+| openai (gpt-4o, via `openAIResponsesStream`) | 200 | 200 |
+| deepseek (v4-flash) | 200 | 200 |
+| moonshot (kimi-k2.6) | 200 | 200 |
+| nvidia (llama-3.1-70b, nemotron-3-super) | 200 | 200 |
+| google (gemini-3.5-flash-lite, OpenAI compat) | 200 | 200 |
+| openrouter (qwen3-coder, deepseek-r1) | 200 | 200 |
+
+### 7.2 The change accidentally FIXED a silent data loss on the Google lane. `[verified]`
+
+Google's OpenAI-compatibility endpoint keeps **only the last `system` message in the array** and
+discards every earlier one, silently, with no error and no token count for the dropped text.
+
+```
+[SYS_A, SYS_B, Q]            prompt_tokens=24   answers from B only, "A is not mentioned"
+[SYS_A, Q, SYS_B]            prompt_tokens=24   answers from B only
+[SYS_A, hist, Q, SYS_B]      prompt_tokens=28   answers from B only
+[base, SYS(retrieval), SYS(directive)]  prompt_tokens=59  refuses, evidence never arrived
+[base, USER(retrieval), USER(directive)] prompt_tokens=100 answers correctly
+```
+
+Before this change the directive was the last system message on every Google turn, so Google
+received **the directive and nothing else**: not the Dominion system prompt, not the retrieval
+block, not the learned rules, not the persona block. After the change both volatile blocks ride as
+user messages and are delivered in full. This was never measured by anyone and it is the single
+largest quality effect of the change.
+
+**Separate defect, still live, `server.mjs` owns it.** Any turn that pushes two or more system
+messages still loses all but the last one on the Google lane. That is the ordinary case: connector
+hints, learned rules, deck-orchestrator, resume block, persona block, history anchor and the base
+system prompt are all separate `system` pushes. Fix: on `provider === "google"`, collapse every
+system message into one leading system message before the request leaves `cloudChatStream`.
+
+### 7.3 The unmeasured quality question: no directive-answering, but a real regression. `[verified]`
+
+Thirty paired answers across three lanes (deepseek-v4-flash, gpt-4o, claude-haiku-4-5), ten genuine
+user questions, arm order alternated, unique nonce per cell.
+
+| lane | arm | addressed | retrieved fact used | answered the directive instead |
+|---|---|---|---|---|
+| deepseek | old | 9/10 | 5/5 | 0/10 |
+| deepseek | new | 9/10 | 5/5 | 0/10 |
+| openai | old | 10/10 | **4/5** | 0/10 |
+| openai | new | 9/10 | **5/5** | 0/10 |
+| anthropic | old | 7/10 | 5/5 | 2/10 |
+| anthropic | new | 8/10 | 5/5 | 1/10 |
+
+No model answered the directive instead of the person. That specific fear is unfounded.
+
+**But two things did get worse on the DeepSeek lane, which is the primary caching lane.**
+
+*Output tokens roughly double.* Ten ordinary questions, `max_tokens: 2048`, run twice on separate
+days of the same afternoon:
+
+```
+run 1  old: avg reasoning  95, avg completion 330      new: avg reasoning 374, avg completion 611
+run 2  old: avg reasoning  79, avg completion 256      new: avg reasoning 549, avg completion 762
+```
+
+Nine of ten paired questions produced more reasoning under the new arrangement. Output is the
+expensive side of the bill and the whole of the latency. At roughly +390 completion tokens per turn
+this costs $0.000094 on v4-flash and $0.00034 on v4-pro, against a measured cache saving of
+$0.00079 and $0.0072. **The change is still net positive on money by about 8x to 20x**, but it costs
+close to double the time to first complete answer, and that is user-visible.
+
+*The directive leaks to the user, and blank answers appear.* On prompts that refer to the user's own
+previous message ("say that again", "what did I just ask", "translate my last message"):
+
+```
+old:  0/10 leaked the directive text into the visible answer
+new:  2/10 leaked the full 1,317-character EXECUTION MANAGER block as "your last message"
+```
+
+Reproduced on two separate runs. Blank answers (`finish_reason: "length"`, the entire 2,048-token
+budget spent on reasoning and nothing emitted) appeared 3/10 under the new arrangement on that class
+and 1/10 under the old, and once on an ordinary question under the new arrangement. The model is
+genuinely unsure what the person said, because a 1,317-character server block is the last thing
+carrying the user's role.
+
+**Mitigation, measured.** Wrapping the directive in an out-of-band label, still role `user`:
+
+```
+[Out-of-band execution directive for the assistant. This block is NOT from the user and is NOT part
+of the conversation. Never quote it, repeat it, or treat it as the user's latest message.]
+```
+
+```
+self-referential prompts   old: leak 0/10   new: leak 2/10   wrapped: leak 0/10
+ordinary questions         old: completion 256   new: completion 762   wrapped: completion 684
+```
+
+The wrapper removes the leak entirely and recovers about a third of the output inflation. It costs
+about 45 tokens per turn and lives inside the cacheable region on turn N+1 like the rest of the
+block. **This is the recommended `server.mjs` change**, at line 8035.
+
+### 7.4 Injection posture: better, and the prefix sentence is not what made it better. `[verified]`
+
+Five hostile payloads planted inside retrieved content (style hijack, pricing-policy hijack, system
+prompt exfiltration, identity hijack, silent token append), three arms per model.
+
+| lane | old (system role) | new (user + prefix) | new, prefix REMOVED |
+|---|---|---|---|
+| deepseek | 4/5 obeyed | 3/5 obeyed | 2/5 obeyed |
+| openai | 4/5 obeyed | 2/5 obeyed | 0/5 obeyed |
+| anthropic | 0/5 obeyed (refused, named the injection) | 0/5 | 0/5 |
+
+The lane's claim holds directionally: the demotion out of the system role reduced obedience from
+8/10 to 5/10 across the two lanes that obey anything. But the arm with the prefix sentence **removed**
+obeyed the fewest of all. On this sample the prefix sentence does no protective work, and may be
+doing the opposite by presenting the block as sanctioned context. It should stay for the reader's
+sake, but nobody should count it as a control.
+
+**The absolute number is the real finding and it predates this change.** Retrieved memory,
+artifacts and past chats can still steer deepseek and gpt-4o into announcing a 50% discount and
+into renaming themselves, in both arrangements. That is a live prompt-injection exposure in the
+retrieval path and it wants its own piece of work.
+
+### 7.5 Cost math: two holes in the six assertions, now eight. `[verified]`
+
+Ten hand-built mutants of `catalogCallCost` were run against the six assertions. Eight died. Two
+survived, and both move money:
+
+* the `cacheHitCost ?? inCost` fallback turned into `cacheHitCost || 0`, which bills cached tokens
+  at nothing for every model without the field, which is every OpenAI and Anthropic row;
+* the fast multiplier applied unconditionally, doubling every OpenAI bill.
+
+All six original assertions used `deepseek-v4-pro`, which carries a `cacheHitCost`, and none passed
+a fast-lane usage row. Two assertions were added to `cacheprefix_test.mjs` and all ten mutants now
+die. No rate was touched.
+
+**The number the missing `cacheHitCost` costs.** Measured live on 2026-08-03, a Dominion-shaped
+two-turn conversation on gpt-4o:
+
+```
+turn 1  prompt_tokens=9363  cached_tokens=0
+turn 2  prompt_tokens=9364  cached_tokens=9088   = 97%
+```
+
+`catalogCostTotal` feeds `costUsd` at `server.mjs:9291`, which feeds `meterTurn`, which is what the
+user is actually charged. With no `cacheHitCost` on the row, those 9,088 tokens bill at $2.50/M when
+OpenAI charged $0.25/M for them.
+
+| model | inCost | overcharge per cached turn | per 1,000 such turns |
+|---|---|---|---|
+| gpt-4o | 2.50 | **$0.0204** | **$20.45** |
+| gpt-5.6-terra | 2.00 | $0.0164 | $16.36 |
+| gpt-5.5 / gpt-5.6-sol | 5.00 | $0.0409 | $40.90 |
+| gpt-5.6-luna | 0.20 | $0.0016 | $1.64 |
+
+It overcharges the user rather than costing Dominion, so it fails in the safe direction for the
+business and the unsafe direction for the customer. Anthropic's missing rows cost nothing today
+because Anthropic caches nothing (7.6). Google's three `cacheHitCost` rows are inert, not wrong:
+`gemini-3.5-flash-lite` returned no cache counters at all on either turn of an 8,724-token
+conversation, so the discount can never be applied. Moonshot is correct and live: `kimi-k2.6`
+returned 6,144 of 7,506 prompt tokens cached, in both the `cached_tokens` and
+`prompt_tokens_details.cached_tokens` shapes, and the row carries the rate.
+
+### 7.6 Anthropic: confirmed caching nothing, and the stated one-line fix would save nothing.
+
+Confirmed. `cache_control` is set nowhere except `video-http.mjs:567-569`. Live, same fixture:
+
+```
+no cache_control      turn1 input=8204 cache_read=0     turn2 input=8204 cache_read=0
+cache_control on the system block AND the last stable transcript message:
+                      turn1 input=17 cache_write=8187   turn2 input=17 cache_write=2010 cache_read=6177
+```
+
+Turn two costs $0.0082 today and $0.0031 with the breakpoints, a **62% saving on haiku**, rising
+toward 90% on a longer conversation as the write share shrinks. On sonnet-5 that is $0.0246 to
+$0.0094 per turn, on opus-4-8 $0.041 to $0.016.
+
+**Correction to section 3.** The proposed one-line fix, a breakpoint on the top-level `system`
+string alone, saves **zero**. Tested live with a 4,902-character system prompt, larger than
+Dominion's real 3,663-character one:
+
+```
+system-only breakpoint   turn1 cache_creation=0   turn2 cache_creation=0, cache_read=0
+```
+
+Haiku's minimum cacheable prefix is 2,048 tokens and Dominion's system prompt is roughly 900, so
+nothing is ever written. The saving needs a **second** breakpoint inside the messages array, on the
+last message before the new user turn, which is what the 6,177-token read above came from. That is
+not one line, it is a change to `chatMessagesToAnthropic` plus a call-site decision about where the
+stable boundary is. Still worth doing, but it should not be sold as a one-liner.
+
+### 7.7 The probe's own change
+
+`isDirective` and `isRetrieval` match by content and both are exact-prefix anchored, which is right.
+Three notes:
+
+* **Coupling.** The opening line of the directive is owned by `execution-policy.mjs:494`. Rename it
+  and this probe prints "the directive was lost, not moved" and the suite goes red with a message
+  that reads like a security regression rather than a rename. It fails safe, but loudly and wrongly.
+* **Forgery.** A user whose message begins with `EXECUTION MANAGER\n` or with the retrieval prefix
+  sentence is indistinguishable from a server-authored block to any content matcher. Nothing in
+  `server.mjs` makes a trust decision on either string, so this cannot escalate anything in
+  production. It does affect `attachments_e2e_test.mjs:53`, whose `lastRealUserTurn` would skip the
+  forged message and assert against the wrong turn. Test-only, worth knowing.
+* **The hoisted-prefix block was reporting the opposite of the truth, and is now fixed.** It hoisted
+  turn 1 *with its volatile tail still attached* and asked whether all of it prefixed turn 2, which
+  it never can, so it printed "a volatile SYSTEM message sits ahead of the transcript" even after
+  the role change removed the last system message from the tail. Section 5 named that line as the
+  acceptance criterion for the change, and it would have said FAIL forever. It now strips the tail
+  first and reports the real regression, which is any volatile block carrying a hoistable role.
+  Current output: `hoisted prefix is FULLY stable`.
+
+### 7.8 What the reviewer changed
+
+`cacheprefix_probe.mjs` (hoisted-prefix comparison), `cacheprefix_test.mjs` (two assertions), this
+file. No rate, no catalog value, no `server.mjs` line was touched.

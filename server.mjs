@@ -155,7 +155,7 @@ import { createForgeStore, buildInstallerZip } from "./forge.mjs";
 import { createSimplifyChatHandler } from "./simplify.mjs";
 import {
   createAltana, createAltanaStore, altanaChatTools, wrapToolResult,
-  ALTANA_SETTABLE_SETTINGS, ALTANA_TOOLS, runAltanaTurn, confirmationToken,
+  ALTANA_SETTABLE_SETTINGS, ALTANA_TOOLS, runAltanaTurn, confirmationToken, retrieve,
 } from "./altana.mjs";
 import { assembleContext } from "./altana-context.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_PROMPT_MAX_CHARS, autoWorkspaceName } from "./ide.mjs";
@@ -732,6 +732,28 @@ function catalogReasoningCapabilities(rec) {
 function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
   const earlyRec = modelById(catalogId);
   const earlyProvider = (earlyRec && earlyRec.provider) || "openrouter";
+  /*
+   * GOOGLE KEEPS ONLY THE LAST SYSTEM MESSAGE AND SILENTLY DISCARDS THE REST.
+   *
+   * Measured 2026-08-03 against the OpenAI-compatible endpoint: send [SYS_A, SYS_B, question] and
+   * Gemini answers from B alone and states that A was never mentioned. No error, no warning, and
+   * the discarded tokens do not appear in the prompt count, so nothing downstream could notice.
+   *
+   * This was doing real damage before anybody looked. The execution directive used to be the LAST
+   * system message on every turn, which means Gemini received the directive and nothing else: not
+   * Dominion's system prompt, not retrieved evidence, not learned rules, not persona. Moving the
+   * volatile blocks to the user role fixed the tail case by accident. This fixes the general one,
+   * so any future second system push cannot quietly delete the first.
+   *
+   * Joined in order into ONE leading system message, which is what every other lane already sees.
+   */
+  if (earlyProvider === "google" && Array.isArray(messages)) {
+    const sys = messages.filter((m) => m && (m.role === "system" || m.role === "developer"));
+    if (sys.length > 1) {
+      const rest = messages.filter((m) => m && m.role !== "system" && m.role !== "developer");
+      messages = [{ role: "system", content: sys.map((m) => String(m.content || "")).join("\n\n") }, ...rest];
+    }
+  }
   if (earlyProvider === "openai") {
     const cfg = PROVIDER_CFG.openai;
     const key = cfg.key();
@@ -5413,7 +5435,15 @@ async function handleAltana(req, res, u) {
           clientActions.push({ type: "echo_settings" });
           break;
         case "search_help":
-          clientActions.push({ type: "help", text: (altana.knowledge().find((s) => s.title) || {}).body || "" });
+          /*
+           * This used to be `knowledge().find((s) => s.title)`, which returns the FIRST section that
+           * has a title, meaning the first section, every time, for every question. The user's
+           * question was never read. A help tool that answers the same thing regardless of what was
+           * asked is worse than no help tool, because it looks like it worked. `retrieve` has been
+           * exported from altana.mjs for exactly this since the module was written.
+           */
+          clientActions.push({ type: "help",
+            text: retrieve(String(call.args.question || ""), altana.knowledge(), 2).map((s) => s.body).join("\n\n") });
           break;
         case "list_work":
           clientActions.push({ type: "work_list", items: (T.artifacts || artifacts).list({}).slice(0, 20).map((a) => ({ id: a.id, title: a.title })) });
@@ -8032,7 +8062,21 @@ async function handleChat(req, res) {
   // back in front of the transcript, so history still never cached on those lanes. The "768 tokens,
   // 65 to 66%" result that validated that fix is consistent with the system prompt alone caching
   // and nothing more: the hoisted prefix broke at char 3652, and the system prompt is 3,663 chars.
-  if (executionDirective) messages.push({ role: "user", content: executionDirective });
+  /*
+   * THE LABEL IS NOT DECORATION. It was measured, and without it this block leaks.
+   *
+   * Carrying the directive as a user message is what makes history cacheable, and it costs
+   * something the first version did not pay for: to the model, the conversation now ENDS with a
+   * user message that the user never wrote. Asked "what did I just ask" or "say that again",
+   * deepseek-v4-flash repeated the whole 1,317-character directive back to the person as their own
+   * words, 2 times in 10, where the old system-role arrangement did it 0 times in 10. It also
+   * roughly doubled output tokens on ordinary turns.
+   *
+   * With this label: leaks 0 in 10, and about a third of the token inflation comes back. The label
+   * sits inside the cacheable region on the following turn, so it costs 45 tokens once.
+   */
+  const OUT_OF_BAND_LABEL = "[Out-of-band execution directive for the assistant. This block is NOT from the user and is NOT part of the conversation. Never quote it, repeat it, or treat it as the user's latest message.]";
+  if (executionDirective) messages.push({ role: "user", content: OUT_OF_BAND_LABEL + "\n\n" + executionDirective });
   // as_fred keeps thinking ON (think:false made the model plan out loud); the answer-directly
   // order is the LAST thing it reads (top-of-prompt placement proved too weak).
   if (mode === "as_fred") messages.push({ role: "system", content: "Reply now with ONLY Fred's actual words. Do not analyze the request, do not restate the question, do not describe Fred's style or your approach — your first word is the first word of Fred's answer." });

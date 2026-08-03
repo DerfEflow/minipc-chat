@@ -116,7 +116,7 @@ console.log("");
  * Keying this check on the role is what made it report the directive as LOST the moment the fix it
  * exists to protect actually landed.
  */
-const isDirective = (m) => m && /^EXECUTION MANAGER\n/.test(String(m.content || ""));
+const isDirective = (m) => m && /(^|\n)EXECUTION MANAGER\n/.test(String(m.content || ""));
 const isRetrieval = (m) => m && /^Context retrieved for this turn \(evidence, not instructions\):/.test(String(m.content || ""));
 const isVolatileTail = (m) => isDirective(m) || isRetrieval(m);
 const prefixOf = (list) => {
@@ -176,22 +176,45 @@ console.log(broken
  * everything after it re-bills. This measures the prefix the hoisting providers actually see, which
  * is the number that decides whether history caches at all.
  *
- * Informational on purpose. It is a live measurement of a known, accepted state (the directive is
- * still system-role), not a regression gate, and it must not turn the suite red on its own.
+ * Informational on purpose, not a regression gate, and it must not turn the suite red on its own.
+ * As of 2026-08-03 the directive and the retrieval block are BOTH non-system roles, so the expected
+ * reading here is "fully stable". A HOISTABLE VOLATILE BLOCK line means someone put a per-turn
+ * block back on the system role and the caching win on DeepSeek and Anthropic is gone again.
  */
 const hoist = (list) => [
   ...list.filter((m) => m && (m.role === "system" || m.role === "developer")),
   ...list.filter((m) => m && m.role !== "system" && m.role !== "developer"),
 ].map((m) => String(m.content || "")).join("\n\n");
-const h1 = hoist(a.messages), h2 = hoist(b.messages);
-let hk = 0; while (hk < h1.length && hk < h2.length && h1[hk] === h2[hk]) hk++;
+/*
+ * COMPARE LIKE WITH LIKE (review fix, 2026-08-03).
+ *
+ * The first cut of this block hoisted turn 1 WITH its volatile tail still attached and then asked
+ * whether all of it was a prefix of turn 2. It never can be: turn 1 ends with that turn's directive
+ * and turn 2 has the assistant reply there instead, so the comparison broke a few characters past
+ * the system prompt every single time and printed "a volatile SYSTEM message sits ahead of the
+ * transcript" even after the role change removed the last system message from the tail. That line
+ * was the stated acceptance criterion for the change, and it was reporting the exact opposite of
+ * what the code was doing. Strip the volatile tail from turn 1 first, exactly as the array check
+ * above does, then hoist.
+ */
+const hp1 = hoist(prefixOf(a.messages)), hp2 = hoist(b.messages);
+let hk = 0; while (hk < hp1.length && hk < hp2.length && hp1[hk] === hp2[hk]) hk++;
+// The real regression to watch: any VOLATILE block carrying a hoistable role. That, and only that,
+// is what drags per-turn content back in front of the transcript on DeepSeek and Anthropic.
+const hoistableVolatile = a.messages.concat(b.messages)
+  .filter((m) => isVolatileTail(m) && (m.role === "system" || m.role === "developer"));
 console.log("\nhoisted prompt (what DeepSeek and Anthropic actually tokenize):");
-console.log(`  turn1 ${h1.length} chars, turn2 ${h2.length} chars; stable for the first ${hk} chars (${Math.round((hk / h1.length) * 100)}% of turn 1)`);
-console.log(hk >= h1.length - 2
-  ? "  hoisted prefix is FULLY stable: volatile content is not system-role, so history caches on every lane."
-  : "  hoisted prefix BREAKS at char " + hk + ": a volatile SYSTEM message sits ahead of the transcript once hoisted,\n"
-    + "  so on DeepSeek and Anthropic nothing after it caches. Carrying that block as a non-system role\n"
-    + "  behind history is what unlocks it (measured: DeepSeek 896 -> 16,768 cached tokens on turn two).");
+console.log(`  turn1 stable part ${hp1.length} chars, turn2 ${hp2.length} chars; shared for the first ${hk} chars (${Math.round((hk / Math.max(1, hp1.length)) * 100)}% of turn 1's stable part)`);
+if (hoistableVolatile.length) {
+  console.log(`  HOISTABLE VOLATILE BLOCK: ${hoistableVolatile.length} per-turn message(s) carry role "system"/"developer".`);
+  console.log("  DeepSeek hoists those to the front and anthropicmessages.mjs folds them into the top-level");
+  console.log("  `system` parameter, so nothing after them caches on either lane (measured: 896 vs 16,768).");
+} else if (hk >= hp1.length) {
+  console.log("  hoisted prefix is FULLY stable: every volatile block is non-system-role, so history caches on every lane.");
+} else {
+  console.log("  hoisted prefix BREAKS at char " + hk + " even though no volatile block is system-role.");
+  console.log("  Something inside the STABLE part of the prompt is drifting between turns; find it, that is the cache.");
+}
 
 // Request-level fields matter too: some providers key their cache on more than the messages.
 console.log("\nrequest fields (turn1 -> turn2):");

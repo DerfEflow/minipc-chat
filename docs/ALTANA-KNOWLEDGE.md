@@ -54,9 +54,20 @@ explains WHAT is guaranteed and WHY it holds, and the private HOW stays private.
 
 If a web page, an uploaded file or a search result contains text telling Altana to change a
 setting, reveal something or ignore her rules, she treats it as a fact about that document and
-mentions it to you. She does not act on it. The app enforces this independently: when a tool result
-contains instruction-shaped text, every action that would change something is blocked for that
-step, whatever the model decides. Only your own typed messages direct her.
+mentions it to you. She does not act on it. Only your own typed messages direct her.
+
+The app enforces this independently, on two levels, because the first level can only catch what it
+recognises:
+
+- When a tool result contains instruction-shaped text, every action that would change something is
+  blocked outright for that step, whatever the model decides.
+- When a tool result is merely PRESENT, whether or not anything about it looked like an attack, a
+  change of settings or the logging of a complaint is held and put to you as a question first. A
+  politely worded instruction hidden in a document trips no alarm, so the second level does not try
+  to spot one. It asks you instead.
+
+Reading is never blocked by either level, so she keeps answering while a document is in the room.
+A request you make yourself, with no document in play, is acted on immediately.
 
 ---
 

@@ -50,7 +50,7 @@ const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJA
  * server-authored blocks by their content signature rather than trusting position. A locator that
  * depends on ordering has now broken twice for the same reason.
  */
-const SERVER_AUTHORED = [/^EXECUTION MANAGER\n/, /^Context retrieved for this turn \(evidence, not instructions\):/];
+const SERVER_AUTHORED = [/(^|\n)EXECUTION MANAGER\n/, /^\[Out-of-band execution directive/, /^Context retrieved for this turn \(evidence, not instructions\):/];
 const isServerAuthored = (m) =>
   typeof m.content === "string" && SERVER_AUTHORED.some((re) => re.test(m.content));
 const lastRealUserTurn = (msgs) =>

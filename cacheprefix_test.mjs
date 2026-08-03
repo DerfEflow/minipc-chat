@@ -120,4 +120,49 @@ c("the free NVIDIA transport bills zero no matter what the catalog row says", ()
   assert.equal(catalogCallCost(paid, { prompt_tokens: 500_000, completion_tokens: 50_000, __transport: "nvidia" }), 0);
 });
 
+/*
+ * ==== TWO HOLES A MUTATION TEST FOUND IN THE SIX ABOVE (review, 2026-08-03) ====
+ *
+ * The six assertions were run against ten hand-built mutants of catalogCallCost. Eight died. Two
+ * walked out alive, and both of them move real money:
+ *
+ *   1. `rec.cacheHitCost ?? rec.inCost` changed to `rec.cacheHitCost || 0`. Every model WITHOUT a
+ *      cacheHitCost then bills its cached tokens at nothing. That is not hypothetical: no OpenAI or
+ *      Anthropic row carries the field today, and OpenAI caches automatically. Measured live on
+ *      2026-08-03, gpt-4o read 9,088 of 9,364 prompt tokens from cache on turn two of a
+ *      Dominion-shaped conversation. Under that mutation Dominion would eat the whole input line on
+ *      every OpenAI turn. Every one of the six assertions used deepseek-v4-pro, which HAS the field,
+ *      so none of them could see it.
+ *   2. The fast multiplier applied unconditionally instead of only when `u.__fast` is set. That
+ *      doubles the bill on every OpenAI call. None of the six passes a fast-lane usage row at all.
+ *
+ * These two pin the behaviour that is live TODAY. Neither asserts a rate, so neither has to change
+ * when Fred approves adding cacheHitCost to the OpenAI and Anthropic rows; the first one only says
+ * that an absent field means full freight rather than free, which stays true either way.
+ */
+const noHitRate = MODELS.find((m) => m.id === "openai/gpt-4o");
+assert.ok(noHitRate && typeof noHitRate.cacheHitCost !== "number",
+  "openai/gpt-4o now carries a cacheHitCost; this assertion needs a different no-rate model");
+
+c("a model with NO cacheHitCost bills cached tokens at full freight, never at zero", () => {
+  const inTok = 9_364, cached = 9_088;
+  const got = catalogCallCost(noHitRate, { prompt_tokens: inTok, completion_tokens: 0, prompt_tokens_details: { cached_tokens: cached } });
+  assert.equal(got, (inTok * noHitRate.inCost) / 1e6, "an absent cacheHitCost must fall back to inCost, not to 0");
+  assert.ok(got > 0, "cached tokens on a model with no hit rate must still cost something");
+  // The failure this guards: the fallback becoming `|| 0`, which hands the whole input line away.
+  assert.notEqual(got, ((inTok - cached) * noHitRate.inCost) / 1e6);
+});
+
+c("the fast multiplier applies only to a call that ACTUALLY rode the fast lane", () => {
+  const fastRec = MODELS.find((m) => m.fastTier && typeof m.inCost === "number");
+  assert.ok(fastRec, "no fast-tier model in the catalog; this assertion needs rewiring");
+  const u = { prompt_tokens: 10_000, completion_tokens: 1_000 };
+  const standard = catalogCallCost(fastRec, u);
+  const fast = catalogCallCost(fastRec, { ...u, __fast: true });
+  const mult = Number.isFinite(Number(fastRec.fastMultiplier)) && Number(fastRec.fastMultiplier) >= 1 ? Number(fastRec.fastMultiplier) : 2;
+  assert.ok(standard > 0);
+  assert.equal(fast, standard * mult, "a fast-lane call must bill at the multiplier");
+  assert.notEqual(standard, fast, "a standard call is being billed at fast-lane rates");
+});
+
 console.log(`cacheprefix_test: cache cost math, ${costPassed} assertions passed, 0 failed`);
