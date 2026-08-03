@@ -305,7 +305,14 @@ export async function probeModel({ provider, id, wireId, key, label = "" }) {
     const imgCeiling = Math.max(1024, rec.recoversAt || 0);
     const v = await run({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: RED_PNG } }, { type: "text", text: "What colour is this image? Answer with one word." }] }], maxOut: imgCeiling });
     rec.acceptsImage = v.ok;
-    rec.seesImage = v.ok ? /\bred\b|crimson|scarlet/i.test(v.text) : false;
+    /*
+     * Accept any reasonable name for the swatch. The png is RGB(220,20,20), a dark red, and
+     * gpt-5.6-sol answered "Maroon" on 2026-08-03 and was scored blind by a regex that only knew
+     * three words. That is the same class of error as the 1x1 pixel: the instrument's narrowness
+     * became a finding about the model. Being generous here costs nothing, because a model that
+     * cannot see does not guess a red-family word for a red square, it says "Unknown".
+     */
+    rec.seesImage = v.ok ? /\bred\b|crimson|scarlet|maroon|firebrick|burgundy|vermilion|ruby/i.test(v.text) : false;
     rec.vision = rec.seesImage;
     if (v.ok && !rec.seesImage) rec.notes.push("accepted the image payload but did not name the colour; answered: " + JSON.stringify(v.text.trim().slice(0, 60)));
     if (!v.ok && v.err) rec.notes.push("image probe: " + v.err);

@@ -485,6 +485,29 @@ Fred assigned Palmyra to literary on the strength of a one-line description in t
 
 Output limits are already in decent shape and someone has fought this battle before: `model_execution_limits_test.mjs` asserts in so many words that "Normal mode must not impose a hidden Dominion output ceiling." Leave that test standing. The generosity work is on the context side, where roughly 42% of a selected model's window is currently never offered to history.
 
+### Measured 2026-08-03: the starvation floors are real, systemic, and NOT stable
+
+Two full roster probes plus targeted follow-ups. **Ten of forty-four models return an empty string at a 64-token output ceiling**, having spent the entire budget on hidden reasoning. That includes both defaults: DeepSeek V4 Pro (owner) and V4 Flash (tenant).
+
+**The finding that matters more than the numbers: the floors move between runs.**
+
+| Model | Run 1 floor | Run 2 floor |
+|---|---|---|
+| Trinity Large Thinking | 512 | **2048** |
+| gpt-oss-20b | 1024 | 512 |
+| MiniMax M2.5 | 1024 | 512 |
+| Tencent Hy3 | 1024 | 512 |
+| Kimi K3 | 256 | 512 |
+| DeepSeek V4 Flash | 256 | did not starve at all |
+| Claude Sonnet 5 | 256 | did not starve at all |
+| DeepSeek R1 | 2048 | no text at any ceiling to 2048 |
+
+Same prompt, same models, swings of up to four times. Trinity, the one OpenRouter model kept on merit, moved from 512 to 2048.
+
+**This is hard evidence for Fred's instinct to leave limits generous.** These ceilings cannot be tuned tightly because they are not stable properties. Any limit set from a single measurement will be wrong on some later turn, and the failure mode is not a truncated answer, it is a completely empty reply. Whatever gets set needs headroom above the worst ever observed, not the last observed.
+
+**DeepSeek R1 specifically, since Fred kept it deliberately and routed it to science and math.** It is not broken. Probed directly at 2048 it answered correctly, spending 912 output tokens: about 860 of reasoning and 54 of answer, with 3,438 characters of thinking returned alongside. The reasoning is billed to the same completion budget. So R1 needs roughly a thousand tokens before it says a word, on a one-sentence puzzle, and its margin at 2048 is thin enough to vanish on a harder question. **Dominion's fast mode caps output at exactly 2048.** R1 must not run in fast mode, and its Simplify route needs a ceiling well above it.
+
 **The trap that makes "monitor and narrow later" fail.** If limits are raised and usage is logged, but the moment a turn *hits* a limit is not logged, the collected distribution is censored by the very caps being tuned. Several hundred turns later the data says nobody exceeded 400 messages, which is indistinguishable from turns having been silently clipped at 400. A naturally short turn and a starved turn look identical in a usage log that only records what got through.
 
 So the instrumentation records the ceiling events, not just the consumption:
