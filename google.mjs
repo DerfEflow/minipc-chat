@@ -16,57 +16,47 @@
  *     verified" -- that was stale and had misled more than one session into chasing a 7-day
  *     token-expiry theory that was never real. There is no test-user list to maintain here.
  *
- * Maps, BigQuery, and People (Contacts) tools were added 2026-08-03. Maps needs no OAuth at all,
- * just a plain API key, see google-maps.mjs. BigQuery and People ride this SAME OAuth grant with
- * two added scopes, and those scopes are GATED OFF behind GOOGLE_CLOUD_SCOPES until Fred declares
- * them on the consent screen. Read the block above SCOPES before changing any of it.
+ * Three tool families were added 2026-08-03 and NONE of them rides this OAuth grant:
+ *   Maps      a plain server API key, no OAuth at all. See google-maps.mjs.
+ *   BigQuery  a SERVICE ACCOUNT, Dominion's own identity. See google-serviceaccount.mjs.
+ *   Contacts  built, and NOT registered. It needs a scope that forces app verification.
+ * Read the block above SCOPES before adding anything to that list.
  */
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHmac, randomBytes } from "node:crypto";
 import { createMapsTools } from "./google-maps.mjs";
 import { createBigQueryTools } from "./google-bigquery.mjs";
-import { createPeopleTools } from "./google-people.mjs";
+import { createServiceAccountTokenSource } from "./google-serviceaccount.mjs";
 
 /*
- * THE NEW SCOPES ARE OFF BY DEFAULT, AND THAT IS A SAFETY DECISION RATHER THAN AN OVERSIGHT.
+ * THE USER'S OAUTH GRANT COVERS THE USER'S OWN DATA, AND THAT IS THE WHOLE DESIGN.
  *
- * Google aborts the ENTIRE authorization request with `restricted_client` when the request carries
- * a scope the client has not declared on its consent screen. Not the one scope, the whole request.
- * So shipping BigQuery and People scopes before Fred declares them in the Google Cloud console
- * would break the Connect Google button for every user, taking Gmail, Calendar, Drive, Sheets and
- * Docs down with it. Verified 2026-08-03 by probing accounts.google.com directly: a declared-but-
- * unregistered scope returns `restricted_client`, while a scope Google has never heard of returns
- * `invalid_scope`. Both of these return the former, which confirms the strings are real and the
- * only thing missing is the console declaration.
+ * Gmail, Calendar, Drive, Sheets and Docs belong to the user, so consent belongs to the user too.
+ * BigQuery does NOT: it reads Fred's own cloud project. Asking every user to consent to it was the
+ * wrong model, and it had a price. Adding `cloud-platform.read-only` here on 2026-08-03 made Google
+ * demand app VERIFICATION, which means a privacy policy, a demo video, domain verification and
+ * weeks of review, for a feature that never touches a user's account at all.
  *
- * TO TURN THEM ON: declare both scopes on the consent screen, enable the BigQuery API and the
- * People API on the project, then set GOOGLE_CLOUD_SCOPES=1. Existing users then reconnect once
- * (Setup, Disconnect, Connect Google), because Google never adds a scope to a token that already
- * exists. Users who do not reconnect keep working exactly as they do today.
+ * So BigQuery moved to a service account, see google-serviceaccount.mjs. Dominion's own identity,
+ * no consent screen, no verification, bounded by the two read-only IAM roles it is granted.
  *
- * cloud-platform.read-only is used rather than bigquery.readonly. `bigquery.readonly` is published
- * on Google's scope list, and a live read of the bigquery/v2 discovery document on 2026-08-03 shows
- * it is accepted by NONE of the methods this code calls: jobs.query, datasets.list and tables.list
- * each take only `bigquery`, `cloud-platform`, or `cloud-platform.read-only`. Shipping the narrower
- * looking string would have produced ACCESS_TOKEN_SCOPE_INSUFFICIENT on every BigQuery call. Of the
- * three that work, `bigquery` permits writes and `cloud-platform` is broader still, so the
- * read-only variant is the only one that makes the read-only promise true at the IAM layer instead
- * of resting entirely on this codebase's own SQL gate.
+ * CONTACTS WAS DROPPED. `people_search_contacts` genuinely reads the user's own address book, so it
+ * genuinely needs user consent and genuinely needs verification. Fred's call, 2026-08-03: a
+ * convenience is not worth a review cycle. `google-people.mjs` stays on disk, unregistered, so
+ * turning it back on later is a scope plus one line rather than a rebuild.
+ *
+ * DO NOT ADD A SENSITIVE SCOPE HERE without knowing it triggers verification for the WHOLE app.
+ * Google aborts the entire authorization request with `restricted_client` when it carries a scope
+ * that is not declared, so a careless addition breaks Connect Google for every user, Gmail
+ * included, rather than failing only the feature that wanted it.
  */
-const CLOUD_SCOPES_ON = String(process.env.GOOGLE_CLOUD_SCOPES || "").trim() === "1";
 const SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/calendar",
   "https://www.googleapis.com/auth/drive",
   "https://www.googleapis.com/auth/spreadsheets",
   "https://www.googleapis.com/auth/documents",
-  ...(CLOUD_SCOPES_ON ? [
-    "https://www.googleapis.com/auth/cloud-platform.read-only",
-    // [verified] developers.google.com/people/api/rest/v1/people/searchContacts, read 2026-08-03,
-    // lists contacts and contacts.readonly as accepted. This module never writes a contact.
-    "https://www.googleapis.com/auth/contacts.readonly",
-  ] : []),
   "openid", "email",
 ].join(" ");
 
@@ -296,9 +286,23 @@ export function createGoogleProvider({ dir, cfgGet, baseUrl, enc, dec }) {
    * See docs/wiring/lane-h-google.md for the exact mechanism and why tools.mjs was NOT the answer.
    */
   const mapsTools = createMapsTools({ cfgGet }).TOOLS;
-  const bigqueryTools = createBigQueryTools({ accessToken, cfgGet }).TOOLS;
-  const peopleTools = createPeopleTools({ accessToken }).TOOLS;
-  TOOLS.push(...mapsTools, ...bigqueryTools, ...peopleTools);
+  /*
+   * BigQuery gets DOMINION'S identity, not the caller's. The `accessToken` above is the user's
+   * OAuth token and is deliberately not passed here: BigQuery reads Fred's own cloud project, so a
+   * per-user grant was both the wrong model and the thing that triggered Google's verification
+   * demand. The service-account source has the same `accessToken()` shape, so nothing downstream
+   * changed. When no key is configured the tools still register and refuse honestly at call time,
+   * which is better than vanishing and leaving a model to invent an explanation.
+   */
+  const bigquerySA = createServiceAccountTokenSource({ cfgGet });
+  const bigqueryTools = createBigQueryTools({ accessToken: bigquerySA.accessToken, cfgGet }).TOOLS;
+  /*
+   * people_search_contacts is BUILT AND NOT REGISTERED (Fred, 2026-08-03). It reads the user's own
+   * address book, so it needs `contacts.readonly`, and that scope makes Google require full app
+   * verification. Restoring it means adding the scope back, completing verification, and adding
+   * `...peopleTools` here. Left out of TOOLS rather than deleted so that stays a small job.
+   */
+  TOOLS.push(...mapsTools, ...bigqueryTools);
   const byName = new Map(TOOLS.map((t) => [t.name, t]));
 
   /*
