@@ -1,0 +1,112 @@
+{
+  "generatedAt": "2026-08-03T01:41:57.041Z",
+  "note": "Phase A per-model record. Live probe results only. A null field means the probe could not establish it, never an assumption.",
+  "probed": 3,
+  "problems": [
+    {
+      "id": "openai/gpt-oss-20b",
+      "kind": "budget-eater",
+      "note": "reasoning eats the output budget; needs max_tokens >= 512 to return any text"
+    }
+  ],
+  "records": [
+    {
+      "catalogId": "nvidia/nemotron-3-ultra-550b-a55b",
+      "wireId": "nvidia/nemotron-3-ultra-550b-a55b",
+      "provider": "nvidia",
+      "label": "Nemotron 3 Ultra",
+      "probedAt": "2026-08-03T01:40:45.404Z",
+      "endpoint": "https://integrate.api.nvidia.com/v1/chat/completions",
+      "family": "openai-chat",
+      "endpointVerified": "2026-08-03",
+      "answers": true,
+      "tools": true,
+      "acceptsImage": false,
+      "seesImage": false,
+      "vision": false,
+      "reasoningReported": true,
+      "budgetEater": false,
+      "recoversAt": null,
+      "outTokensAtCeiling": 64,
+      "finishAtCeiling": "length",
+      "err": "",
+      "notes": [
+        "image probe: ValueError: Received multimodal data but multimodal processing is not enabled. Use --enable-multimodal flag to enable multimodal processing."
+      ],
+      "catalogClaims": {
+        "ctx": 1000000,
+        "maxOut": 16384,
+        "reasoning": true,
+        "vision": false,
+        "inCost": 0.42,
+        "outCost": 2.61
+      }
+    },
+    {
+      "catalogId": "nvidia/nemotron-3-super-120b-a12b:free",
+      "wireId": "nvidia/nemotron-3-super-120b-a12b",
+      "provider": "nvidia",
+      "label": "Nemotron 3 Super",
+      "probedAt": "2026-08-03T01:41:31.117Z",
+      "endpoint": "https://integrate.api.nvidia.com/v1/chat/completions",
+      "family": "openai-chat",
+      "endpointVerified": "2026-08-03",
+      "answers": true,
+      "tools": true,
+      "acceptsImage": false,
+      "seesImage": false,
+      "vision": false,
+      "reasoningReported": true,
+      "budgetEater": false,
+      "recoversAt": null,
+      "outTokensAtCeiling": 64,
+      "finishAtCeiling": "length",
+      "err": "",
+      "notes": [
+        "image probe: ValueError: Received multimodal data but multimodal processing is not enabled. Use --enable-multimodal flag to enable multimodal processing."
+      ],
+      "catalogClaims": {
+        "ctx": 1000000,
+        "maxOut": 8192,
+        "reasoning": false,
+        "vision": false,
+        "inCost": 0,
+        "outCost": 0
+      }
+    },
+    {
+      "catalogId": "openai/gpt-oss-20b",
+      "wireId": "openai/gpt-oss-20b",
+      "provider": "nvidia",
+      "label": "GPT-OSS 20B",
+      "probedAt": "2026-08-03T01:41:36.313Z",
+      "endpoint": "https://integrate.api.nvidia.com/v1/chat/completions",
+      "family": "openai-chat",
+      "endpointVerified": "2026-08-03",
+      "answers": true,
+      "tools": true,
+      "acceptsImage": true,
+      "seesImage": false,
+      "vision": false,
+      "reasoningReported": true,
+      "budgetEater": true,
+      "recoversAt": 512,
+      "outTokensAtCeiling": 64,
+      "finishAtCeiling": "length",
+      "err": "",
+      "notes": [
+        "STARVATION: spent 64 output tokens and returned no text at a 64-token ceiling",
+        "recovers at max_tokens=512 (spent 351, finish=stop)",
+        "accepted the image payload but did not name the colour; answered: \"\""
+      ],
+      "catalogClaims": {
+        "ctx": 131072,
+        "maxOut": 8192,
+        "reasoning": true,
+        "vision": false,
+        "inCost": 0,
+        "outCost": 0
+      }
+    }
+  ]
+}

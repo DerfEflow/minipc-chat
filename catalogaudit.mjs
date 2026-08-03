@@ -35,10 +35,46 @@ async function listDirect(provider, keys) {
     if (!r.ok) throw new Error("HTTP " + r.status);
     return new Set(((await r.json()).data || []).map((m) => m.id));
   }
+  /*
+   * NVIDIA (added 2026-08-03). The lane was invisible to this audit: nvidia-provider models fell
+   * into the direct branch, found no set for their provider, and were skipped silently. That is how
+   * a whole free fleet shipped unaudited. Shape verified live 2026-08-03: OpenAI-compatible
+   * /v1/models returning {data:[{id}]}, 102 models on the developer tier.
+   */
+  if (provider === "nvidia") {
+    if (!keys.nvidia) return null;
+    const r = await fetch("https://integrate.api.nvidia.com/v1/models", { headers: { authorization: "Bearer " + keys.nvidia } });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return new Set(((await r.json()).data || []).map((m) => m.id));
+  }
+  /*
+   * Google AI Studio (added 2026-08-03). UNVERIFIED SHAPE: no AI Studio key existed when this was
+   * written, so the parse below has never seen a real response. It is written to fail SAFE — an
+   * unexpected body yields an empty set, which throws here and marks the provider "unchecked"
+   * rather than declaring every Google model dead. Confirm against a live call the moment a key
+   * lands, and delete this warning when it has actually run.
+   * Generative Language returns names as "models/<id>"; both forms are accepted.
+   */
+  if (provider === "google") {
+    if (!keys.google) return null;
+    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=" + encodeURIComponent(keys.google));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const body = await r.json();
+    const list = Array.isArray(body.models) ? body.models : [];
+    const ids = new Set();
+    for (const m of list) {
+      const n = String(m && m.name || "").trim();
+      if (!n) continue;
+      ids.add(n);
+      if (n.startsWith("models/")) ids.add(n.slice(7));
+    }
+    if (!ids.size) throw new Error("no models parsed (response shape may have changed)");
+    return ids;
+  }
   return null;
 }
 
-// keys: { openrouter, openai, anthropic, deepseek } — pass what you have; missing = that check skipped.
+// keys: { openrouter, openai, anthropic, deepseek, nvidia, google } — pass what you have; missing = that check skipped.
 export async function runCatalogAudit(keys = {}) {
   const result = { checkedAt: new Date().toISOString(), ok: true, problems: [], notes: [], providers: {} };
 
@@ -47,7 +83,7 @@ export async function runCatalogAudit(keys = {}) {
   catch (e) { result.providers.openrouter = "unchecked: " + (e.message || e); }
 
   const directSets = {};
-  for (const p of ["openai", "anthropic", "deepseek"]) {
+  for (const p of ["openai", "anthropic", "deepseek", "nvidia", "google"]) {
     try { const s = await listDirect(p, keys); directSets[p] = s; result.providers[p] = s ? "checked (" + s.size + " live models)" : "unchecked: no key"; }
     catch (e) { directSets[p] = null; result.providers[p] = "unchecked: " + (e.message || e); }
   }
