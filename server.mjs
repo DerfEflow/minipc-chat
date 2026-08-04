@@ -166,6 +166,7 @@ import { isRepoCmd, startBranchPlan, salvageCommitPlan, githubPushPlan, mergePla
 import { ensureRepo, repoNameFrom, shipSummary } from "./idegithub.mjs";
 import { createTelemetry, estimatePartTokens } from "./idetelemetry.mjs";
 import { taskRoadmapMessages, parseTaskRoadmap, topoOrder, readyTasks, filesCollide, resolveTaskAssignments, reduceTaskGoal, classifyReduction, validateStoredSplit, fitPartsToAgents } from "./idetasks.mjs";
+import { runTaskPool, createGate } from "./idepool.mjs";
 import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } from "./ideafrun.mjs";
 import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderouter.mjs";
 import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
@@ -4441,20 +4442,9 @@ async function runIdeBuild(job, {
       const snap = await engine.snapshot(job, workspace);
       if (!snap.ok) { ideJobs.finish(job.id, { type: "error", message: "No restore point could be made, so nothing was written. " + (snap.error || "") }); return false; }
 
-      /*
-       * THE MODEL-CALL GATE. Concurrency is capped so a 12-task roadmap cannot fire 12 (or with
-       * divided tasks, 30) simultaneous calls at providers that are already wobbling - the
-       * thundering herd is what turned one flaky endpoint into nine failed tasks on 2026-08-03.
-       * Calls queue here in arrival order; disk writes are serialized separately below.
-       */
-      const MODEL_CALL_GATE_LIMIT = 6;
-      const gate = (() => {
-        let inFlight = 0; const waiters = [];
-        return {
-          async enter() { if (inFlight >= MODEL_CALL_GATE_LIMIT) await new Promise((wake) => waiters.push(wake)); inFlight++; },
-          leave() { inFlight = Math.max(0, inFlight - 1); const wake = waiters.shift(); if (wake) wake(); },
-        };
-      })();
+      // The model-call gate (idepool.mjs): calls queue so a 12-task roadmap cannot fire 30
+      // simultaneous calls at providers that are already wobbling. Writes serialize separately.
+      const gate = createGate(6);
       const gatedChat = async (args) => { await gate.enter(); try { return await chat(args); } finally { gate.leave(); } };
 
       // Run ONE unit (a whole task, or one sub-part of a divided task): a model call whose result
@@ -4588,34 +4578,21 @@ async function runIdeBuild(job, {
 
       /*
        * THE ROLLING POOL (Fred, 2026-08-03: "why can't all tasks be done at the same time?").
-       * The old runner executed discrete waves with a full barrier, so one slow task held every
-       * satisfied, file-disjoint task out of the next wave. This pool starts ANY task the moment
-       * its dependencies are done and its files collide with nothing currently running -
-       * readyTasks has enforced both rules since the redesign; the old runner just never passed
-       * it the running set. Model calls run concurrently behind the gate above; everything after
-       * a task's calls settle - metering, ownership filtering, WRITES, events - runs on ONE
-       * serialized chain, so disk and ledger order stay exactly as single-file as the old loop.
-       *
-       * Failure is a fork, not a slide (the 2026-08-03 build lost most of its tasks to one flaky
-       * endpoint and slid straight into the final audit as if it were wrapping up): when the pool
-       * drains with failed tasks, the user is ASKED - retry (transport deaths reroute through the
-       * provider hop automatically), skip, or stop. Only after that choice does anything get
-       * abandoned, and abandoned tasks say so on their own Blueprint rows.
+       * Scheduling truth lives in idepool.mjs, where tests exercise it directly: any task whose
+       * dependencies are done and whose files collide with nothing running starts immediately;
+       * failure drains the pool and FORKS (retry / skip / stop) instead of sliding into the
+       * final audit. This block supplies what the pool cannot know: model calls, the serialized
+       * settle chain (metering, ownership filtering, WRITES, events - one at a time, exactly as
+       * single-file as the old wave loop), and the Blueprint's row states.
        */
-      const done = new Set(); const hardFailed = new Set();
-      const failReason = new Map();       // task n -> the message shown in the retry fork
-      const attemptsByTask = new Map();   // task n -> failed tries (two-strike bookkeeping)
-      const runningN = new Set();
-      const active = new Map();           // task n -> settling promise
       let settleChain = Promise.resolve();
       const enqueueSettle = (fn) => { settleChain = settleChain.then(fn); return settleChain; };
-      let fatal = null;                   // { kind: "abort" | "carve" } - drain, then act once
-      let retryRounds = 0;
+      let poolFatal = false;   // set on abort/carve so queued settles stop writing
 
       // Everything after a task's model calls settle, for ALL of its units, in order. Runs on
-      // the serialized chain. Returns the task verdict.
-      const settleTaskUnits = async (t, settled) => {
-        let ok = true, filesWritten = 0;
+      // the serialized chain. Returns the task verdict the pool acts on.
+      const settleTaskUnits = async (settled) => {
+        let ok = true, filesWritten = 0, reason = "";
         for (const r of settled) {
           spend(r.res.costUsd);
           if (r.res.costUsd) { await meterTurn(T, r.res.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: r.res.costUsd, move: r.id }); }
@@ -4623,11 +4600,11 @@ async function runIdeBuild(job, {
             const outTok = (r.res.usage && (r.res.usage.completion_tokens ?? r.res.usage.output_tokens)) || 0;
             if (outTok > 0 && r.res.ms > 0 && r.res.model) buildTelemetry.record({ model: r.res.model, outTokens: outTok, ms: r.res.ms, costUsd: r.res.costUsd || 0 });
           } catch {}
-          if (ac.signal.aborted || (fatal && fatal.kind === "abort")) return { ok: false, aborted: true };
-          if (fatal && fatal.kind === "carve") return { ok: false };   // a wall is up; write nothing more
+          if (ac.signal.aborted) return { ok: false, aborted: true };
+          if (poolFatal) return { ok: false, reason: "the build was already stopping" };
           if (!r.res.ok) {
             ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "failed", message: r.res.error || "The model call failed." });
-            failReason.set(t.n, String(r.res.error || "the model call failed").slice(0, 160));
+            reason = String(r.res.error || "the model call failed").slice(0, 160);
             ok = false; continue;
           }
           const parsed = r.parsed || parseFileBlocks(r.res.content);
@@ -4635,118 +4612,98 @@ async function runIdeBuild(job, {
           for (const d of own.dropped) ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "warned", message: d.path + ": outside this task's files, refused (the cookie rule)" });
           if (!own.kept.length) {
             ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "failed", message: "It returned no files inside its task." });
-            failReason.set(t.n, "it returned no files inside its task");
+            reason = "it returned no files inside its task";
             ok = false; continue;
           }
           const coverage = fileCoverage(r.grant || [], own.kept);
           if (!coverage.complete) {
             ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "failed",
               message: "It omitted owned files: " + coverage.missing.join(", ") + ". No partial task was written." });
-            failReason.set(t.n, "it omitted owned files");
+            reason = "it omitted owned files";
             ok = false; continue;
           }
           const carve = carveOutReport(own.kept);
           if (carve) {
             ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "blocked", message: carve.message });
+            poolFatal = true;   // queued settles for other tasks stop writing immediately
             return { ok: false, carve: true };
           }
           const write = await engine.writeFiles(job, workspace, own.kept);
           if (write.failed.length || !write.written.length) {
             ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "failed",
               message: write.failed.length ? write.failed.length + " owned file write(s) failed." : "No owned file changed." });
-            failReason.set(t.n, "owned file writes failed");
+            reason = "owned file writes failed";
             ok = false; continue;
           }
           markCovered(own.kept);
           filesWritten += own.kept.length;
           ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "done", files: own.kept.length });
         }
-        return { ok, filesWritten };
+        return { ok, filesWritten, reason };
       };
 
-      const startTask = (t) => {
-        runningN.add(t.n);
-        const settling = (async () => {
+      const parentRow = (t, state, extra = {}) => ideJobs.emit(job.id, { type: "move", id: "tg-" + t.n,
+        title: t.n + ". " + t.title, state, model: (assignByN.get(t.n) || {}).model || workerModel, ...extra });
+
+      const pool = await runTaskPool({
+        tasks,
+        isAborted: () => ac.signal.aborted,
+        maxRetryRounds: 2,
+        maxAttemptsPerTask: 3,
+        // The task's own row goes to work THE MOMENT the task does - including during its
+        // division call. A divided task's row used to stay QUEUED forever while its sub-rows
+        // worked at the bottom of the list (the "started the last tasks first" illusion). An
+        // undivided task re-emits the same id from runUnit, which supersedes this with the
+        // identical truth.
+        onTaskStart: (t) => parentRow(t, "running"),
+        runTask: async (t) => {
           const units = await unitsForTask(t);
-          // When a task divides, its own row would otherwise stay QUEUED forever while its
-          // sub-rows worked (the "started the last tasks first" illusion). The parent row now
-          // tracks the truth: running while its agents work, one terminal state at the end.
           const dividedRow = !(units.length === 1 && units[0].id === "tg-" + t.n);
-          if (dividedRow) {
-            ideJobs.emit(job.id, { type: "move", id: "tg-" + t.n, title: t.n + ". " + t.title, state: "running",
-              model: (assignByN.get(t.n) || {}).model || workerModel,
-              message: units.length > 1 ? units.length + " agents working on it at once." : "" });
-          }
+          if (dividedRow && units.length > 1) parentRow(t, "running", { message: units.length + " agents working on it at once." });
           const settled = await Promise.all(units.map((u) => runUnit(u)));
           let verdict = { ok: false };
-          await enqueueSettle(async () => { try { verdict = await settleTaskUnits(t, settled); } catch (e) { verdict = { ok: false, error: String((e && e.message) || e) }; } });
-          return { t, dividedRow, verdict };
-        })().catch((e) => ({ t, dividedRow: false, verdict: { ok: false, error: String((e && e.message) || e) } }));
-        active.set(t.n, settling);
-      };
-
-      while (true) {
-        if (!fatal && !ac.signal.aborted) {
-          const startable = readyTasks(tasks, { done, running: [...runningN] })
-            .filter((t) => !active.has(t.n) && !hardFailed.has(t.n) && !t.needs.some((n) => hardFailed.has(n)));
-          for (const t of startable) startTask(t);
-        }
-        if (!active.size) {
-          if (ac.signal.aborted || (fatal && fatal.kind === "abort")) { await salvage("interrupted", "task graph"); return false; }
-          if (fatal && fatal.kind === "carve") { await salvage("interrupted", "carve-out"); ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) }); return false; }
-          if (hardFailed.size && retryRounds < 2) {
-            const retryable = [...hardFailed].filter((n) => (attemptsByTask.get(n) || 0) < 3).sort((a, b) => a - b);
-            if (retryable.length) {
-              const list = retryable.map((n) => {
-                const failedTask = tasks.find((x) => x.n === n);
-                return n + " (" + ((failedTask && failedTask.title) || "task") + (failReason.has(n) ? " - " + failReason.get(n) : "") + ")";
-              }).join("; ").slice(0, 900);
-              const answer = await ask("tasks-failed", phrase("tasks_failed_question", reg, retryable.length, list),
-                [phrase("tasks_retry", reg), phrase("tasks_skip", reg), phrase("move_stop", reg)]);
-              if (answer === null) return false;
-              if (ANSWER.stop.test(answer)) { ideJobs.finish(job.id, { type: "stopped", message: phrase("move_stopped", reg) }); return false; }
-              if (ANSWER.retry.test(answer)) {
-                retryRounds++;
-                for (const n of retryable) hardFailed.delete(n);
-                ideJobs.emit(job.id, { type: "run", command: "schedule", ok: true,
-                  output: "Retrying task(s) " + retryable.join(", ") + ". A step whose endpoint was down reroutes to a backup engine automatically." });
-                continue;
-              }
-              // Skip chosen: fall through and abandon honestly.
-            }
-          }
-          break;
-        }
-        const finished = await Promise.race([...active.values()]);
-        active.delete(finished.t.n);
-        runningN.delete(finished.t.n);
-        const verdict = finished.verdict || { ok: false };
-        if (verdict.aborted) fatal = fatal || { kind: "abort" };
-        else if (verdict.carve) fatal = fatal || { kind: "carve" };
-        if (verdict.ok) {
-          done.add(finished.t.n);
-          if (finished.dividedRow) ideJobs.emit(job.id, { type: "move", id: "tg-" + finished.t.n, title: finished.t.n + ". " + finished.t.title, state: "done", files: verdict.filesWritten || 0 });
-        } else if (!fatal) {
-          hardFailed.add(finished.t.n);
-          attemptsByTask.set(finished.t.n, (attemptsByTask.get(finished.t.n) || 0) + 1);
-          if (finished.dividedRow) ideJobs.emit(job.id, { type: "move", id: "tg-" + finished.t.n, title: finished.t.n + ". " + finished.t.title, state: "failed",
-            message: failReason.get(finished.t.n) || verdict.error || "One of its agents did not finish." });
-        }
-      }
+          await enqueueSettle(async () => { try { verdict = await settleTaskUnits(settled); } catch (e) { verdict = { ok: false, error: String((e && e.message) || e) }; } });
+          verdict.dividedRow = dividedRow;
+          return verdict;
+        },
+        onTaskDone: (t, verdict) => { if (verdict.dividedRow) parentRow(t, "done", { files: verdict.filesWritten || 0 }); },
+        onTaskFailed: (t, reason, verdict) => {
+          if (verdict.dividedRow) parentRow(t, "failed", { message: reason || "One of its agents did not finish." });
+        },
+        askRetry: async (failedList) => {
+          const list = failedList.map(({ n, reason }) => {
+            const failedTask = tasks.find((x) => x.n === n);
+            return n + " (" + ((failedTask && failedTask.title) || "task") + (reason ? " - " + reason : "") + ")";
+          }).join("; ").slice(0, 900);
+          const answer = await ask("tasks-failed", phrase("tasks_failed_question", reg, failedList.length, list),
+            [phrase("tasks_retry", reg), phrase("tasks_skip", reg), phrase("move_stop", reg)]);
+          if (answer === null) return null;
+          if (ANSWER.stop.test(answer)) return "stop";
+          if (ANSWER.retry.test(answer)) return "retry";
+          return "skip";
+        },
+        onRetry: (ns) => ideJobs.emit(job.id, { type: "run", command: "schedule", ok: true,
+          output: "Retrying task(s) " + ns.join(", ") + ". A step whose endpoint was down reroutes to a backup engine automatically." }),
+      });
+      poolFatal = pool.outcome !== "drained";
+      await settleChain.catch(() => {});   // every queued write/meter lands before anything terminal
+      if (pool.outcome === "sealed") return false;
+      if (pool.outcome === "aborted") { await salvage("interrupted", "task graph"); return false; }
+      if (pool.outcome === "carve") { await salvage("interrupted", "carve-out"); ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) }); return false; }
+      if (pool.outcome === "stopped") { ideJobs.finish(job.id, { type: "stopped", message: phrase("move_stopped", reg) }); return false; }
+      const done = pool.done, hardFailed = pool.hardFailed, failReason = pool.failReason;
 
       /*
        * Abandonment accounting, ON THE ROWS. A task blocked behind a failure used to get one log
        * line while its row said QUEUED forever - which is how a finished failure read as a build
        * still in progress while the final audit asked its questions.
        */
-      const skippedTasks = tasks.filter((t) => !done.has(t.n) && !hardFailed.has(t.n));
-      for (const t of skippedTasks) {
-        const missing = t.needs.filter((n) => !done.has(n)).sort((a, b) => a - b);
+      for (const { t, missing } of pool.skipped) {
         ideJobs.emit(job.id, { type: "move", id: "tg-" + t.n, title: t.n + ". " + t.title, state: "skipped",
           message: "Skipped: it needs task" + (missing.length === 1 ? " " : "s ") + missing.join(", ") + ", which did not finish." });
         knownIncomplete.push("Task " + t.n + " (" + t.title + ") was skipped: it needs task(s) " + missing.join(", ") + " which did not finish.");
       }
-      if (!done.size && (hardFailed.size || skippedTasks.length)) {
+      if (!done.size && (hardFailed.size || pool.skipped.length)) {
         // Nothing built at all: this is a failed build and it says so, instead of parading the
         // end-of-build audit over an empty workspace.
         for (const n of [...hardFailed].sort((a, b) => a - b)) knownIncomplete.push("Task " + n + " did not finish (" + (failReason.get(n) || "failed") + ").");

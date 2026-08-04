@@ -1,5 +1,12 @@
 # Build Governance Audit — 2026-08-03
 
+> **STATUS 2026-08-03 (later the same day): ALL FINDINGS FIXED on this branch**
+> (`iter/build-governance-audit`). Every item below is closed; the fix map is at the bottom of
+> this file. 129 test suites pass, including a new `idepool_test.mjs` that exercises the
+> replacement scheduler directly — and whose first run caught a real file-collision race before
+> it ever ran a build. Not merged into `iter/assistant-build-core` and not pushed; the running
+> server still serves the audited (unfixed) code until Fred says merge.
+
 Fred's concerns from today's Agent Army build (the Jarvis/orb app), audited against the code that
 is actually running: `iter/assistant-build-core`, served live by
 `Z:\Apps\minipc-chat\assistant-build-core\server.mjs` (verified by process list). That branch
@@ -191,16 +198,41 @@ the first attempts; never substitute silently.
 
 ---
 
-## Priority order (if Fred says go)
+## Fix map (built 2026-08-03, same branch)
 
-1. **Worker-call failover on transport failure** (§7) — converts endpoint flakiness from
-   build-killing to a logged substitution. Small, contained in the `chat` wrapper.
-2. **Truthful Blueprint states** (§1, §5) — skipped/failed rows go terminal; sub-units nest under
-   parents; failure banner on mass hard-fail before any end-of-build audit.
-3. **Ground `/ide/tasks` + feed the prior ledger** (§3) — replans stop being blind.
-4. **Bind the previewed split; debounce reduce** (§4) — plan screen and build agree on agents.
-5. **Rolling scheduler + concurrency cap** (§6) — more true parallelism, fewer thundering herds.
-6. **Furnace auto-fix preference + post-failure retry dialog** (§2).
+Every finding above is closed. Where each fix lives:
 
-No code was changed in this audit. This worktree (`iter/build-governance-audit`) exists so any of
-the fixes above can be built here without touching the running branch.
+1. **Worker-call failover on transport failure** (§7) — `server.mjs` chat wrapper: after the
+   provider layer's own 3 same-model retries, a transport death hops ONCE to the keyed model
+   **closest in price** (funds deaths still hop cheapest-first), announced in the run log; user
+   aborts never reroute. `altKeyedModelFor` gained the `prefer: "similar"` sort.
+2. **Truthful Blueprint states + failure fork** (§1, §2, §5) — the scheduler was extracted to
+   `idepool.mjs` (tested directly by `idepool_test.mjs`): rolling starts, per-start collision
+   recheck, and a **fork on failure**: when the pool drains with failed tasks the user chooses
+   retry / skip / stop (two-strike caps: max 2 fork rounds, 3 attempts per task). Skipped tasks
+   get `state: "skipped"` on their own rows; divided-task parent rows now run/finish/fail for
+   real; a nothing-built run ends as a **failed build**, never a wrap-up audit.
+   `dominion-lenses.js` nests sub-agent rows under their task and counts progress over leaves.
+3. **Grounded replans** (§3) — `/ide/tasks` runs the adopt scanner over the live workspace and
+   appends the **previous build's ledger** (`ledgerFromEvents` in `idejobs.mjs`: done / failed /
+   skipped / unstarted / files written) to the orchestrator prompt. Degrades to an honest note
+   when the scan cannot run.
+4. **Bound splits + debounced reduce** (§4) — `/ide/reduce` returns its parts; the client stores
+   them with the plan (`af.splits`) and a sequence token drops stale responses; the build
+   validates (`validateStoredSplit`) and **executes the previewed split**, deterministically
+   fitted to the final agent count (`fitPartsToAgents`) — fresh division only when no valid
+   stored split exists.
+5. **Rolling scheduler + concurrency cap** (§6) — `idepool.mjs` + `createGate(6)` on model
+   calls; writes and metering stay on one serialized chain. The pool's first test run caught a
+   real race (two owners of one file starting in the same scheduling pass) — fixed by
+   recomputing the ready set after every start.
+6. **Furnace auto-fix + honest estimates** (§2, §8) — findings are fixed automatically by
+   default (out loud; "Ask before fixing" checkbox on the plan screen restores the question),
+   and fix moves target the files the findings **name**, batched by `MAX_FILES_PER_MOVE`,
+   instead of one 12-file move. `estimatePlan` simulates dependency waves and the plan total
+   shows a parallel-to-sequential **range** plus accumulated planning spend.
+
+Verification: 129 suites green (`npm test`), including new tests in `idetasks_test.mjs`,
+`idejobs_test.mjs`, `idetelemetry_test.mjs`, and the 12-case `idepool_test.mjs`. The engine's
+sequencing invariants (snapshot before writes, serialized writes, ownership filter, budget
+freeze, meter-on-finally) were preserved deliberately and re-verified by the existing suites.
