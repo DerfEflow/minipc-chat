@@ -48,6 +48,43 @@ export const EVENT_TYPES = new Set([
 
 const isTerminal = (t) => TERMINAL.has(t);
 
+/*
+ * What a finished job actually did, as a plan-sized summary (Fred, 2026-08-03: "I am not
+ * confident it was done according to the tasks that were completed last time"). Re-planning used
+ * to be blind to the previous build; this is the ledger the orchestrator gets so a second plan
+ * builds on round one instead of re-planning it from zero. Pure: events in, summary out.
+ */
+export function ledgerFromEvents(events) {
+  const moves = new Map();
+  const files = new Set();
+  let outcome = "";
+  for (const ev of events || []) {
+    if (!ev || typeof ev !== "object") continue;
+    if (ev.type === "plan") {
+      for (const m of ev.moves || []) {
+        if (m && m.id && !moves.has(m.id)) moves.set(m.id, { id: m.id, title: m.title || "", state: "planned" });
+      }
+    } else if (ev.type === "move" && ev.id) {
+      const prev = moves.get(ev.id) || { id: ev.id, title: "" };
+      moves.set(ev.id, { ...prev, title: ev.title || prev.title, state: ev.state || prev.state || "planned" });
+    } else if (ev.type === "file" && ev.path) {
+      files.add(String(ev.path));
+    } else if (isTerminal(ev.type)) {
+      outcome = ev.type;
+    }
+  }
+  const titled = (m) => m.title || m.id;
+  const rows = [...moves.values()];
+  return {
+    outcome,
+    done: rows.filter((m) => m.state === "done" || m.state === "warned").map(titled),
+    failed: rows.filter((m) => m.state === "failed").map(titled),
+    skipped: rows.filter((m) => m.state === "skipped").map(titled),
+    unstarted: rows.filter((m) => m.state === "planned").map(titled),
+    files: [...files],
+  };
+}
+
 // Rolling-deploy grace (Kimi #2). Railway boots the NEW container while the OLD one is briefly
 // still driving a build. The old instance writes an internal lease heartbeat to the same append-
 // only journal; a new instance tails it until it sees a terminal event or one full grace window

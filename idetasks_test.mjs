@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import {
   taskRoadmapMessages, parseTaskRoadmap, collisionPairs, filesCollide, readyTasks, topoOrder,
-  resolveTaskAssignments, reduceTaskGoal, classifyReduction,
+  resolveTaskAssignments, reduceTaskGoal, classifyReduction, validateStoredSplit, fitPartsToAgents,
 } from "./idetasks.mjs";
 
 let passed = 0, failed = 0;
@@ -154,6 +154,71 @@ t("the fallback chain can always seat someone", () => {
   // leaves the fallback picking the model that just failed.
   assert.ok(ORCHESTRATOR_FALLBACKS.some((id) => id !== DEFAULT_MODEL));
   assert.ok(ORCHESTRATOR_FALLBACKS.some((id) => id !== TENANT_DEFAULT_MODEL));
+});
+
+/* ---- the previewed split is the split that runs -------------------------------------------- */
+const SPLIT_TASK = { n: 4, title: "Build the connectors", files: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"] };
+
+t("a stored split whose files match the task validates and keeps its parts", () => {
+  const v = validateStoredSplit(SPLIT_TASK, { parts: [
+    { title: "first", files: ["src/a.ts", "src/b.ts"], contract: "own a and b" },
+    { title: "second", files: ["src/c.ts", "src/d.ts"] },
+  ] });
+  assert.ok(v.ok);
+  assert.equal(v.parts.length, 2);
+  assert.deepEqual(v.parts[0].files, ["src/a.ts", "src/b.ts"]);
+});
+
+t("a stored split naming a file the task no longer owns is discarded whole", () => {
+  const v = validateStoredSplit(SPLIT_TASK, { parts: [
+    { files: ["src/a.ts"] }, { files: ["src/gone.ts"] },
+  ] });
+  assert.ok(!v.ok);
+  assert.match(v.error, /gone\.ts/);
+});
+
+t("a file claimed by two parts kills the stored split (the cookie rule)", () => {
+  const v = validateStoredSplit(SPLIT_TASK, { parts: [
+    { files: ["src/a.ts", "src/b.ts"] }, { files: ["src/b.ts", "src/c.ts"] },
+  ] });
+  assert.ok(!v.ok);
+  assert.match(v.error, /more than one part/);
+});
+
+t("an unsafe path in a stored split is refused", () => {
+  const v = validateStoredSplit(SPLIT_TASK, { parts: [{ files: ["../escape.ts"] }] });
+  assert.ok(!v.ok);
+  assert.match(v.error, /unsafe/);
+});
+
+t("case and slash differences still match the task's files", () => {
+  const v = validateStoredSplit(SPLIT_TASK, { parts: [{ files: ["SRC\\A.ts"] }, { files: ["src/b.ts"] }] });
+  assert.ok(v.ok);
+});
+
+t("fitPartsToAgents merges the smallest parts when agents shrink, disjointness intact", () => {
+  const fitted = fitPartsToAgents([
+    { title: "one", files: ["a"], contract: "" },
+    { title: "two", files: ["b", "c"], contract: "x" },
+    { title: "three", files: ["d", "e", "f"], contract: "" },
+  ], 2);
+  assert.equal(fitted.length, 2);
+  const all = fitted.flatMap((p) => p.files).sort();
+  assert.deepEqual(all, ["a", "b", "c", "d", "e", "f"]);   // nothing lost, nothing doubled
+});
+
+t("fitPartsToAgents is deterministic: same input, same output, twice", () => {
+  const input = [
+    { title: "p1", files: ["a"], contract: "" },
+    { title: "p2", files: ["b"], contract: "" },
+    { title: "p3", files: ["c", "d"], contract: "" },
+  ];
+  assert.deepEqual(fitPartsToAgents(input, 2), fitPartsToAgents(input, 2));
+});
+
+t("fitPartsToAgents leaves parts alone when agents >= parts", () => {
+  const parts = [{ title: "a", files: ["x"], contract: "" }, { title: "b", files: ["y"], contract: "" }];
+  assert.equal(fitPartsToAgents(parts, 5).length, 2);
 });
 
 console.log("\nidetasks: " + passed + " passed, " + failed + " failed");

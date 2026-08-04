@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createIdeJobs, TERMINAL, EVENT_TYPES } from "./idejobs.mjs";
+import { createIdeJobs, TERMINAL, EVENT_TYPES, ledgerFromEvents } from "./idejobs.mjs";
 
 let passed = 0, failed = 0;
 function t(name, fn) {
@@ -367,6 +367,28 @@ await t("waitForAnswer resolves null when the job seals instead of hanging forev
   jobs.stop(job.id, "user gave up");
   assert.equal(await waiting, null, "a sealed job must release its waiter with null");
   assert.equal(await jobs.waitForAnswer("ide_nope", 0), null, "an unknown job resolves null immediately");
+});
+
+await t("ledgerFromEvents summarizes what a job really did: done, failed, skipped, unstarted, files", () => {
+  const ledger = ledgerFromEvents([
+    { type: "job", at: 1 },
+    { type: "plan", moves: [
+      { id: "tg-1", title: "1. Types" }, { id: "tg-2", title: "2. Orb" },
+      { id: "tg-3", title: "3. Voice" }, { id: "tg-4", title: "4. Wire it" },
+    ] },
+    { type: "move", id: "tg-1", title: "1. Types", state: "running" },
+    { type: "move", id: "tg-1", title: "1. Types", state: "done" },
+    { type: "move", id: "tg-2", title: "2. Orb", state: "failed", message: "endpoint died" },
+    { type: "move", id: "tg-3", title: "3. Voice", state: "skipped" },
+    { type: "file", path: "src/types.ts" },
+    { type: "checkpoint", at: 9 },
+  ]);
+  assert.equal(ledger.outcome, "checkpoint");
+  assert.deepEqual(ledger.done, ["1. Types"]);
+  assert.deepEqual(ledger.failed, ["2. Orb"]);
+  assert.deepEqual(ledger.skipped, ["3. Voice"]);
+  assert.deepEqual(ledger.unstarted, ["4. Wire it"]);
+  assert.deepEqual(ledger.files, ["src/types.ts"]);
 });
 
 console.log("\n" + passed + " passed, " + failed + " failed");

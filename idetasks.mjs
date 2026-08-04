@@ -185,6 +185,72 @@ export function reduceTaskGoal(task, agents) {
 }
 
 /*
+ * THE PREVIEWED SPLIT IS THE SPLIT THAT RUNS (Fred, 2026-08-03).
+ *
+ * The plan screen's reduce check and the build's division used to be two separate rolls of the
+ * same dice: the user previewed "3 pieces", pressed build, and a fresh divider call came back
+ * with 2. Both verdicts were honest; showing one and running the other was the lie. So the
+ * client now stores the parts it previewed, and the build validates and executes THAT split.
+ * A fresh division happens only when no stored split exists or the stored one no longer matches
+ * the task (files edited since the preview).
+ *
+ * Validation is server-side and strict, because the stored split arrives from the client:
+ * every file must belong to the task, appear in exactly one part, and be a safe relative path.
+ * A split that fails any check is discarded whole - a half-trusted split is worse than a fresh
+ * division, because it looks like the preview and is not.
+ */
+export function validateStoredSplit(task, split) {
+  if (!split || !Array.isArray(split.parts) || !split.parts.length) return { ok: false, error: "no stored split" };
+  const taskFiles = new Set((task.files || []).map(norm));
+  const seen = new Set();
+  const parts = [];
+  for (const raw of split.parts.slice(0, 6)) {
+    const files = Array.isArray(raw && raw.files) ? raw.files : [];
+    const kept = [];
+    for (const rawFile of files.slice(0, 40)) {
+      const f = String(rawFile || "").trim();
+      if (!f) continue;
+      if (f.includes("..") || /^[a-zA-Z]:[\\/]/.test(f) || f.startsWith("/")) return { ok: false, error: "unsafe path in the stored split (" + f + ")" };
+      const n = norm(f);
+      if (!taskFiles.has(n)) return { ok: false, error: f + " is not one of this task's files anymore" };
+      if (seen.has(n)) return { ok: false, error: f + " appears in more than one part" };
+      seen.add(n);
+      kept.push(f);
+    }
+    if (kept.length) parts.push({
+      title: String((raw && raw.title) || "").slice(0, 200),
+      files: kept,
+      contract: String((raw && raw.contract) || "").slice(0, 500),
+    });
+  }
+  if (!parts.length) return { ok: false, error: "the stored split had no usable parts" };
+  return { ok: true, parts };
+}
+
+/*
+ * Fit a validated split to the agent count the user finally chose, DETERMINISTICALLY.
+ * More parts than agents: merge the smallest parts together until the counts match (the cookie
+ * rule survives - merging disjoint sets is still disjoint). Fewer parts than agents: run the
+ * parts there are; extra agents have nothing disjoint to own, which is exactly what the preview
+ * said. No model call, so the same inputs always produce the same units.
+ */
+export function fitPartsToAgents(parts, agents) {
+  const want = Math.max(1, Math.trunc(Number(agents) || 1));
+  const out = (parts || []).map((p) => ({ title: p.title || "", files: [...(p.files || [])], contract: p.contract || "" }));
+  while (out.length > want) {
+    out.sort((a, b) => a.files.length - b.files.length || String(a.title).localeCompare(String(b.title)));
+    const smallest = out.shift();
+    const nextSmallest = out.shift();
+    out.push({
+      title: nextSmallest.title || smallest.title,
+      files: [...nextSmallest.files, ...smallest.files],
+      contract: [nextSmallest.contract, smallest.contract].filter(Boolean).join(" "),
+    });
+  }
+  return out;
+}
+
+/*
  * Decide what a reduction attempt means:
  *   clean       - got as many disjoint sub-parts as agents requested; use them all.
  *   partial     - got 2..(agents-1) disjoint sub-parts; use that many agents, tell the user.

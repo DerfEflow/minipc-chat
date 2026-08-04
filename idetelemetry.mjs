@@ -143,18 +143,62 @@ export function createTelemetry({ dir, now = Date.now } = {}) {
   }
 
   // Whole-plan roll-up: sum the parts under their chosen models and agent counts.
+  /*
+   * Wall time the way the scheduler actually runs (Fred, 2026-08-03: "Whole plan: 18 min to
+   * 40 min" was a sequential sum shown over a parallel build). Model calls run CONCURRENTLY for
+   * every task whose dependencies are met and whose files are disjoint; only the file writes
+   * serialize, and writes are seconds against a model call's minutes. So the honest wall figure
+   * simulates the dependency waves: each wave costs as long as its slowest member, and the plan
+   * costs the sum of its waves. Money still ADDS across every part - parallelism buys time, not
+   * dollars. Parts with no dependency info (older clients) fall back to the sequential sum, which
+   * is then labelled for what it is.
+   */
+  function planWallSeconds(parts, secondsOf) {
+    const nodes = (parts || []).map((p, i) => ({
+      i,
+      n: Number.isFinite(Number(p && p.n)) ? Number(p.n) : i + 1,
+      needs: Array.isArray(p && p.needs) ? p.needs.map(Number).filter(Number.isFinite) : [],
+      files: new Set((Array.isArray(p && p.files) ? p.files : []).map((f) => String(f).trim().replace(/\\/g, "/").toLowerCase())),
+    }));
+    if (!nodes.length) return 0;
+    const present = new Set(nodes.map((x) => x.n));
+    for (const x of nodes) x.needs = x.needs.filter((n) => present.has(n) && n !== x.n);
+    const doneN = new Set();
+    const left = new Set(nodes.map((x) => x.i));
+    let wall = 0, guard = 0;
+    while (left.size && guard++ <= nodes.length + 1) {
+      const ready = [...left].map((i) => nodes[i]).filter((x) => x.needs.every((n) => doneN.has(n)));
+      if (!ready.length) return null;   // a dependency loop; the caller falls back to the sum
+      const wave = [];
+      for (const x of ready) {
+        if (!wave.some((w) => [...w.files].some((f) => x.files.has(f)))) wave.push(x);
+      }
+      wall += Math.max(...wave.map((x) => secondsOf(x.i)));
+      for (const x of wave) { left.delete(x.i); doneN.add(x.n); }
+    }
+    return left.size ? null : wall;
+  }
+
   function estimatePlan(parts, pick) {
     let seconds = 0, secondsHigh = 0, tokens = 0, usd = 0, usdHigh = 0, anyPrior = false;
+    const perSeconds = [], perSecondsHigh = [];
     for (let i = 0; i < parts.length; i++) {
       const p = pick(parts[i], i) || {};
       const e = estimatePart(parts[i], p.rec, p.agents || 1);
-      // Parts run sequentially at write time (the pipeline's law), so wall seconds ADD.
+      perSeconds.push(e.seconds); perSecondsHigh.push(e.secondsHigh || e.seconds);
       seconds += e.seconds; secondsHigh += e.secondsHigh || e.seconds;
       tokens += e.tokens; usd += e.usd; usdHigh += e.usdHigh || e.usd;
       if (e.basis === "prior") anyPrior = true;
     }
+    const wall = planWallSeconds(parts, (i) => perSeconds[i]);
+    const wallHigh = wall == null ? null : planWallSeconds(parts, (i) => perSecondsHigh[i]);
     return {
       seconds, secondsHigh, tokens,
+      // The parallel-aware figures. Null dependency info degrades to the sequential sum so the
+      // range can never claim a speedup nobody scheduled.
+      secondsParallel: wall == null ? seconds : wall,
+      secondsParallelHigh: wallHigh == null ? secondsHigh : wallHigh,
+      parallelBasis: wall == null ? "sequential" : "waves",
       usd: +usd.toFixed(4), usdHigh: +usdHigh.toFixed(4),
       basis: anyPrior ? "prior" : "measured",
     };

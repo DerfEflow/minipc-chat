@@ -73,6 +73,46 @@ t("plan roll-up sums sequential parts and reports prior if any part is prior", (
   assert.equal(roll.basis, "prior");
 });
 
+t("plan roll-up with dependency info reports wave-based wall time below the sequential sum", () => {
+  const tel = createTelemetry({ dir: tmp() });
+  // 1 and 2 are independent and file-disjoint (one wave); 3 needs both (second wave).
+  const parts = [
+    { n: 1, needs: [], files: ["a.ts"], contract: "" },
+    { n: 2, needs: [], files: ["b.ts"], contract: "" },
+    { n: 3, needs: [1, 2], files: ["c.ts"], contract: "" },
+  ];
+  const roll = tel.estimatePlan(parts, () => ({ rec: FRONTIER, agents: 1 }));
+  const p = parts.map((part) => tel.estimatePart(part, FRONTIER, 1));
+  assert.equal(roll.parallelBasis, "waves");
+  assert.equal(roll.secondsParallel, Math.max(p[0].seconds, p[1].seconds) + p[2].seconds);
+  assert.ok(roll.secondsParallel < roll.seconds, "parallel wall time beats the sequential sum");
+  assert.equal(roll.seconds, p[0].seconds + p[1].seconds + p[2].seconds, "the sequential sum survives as the ceiling");
+});
+
+t("plan roll-up without dependency info degrades to the sequential sum, labelled", () => {
+  const tel = createTelemetry({ dir: tmp() });
+  const parts = [{ files: ["a"], contract: "" }, { files: ["b"], contract: "" }];
+  const roll = tel.estimatePlan(parts, () => ({ rec: FRONTIER, agents: 1 }));
+  assert.equal(roll.parallelBasis, "waves");   // no needs at all means every part is wave one...
+  const rollLoop = tel.estimatePlan([
+    { n: 1, needs: [2], files: ["a"], contract: "" },
+    { n: 2, needs: [1], files: ["b"], contract: "" },
+  ], () => ({ rec: FRONTIER, agents: 1 }));
+  assert.equal(rollLoop.parallelBasis, "sequential", "a dependency loop falls back to the honest sum");
+  assert.equal(rollLoop.secondsParallel, rollLoop.seconds);
+});
+
+t("file-sharing parts never land in the same wave (the cookie rule reaches the estimate)", () => {
+  const tel = createTelemetry({ dir: tmp() });
+  const parts = [
+    { n: 1, needs: [], files: ["shared.ts"], contract: "" },
+    { n: 2, needs: [], files: ["shared.ts"], contract: "" },
+  ];
+  const roll = tel.estimatePlan(parts, () => ({ rec: FRONTIER, agents: 1 }));
+  const p = parts.map((part) => tel.estimatePart(part, FRONTIER, 1));
+  assert.equal(roll.secondsParallel, p[0].seconds + p[1].seconds, "two waves, not one");
+});
+
 t("telemetry survives a reload from disk", () => {
   const dir = tmp();
   const a = createTelemetry({ dir });
