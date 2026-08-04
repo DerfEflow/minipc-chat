@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v175-simplify-button";
+const CACHE = "dominion-ai-v176-altana-above-surfaces";
 const SHELL = [
   "/",
   "/index.html",
@@ -7,8 +7,8 @@ const SHELL = [
   // Added 2026-08-03. A sheet or script that index.html links but this list omits is served from
   // the network while the rest of the shell comes from cache, so the surface it styles arrives
   // late or not at all on a phone that is offline.
-  "/altana.css?v=1",
-  "/altana.js?v=1",
+  "/altana.css?v=2",
+  "/altana.js?v=2",
   "/dominion-models.css?v=1",
   "/dominion-simplify.css?v=1",
   "/dominion-simplify.js?v=1",

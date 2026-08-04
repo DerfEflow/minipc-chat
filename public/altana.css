@@ -28,7 +28,24 @@
 
 #altana {
   position: fixed;
-  z-index: 60;                   /* above content, below modals (which sit at 100+) */
+  /*
+   * THE STACKING MAP (Fred, 2026-08-04: "she is supposed to appear on every page").
+   * z-index 60 put her BELOW the surfaces people actually live in, so she showed once on the
+   * base chat screen and vanished the moment Dominion Works slid up - which read as "moving
+   * her made her disappear". The app's real layers, measured, are:
+   *
+   *    70   #ide-root        (Dominion Works - fixed, inset 0, OPAQUE: covers everything under it)
+   *    80   #dock-nav        (mobile dock), .bg-help (beginner help overlay)
+   *   130   #altana          <- the assistant floats above every SURFACE...
+   *   131   #altana-panel
+   *   340+  IDE popovers, tour, lightbox (400)
+   *  1380+  the Forge overlay, true modals
+   *
+   * ...and below every TRANSIENT (popover, tour, lightbox, forge, modal), which may honestly
+   * cover her while they are up. altana_test.mjs pins these relationships against the real
+   * stylesheets, so a new surface layer cannot silently bury her again.
+   */
+  z-index: 130;
   width: var(--altana-size);
   height: var(--altana-size);
   right: var(--altana-inset);
@@ -167,7 +184,7 @@
 
 #altana-panel {
   position: fixed;
-  z-index: 61;                    /* above the dot, still below modals */
+  z-index: 131;                   /* one above the dot; see the stacking map at #altana */
   right: var(--altana-inset);
   bottom: calc(var(--altana-inset) + var(--altana-size) + 14px);
   width: var(--altana-panel-w);

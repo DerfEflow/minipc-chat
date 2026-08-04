@@ -14,7 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { faceForSignIn, altanaMount, altanaState, altanaCheckAnchoring, ALTANA_FACES } from "./public/altana.js";
+import { faceForSignIn, altanaMount, altanaState, altanaCheckAnchoring, altanaHome, ALTANA_FACES } from "./public/altana.js";
 
 let passed = 0;
 const ok = (n) => { console.log("  PASS  " + n); passed++; };
@@ -506,4 +506,61 @@ function collectText(node) {
   ok("her API matches named endpoints only, so her face images still reach the file server");
 }
 
-console.log(`\n${passed}/22 checks passed - Altana mounts on body, rotates every ten sign-ins, guards her own anchoring, opens into a conversation that never claims more than clientActions actually dispatched, and is switched ON.`);
+/* ---- the stacking contract: she floats above every SURFACE, below every TRANSIENT ------------ */
+/*
+ * The 2026-08-04 bug: z-index 60 sat below Dominion Works (#ide-root, fixed inset 0, opaque,
+ * z 70), so she appeared once on the chat screen and was buried the moment the Works surface
+ * slid up - which read as "moving her made her disappear". These checks measure the REAL
+ * stylesheets so a new surface layer cannot silently bury her again.
+ */
+{
+  const zOf = (file, selector) => {
+    // A selector can open several blocks (state variants, media queries); the one that matters
+    // here is the first that actually declares a z-index.
+    const css = readFileSync(new URL(file, import.meta.url), "utf8");
+    const blocks = [...css.matchAll(new RegExp(selector.replace(/[.#]/g, "\\$&") + "\\s*\\{([\\s\\S]*?)\\}", "g"))];
+    assert.ok(blocks.length, selector + " must exist in " + file);
+    for (const block of blocks) {
+      const z = block[1].match(/z-index:\s*(-?\d+)/);
+      if (z) return parseInt(z[1], 10);
+    }
+    assert.fail(selector + " must declare a z-index in " + file);
+  };
+  const dot = zOf("./public/altana.css", "#altana");
+  const panel = zOf("./public/altana.css", "#altana-panel");
+  const ideRoot = zOf("./public/dominion-ide.css", "#ide-root");
+  const dock = zOf("./public/dominion-cinematic-04.css", "#dock-nav");
+  const bgHelp = zOf("./public/dominion-beginner.css", ".bg-help");
+  assert.ok(dot > ideRoot, `the dot (${dot}) must float above Dominion Works (#ide-root, ${ideRoot}) - the exact burial that hid her`);
+  assert.ok(dot > dock, `the dot (${dot}) must float above the mobile dock (${dock})`);
+  assert.ok(dot > bgHelp, `the dot (${dot}) must float above the beginner help overlay (${bgHelp})`);
+  assert.ok(dot < 340, `the dot (${dot}) must stay below transients (IDE popovers start at 340)`);
+  assert.equal(panel, dot + 1, "the panel rides exactly one layer above the dot");
+  ok("the stacking contract holds: above every surface, below every transient, measured from the real CSS");
+}
+
+/* ---- the rescue hatch: double-click sends her home ------------------------------------------- */
+{
+  const d = stubDoc();
+  const el = altanaMount({ doc: d, enabled: true, signins: 0 });
+  el.style.left = "42px"; el.style.top = "17px"; el.style.right = "auto"; el.style.bottom = "auto";
+  altanaHome(d);
+  assert.equal(el.style.left, "", "home clears the dragged x");
+  assert.equal(el.style.top, "", "home clears the dragged y");
+  assert.equal(el.style.right, "", "home restores the CSS resting corner");
+  ok("altanaHome forgets the drag and falls back to the resting corner");
+}
+{
+  const d = stubDoc();
+  const el = altanaMount({ doc: d, enabled: true, signins: 0 });
+  el.style.left = "42px"; el.style.top = "17px";
+  el.dispatchEvent(new Event("dblclick", { cancelable: true }));
+  assert.equal(el.style.left, "", "double-click is wired to the same rescue");
+  ok("double-clicking the dot sends her home");
+}
+{
+  altanaHome(stubDoc());   // nothing mounted
+  ok("sending a missing dot home is a no-op, not a crash");
+}
+
+console.log(`\n${passed}/26 checks passed - Altana mounts on body, floats above every surface and below every transient, rotates every ten sign-ins, guards her own anchoring, can always be sent home, opens into a conversation that never claims more than clientActions actually dispatched, and is switched ON.`);

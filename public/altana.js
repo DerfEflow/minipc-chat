@@ -151,6 +151,13 @@ export function altanaMount(opts = {}) {
     if (moved) { e.preventDefault(); e.stopPropagation(); return; }
     try { togglePanel(doc); } catch {}
   });
+  // The rescue hatch: double-click sends her home to the resting corner and forgets the saved
+  // position. If a drag ever strands her somewhere unhelpful, this is the way back that needs
+  // no settings screen and no reload.
+  el.addEventListener("dblclick", (e) => {
+    try { e.preventDefault(); e.stopPropagation(); } catch {}
+    try { altanaHome(doc); } catch {}
+  });
 
   on(typeof window !== "undefined" ? window : null, "resize", () => {
     const r = el.getBoundingClientRect();
@@ -171,7 +178,41 @@ export function altanaMount(opts = {}) {
   doc.body.appendChild(el);
   setTimeout(() => el.removeAttribute("data-enter"), 700);
   altanaCheckAnchoring(doc);
+
+  /*
+   * THE REMOUNT WATCHDOG. She mounts once, on body, and is supposed to exist on every screen
+   * for the whole session - but any script that rebuilds body's children (a surface swap, a
+   * future theme change, an overzealous cleanup) would silently delete her and nothing would
+   * ever put her back ("not really showing up except once", Fred, 2026-08-04). If she leaves
+   * the DOM without altanaMount asking, she is re-appended - same element, same face, same
+   * position, so nothing visually restarts. MutationObserver only fires on real childList
+   * changes; this costs nothing in the steady state.
+   */
+  try {
+    if (typeof MutationObserver === "function") {
+      const watchdog = new MutationObserver(() => {
+        try {
+          if (!doc.getElementById("altana") && doc.body) doc.body.appendChild(el);
+          const panel = panels.get(doc);
+          if (panel && !doc.getElementById("altana-panel") && doc.body) doc.body.appendChild(panel.root);
+        } catch {}
+      });
+      watchdog.observe(doc.body, { childList: true });
+    }
+  } catch {}
   return el;
+}
+
+/*
+ * Send the dot home: forget the remembered drag position and fall back to the CSS resting
+ * corner. Exported for the double-click handler above and for anything else (a settings screen,
+ * a help action) that wants a "bring her back" control.
+ */
+export function altanaHome(doc = document) {
+  try { localStorage.removeItem(KEY_POS); } catch {}
+  const el = doc.getElementById("altana");
+  if (!el) return;
+  el.style.left = ""; el.style.top = ""; el.style.right = ""; el.style.bottom = "";
 }
 
 /*

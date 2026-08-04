@@ -23,7 +23,7 @@
 <link rel="stylesheet" href="/dominion-vibe.css?v=19" />
 <link rel="stylesheet" href="/dominion-tour.css?v=3" />
 <link rel="stylesheet" href="/dominion-markdown.css?v=1" />
-<link rel="stylesheet" href="/altana.css?v=1" />
+<link rel="stylesheet" href="/altana.css?v=2" />
 <link rel="stylesheet" href="/dominion-simplify.css?v=1" />
 <!-- dominion-models.css restructures .model-row and friends, which dominion-cinematic-06.css already
      declares at the same specificity, so it has to come after that sheet. It does: cinematic-06
@@ -597,12 +597,12 @@
   <script src="/dominion-ui.js?v=40"></script>
   <script src="/dominion-tenant.js?v=5" defer></script>
   <script src="/dominion-orders.js?v=1" defer></script>
-  <script type="module" src="/altana.js?v=1"></script>
+  <script type="module" src="/altana.js?v=2"></script>
   <!-- Classic script rather than a module, matching dominion-images.js and dominion-ide.js. It is a
        self-contained IIFE with no imports of its own and only needs to set window.DominionSimplify. -->
   <script src="/dominion-simplify.js?v=1"></script>
   <script type="module">
-    import { altanaMount } from "/altana.js";
+    import { altanaMount } from "/altana.js?v=2";
     /*
      * ALTANA IS LIVE (2026-08-03). She shipped dark first, and the flag only moved once every part
      * of the loop existed: her brain answers on /altana/ask, the dot opens into a panel, the panel
