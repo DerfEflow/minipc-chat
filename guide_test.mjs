@@ -34,9 +34,20 @@ t("a spending question retrieves spending, not durability", () => {
   assert.match(hit[0].title, /SPENDING/i, "got: " + hit[0].title);
 });
 
-t("an off-topic question still yields the refusal rules", () => {
-  const hit = retrieve("zzzz qqqq", sections);
-  assert.ok(hit.length >= 1, "never returns nothing to ground on");
+/*
+ * CONTRACT CHANGE, 2026-08-04, deliberate. This used to assert that retrieval "never returns
+ * nothing to ground on", and that guarantee is exactly what produced Fred's screenshot: asked how
+ * to connect GitHub, a corpus containing no GitHub returned its two least-irrelevant sections with
+ * total confidence, the model could not answer from them, and the user got a placeholder twice and
+ * then silence. Grounding on something unrelated is not grounding.
+ *
+ * Returning nothing is safe here because the refusal rules do not depend on retrieval: they live
+ * in the system prompt and are sent on every single turn regardless of what was found.
+ */
+t("an off-topic question returns nothing rather than irrelevant grounding", () => {
+  assert.equal(retrieve("zzzz qqqq", sections).length, 0, "must not dress up an unrelated section as an answer");
+  assert.ok(retrieve("how do I know my data isnt going to get lost?", sections).length,
+    "...while a question the corpus does cover is still answered");
 });
 
 t("the prompt carries every hard limit Fred named", () => {

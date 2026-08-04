@@ -102,9 +102,14 @@
 #altana:focus-visible .altana-face { opacity: 1; transform: scale(1.06); }
 #altana:focus-visible { outline: 2px solid var(--altana-glow, #78c8ff); outline-offset: 3px; }
 
-/* Thinking: the dot rotates slowly, the way the ring of marks around each face already implies. */
-#altana[data-state="thinking"] .altana-face { opacity: 1; animation: altana-think 2.6s linear infinite; }
-#altana[data-state="thinking"] .altana-halo { opacity: .9; animation: altana-halo-pulse 2.6s ease-in-out infinite; }
+/*
+ * Thinking: she BREATHES WITH LIGHT (Fred's original plan, restated 2026-08-04). This used to be
+ * a slow rotation, which reads as a loading spinner rather than as someone considering something.
+ * The face swells very slightly while the halo behind it brightens and widens on the same beat,
+ * so the light is what moves. Transform and opacity only, per the performance rule at the top.
+ */
+#altana[data-state="thinking"] .altana-face { opacity: 1; animation: altana-think-breathe 1.9s ease-in-out infinite; }
+#altana[data-state="thinking"] .altana-halo { opacity: 1; animation: altana-think-glow 1.9s ease-in-out infinite; }
 
 /* Speaking: a quicker breath, no rotation, so it reads as talking rather than working. */
 #altana[data-state="speaking"] .altana-face { opacity: 1; animation: altana-breathe 1.5s ease-in-out infinite; }
@@ -126,9 +131,13 @@
   0%, 100% { opacity: .28; }
   50%      { opacity: .62; }
 }
-@keyframes altana-think {
-  from { transform: rotate(0deg) scale(1.02); }
-  to   { transform: rotate(360deg) scale(1.02); }
+@keyframes altana-think-breathe {
+  0%, 100% { transform: scale(1);     opacity: .86; }
+  50%      { transform: scale(1.075); opacity: 1; }
+}
+@keyframes altana-think-glow {
+  0%, 100% { opacity: .32; transform: scale(.96); }
+  50%      { opacity: .95; transform: scale(1.08); }
 }
 @keyframes altana-nudge {
   0%, 100% { transform: scale(1) rotate(0deg); }
@@ -148,7 +157,13 @@
   .altana-face, .altana-halo,
   #altana[data-state] .altana-face, #altana[data-state] .altana-halo,
   #altana[data-enter] .altana-face,
+  .altana-thinking-dots::before,
+  #altana-panel[data-answered] .altana-panel-inner::after,
   #altana-panel[data-enter] .altana-panel-inner { animation: none !important; }
+  /* The information still survives without motion: the dots stay legible and the flash overlay
+     stays dark rather than strobing. */
+  .altana-thinking-dots::before { opacity: 1; }
+  #altana-panel[data-answered] .altana-panel-inner::after { opacity: 0; }
   #altana[data-state="thinking"] .altana-face,
   #altana[data-state="speaking"] .altana-face { opacity: 1; }
   #altana[data-state="thinking"] .altana-halo,
@@ -196,6 +211,7 @@
 
 .altana-panel-inner {
   pointer-events: auto;
+  position: relative;              /* anchors the arrival-flash overlay below */
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -243,7 +259,46 @@
   color: var(--altana-muted); font-style: italic;
 }
 
+/*
+ * THE ARRIVAL FLASH. The whole card catches light for a beat when she answers, so an answer that
+ * lands while the reader is looking somewhere else still announces itself.
+ *
+ * It is an overlay whose OPACITY animates, never a box-shadow or background animation: those
+ * repaint the card on every frame, and altana_test refuses any keyframe that touches a property
+ * other than transform/opacity. The parent's clip-path shapes it, so the light follows the card.
+ */
+.altana-panel-inner::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background:
+    radial-gradient(120% 70% at 50% 0%, var(--altana-glow, rgba(120, 200, 255, .55)), transparent 70%),
+    linear-gradient(180deg, rgba(190, 235, 255, .16), transparent 45%);
+}
+#altana-panel[data-answered] .altana-panel-inner::after { animation: altana-answer-flash .9s ease-out 1; }
+@keyframes altana-answer-flash {
+  0%   { opacity: 0; }
+  18%  { opacity: .55; }
+  100% { opacity: 0; }
+}
+
 .altana-msg { max-width: 92%; padding: 8px 11px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; }
+/*
+ * THE THINKING ROW. The dot animates too, but on a phone the panel is a bottom sheet that covers
+ * it, so the transcript carries the state where the person is actually looking.
+ */
+.altana-thinking { align-self: flex-start; display: inline-flex; align-items: baseline; gap: 2px;
+  background: rgba(255, 255, 255, .04); border: 1px solid var(--altana-line);
+  color: var(--altana-ink-soft); font-style: italic; opacity: .9; }
+.altana-thinking-dots { display: inline-flex; width: 18px; }
+.altana-thinking-dots::before { content: "..."; letter-spacing: 1px; animation: altana-dots 1.25s steps(4, end) infinite; }
+@keyframes altana-dots {
+  0%   { opacity: .25; }
+  50%  { opacity: 1; }
+  100% { opacity: .25; }
+}
 .altana-msg-user { align-self: flex-end; background: rgba(120, 180, 255, .14); border: 1px solid rgba(150, 200, 255, .28); color: var(--altana-ink); }
 .altana-msg-altana { align-self: flex-start; background: rgba(255, 255, 255, .04); border: 1px solid var(--altana-line); color: var(--altana-ink-soft); }
 .altana-msg-system { align-self: stretch; background: rgba(247, 177, 112, .08); border: 1px solid var(--altana-copper-line); color: var(--altana-copper); font-size: 12.5px; }

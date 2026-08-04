@@ -13,8 +13,9 @@
  * without dragging a headless browser into a suite that runs on every commit.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { faceForSignIn, altanaMount, altanaState, altanaCheckAnchoring, altanaHome, ALTANA_FACES } from "./public/altana.js";
+import { retrieve, splitKnowledge } from "./altana.mjs";
 
 let passed = 0;
 const ok = (n) => { console.log("  PASS  " + n); passed++; };
@@ -563,4 +564,90 @@ function collectText(node) {
   ok("sending a missing dot home is a no-op, not a crash");
 }
 
-console.log(`\n${passed}/26 checks passed - Altana mounts on body, floats above every surface and below every transient, rotates every ten sign-ins, guards her own anchoring, can always be sent home, opens into a conversation that never claims more than clientActions actually dispatched, and is switched ON.`);
+/* ---- retrieval must be able to admit ignorance ----------------------------------------------- */
+{
+  const CORPUS = splitKnowledge(readFileSync(new URL("./docs/ALTANA-KNOWLEDGE.md", import.meta.url), "utf8"));
+  assert.ok(CORPUS.length >= 8, "the knowledge file must actually load for this to mean anything");
+
+  /*
+   * Genuinely off-topic questions get an empty hand rather than the least-irrelevant section.
+   *
+   * The GitHub question that started all this is deliberately NOT in this list any more: it is now
+   * answered by the FAQ corpus, which is what production actually loads, and it is asserted
+   * against that corpus further down. Testing it here would only prove the doctrine file alone
+   * does not cover connectors, which was never the interesting claim.
+   */
+  for (const q of [
+    "How do I make a pizza?",
+    "What is the capital of France?",
+    "Who won the World Cup?",
+  ]) {
+    assert.equal(retrieve(q, CORPUS, 2).length, 0, `must return nothing rather than filler for: ${q}`);
+  }
+
+  // ...while everything the file genuinely covers still comes back, longest-winded first.
+  const covered = [
+    ["Will my work get lost if the server restarts?", /DURABILITY/i],
+    ["Where does my text go? Is it private?", /PRIVACY/i],
+    ["What happens when a model or provider fails?", /RELIABILITY/i],
+    ["Can anyone else reach my machine?", /ISOLATION/i],
+  ];
+  for (const [q, expected] of covered) {
+    const hits = retrieve(q, CORPUS, 2);
+    assert.ok(hits.length, `must still answer a covered question: ${q}`);
+    assert.match(hits[0].title, expected, `the best section must lead for: ${q}`);
+  }
+
+  // A chatty question is still a question. Rarity is measured against a small in-domain corpus,
+  // so ordinary English ("sitting", "wondering") looks rare; it must not outvote the subject.
+  assert.ok(retrieve(
+    "Hey Altana, I was just sitting here wondering, if the server happens to restart in the "
+    + "middle of things, is my work going to get lost or is it safe?", CORPUS, 2).length,
+    "a long, rambling, genuinely covered question must not be starved by its own filler");
+
+  // Whole words only: the two-letter "ai" must not match "said"/"again"/"available".
+  const toy = [{ title: "Sailing boats", body: "We explain again that it is available and said so." }];
+  assert.equal(retrieve("ai", toy, 2).length, 0, "substring matching would have hit every one of those words");
+  ok("retrieval weights rare words, matches whole words, and returns NOTHING when it does not know");
+}
+
+/* ---- the FAQ corpus answers the questions it exists for ------------------------------------- */
+{
+  const dir = new URL("./docs/altana-faq/", import.meta.url);
+  const files = readdirSync(dir).filter((n) => n.endsWith(".md")).sort();
+  assert.ok(files.length >= 4, "the FAQ folder must actually contain the answer book");
+  const CORPUS = files.flatMap((n) => splitKnowledge(readFileSync(new URL(n, dir), "utf8")));
+  assert.ok(CORPUS.length >= 300, `expected a large FAQ corpus, got ${CORPUS.length}`);
+
+  // Every entry is a real question with a real answer. An empty body would retrieve as a match and
+  // then tell the model nothing, which is the failure this whole corpus exists to end.
+  for (const s of CORPUS) {
+    assert.match(s.title, /^Q:\s*\S/, `every FAQ heading must be a question: ${s.title}`);
+    const answer = s.body.split("\n").slice(1).join(" ").trim();
+    assert.ok(answer.length > 20, `FAQ entry has no usable answer: ${s.title}`);
+  }
+
+  // The exact question from Fred's 2026-08-04 screenshot, which used to return three and a half
+  // thousand characters about durability and then die in silence.
+  const github = retrieve("How do I connect my Dominion AI to my GitHub?", CORPUS, 2);
+  assert.ok(github.length, "the GitHub question must now find an answer");
+  assert.match(github[0].title, /github/i, "and the GitHub entry must lead");
+
+  for (const q of [
+    "Why did my agents drop from 5 to 2?",
+    "Is there a free way to make images?",
+    "How long can a video clip be?",
+    "What is the Forge Dial?",
+    "Can Altana spend my money?",
+  ]) {
+    assert.ok(retrieve(q, CORPUS, 2).length, `the corpus must answer: ${q}`);
+  }
+
+  // ...and it still declines what it genuinely does not cover.
+  for (const q of ["How do I make a pizza?", "What is the capital of France?", "Who won the World Cup?"]) {
+    assert.equal(retrieve(q, CORPUS, 2).length, 0, `must not invent an answer for: ${q}`);
+  }
+  ok(`the ${CORPUS.length}-entry FAQ answers real questions and still declines the ones it cannot`);
+}
+
+console.log(`\n${passed}/28 checks passed - Altana mounts on body, floats above every surface and below every transient, rotates every ten sign-ins, guards her own anchoring, can always be sent home, opens into a conversation that never claims more than clientActions actually dispatched, and is switched ON.`);

@@ -47,7 +47,7 @@
  * the same shape the app already uses for model substitution, because a free turn quietly becoming
  * a billed one is the kind of surprise that costs trust (wargame F7).
  */
-import { readFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -879,25 +879,170 @@ export function splitKnowledge(text) {
   return out;
 }
 
-const STOP = new Set(["the","a","an","is","are","my","i","to","of","and","or","it","that","this","how","do","does","did","can","will","would","what","why","when","if","in","on","for","with","be","get","got","not","no","you","your","me","we","our","from","at","by","so","just","know","about","there","was","were"]);
+/*
+ * Function words carry no information, so they must never be scored. The apostrophe-less
+ * contractions matter more than they look: people type "isnt" and "dont", those spellings appear
+ * nowhere in a written corpus, and a word absent from the corpus is treated as maximally
+ * informative. So "how do I know my data isnt going to get lost?" was rated as hinging on the
+ * word `isnt` and returned nothing at all, while the section answering it sat right there.
+ */
+const STOP = new Set(["the","a","an","is","are","my","i","to","of","and","or","it","that","this","how","do","does","did","can","will","would","what","why","when","if","in","on","for","with","be","get","got","not","no","you","your","me","we","our","from","at","by","so","just","know","about","there","was","were",
+  "isnt","arent","dont","doesnt","didnt","cant","cannot","wont","wouldnt","couldnt","shouldnt","havent","hasnt","hadnt","aint",
+  "im","ive","id","ill","youre","youve","theyre","thats","whats","its","lets","gonna","wanna",
+  "going","really","actually","maybe","please","thanks","hey","hello","ok","okay","sure","some","any","all","been","being","have","has","had","am","but","than","then","them","they","he","she","his","her","us","out","up","down","over","under","into","after","before","again","still","also","much","many","more","most","less","very","too","now","here","should","could","may","might","must","who","whom","whose","which","while","because","since","until","during","between","each","every","both","either","neither","other","another","such","own","same","few","several",
+  // Filler nouns. "is my stuff private" hinges on `private`, not on `stuff`, but `stuff` appears
+  // nowhere in written documentation and so was being scored as the most important word in it.
+  "stuff","thing","things","something","anything","everything","nothing","way","ways","kind","sort","bit","lot","lots"]);
 const terms = (s) => String(s || "").toLowerCase().match(/[a-z][a-z0-9-]{1,}/g) || [];
 
-// Distinct-term scoring, so one section repeating a common word cannot drown a section that
-// matches several different words in the question.
-export function retrieve(question, sections, max = 3) {
+// Light stemming so "agents"/"agent" and "connecting"/"connect" find each other. Deliberately
+// crude: a real stemmer is a dependency and a surprise, and this only has to survive plurals and
+// the handful of verb tenses people type into a help box.
+function stem(word) {
+  const w = String(word || "");
+  let out = w;
+  if (w.length > 5 && w.endsWith("ing")) out = w.slice(0, -3);
+  else if (w.length > 4 && w.endsWith("ed")) out = w.slice(0, -2);
+  else if (w.length > 4 && w.endsWith("es")) out = w.slice(0, -2);
+  else if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) out = w.slice(0, -1);
+  /*
+   * Undo the consonant English doubles before -ed and -ing, so "dropped" reaches "drop" instead of
+   * stopping at "dropp". Caught live: "Why did my agents drop from 5 to 2?" found nothing at all
+   * while the entry answering it was titled "I asked for five agents and it dropped to two".
+   */
+  if (out !== w && out.length > 3 && /([bdfglmnprt])\1$/.test(out)) out = out.slice(0, -1);
+  return out;
+}
+
+/*
+ * RETRIEVAL THAT CAN SAY "I DO NOT HAVE THAT" (Fred, 2026-08-04, with a screenshot).
+ *
+ * The old scorer counted how many distinct question words a section contained and kept anything
+ * scoring above zero. Asked "How do I connect my Dominion AI to my GitHub?", the words `dominion`
+ * and `ai` sit on nearly every line of the knowledge file while `github` was nowhere in it, so it
+ * returned three and a half thousand characters about durability and provider reliability with
+ * complete confidence. Luna could not answer from that, asked to look again, and the user got the
+ * same placeholder twice and then silence. Filler that looks like an answer is worse than an
+ * empty hand, and it gets worse as the corpus grows: five hundred entries is five hundred more
+ * ways to hand back something confidently irrelevant.
+ *
+ * Two changes fix it:
+ *
+ * 1. RARE WORDS CARRY THE MEANING. Each question word is weighted by how little of the corpus
+ *    contains it, so `dominion` in every entry counts for almost nothing while `github` in three
+ *    entries counts for a great deal. A word that appears NOWHERE gets the HIGHEST weight, which
+ *    is the whole point: it is the most informative word in the question and the one word we
+ *    cannot match, so it has to drag the score down instead of being silently ignored. Scoring it
+ *    as zero is precisely how the old version convinced itself it had an answer.
+ * 2. A FLOOR. A section is only returned if it covers enough of the question's total available
+ *    weight. Below that this returns NOTHING, and the caller says so in words.
+ *
+ * Her safety doctrine does not depend on this: those rules are in altanaSystemPrompt and reach
+ * her every turn whether or not anything is retrieved.
+ */
+/*
+ * Measured against the real corpus, not guessed, and retuned once the FAQ existed: the first pass
+ * was swept against the eleven-section doctrine file alone and picked a floor that then rejected
+ * "how do I know my data isnt going to get lost?" once there were hundreds of entries. Tuning a
+ * threshold on a corpus a fortieth the size of the real one is its own lesson.
+ *
+ * Final sweep across 19 questions the corpus answers (including deliberately chatty and
+ * misspelled ones) and 8 it must refuse: recall 19/19, false positives 0/8.
+ */
+export const RETRIEVE_FLOOR = 0.45;
+
+/*
+ * THE SECOND GATE: did we match anything actually INFORMATIVE?
+ *
+ * Coverage alone cannot separate these two, and trying to make it do so was measurably wrong.
+ * Tuned as a single threshold, 0.45 answered every real question and also answered "How do I make
+ * a pizza?", while 0.62 refused the pizza and also refused "how do I know my data isnt going to
+ * get lost?", which is a question this app must obviously answer. One number was doing two jobs.
+ *
+ * They are different jobs. Coverage asks how much of the question we found. This asks whether the
+ * part we found carried any substance: the pizza question matches a single ordinary word while its
+ * one load-bearing word is missing entirely, whereas the durability question matches several real
+ * ones. So the total weight we DID match must stand up against the single most informative word
+ * the question contained, matched or not.
+ */
+export const RETRIEVE_INFORMATIVE = 0.9;
+
+/*
+ * ONE STRONGEST OBJECTION, NOT A PILE OF THEM.
+ *
+ * Measured while building this: dividing the matched weight by the weight of EVERY question word
+ * looks right and fails on real sentences. In a chatty question the rarest words are the filler,
+ * not the subject ("sitting", "wondering", "sorry", "exactly"), because rarity is measured against
+ * a small in-domain corpus where ordinary English is what is missing. Ranking by rarity therefore
+ * promoted the noise and buried the topic, and two perfectly answerable questions came back empty.
+ *
+ * So an unmatched word is treated as a single objection rather than a running tally: the score is
+ * the matched weight against itself plus the WORST unmatched word. A question about GitHub still
+ * fails, because `github` is that worst word and almost nothing else matched. The same rambling
+ * question about durability still passes, because it matched a great deal and the worst thing
+ * against it is one stray word like "sitting".
+ */
+
+export function retrieve(question, sections, max = 3, { floor = RETRIEVE_FLOOR, informative = RETRIEVE_INFORMATIVE } = {}) {
+  const list = Array.isArray(sections) ? sections : [];
+  if (!list.length) return [];
   const q = [...new Set(terms(question))].filter((w) => !STOP.has(w));
-  if (!q.length) return sections.slice(0, 1);
-  const scored = sections.map((s) => {
-    const hay = (s.title + " " + s.body).toLowerCase();
-    let score = 0;
-    for (const w of q) {
-      if (!hay.includes(w)) continue;
-      score += 1;
-      if (s.title.toLowerCase().includes(w)) score += 2;
+  if (!q.length) return [];
+
+  /*
+   * WHOLE WORDS, NOT SUBSTRINGS. This used to ask `haystack.includes(word)`, so the two-letter
+   * `ai` matched "said", "again", "available" and "explain", and `connect` matched "connected"
+   * in a section about something else entirely. Every generic question therefore "matched"
+   * everything, which is half the reason the old scorer could never admit ignorance. Sections are
+   * tokenised once into a set and looked up by whole word, with light stemming so plurals and
+   * tenses still find each other.
+   */
+  const allQ = [...new Set(q.map(stem))];
+  const rows = list.map((s) => ({
+    s,
+    titleTokens: new Set(terms(s.title).map(stem)),
+    allTokens: new Set([...terms(s.title), ...terms(s.body)].map(stem)),
+  }));
+
+  // Inverse document frequency over the corpus we were actually handed. A term absent everywhere
+  // (df 0) yields the largest weight of all.
+  const idf = new Map();
+  for (const w of allQ) {
+    let df = 0;
+    for (const r of rows) if (r.allTokens.has(w)) df++;
+    idf.set(w, Math.log(1 + list.length / (1 + df)));
+  }
+  const qs = allQ;
+  if (!qs.some((w) => (idf.get(w) || 0) > 0)) return [];
+
+  // The most informative thing the question asked about at all, matched or not.
+  const maxAsked = qs.reduce((m, w) => Math.max(m, idf.get(w) || 0), 0);
+
+  const scored = rows.map(({ s, titleTokens, allTokens }) => {
+    let matched = 0, worstMiss = 0, matchedRaw = 0;
+    for (const w of qs) {
+      const weight = idf.get(w) || 0;
+      if (allTokens.has(w)) {
+        // A hit in the heading counts for more, because in the FAQ the heading IS the question.
+        matched += weight * (titleTokens.has(w) ? 1.75 : 1);
+        matchedRaw += weight;   // unboosted, for the substance gate below
+      } else if (weight > worstMiss) {
+        worstMiss = weight;
+      }
     }
-    return { s, score };
-  }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
-  if (!scored.length) return sections.filter((s) => /NEVER DO|LIMITS/i.test(s.title)).slice(0, 1);
+    const denom = matched + worstMiss;
+    return { s, matched, matchedRaw, relevance: denom > 0 ? matched / denom : 0 };
+  })
+    .filter((x) => x.relevance >= floor && (maxAsked <= 0 || x.matchedRaw >= informative * maxAsked))
+    /*
+     * FILTER on coverage, RANK on weight. Coverage saturates at 1.0 the moment every question word
+     * is found somewhere, so ranking by it alone made a long prose section that happens to contain
+     * the words tie with the entry actually titled after the question, and ties fell back to file
+     * order. Asked "How do I deploy my app?", a durability section won over the entry named for
+     * deployment. Weight keeps the heading bonus, so the entry whose TITLE is the question leads.
+     */
+    .sort((a, b) => b.matched - a.matched || b.relevance - a.relevance);
+
   return scored.slice(0, max).map((x) => x.s);
 }
 
@@ -958,19 +1103,51 @@ export function createAltanaStore({ dir, file = "guide.db", now = () => new Date
  * 8. ASSEMBLY
  * ============================================================================================== */
 
+/*
+ * `knowledgePath` may be one file, several files, or a DIRECTORY of them.
+ *
+ * Her doctrine (what she may never do, how she handles injected instructions) and her answer book
+ * are different kinds of writing with different edit rhythms, and five hundred FAQ entries in the
+ * same file as the doctrine would bury it. So the doctrine keeps its own file and the FAQ lives in
+ * a folder that can grow without anyone re-reading the rules. Every file is split the same way and
+ * they land in one flat pool, because retrieval does not care which file an answer came from.
+ *
+ * A single unreadable file is skipped with a log line rather than taking the whole corpus down:
+ * losing one topic is survivable, losing her entire memory over one bad file is not.
+ */
+function expandKnowledgePaths(pathOrPaths) {
+  const out = [];
+  for (const p of (Array.isArray(pathOrPaths) ? pathOrPaths : [pathOrPaths]).filter(Boolean)) {
+    try {
+      if (statSync(p).isDirectory()) {
+        for (const name of readdirSync(p).sort()) {
+          if (/\.md$/i.test(name)) out.push(join(p, name));
+        }
+      } else out.push(p);
+    } catch { out.push(p); }   // let the read below report it in one place
+  }
+  return out;
+}
+
 export function createAltana({ knowledgePath, store, log = () => {} }) {
   let sections = [];
   let loadedAt = 0;
   const KNOWLEDGE_TTL_MS = 60_000;   // a deploy replaces the file; the process picks it up unrestarted
   function knowledge() {
     if (sections.length && Date.now() - loadedAt < KNOWLEDGE_TTL_MS) return sections;
-    try {
-      sections = splitKnowledge(readFileSync(knowledgePath, "utf8"));
-      loadedAt = Date.now();
-    } catch (e) {
-      log("[altana] knowledge unreadable: " + (e && e.message));
-      if (!sections.length) sections = [];
+    const files = expandKnowledgePaths(knowledgePath);
+    const next = [];
+    let anyRead = false;
+    for (const file of files) {
+      try {
+        next.push(...splitKnowledge(readFileSync(file, "utf8")));
+        anyRead = true;
+      } catch (e) {
+        log("[altana] knowledge unreadable (" + file + "): " + (e && e.message));
+      }
     }
+    if (anyRead) { sections = next; loadedAt = Date.now(); }
+    else if (!sections.length) sections = [];
     return sections;
   }
 

@@ -344,14 +344,35 @@ function dispatchAction(action, doc) {
  * cosmetic problem into a broken turn.
  */
 function answerFromLookup(doc, requestBody, lookups) {
-  altanaState("thinking", doc);
+  showThinking(doc);
   postAsk({ ...requestBody, toolResults: lookups })
     .then((data) => {
-      if (data && data.reply) appendMessage(doc, "altana", data.reply);
+      hideThinking(doc);
+      /*
+       * THIS ROUND IS THE LAST ONE, SO IT HAS TO END IN WORDS (Fred, 2026-08-04, with a
+       * screenshot: he asked how to connect GitHub and got "Looking that up in what I know."
+       * twice and then nothing at all).
+       *
+       * The guard in handleAskResult deliberately refuses a third round, which is right: a
+       * lookup loop that can re-arm itself is how a turn burns money forever. What was missing
+       * is that the refusal was SILENT. If she comes back still asking to look something up,
+       * the honest reading is that her notes do not cover it, and saying so is worth more than
+       * a second copy of a placeholder followed by silence.
+       */
+      const stillLooking = Array.isArray(data && data.clientActions)
+        && data.clientActions.some((a) => a && a.type === "help");
+      const spoke = data && typeof data.reply === "string" && data.reply.trim();
+      if (spoke && !stillLooking) appendMessage(doc, "altana", data.reply);
+      else appendMessage(doc, "altana",
+        "I looked, and I do not have anything solid on that in my notes yet, so I will not guess at it. "
+        + "Ask me another way and I will try again, or tell me to pass it to Fred and I will log it for him.");
       if (data && data.fallback && data.fallback.text) appendMessage(doc, "system", data.fallback.text);
     })
-    .catch(() => {})
-    .finally(() => altanaState("idle", doc));
+    .catch(() => {
+      hideThinking(doc);
+      appendMessage(doc, "error", "I found the reference but could not finish reading it back. Ask me again?");
+    })
+    .finally(() => { hideThinking(doc); altanaState("idle", doc); });
 }
 
 const panels = new WeakMap();
@@ -442,6 +463,12 @@ function togglePanel(doc) {
   else openPanel(doc);
 }
 
+// Keep the newest message in view. The log is a chat transcript, so a reply that lands below the
+// fold reads as no reply at all. Guarded: the test DOM has no layout and no scroll properties.
+function scrollLogToEnd(state) {
+  try { if (state && state.log) state.log.scrollTop = state.log.scrollHeight; } catch {}
+}
+
 function appendMessage(doc, kind, text) {
   const state = panels.get(doc);
   if (!state || !text) return null;
@@ -449,7 +476,62 @@ function appendMessage(doc, kind, text) {
   row.className = "altana-msg altana-msg-" + kind;
   row.textContent = String(text);
   state.log.append(row);
+  scrollLogToEnd(state);
+  // Anything SHE says lands with light. Her own words are the only thing worth flashing for:
+  // a system note or an error already carries its own colour.
+  if (kind === "altana") flashAnswer(doc);
   return row;
+}
+
+/*
+ * THINKING IS SHOWN WHERE THE PERSON IS LOOKING (Fred, 2026-08-04: "there is also no progress
+ * indicator about altana thinking about the query").
+ *
+ * The dot has always animated while she works, but on a phone the panel is a bottom sheet that
+ * covers most of the screen and the dot sits behind or below it, so the one indicator that
+ * existed was the one nobody could see. The transcript itself now carries the state: a row that
+ * appears the moment a question is sent and is removed the moment anything real lands.
+ *
+ * It is a single row that is MOVED to the end rather than re-created, so a second round (the
+ * knowledge lookup) does not stack two of them, and it can never be orphaned by an early return:
+ * every send path clears it in a finally.
+ */
+function showThinking(doc) {
+  const state = panels.get(doc);
+  if (!state) return;
+  if (!state.thinkingRow) {
+    const row = doc.createElement("div");
+    row.className = "altana-msg altana-msg-altana altana-thinking";
+    row.setAttribute("data-testid", "altana-thinking");
+    row.setAttribute("aria-live", "polite");
+    row.textContent = "Thinking";
+    const dots = doc.createElement("span");
+    dots.className = "altana-thinking-dots";
+    dots.setAttribute("aria-hidden", "true");
+    row.append(dots);
+    state.thinkingRow = row;
+  }
+  state.log.append(state.thinkingRow);   // append moves an existing node to the end
+  scrollLogToEnd(state);
+  altanaState("thinking", doc);
+}
+
+function hideThinking(doc) {
+  const state = panels.get(doc);
+  if (!state || !state.thinkingRow) return;
+  try { state.thinkingRow.remove(); } catch {}
+  state.thinkingRow = null;
+}
+
+// The arrival flash: the whole card catches light for a moment when an answer lands, so an answer
+// that arrives while the person is looking elsewhere still announces itself.
+function flashAnswer(doc) {
+  const state = panels.get(doc);
+  if (!state) return;
+  try {
+    state.root.setAttribute("data-answered", "");
+    setTimeout(() => { try { state.root.removeAttribute("data-answered"); } catch {} }, 900);
+  } catch {}
 }
 
 function appendWorkList(doc, items) {
@@ -543,7 +625,11 @@ function handleAskResult(doc, data, requestBody) {
     dispatchAction(action, doc);
     // A DOCUMENT goes back to her. A LIST is drawn, because the user's own saved work is something
     // to look at rather than something for a model to summarise back at them.
-    if (action.type === "help") lookups.push({ name: "search_help", result: action.text });
+    // A lookup that found nothing is not worth a second round trip: the server has already said
+    // so in words, and feeding a model an empty document only buys latency and a repeat.
+    if (action.type === "help" && action.found !== false && String(action.text || "").trim()) {
+      lookups.push({ name: "search_help", result: action.text });
+    }
     else if (action.type === "work_list") appendWorkList(doc, action.items);
     else if (action.type === "echo_settings") appendMessage(doc, "system", "Checked your current settings.");
   }
@@ -569,14 +655,17 @@ async function submitQuestion(doc, question) {
   if (!state) return;
   appendMessage(doc, "user", question);
   state.sending = true;
-  altanaState("thinking", doc);
+  showThinking(doc);
   try {
     const body = buildAskBody(question, doc);
     const data = await postAsk(body);
+    hideThinking(doc);
     handleAskResult(doc, data, body);
   } catch {
+    hideThinking(doc);
     appendMessage(doc, "error", "I could not reach Altana just now. Please try again.");
   } finally {
+    hideThinking(doc);   // belt and braces: the row can never outlive the turn
     state.sending = false;
     altanaState("idle", doc);
   }

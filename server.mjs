@@ -1414,7 +1414,13 @@ function simplifyBilling(T) {
   };
 }
 const altanaStore = createAltanaStore({ dir: dataPath("guide") });
-const altana = createAltana({ knowledgePath: join(HERE, "docs", "ALTANA-KNOWLEDGE.md"), store: altanaStore, log: (m) => console.log(m) });
+// Her doctrine file plus the FAQ folder. See expandKnowledgePaths in altana.mjs for why the
+// answer book is kept out of the file that holds the rules.
+const altana = createAltana({
+  knowledgePath: [join(HERE, "docs", "ALTANA-KNOWLEDGE.md"), join(HERE, "docs", "altana-faq")],
+  store: altanaStore,
+  log: (m) => console.log(m),
+});
 const handsHub = createHandsHub({
   token: HANDS_TOKEN,
   log: (m) => console.log("[dominion-ai] " + m),
@@ -5744,17 +5750,25 @@ async function handleAltana(req, res, u) {
         case "list_settings":
           clientActions.push({ type: "echo_settings" });
           break;
-        case "search_help":
+        case "search_help": {
           /*
            * This used to be `knowledge().find((s) => s.title)`, which returns the FIRST section that
            * has a title, meaning the first section, every time, for every question. The user's
            * question was never read. A help tool that answers the same thing regardless of what was
            * asked is worse than no help tool, because it looks like it worked. `retrieve` has been
            * exported from altana.mjs for exactly this since the module was written.
+           *
+           * `found` carries the OTHER half of that lesson (Fred, 2026-08-04, with a screenshot of
+           * "Looking that up in what I know." twice and no answer). retrieve now returns nothing
+           * when no section clears the relevance floor, and an empty result must be reported as
+           * empty: the client stops instead of paying for a round trip that feeds the model an
+           * empty document, and the spoken line says she has nothing rather than promising a
+           * lookup that already failed.
            */
-          clientActions.push({ type: "help",
-            text: retrieve(String(call.args.question || ""), altana.knowledge(), 2).map((s) => s.body).join("\n\n") });
+          const hits = retrieve(String(call.args.question || ""), altana.knowledge(), 2);
+          clientActions.push({ type: "help", found: hits.length > 0, text: hits.map((s) => s.body).join("\n\n") });
           break;
+        }
         case "list_work":
           clientActions.push({ type: "work_list", items: (T.artifacts || artifacts).list({}).slice(0, 20).map((a) => ({ id: a.id, title: a.title })) });
           break;
@@ -5831,12 +5845,22 @@ async function handleAltana(req, res, u) {
      * server that said "Done, switched to trusted" would be claiming an outcome it cannot see, and
      * that is the exact failure this build has spent its whole length hunting.
      */
+    /*
+     * SHE SOUNDS LIKE A PERSON HERE (Fred, 2026-08-04: "the initial response should be more
+     * conversational than what we saw today"). These were clipped status labels, which read as a
+     * machine narrating itself. They are still worded as INTENT and never as success, because
+     * that constraint is the whole reason this function exists.
+     */
     const spokenFor = (a) => {
-      if (a.type === "set_setting") return "Setting " + String(a.setting).replace(/_/g, " ") + " to " + String(a.value) + ".";
-      if (a.type === "open_screen") return "Opening " + String(a.screen) + ".";
-      if (a.type === "echo_settings") return "Checking your current settings.";
-      if (a.type === "help") return "Looking that up in what I know.";
-      if (a.type === "work_list") return "Pulling up your saved work.";
+      if (a.type === "set_setting") return "Sure, I'm setting " + String(a.setting).replace(/_/g, " ") + " to " + String(a.value) + " for you now.";
+      if (a.type === "open_screen") return "Sure, I'm opening " + String(a.screen) + " for you now.";
+      if (a.type === "echo_settings") return "Let me pull up how you've got things set right now.";
+      if (a.type === "help") {
+        return a.found === false
+          ? "I had a look through my notes, and there's nothing solid in there about that yet, so I won't guess at it."
+          : "Good question. Let me check what I've got on that.";
+      }
+      if (a.type === "work_list") return "Let me pull up the work you've saved.";
       return "";
     };
     const spokenReply = String(reply || "").trim()
