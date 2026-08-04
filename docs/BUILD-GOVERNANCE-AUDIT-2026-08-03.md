@@ -1,9 +1,9 @@
-# Build Governance Audit — 2026-08-03
+# Build Governance Audit - 2026-08-03
 
 > **STATUS 2026-08-03 (later the same day): ALL FINDINGS FIXED on this branch**
 > (`iter/build-governance-audit`). Every item below is closed; the fix map is at the bottom of
 > this file. 129 test suites pass, including a new `idepool_test.mjs` that exercises the
-> replacement scheduler directly — and whose first run caught a real file-collision race before
+> replacement scheduler directly - and whose first run caught a real file-collision race before
 > it ever ran a build. Not merged into `iter/assistant-build-core` and not pushed; the running
 > server still serves the audited (unfixed) code until Fred says merge.
 
@@ -26,16 +26,16 @@ The dependency graph, the file-collision rule, the divider/referee, the ownershi
 wave scheduler are all genuinely implemented and enforced server-side, with tests
 (`idetasks.mjs`, `ideengine.mjs`, `idetasks` referenced from `server.mjs:4441-4495`). Fred's
 suspicion that "much of the wiring is for show" is **wrong about the engine and right about the
-display**. Three specific presentation defects — plus one real planning gap and one real
-reliability gap — produced every symptom he saw. Each is itemized below.
+display**. Three specific presentation defects - plus one real planning gap and one real
+reliability gap - produced every symptom he saw. Each is itemized below.
 
 ---
 
 ## 1. "Why was the last step of quality control being done in the middle of the build?"
 
-**It wasn't mid-build. The build was already over — the board just never said so.**
+**It wasn't mid-build. The build was already over - the board just never said so.**
 
-The "9 issues — fix or close" dialog is the **Furnace pass** (`server.mjs:4779-4859`,
+The "9 issues - fix or close" dialog is the **Furnace pass** (`server.mjs:4779-4859`,
 `idelang.mjs:88-95`): the end-of-build honesty audit (placeholder sweep + vision-fidelity check)
 whose findings "become a QUESTION, never a silent pass." It runs strictly after the task-graph
 loop, the QC stage, and the look-at-it step.
@@ -43,7 +43,7 @@ loop, the QC stage, and the look-at-it step.
 What made it *appear* mid-build:
 
 - When a task's model calls fail (the NVIDIA endpoint flakiness), the task is marked
-  `hardFailed`, and every task depending on it is **silently skipped** — the scheduler emits only
+  `hardFailed`, and every task depending on it is **silently skipped** - the scheduler emits only
   a log line ("Tasks N were skipped because a task they need did not finish",
   `server.mjs:4442-4447`). **No `move` event is ever emitted for skipped tasks, so their
   Blueprint rows stay "QUEUED (WAITING ITS TURN)" forever** (`public/dominion-lenses.js:54-77`
@@ -70,26 +70,26 @@ Two findings, one of them worse than the question implies.
 - **The bigger problem: the "Close them now" button cannot actually fix a failed build.** The fix
   is ONE combined move whose file list is capped at the first **12 already-written files**
   (`server.mjs:4788-4789`, `4838-4843`). After a mass task failure, the missing work is in files
-  that were *never written* — the fix move cannot rebuild failed tasks, so saying "fix" after a
+  that were *never written* - the fix move cannot rebuild failed tasks, so saying "fix" after a
   failure like today's mostly burns a model call and reports "The Furnace findings remained after
   automatic repair." The dialog offers a remedy that is structurally too small for the situation
   that triggered it.
 - Related gap: the task-graph path has **no per-task retry prompt** at all. The older AF-crew
   path asks "retry / skip / stop" per failed part (`server.mjs:4610-4626`); the task-graph
   runner, which is what runs now, accumulates failures and never offers retry. The right dialog
-  after today's build was "9 tasks failed on a dead endpoint — retry them (on another model)?",
+  after today's build was "9 tasks failed on a dead endpoint - retry them (on another model)?",
   and that dialog does not exist.
 
 ## 3. "I re-planned; I'm not confident it followed the tasks completed last time."
 
 **Correct suspicion. The plan-panel replan is blind.**
 
-- "Plan the tasks" posts only the goal text — `intake.messages[0].content` or the prompt box —
+- "Plan the tasks" posts only the goal text - `intake.messages[0].content` or the prompt box -
   to `/ide/tasks` (`public/dominion-ide.js:406-414`), which calls the orchestrator with
-  `taskRoadmapMessages({ goal })` via `ideChatOnce(model, messages, {})` — **no workspace tools,
+  `taskRoadmapMessages({ goal })` via `ideChatOnce(model, messages, {})` - **no workspace tools,
   no repository inventory, no ledger of the previous build** (`server.mjs:3592`,
   `idetasks.mjs:25-62`). For an adopted project the goal is the adoption brief, i.e. a snapshot
-  of the repo **as of the adopt scan** — it knows nothing about what the failed build wrote
+  of the repo **as of the adopt scan** - it knows nothing about what the failed build wrote
   afterward.
 - The build itself is better: before building, a fresh deterministic repository inventory is
   scanned and injected into every planning/divider/review call (`server.mjs:4034-4061`,
@@ -113,22 +113,22 @@ endpoint.
   cannot host 5 agents under the cookie rule (no two concurrent units share a file). Forcing 5
   would either serialize them anyway or produce write collisions. The verdicts ("irreducible",
   "split into N pieces") are shown truthfully. This part is working as intended.
-- Cause 1 — **every +/- click is a fresh paid, nondeterministic model call**
+- Cause 1 - **every +/- click is a fresh paid, nondeterministic model call**
   (`public/dominion-ide.js:461-467, 505-522`). No debounce, no request cancellation: clicking
   2→5 fires overlapping `/ide/reduce` calls whose responses each mutate `p.agents` on arrival. A
   late response for an older click can overwrite a newer value. Walk away and responses keep
   landing.
-- Cause 2 — **the preview verdict is not binding.** At build time each multi-agent task is
+- Cause 2 - **the preview verdict is not binding.** At build time each multi-agent task is
   re-divided from scratch by another fresh divider call (`server.mjs:4416-4435`). Same model,
   same prompt, different sample: a task previewed at 3 parts can legitimately come back 2. The
   Blueprint sub-rows (1.1, 1.2, 2.1, 2.2 = two parts per task) are the build-time verdict; the
   plan panel still shows the preview. Two dice rolls, two screens, no reconciliation.
-- Cause 3 — group sync: tasks sharing a group tag mirror the first task's model+agents
+- Cause 3 - group sync: tasks sharing a group tag mirror the first task's model+agents
   (`public/dominion-ide.js:427-432`), so one task's backoff propagates.
 
 **Fix:** persist the accepted split (the actual parts, not just the count) into
 `state.assignments.af` alongside `taskPlan`, and have the build **execute the previewed split**
-instead of re-rolling — falling back to fresh division only when no stored split exists. This
+instead of re-rolling - falling back to fresh division only when no stored split exists. This
 also removes one paid divider call per multi-agent task per build. Debounce/abort the reduce
 check.
 
@@ -139,7 +139,7 @@ check.
 Wave 1 was correctly tasks 1 and 2 (the only tasks with no NEEDS). Each was divided into 2 units
 with **new ids** (`tg-1-1`, `tg-1-2`, `tg-2-1`, `tg-2-2`) and titles "1.1 …", "2.2 …"
 (`server.mjs:4430-4435`). The Blueprint keys rows by move id and appends unknown ids in arrival
-order (`public/dominion-lenses.js:66-77`) — so four new rows (13-16) appeared at the bottom
+order (`public/dominion-lenses.js:66-77`) - so four new rows (13-16) appeared at the bottom
 marked RUNNING while parent rows 1 and 2 **stayed QUEUED and will never leave that state**: no
 event ever updates a divided task's parent row. Progress percent also divides by this inflated
 row count (`dominion-lenses.js:320-333`), so the bar under-reports.
@@ -154,7 +154,7 @@ Three real constraints, one real inefficiency, and one legitimate open design qu
 - **The NEEDS graph.** The orchestrator model authors the dependencies (task 3 "after 1", task 12
   "after 3,4,5,7,8,9,10,11"), and the scheduler obeys them (`idetasks.mjs:131-140`). Today's plan
   hung almost everything off task 1 (types/config), so waves were roughly {1,2} → {3,4,6,9} →
-  {5,7,8,10,11} → {12}. Note **nothing audits whether a declared dependency is real** — an
+  {5,7,8,10,11} → {12}. Note **nothing audits whether a declared dependency is real** - an
   over-cautious orchestrator silently serializes the build. "Wired at the end" is literally what
   task 12 is; the question is whether tasks 3-11 truly needed task 1 *finished* or just needed
   its type contracts, which could be stubbed first and satisfied in parallel. That is a genuine
@@ -162,22 +162,22 @@ Three real constraints, one real inefficiency, and one legitimate open design qu
 - **The cookie rule.** Two tasks sharing a file may not run together (`idetasks.mjs:110-124`),
   and workers' outputs are filtered to their owned files (`server.mjs:4471-4483`). This is real
   and is what makes parallel agents safe at all.
-- **The wave barrier — the real inefficiency.** The runner executes discrete waves with a full
+- **The wave barrier - the real inefficiency.** The runner executes discrete waves with a full
   join: `readyTasks(...)` is called with `running: []` and the loop `Promise.all`s the entire
   wave (`server.mjs:4441-4458`). The scheduler function already supports rolling starts (it
-  accepts a `running` list and checks collisions against it, `idetasks.mjs:131-140`) — the
+  accepts a `running` list and checks collisions against it, `idetasks.mjs:131-140`) - the
   runner just doesn't use it. One slow unit holds every satisfied-and-disjoint task out of the
   next wave. This is the cheapest large win available: convert the wave loop to a rolling pool.
-- Within a wave there is **no concurrency cap** — all unit model calls fire at once
+- Within a wave there is **no concurrency cap** - all unit model calls fire at once
   (`server.mjs:4458`), which with flaky endpoints amplifies simultaneous failures.
 
 ## 7. The reliability root cause: no failover for worker calls
 
-The build's model wrapper fails over **only on "out of funds"** — one hop, reported out loud
+The build's model wrapper fails over **only on "out of funds"** - one hop, reported out loud
 (`server.mjs:3852-3872`). A worker unit whose endpoint times out or 5xxes gets **3 same-model
 retries** inside `runUnit` (`server.mjs:4358-4385`) and then the task hard-fails and takes its
 dependents with it. The orchestrator seat has proper substitute-on-failure
-(`server.mjs:3584-3616`); the workers — the seats that do 95% of the calls — do not. With NVIDIA
+(`server.mjs:3584-3616`); the workers - the seats that do 95% of the calls - do not. With NVIDIA
 endpoints unreliable, this is exactly the mass-failure Fred watched.
 
 **Fix:** extend the out-of-funds hop to transport failures (timeout / 5xx / empty response):
@@ -187,12 +187,12 @@ the first attempts; never substitute silently.
 
 ## 8. Smaller honesty items found on the way
 
-- **The whole-plan time estimate assumes zero parallelism** — `estimatePlan` sums every part's
+- **The whole-plan time estimate assumes zero parallelism** - `estimatePlan` sums every part's
   seconds ("wall seconds ADD", `idetelemetry.mjs:146-162`) even though model calls run in
   parallel waves and only writes serialize. The "18 min to 40 min" figure was a sequential
   worst-case shown without saying so. Either compute per-wave wall time from the NEEDS graph or
   label the number "if run one at a time."
-- **Per-row EST TIME/COST ignores dependencies entirely** — fine for a per-task figure, but the
+- **Per-row EST TIME/COST ignores dependencies entirely** - fine for a per-task figure, but the
   column implies schedule information it doesn't have.
 - The reduce preview spends real money per click with no visual accounting in the plan totals.
 
@@ -202,31 +202,31 @@ the first attempts; never substitute silently.
 
 Every finding above is closed. Where each fix lives:
 
-1. **Worker-call failover on transport failure** (§7) — `server.mjs` chat wrapper: after the
+1. **Worker-call failover on transport failure** (§7) - `server.mjs` chat wrapper: after the
    provider layer's own 3 same-model retries, a transport death hops ONCE to the keyed model
    **closest in price** (funds deaths still hop cheapest-first), announced in the run log; user
    aborts never reroute. `altKeyedModelFor` gained the `prefer: "similar"` sort.
-2. **Truthful Blueprint states + failure fork** (§1, §2, §5) — the scheduler was extracted to
+2. **Truthful Blueprint states + failure fork** (§1, §2, §5) - the scheduler was extracted to
    `idepool.mjs` (tested directly by `idepool_test.mjs`): rolling starts, per-start collision
    recheck, and a **fork on failure**: when the pool drains with failed tasks the user chooses
    retry / skip / stop (two-strike caps: max 2 fork rounds, 3 attempts per task). Skipped tasks
    get `state: "skipped"` on their own rows; divided-task parent rows now run/finish/fail for
    real; a nothing-built run ends as a **failed build**, never a wrap-up audit.
    `dominion-lenses.js` nests sub-agent rows under their task and counts progress over leaves.
-3. **Grounded replans** (§3) — `/ide/tasks` runs the adopt scanner over the live workspace and
+3. **Grounded replans** (§3) - `/ide/tasks` runs the adopt scanner over the live workspace and
    appends the **previous build's ledger** (`ledgerFromEvents` in `idejobs.mjs`: done / failed /
    skipped / unstarted / files written) to the orchestrator prompt. Degrades to an honest note
    when the scan cannot run.
-4. **Bound splits + debounced reduce** (§4) — `/ide/reduce` returns its parts; the client stores
+4. **Bound splits + debounced reduce** (§4) - `/ide/reduce` returns its parts; the client stores
    them with the plan (`af.splits`) and a sequence token drops stale responses; the build
    validates (`validateStoredSplit`) and **executes the previewed split**, deterministically
-   fitted to the final agent count (`fitPartsToAgents`) — fresh division only when no valid
+   fitted to the final agent count (`fitPartsToAgents`) - fresh division only when no valid
    stored split exists.
-5. **Rolling scheduler + concurrency cap** (§6) — `idepool.mjs` + `createGate(6)` on model
+5. **Rolling scheduler + concurrency cap** (§6) - `idepool.mjs` + `createGate(6)` on model
    calls; writes and metering stay on one serialized chain. The pool's first test run caught a
-   real race (two owners of one file starting in the same scheduling pass) — fixed by
+   real race (two owners of one file starting in the same scheduling pass) - fixed by
    recomputing the ready set after every start.
-6. **Furnace auto-fix + honest estimates** (§2, §8) — findings are fixed automatically by
+6. **Furnace auto-fix + honest estimates** (§2, §8) - findings are fixed automatically by
    default (out loud; "Ask before fixing" checkbox on the plan screen restores the question),
    and fix moves target the files the findings **name**, batched by `MAX_FILES_PER_MOVE`,
    instead of one 12-file move. `estimatePlan` simulates dependency waves and the plan total
