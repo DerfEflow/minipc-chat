@@ -265,8 +265,18 @@
       '</div>' +
       '<p class="af-custom-hint" data-lex="af_tasks_hint"></p>' +
       '<div id="af-sections" class="af-sections"></div>' +
-      '<div id="af-plan-total" class="af-plan-total" hidden></div>';
+      '<div id="af-plan-total" class="af-plan-total" hidden></div>' +
+      '<label class="af-furnace-ask"><input type="checkbox" id="af-furnace-ask"> <span data-lex="af_furnace_ask"></span></label>';
     custom.querySelector("#af-divide").addEventListener("click", planTasks);
+    // Ask-before-fixing is OFF by default: the final honesty check closes its findings
+    // automatically and says so in the run log (Fred, 2026-08-03: "of course I do").
+    const furnaceAsk = custom.querySelector("#af-furnace-ask");
+    furnaceAsk.checked = !!(state.assignments.af && state.assignments.af.furnaceAsk);
+    furnaceAsk.addEventListener("change", () => {
+      if (!state.assignments.af) state.assignments.af = { on: false, rows: [] };
+      state.assignments.af.furnaceAsk = furnaceAsk.checked;
+      saveAssignments();
+    });
 
     const footer = document.createElement("div");
     footer.className = "af-footer";
@@ -402,6 +412,7 @@
    * estimates ride each task and roll up. The confirmed tasks + groups drive the build.
    */
   let afTasks = null;   // { tasks: [{n,title,files,needs}], picks: [{model, agents, group, reduce}] }
+  let planSpendUsd = 0; // real money the planning screen itself has spent (roadmap + reduce checks)
 
   async function planTasks() {
     const goal = (intake.messages[0] && intake.messages[0].content) || ($("#st-prompt") && $("#st-prompt").value.trim()) || "";
@@ -410,9 +421,13 @@
     if (btn) { btn.disabled = true; btn.textContent = L("af_planning"); }
     window.ideFlame.show(L("af_planning"));
     try {
+      // workspaceId grounds the plan in what is actually on disk (plus the previous build's
+      // ledger server-side), so a replan builds on round one instead of planning blind.
       const r = await fetch("/ide/tasks", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: goal, mode: state.mode, register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }) });
+        body: JSON.stringify({ prompt: goal, workspaceId: ($("#st-ws") && $("#st-ws").value) || "",
+          mode: state.mode, register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }) });
       const j = await r.json();
+      if (j && j.costUsd) planSpendUsd += Number(j.costUsd) || 0;
       if (!r.ok || !j.ok) { if (box) box.innerHTML = '<p class="af-section-empty">' + (j.error || j.reason || L("af_plan_failed")) + "</p>"; return; }
       afTasks = { tasks: j.tasks, picks: j.tasks.map(() => ({ model: "", agents: 1, group: "", reduce: null })) };
       renderTasks();
@@ -504,19 +519,31 @@
 
   async function checkReduce(i) {
     const task = afTasks.tasks[i], p = afTasks.picks[i];
+    /*
+     * ONE VERDICT PER ROW, THE LATEST CLICK WINS. Every +/- press fires a real model call, and
+     * responses used to land in any order and each mutate the agent count on arrival - so a
+     * stale answer for "3 agents" could clobber the newer "5 agents" click minutes later, which
+     * is how counts changed while Fred was away from the screen. The sequence token drops every
+     * response but the newest, and the parts that DO land are stored so the build executes the
+     * split the user previewed instead of rolling fresh dice.
+     */
+    p.reduceSeq = (p.reduceSeq || 0) + 1;
+    const seq = p.reduceSeq;
     p.reduce = { mode: "checking", note: L("af_reduce_checking") };
     renderTasksSoft();
     try {
       const r = await fetch("/ide/reduce", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ task, agents: p.agents, model: p.model, mode: state.mode, register: window.DominionLexicon ? window.DominionLexicon.register : "plain" }) });
       const j = await r.json();
+      if (j && j.costUsd) { planSpendUsd += Number(j.costUsd) || 0; refreshTaskEstimates(); }
+      if (seq !== p.reduceSeq) return;   // a newer click owns this row now
       if (!r.ok) { p.reduce = null; }
       else {
-        p.reduce = { mode: j.mode, note: j.note || "" };
+        p.reduce = { mode: j.mode, note: j.note || "", parts: Array.isArray(j.parts) ? j.parts : [] };
         if (j.mode === "irreducible") { p.agents = 1; }        // forced single agent
         else if (j.usableAgents && j.usableAgents < p.agents) { p.agents = j.usableAgents; }
       }
-    } catch { p.reduce = null; }
+    } catch { if (seq === p.reduceSeq) p.reduce = null; }
     renderTasksSoft();
     persistTasks();
   }
@@ -526,8 +553,9 @@
     clearTimeout(estimateTimer);
     estimateTimer = setTimeout(async () => {
       if (!afTasks) return;
-      // The estimate endpoint speaks "parts"; a task IS a part for sizing (files + a short label).
-      const parts = afTasks.tasks.map((t) => ({ title: t.title, files: t.files, contract: (t.needs || []).join(",") }));
+      // The estimate endpoint speaks "parts"; a task IS a part for sizing. n + needs travel too,
+      // so the roll-up can simulate the dependency waves instead of pretending the build is serial.
+      const parts = afTasks.tasks.map((t) => ({ n: t.n, needs: t.needs || [], title: t.title, files: t.files, contract: (t.needs || []).join(",") }));
       const picks = afTasks.picks.map((p) => ({ model: p.model, agents: p.agents }));
       try {
         const r = await fetch("/ide/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ parts, picks }) });
@@ -545,8 +573,15 @@
         const total = $("#af-plan-total");
         if (total && j.plan) {
           total.hidden = false;
-          const tmin = j.plan.seconds >= 90 ? Math.round(j.plan.seconds / 60) + " min" : j.plan.seconds + "s";
-          total.textContent = L("af_plan_total") + " ~" + tmin + " · ~" + Math.round(j.plan.tokens / 1000) + "k tokens · " + money().cost(j.plan.usd, { approx: true });
+          const fmt = (s) => s >= 90 ? Math.round(s / 60) + " min" : s + "s";
+          // Low bound: dependency waves running in parallel. High bound: every part serial with
+          // retry overhead. When the two collapse (no parallelism to be had), one number shows.
+          const low = Number.isFinite(j.plan.secondsParallel) ? j.plan.secondsParallel : j.plan.seconds;
+          const high = Math.max(low, j.plan.secondsHigh || j.plan.seconds);
+          const span = fmt(low) === fmt(high) ? "~" + fmt(low) : "~" + fmt(low) + " to " + fmt(high);
+          const spent = planSpendUsd > 0 ? " · " + L("af_plan_spent") + " " + money().cost(planSpendUsd, { approx: true }) : "";
+          total.textContent = L("af_plan_total") + " " + span + " (" + (j.plan.parallelBasis === "waves" ? L("af_plan_parallel") : L("af_plan_serial")) + ") · ~"
+            + Math.round(j.plan.tokens / 1000) + "k tokens · " + money().cost(j.plan.usd, { approx: true }) + " to " + money().cost(j.plan.usdHigh || j.plan.usd, { approx: true }) + spent;
         }
       } catch {}
     }, 280);
@@ -559,6 +594,17 @@
     if (!afTasks) { delete state.assignments.af.taskMode; delete state.assignments.af.taskPlan; delete state.assignments.af.groups; saveAssignments(); return; }
     state.assignments.af.taskMode = true;
     state.assignments.af.taskPlan = afTasks.tasks.map((t) => ({ n: t.n, title: t.title, files: t.files, needs: t.needs }));
+    // The splits the user previewed travel with the plan: the build validates and EXECUTES
+    // these instead of re-dividing, so the agent counts on this screen are the ones that run.
+    const splits = {};
+    afTasks.tasks.forEach((t, i) => {
+      const p = afTasks.picks[i];
+      if (!p || !p.reduce || p.reduce.mode === "checking") return;
+      if (p.reduce.mode === "irreducible") splits[t.n] = { mode: "irreducible", parts: [] };
+      else if (Array.isArray(p.reduce.parts) && p.reduce.parts.length && p.agents > 1) splits[t.n] = { mode: p.reduce.mode, parts: p.reduce.parts };
+    });
+    if (Object.keys(splits).length) state.assignments.af.splits = splits;
+    else delete state.assignments.af.splits;
     const groups = [];
     const byTag = new Map();
     afTasks.tasks.forEach((t, i) => {

@@ -233,6 +233,13 @@
   border-radius: 4px; overflow: hidden; min-width: 0; }
 .cru-row { min-width: 0; border-bottom: 1px solid rgba(150,200,230,.08); }
 .cru-row:last-child { border-bottom: 0; }
+/* A sub-agent row sits visibly under its task: indented, thinner, with a lineage rail. */
+.cru-row.cru-sub .r-line { padding-left: 34px; }
+.cru-row.cru-sub { border-left: 2px solid rgba(185, 107, 50, .35); background: rgba(10, 20, 32, .35); }
+.cru-row.cru-sub .c-num { border-color: transparent; background: none; }
+.cru-row.cru-sub .c-title { font-size: 13.5px; color: var(--ink-soft, #b9d3e4); }
+.cru-row[data-state="skipped"] .c-title { color: var(--muted, #7d8f9c); }
+.cru-row[data-state="skipped"] .c-state { color: #d9a04b; }
 .cru-row .r-line { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
   font: inherit; cursor: pointer; border: 0; padding: 10px 12px; min-width: 0;
   background: linear-gradient(180deg, rgba(10,24,40,.55), rgba(4,10,18,.55)); color: inherit; }

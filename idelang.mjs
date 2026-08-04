@@ -92,6 +92,28 @@ const D = {
   },
   furnace_fix: { plain: "Close them now", technical: "Fix findings", hybrid: "Fix (close them now)" },
   furnace_finish: { plain: "Finish as is", technical: "Accept as is", hybrid: "Accept (finish as is)" },
+  // Auto-close is the default (Fred, 2026-08-03: "I cannot think of a time where I would say
+  // no"); this line is the out-loud notice that replaces the question.
+  furnace_auto: {
+    plain: (n) => "The honesty check found " + n + " unfinished or missing thing" + (n === 1 ? "" : "s") + " (listed above). Fixing them now. To be asked first instead, turn on \"Ask before fixing\" on the plan screen.",
+    technical: (n) => "Furnace: " + n + " finding" + (n === 1 ? "" : "s") + " (above). Auto-fixing; enable Ask-before-fixing on the plan screen to gate this.",
+    hybrid: (n) => "Furnace audit: " + n + " finding" + (n === 1 ? "" : "s") + ", listed above. Fixing them now (enable Ask before fixing on the plan screen to be asked instead).",
+  },
+  // The fork after tasks fail (Fred, 2026-08-03: a flaky endpoint killed 9 tasks and the build
+  // slid straight into the final audit as if it were wrapping up). The user picks; free text is
+  // guidance, exactly like the per-move fork.
+  tasks_failed_question: {
+    plain: (n, list) => n + " task" + (n === 1 ? "" : "s") + " could not finish: " + list + ". Try them again? A step that failed because a model endpoint was down will automatically use a backup engine on the retry.",
+    technical: (n, list) => n + " task(s) failed: " + list + ". Retry? (Transport failures reroute to a backup provider automatically.)",
+    hybrid: (n, list) => n + " task" + (n === 1 ? "" : "s") + " failed: " + list + ". Retry them? (Endpoint failures retry on a backup engine.)",
+  },
+  tasks_retry: { plain: "Try the failed tasks again", technical: "Retry failed tasks", hybrid: "Retry (try the failed tasks again)" },
+  tasks_skip: { plain: "Skip them and finish the rest", technical: "Skip failed tasks", hybrid: "Skip (finish without them)" },
+  tasks_nothing_built: {
+    plain: "Nothing could be built: every task failed. The most common reason is above. Nothing you had before was touched.",
+    technical: "Build failed: all tasks failed. See the log above. The workspace was not modified beyond the snapshot.",
+    hybrid: "Build failed: every task failed (log above). Your existing files were not harmed.",
+  },
 };
 
 /*

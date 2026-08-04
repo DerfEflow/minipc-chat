@@ -97,6 +97,39 @@
     return d;
   }
 
+  /*
+   * Task/sub-agent lineage. A divided task's agents emit moves with ids like tg-4-1 (and file
+   * batches like tg-4-chunk-2); their parent row is tg-4. Before this, an unknown child id was
+   * appended at the BOTTOM of the Blueprint while the parent row sat QUEUED forever - which is
+   * how a build working on tasks 1 and 2 looked like it had "started the last tasks first".
+   */
+  const moveParentOf = (id) => {
+    const match = /^tg-(\d+)-/.exec(String(id || ""));
+    return match ? "tg-" + match[1] : "";
+  };
+  function moveChildren(d, moves) {
+    const children = new Map();
+    for (const m of moves) {
+      const pid = moveParentOf(m.id);
+      if (pid && d.moves.has(pid)) {
+        if (!children.has(pid)) children.set(pid, []);
+        children.get(pid).push(m);
+      }
+    }
+    return children;
+  }
+  // Progress counts LEAVES only: a divided task's parent row and its sub-rows must not both
+  // swell the denominator (16 rows for 12 tasks made the bar under-report).
+  function moveLeaves(d) {
+    const moves = [...d.moves.values()];
+    const parents = new Set();
+    for (const m of moves) {
+      const pid = moveParentOf(m.id);
+      if (pid && d.moves.has(pid)) parents.add(pid);
+    }
+    return moves.filter((m) => !parents.has(m.id));
+  }
+
   /* ---------- the shell ---------------------------------------------------------------------- */
   function mount() {
     const stage = $("#ide-stage");
@@ -325,7 +358,7 @@
    */
   let lastProgress = "";
   function announceProgress(d) {
-    const moves = [...d.moves.values()];
+    const moves = moveLeaves(d);
     const total = moves.length;
     const done = moves.filter((m) => m.state === "done").length;
     const percent = total ? Math.min(99, Math.round((done / total) * 100)) : 0;
@@ -558,29 +591,45 @@
     if (foldDone && moves.length) {
       // The build is finished and this reader is here for the result: the steps fold into one
       // honest sentence, reopenable, and the invitation card above leads.
+      const leafCount = moveLeaves(d).length;
       const filesTotal = d.files.size;
       const sum = document.createElement("button");
       sum.type = "button";
       sum.className = "cru-plansum";
-      sum.textContent = moves.length + (moves.length === 1 ? " step" : " steps") + ", "
+      sum.textContent = leafCount + (leafCount === 1 ? " step" : " steps") + ", "
         + filesTotal + (filesTotal === 1 ? " file" : " files") + " " + stateWord("done").toLowerCase();
       sum.addEventListener("click", () => { state.showFullPlan = true; render(); });
       wrap.append(sum);
     } else if (moves.length) {
       const plan = document.createElement("div");
       plan.className = "cru-plan";
-      moves.forEach((m, i) => {
+      /*
+       * Sub-agent rows nest UNDER their task's row instead of piling up at the bottom of the
+       * list, and a parent whose children are working can never sit on "Queued" (the lie that
+       * read as "it started the last tasks first"). Server-emitted parent states win; the
+       * derivation only covers journals from before the parent rows spoke for themselves.
+       */
+      const childrenBy = moveChildren(d, moves);
+      const topLevel = moves.filter((m) => { const pid = moveParentOf(m.id); return !(pid && d.moves.has(pid)); });
+      const shownState = (m) => {
+        const kids = childrenBy.get(m.id);
+        if (!kids || !kids.length || (m.state && m.state !== "planned")) return m.state;
+        return kids.every((k) => k.state === "done") ? "done"
+          : kids.some((k) => k.state === "failed") ? "failed"
+          : "running";
+      };
+      const buildRow = (m, numText, depth) => {
         const row = document.createElement("div");
-        row.className = "cru-row";
-        row.dataset.state = m.state;
+        row.className = "cru-row" + (depth ? " cru-sub" : "");
+        row.dataset.state = shownState(m);
         const open = state.openMoves.has(m.id) || mode === "engineer";
 
         const line = document.createElement("button");
         line.type = "button";
         line.className = "r-line";
-        const num = document.createElement("span"); num.className = "c-num"; num.textContent = String(i + 1);
-        const title = document.createElement("span"); title.className = "c-title"; title.textContent = m.title || "Move " + (i + 1);
-        const badge = document.createElement("span"); badge.className = "c-state"; badge.textContent = stateWord(m.state);
+        const num = document.createElement("span"); num.className = "c-num"; num.textContent = numText;
+        const title = document.createElement("span"); title.className = "c-title"; title.textContent = m.title || "Move " + numText;
+        const badge = document.createElement("span"); badge.className = "c-state"; badge.textContent = stateWord(shownState(m));
         line.append(num, title, badge);
         row.append(line);
 
@@ -623,7 +672,11 @@
             render();
           });
         }
-        plan.append(row);
+        return row;
+      };
+      topLevel.forEach((m, i) => {
+        plan.append(buildRow(m, String(i + 1), 0));
+        for (const kid of childrenBy.get(m.id) || []) plan.append(buildRow(kid, "·", 1));
       });
       wrap.append(plan);
     }
