@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v177-video-producer-flow";
+const CACHE = "dominion-ai-v178-chat-is-the-front-door";
 const SHELL = [
   "/",
   "/index.html",
@@ -19,8 +19,8 @@ const SHELL = [
   "/dominion-mobile.css?v=1",
   "/dominion-images.css?v=9",
   "/dominion-images.js?v=14",
-  "/dominion-video.css?v=7",
-  "/dominion-video.js?v=13",
+  "/dominion-video.css?v=8",
+  "/dominion-video.js?v=14",
   "/dominion-lexicon.js?v=14",
   "/dominion-lenses.css?v=7",
   "/dominion-beginner.css?v=5",

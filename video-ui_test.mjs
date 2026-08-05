@@ -33,11 +33,11 @@ function hasCssDeclaration(selector, property, expected, label = `${selector} ${
 }
 
 test("versioned video assets match the offline shell", () => {
-  for (const asset of ["/dominion-video.css?v=7", "/dominion-video.js?v=13"]) {
+  for (const asset of ["/dominion-video.css?v=8", "/dominion-video.js?v=14"]) {
     includes(html, asset, `${asset} in index`);
     includes(sw, `"${asset}"`, `${asset} in service worker`);
   }
-  includes(js, "l.href='/dominion-video.css?v=7'", "dynamic stylesheet fallback version");
+  includes(js, "l.href='/dominion-video.css?v=8'", "dynamic stylesheet fallback version");
 });
 
 test("the editor exposes the promised models and seven media layers", () => {
@@ -234,6 +234,25 @@ test("generation starts from the chat, not from the settings bar above the playe
   for (const control of ["dv-model", "dv-ratio", "dv-resolution", "dv-format"]) {
     if (!bar.includes(control)) throw new Error(`the settings bar lost ${control}`);
   }
+});
+
+/*
+ * The render button must never impersonate the send button (Fred, 2026-08-05, with screenshots):
+ * he typed his whole request into the chat, pressed the wide primary bar underneath it, and got a
+ * modal asking for the prompt he had just written.
+ */
+test("the render control is secondary, conditional, and never eats a typed message", () => {
+  const baseStart = js.indexOf("function baseMarkup()");
+  const markup = js.slice(baseStart, js.indexOf("function captureDrafts()", baseStart));
+  const chat = markup.slice(markup.indexOf('id="dv-chat"'), markup.indexOf("</aside>", markup.indexOf('id="dv-chat"')));
+  if (/class="dv-generate"/.test(chat)) throw new Error("the render button must not use the wide primary generate styling inside the chat");
+  if (!/dv-generate-secondary/.test(chat)) throw new Error("the render button must be visually secondary to the conversation");
+  if (!/renderableScene\(\)/.test(chat)) throw new Error("the render button must only appear when a scene can actually be rendered");
+  // Enter sends: its absence is half of why a button underneath read as the send control.
+  includes(js, "e.key==='Enter'&&!e.shiftKey", "Enter sends the message, Shift+Enter makes a newline");
+  // A typed message is routed to the producer rather than dropped into an empty modal.
+  const gen = js.slice(js.indexOf("async function generate()"), js.indexOf("function mergeServerClips"));
+  if (!/typed[\s\S]{0,120}sendChat\(\)/.test(gen)) throw new Error("text in the chat box must reach the producer instead of opening an empty prompt modal");
 });
 
 test("the numbered pipeline reflects real project state and never invents a step", () => {
