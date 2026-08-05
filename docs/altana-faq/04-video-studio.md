@@ -201,6 +201,18 @@ The timeline is where local assembly work happens.
 Projects are stored so you can come back to them, within a 2GB per project allowance. The generation
 itself happens at the provider.
 
+## Q: Does video work in Trusted privacy mode?
+Yes. The studio runs its own fixed crew of providers and says so on its surface, so Trusted mode
+does not block it. Only Private mode blocks video.
+
+## Q: Why does video not work in Private privacy mode?
+Private mode promises a single provider, Anthropic, and video generation runs on Runware, so it is
+refused rather than quietly rerouted. Switch to Normal or Trusted to generate video.
+
+## Q: Why does it say video generation is not configured?
+The server has no key for the video render engine yet, so nothing can generate. Planning, chat, the
+screenwriter and the storyboard still work, and the banner goes away once the key is added.
+
 ## Q: Why is there no free video option like there is for images?
 Video generation is dramatically more expensive to run than an image, so there is no free lane that
 would be honest to offer. Images have one precisely because they are cheap enough.

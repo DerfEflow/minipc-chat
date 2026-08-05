@@ -50,6 +50,7 @@ Read each value at runtime from `~/.app-secrets.env`; never inline. Set on the R
 | `DEEPSEEK_AI_DOMINION_UI_APIKEY` | same | DeepSeek direct |
 | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` | Anthropic direct (Trusted mode) |
 | `SERP_API_KEY` | same | web_search |
+| `RUNWARE_VIDEO_GEN_DOMINION_API_KEY` | same | Video Studio generation (Runware). Without it the studio shows a not-configured banner and nothing can render |
 | `GITHUB_TOKEN` | `DOMI_AI_MAX_ACCESS_GITHUB_API` | the app's max-access GitHub token |
 | `HANDS_TOKEN` | generate at deploy | SAME value goes on every hands node (installer/compose) |
 | `OLLAMA_URL` | the mini-PC tailnet address | needs the Tailscale key first (L-005) |

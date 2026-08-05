@@ -89,6 +89,18 @@ that a deliberate, visible switch instead of a guess.
 Net effect: the privacy level is always exactly what Fred selected, with zero surprises. Normal =
 everything; Trusted = only no-train direct providers or local; Private = local only.
 
+### The Video Studio exception (Fred's ruling, 2026-08-05)
+
+The Video Studio's transports are FIXED castings — Runware renders, NVIDIA directs and
+orchestrates, OpenRouter writes the screenplay, Anthropic liaises — and none of the first three
+sit on the Trusted list, so Trusted mode used to kill the entire studio (every generation and
+every producer conversation refused). Ruling: **inside the Video Studio only**, the fixed crew is
+permitted in Trusted mode, and the studio states its crew on its own surface ("This studio runs
+its own fixed crew…"). The global `TRUSTED_PROVIDERS` list is deliberately unchanged, so chat's
+Trusted promise keeps its exact meaning. Private mode still refuses the studio outright: one
+provider, no exceptions, refuse rather than substitute. Enforced by `STUDIO_CREW_PROVIDERS` in
+`video-http.mjs` (`requireProviderPrivacy`).
+
 ---
 
 ## 4. "Can I trust Anthropic / OpenAI not to save it?" (grounded, 2026)

@@ -425,9 +425,23 @@ export function createVideoHttp({
     if (timer) clearTimeout(timer);
     return { pending: pending.length, completed: pending.length - activeScreenwriterTurns.size - activeAiTurns.size, timedOut };
   }
+  /*
+   * THE STUDIO RUNS ITS OWN CREW (Fred, 2026-08-05). The studio's four transports are FIXED
+   * castings - Runware renders, NVIDIA directs and orchestrates, OpenRouter writes, Anthropic
+   * liaises - and none of the first three sit on the global Trusted list, so Trusted mode used to
+   * kill the entire studio: every generation AND every producer conversation 403'd, which read as
+   * "the API isn't live". Fred's ruling: inside the Video Studio only, the fixed crew is
+   * permitted in Trusted mode, and the studio header names the crew so the privacy story is
+   * stated on the surface where it applies. The global TRUSTED_PROVIDERS list is deliberately
+   * untouched - chat's promise ("Trusted · OpenAI/Anthropic direct") keeps its exact meaning.
+   * Private mode still refuses the studio outright: one provider, no exceptions, refuse rather
+   * than substitute.
+   */
+  const STUDIO_CREW_PROVIDERS = new Set(["runware", "nvidia", "openrouter", "anthropic"]);
   function requireProviderPrivacy(body, { provider, model }) {
     const requested = String(body?.privacyMode || "normal").trim().toLowerCase();
     const mode = new Set(["normal", "trusted", "private"]).has(requested) ? requested : "normal";
+    if (mode === "trusted" && STUDIO_CREW_PROVIDERS.has(provider)) return mode;
     const providerGate = typeof privacy.providerAllowed === "function"
       ? { allowed: privacy.providerAllowed(mode, provider) }
       : { allowed: mode === "normal" || provider === "anthropic" };

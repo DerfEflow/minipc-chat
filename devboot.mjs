@@ -36,7 +36,9 @@ const env = { ...process.env, PORT: String(APP), OLLAMA_URL: "http://127.0.0.1:"
   // is an empty string, which deliberately defeats cfgGet's fallback chain too. DEVBOOT_ALLOW_PAID=1
   // opts one session in, for live verification that genuinely needs a provider (e.g. the vision
   // judge). Stripe stays blanked unconditionally: no dev rig ever needs the money rail.
-  ...(process.env.DEVBOOT_ALLOW_PAID === "1" ? {} : { OPENROUTER_API_KEY: "", OPEN_AI_DOMINION_UI_APIKEY: "", ANTHROPIC_API_KEY: "" }),
+  // RUNWARE joined this list 2026-08-05: it was the one paid provider a dev rig could still bill
+  // live, the exact hole this blanking exists to close.
+  ...(process.env.DEVBOOT_ALLOW_PAID === "1" ? {} : { OPENROUTER_API_KEY: "", OPEN_AI_DOMINION_UI_APIKEY: "", ANTHROPIC_API_KEY: "", RUNWARE_VIDEO_GEN_DOMINION_API_KEY: "" }),
   STRIPE_SECRET_KEY: "" };
 const child = spawn(process.execPath, [join(HERE, "server.mjs")], { env, cwd: HERE, stdio: "inherit" });
 process.on("exit", () => { try { child.kill(); } catch {} });
