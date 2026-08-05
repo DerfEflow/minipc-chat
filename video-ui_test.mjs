@@ -33,11 +33,11 @@ function hasCssDeclaration(selector, property, expected, label = `${selector} ${
 }
 
 test("versioned video assets match the offline shell", () => {
-  for (const asset of ["/dominion-video.css?v=6", "/dominion-video.js?v=12"]) {
+  for (const asset of ["/dominion-video.css?v=7", "/dominion-video.js?v=13"]) {
     includes(html, asset, `${asset} in index`);
     includes(sw, `"${asset}"`, `${asset} in service worker`);
   }
-  includes(js, "l.href='/dominion-video.css?v=5'", "dynamic stylesheet fallback version");
+  includes(js, "l.href='/dominion-video.css?v=7'", "dynamic stylesheet fallback version");
 });
 
 test("the editor exposes the promised models and seven media layers", () => {
@@ -204,6 +204,54 @@ test("timeline stays secondary but has a clear reversible editor focus mode", ()
   includes(js, "state.focus?'↙ Exit player + editor':'⛶ Player + editor'", "clear player and editor focus exit control");
   includes(js, "node.classList.add(state.panels[p])", "panel states retained across focus render");
   hasCssDeclaration(".dv-focus-mode .dv-timeline-panel", "display", /^(?:block|grid|flex)$/, "focus mode promotes the secondary timeline into a usable editor surface");
+});
+
+/*
+ * THE CHAT IS THE FRONT DOOR (Fred, 2026-08-05: "the button to generate the video is in a strange
+ * place above the video player. It should be in the chat where you are describing the video you
+ * want."). The sketched panel composition above is unchanged and still pinned; only the entry
+ * point moved, and the numbered pipeline is an overlay on the existing panels rather than a
+ * relayout.
+ */
+test("generation starts from the chat, not from the settings bar above the player", () => {
+  const baseStart = js.indexOf("function baseMarkup()");
+  const baseEnd = js.indexOf("function captureDrafts()", baseStart);
+  const markup = js.slice(baseStart, baseEnd);
+  const barStart = markup.indexOf('class="dv-controlbar"');
+  const barEnd = markup.indexOf("</section>", barStart);
+  const chatStart = markup.indexOf('id="dv-chat"');
+  const chatEnd = markup.indexOf("</aside>", chatStart);
+  if (barStart < 0 || chatStart < 0) throw new Error("control bar or chat could not be isolated");
+  const bar = markup.slice(barStart, barEnd);
+  const chat = markup.slice(chatStart, chatEnd);
+  if (/data-action="generate"/.test(bar)) throw new Error("the generate button must not sit in the settings bar above the player");
+  if (!/data-action="generate"/.test(chat)) throw new Error("the generate button must live in the chat, where the video is described");
+  // The chips are assembled above the template and interpolated into the chat, so assert the
+  // relationship rather than the literal: they must be BUILT as tappable and PLACED in the chat.
+  if (!/\$\{chipMarkup\}/.test(chat)) throw new Error("the producer's suggested next step must be rendered inside the chat");
+  if (!/const chipMarkup[\s\S]{0,400}data-action="chip"/.test(markup)) throw new Error("the suggested next step must be a real tappable control");
+  // Settings stay where Fred likes them.
+  for (const control of ["dv-model", "dv-ratio", "dv-resolution", "dv-format"]) {
+    if (!bar.includes(control)) throw new Error(`the settings bar lost ${control}`);
+  }
+});
+
+test("the numbered pipeline reflects real project state and never invents a step", () => {
+  const start = js.indexOf("function stageState()");
+  const end = js.indexOf("function baseMarkup()", start);
+  if (start < 0 || end <= start) throw new Error("stageState could not be isolated");
+  const fn = js.slice(start, end);
+  for (const [signal, why] of [
+    ["state.messages", "brief comes from the real conversation"],
+    ["state.screenplay", "script stage reads the real screenplay"],
+    ["state.scenes", "storyboard stage reads real scenes"],
+    ["state.clips", "clip stage reads real generated clips"],
+  ]) if (!fn.includes(signal)) throw new Error(`stageState must derive from project state: ${why}`);
+  if (!/skipped/.test(fn)) throw new Error("a deliberately skipped stage must read as skipped, not pending");
+  includes(js, 'class="dv-stage-strip"', "the pipeline strip is rendered");
+  includes(js, 'class="dv-step-badge"', "panels carry their step number");
+  hasCssDeclaration(".dv-stage-step[data-state=\"current\"]", "color", /#/, "the current stage is lit");
+  hasCssDeclaration(".dv-stage-step[data-state=\"skipped\"]", "opacity", /^\./, "a skipped stage is dimmed rather than hidden");
 });
 
 if (!process.exitCode) console.log(`\nvideo UI: ${passed} passed, 0 failed`);
