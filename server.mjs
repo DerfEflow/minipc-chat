@@ -350,6 +350,30 @@ const CHATJOBS_UNCOLLECTED_TTL_MS = (() => { const n = Number(cfgGet("CHATJOBS_U
 
 // Phase 4: artifact studio. Generated documents become versioned, editable artifacts.
 const ARTIFACT_DIR = cfgGet("ARTIFACT_DIR", dataPath("artifacts"));
+
+/*
+ * SEAT PROBE OVERLAY. models.catalog.mjs ships dated probe defaults; ops/seat-probe.mjs re-measures
+ * from THIS container and writes catalog-probes.json onto the volume. Reading it here means a
+ * refresh needs no deploy, which matters because a stale probe is itself a refusal: without a
+ * refresh path the shipped defaults expire after GUEST_PROBE_MAX_AGE_DAYS and the guest picker
+ * silently loses every measured seat. Cached for a minute so the models route stays cheap.
+ * A missing or unparseable file falls back to the shipped defaults rather than blocking anything.
+ */
+const SEAT_PROBE_FILE = cfgGet("CATALOG_PROBE_FILE", dataPath("catalog-probes.json"));
+let seatProbeCache = { at: 0, value: null };
+function readSeatProbes() {
+  const now = Date.now();
+  if (seatProbeCache.value && now - seatProbeCache.at < 60000) return seatProbeCache.value;
+  let value = undefined;   // undefined => guestSeatRefusal uses its shipped defaults
+  try {
+    if (existsSync(SEAT_PROBE_FILE)) {
+      const parsed = JSON.parse(readFileSync(SEAT_PROBE_FILE, "utf8"));
+      if (parsed && parsed.probes && typeof parsed.probes === "object") value = parsed.probes;
+    }
+  } catch { /* keep the shipped defaults */ }
+  seatProbeCache = { at: now, value };
+  return value;
+}
 const artifacts = createArtifactStore({ dir: ARTIFACT_DIR });
 CTX.artifacts = artifacts;
 
@@ -10420,8 +10444,9 @@ const server = http.createServer(async (req, res) => {
        * reason attached, so Fred can see what his guests cannot pick and why.
        */
       const probeNow = Date.now();
+      const probes = readSeatProbes();
       for (const g of payload.groups || []) g.models = (g.models || []).map((m) => {
-        const refusal = guestSeatRefusal(m.id, probeNow);
+        const refusal = guestSeatRefusal(m.id, probeNow, probes);
         return {
           ...m,
           orchestratorOk: isOrchestratorApproved(m.id),
