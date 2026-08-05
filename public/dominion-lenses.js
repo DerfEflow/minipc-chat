@@ -39,6 +39,7 @@
     verifyAnnounced: "",    // job whose first recorded check advanced the shared journey
     endedAnnounced: "",     // failed/stopped job whose retryable ending was announced
     autoWorkshop: "",       // job whose completion already flipped the view to the Workshop (once)
+    droppedJob: "",         // job whose stream dropped mid-build: re-attach from the cursor, not zero
   };
 
   // The Crucible's working mode drives how much machinery each lens shows.
@@ -196,25 +197,41 @@
    * Attach replays the whole journal from event zero and then live-tails, so opening a build that
    * finished yesterday and watching one that is running right now take the identical path.
    */
+  /*
+   * RESUME, DO NOT REPLAY (2026-08-05). Production logs showed 28 dropped /ide/job/attach streams
+   * in a four-hour window — Cloudflare cancelling the tunnel, not the server ending the response.
+   * Every one of them re-attached with from=0 into an emptied event list, so a long build replayed
+   * its ENTIRE journal on each blip, and the longer the build ran the more each drop cost. That is
+   * the "Dominion is slow and unstable" the user feels: the build view resetting and re-reading
+   * itself from the beginning under them.
+   *
+   * The server already indexes events and already honours ?from= (idejobs.attach slices from it).
+   * Only the client was throwing its place away. state.events.length IS the cursor: every event
+   * the server sends is pushed exactly once, so its length is the count already received.
+   */
   function follow(jobId, opts) {
-    if (!jobId || jobId === state.jobId) return;
+    const resume = !!(opts && opts.resume) && jobId === state.jobId && state.events.length > 0;
+    if (!jobId || (jobId === state.jobId && !resume)) return;
     // A follow of a job we already know is finished (opened from the log) is a REPLAY: its journal
     // carried its terminal event before we attached, so it can never earn a live publish
     // invitation. sync() and a fresh build attach live jobs and leave this false.
     const replay = !!(opts && opts.replay);
     if (state.detach) { try { state.detach(); } catch {} state.detach = null; }
-    state.jobId = jobId;
-    state.events = [];
-    state.openMoves = new Set();
-    state.showFullPlan = false;
-    state.previewOn = false;
-    state.verifyAnnounced = "";
-    state.endedAnnounced = "";
-    state.autoWorkshop = "";
-    state.terminalWitnessedLive.clear();
-    render();
-
-    const es = new EventSource("/ide/job/attach?job=" + encodeURIComponent(jobId) + "&from=0");
+    if (!resume) {
+      state.jobId = jobId;
+      state.events = [];
+      state.openMoves = new Set();
+      state.showFullPlan = false;
+      state.previewOn = false;
+      state.verifyAnnounced = "";
+      state.endedAnnounced = "";
+      state.autoWorkshop = "";
+      state.terminalWitnessedLive.clear();
+      render();
+    }
+    state.droppedJob = "";
+    const from = resume ? state.events.length : 0;
+    const es = new EventSource("/ide/job/attach?job=" + encodeURIComponent(jobId) + "&from=" + from);
     let closed = false, ended = false;
     es.onmessage = (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch { return; }
@@ -261,7 +278,13 @@
        * with the job still live is a real drop worth resetting and retrying.
        */
       if (ended) return;
-      state.jobId = "";
+      /*
+       * A real drop on a live job. The old line cleared state.jobId so follow() would agree to
+       * re-attach, which also threw away every event received so far and forced a full replay.
+       * Instead: remember which job dropped and KEEP the events. sync() re-attaches with resume,
+       * follow() computes from=state.events.length, and the server sends only what we missed.
+       */
+      state.droppedJob = state.jobId;
       setTimeout(() => { if (document.body.classList.contains("ide-open")) sync(); }, 2000);
     };
     state.detach = () => { closed = true; es.close(); };
@@ -276,8 +299,9 @@
       if (!r.ok) return;
       const jobs = (await r.json()).jobs || [];
       const live = jobs.find((j) => !j.done);
-      if (live) follow(live.id);
-      else { state.jobId = ""; state.events = []; render(); }
+      // Resume only the job that actually dropped; anything else is a fresh follow from zero.
+      if (live) follow(live.id, { resume: state.droppedJob === live.id });
+      else { state.jobId = ""; state.droppedJob = ""; state.events = []; render(); }
     } catch {
       window.ideFlame && window.ideFlame.hide();
     }

@@ -391,5 +391,45 @@ await t("ledgerFromEvents summarizes what a job really did: done, failed, skippe
   assert.deepEqual(ledger.files, ["src/types.ts"]);
 });
 
+/*
+ * A dropped attach must RESUME, not replay. 28 tunnel drops in four hours each re-attached at
+ * from=0 and re-sent the whole journal, so a long build got slower the longer it ran. Two halves
+ * of the contract are checked here: the server slices from the cursor (behaviour), and the client
+ * sends its cursor instead of a hardcoded zero (source).
+ */
+t("attach(from) resumes at the cursor and never re-sends what was already delivered", () => {
+  const dir = mkdtempSync(join(tmpdir(), "idejobs-resume-"));
+  const jobs = createIdeJobs({ dir });
+  const job = jobs.create({ kind: "build", uid: "u1" });
+  for (let i = 1; i <= 6; i++) jobs.emit(job.id, { type: "move", id: "tg-" + i, state: "running" });
+
+  const firstPass = [];
+  const off = jobs.attach(job.id, 0, (ev) => { if (ev) firstPass.push(ev); });
+  off();
+  assert.equal(firstPass.length, 6, "a fresh attach replays the whole journal");
+
+  // The stream drops here; two more events land while the client is away.
+  jobs.emit(job.id, { type: "move", id: "tg-7", state: "running" });
+  jobs.emit(job.id, { type: "move", id: "tg-8", state: "running" });
+
+  const resumed = [];
+  const off2 = jobs.attach(job.id, firstPass.length, (ev) => { if (ev) resumed.push(ev); });
+  off2();
+  assert.equal(resumed.length, 2, "a resume delivers only the missed events, not the journal again");
+  assert.deepEqual(resumed.map((e) => e.id), ["tg-7", "tg-8"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+t("the build lens re-attaches from its cursor rather than from zero", () => {
+  const src = readFileSync(new URL("./public/dominion-lenses.js", import.meta.url), "utf8");
+  assert.match(src, /"\/ide\/job\/attach\?job=" \+ encodeURIComponent\(jobId\) \+ "&from=" \+ from/,
+    "the attach URL must carry a computed cursor");
+  assert.match(src, /const from = resume \? state\.events\.length : 0/);
+  assert.match(src, /state\.droppedJob = state\.jobId/,
+    "a mid-build drop must remember the job so sync() can resume it");
+  assert.doesNotMatch(src, /attach\?job=" \+ encodeURIComponent\(jobId\) \+ "&from=0/,
+    "no path may hardcode from=0 again");
+});
+
 console.log("\n" + passed + " passed, " + failed + " failed");
 process.exit(failed ? 1 : 0);
