@@ -1284,7 +1284,15 @@ test("screenwriter preserves leading and trailing screenplay whitespace for the 
   assert.equal(screenplaySet.text.slice(0, exact.length), exact);
 });
 
-test("screenwriter privacy modes refuse OpenRouter unless normal mode explicitly allows exact Trinity", async () => {
+/*
+ * CONTRACT CHANGE (Fred's ruling, 2026-08-05): the studio runs its own fixed crew. Trusted mode
+ * used to refuse the screenwriter's OpenRouter transport, which killed the studio's producer flow
+ * everywhere outside Normal mode - the studio's transports are fixed castings, so inside the
+ * studio the crew (runware/nvidia/openrouter/anthropic) is now permitted in Trusted, stated on
+ * the studio surface. Private keeps refusing: one provider, no exceptions. This test used to pin
+ * the old refusal; it now pins the ruling.
+ */
+test("screenwriter privacy: trusted admits the fixed crew, private still refuses", async () => {
   const privacyChecks = [];
   const providerCalls = [];
   const env = setup({
@@ -1307,25 +1315,28 @@ test("screenwriter privacy modes refuse OpenRouter unless normal mode explicitly
   });
   setPersistedScreenplay(env, "Write a private garden opening");
 
+  // Trusted: the crew exemption short-circuits BEFORE the privacy callbacks, so the turn runs and
+  // no modeAllows check is even consulted - the studio's casting is not negotiable per-turn.
   const trusted = await call(env.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "Write a private garden opening", limit: 115_000, privacyMode: "trusted" });
-  assert.equal(trusted.res.statusCode, 403);
-  assert.equal(trusted.body.code, "privacy_mode_block");
-  assert.equal(providerCalls.length, 0);
+  assert.equal(trusted.res.statusCode, 200);
+  assert.equal(providerCalls.length, 1);
 
   const privateMode = await call(env.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "Write a private garden opening", limit: 115_000, privacyMode: "private" });
   assert.equal(privateMode.res.statusCode, 403);
   assert.equal(privateMode.body.code, "privacy_mode_block");
-  assert.equal(providerCalls.length, 0);
+  assert.equal(providerCalls.length, 1, "private mode must not reach the provider");
 
+  // The trusted turn above genuinely wrote a section, so the stale-guard precondition must be
+  // re-armed before the next turn - proof the trusted call was real work, not a bypass.
+  setPersistedScreenplay(env, "Write a private garden opening");
   const normal = await call(env.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "Write a private garden opening", limit: 115_000, privacyMode: "normal" });
   assert.equal(normal.res.statusCode, 200);
-  assert.equal(providerCalls.length, 1);
+  assert.equal(providerCalls.length, 2);
   assert.equal(providerCalls[0].model, "arcee-ai/trinity-large-thinking");
   assert.deepEqual(privacyChecks, [
-    { mode: "trusted", model: "arcee-ai/trinity-large-thinking" },
     { mode: "private", model: "arcee-ai/trinity-large-thinking" },
     { mode: "normal", model: "arcee-ai/trinity-large-thinking" },
-  ]);
+  ], "trusted mode never consults the per-model gate: the crew is fixed");
 });
 
 test("screenwriter rejects stale and concurrent turns before a second paid request", async () => {

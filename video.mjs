@@ -284,14 +284,21 @@ function normalizeClientCheckpoint(current, incoming = {}) {
     const sourceStart = Number(raw.sourceStart || 0);
     if (!Number.isFinite(sourceStart) || sourceStart < 0 || sourceStart > MAX_PROJECT_DURATION) fail("video_clip_invalid", "A timeline clip has an invalid source offset.");
     const targetTrack = targetTracks.get(String(raw.trackId));
-    targetTrack.clips.push({ id, name: String(raw.name || "Clip").slice(0, 160), start, duration, sourceStart, type: targetTrack.kind, linked: raw.linked ? String(raw.linked) : null, mediaJobId: raw.mediaJobId ? String(raw.mediaJobId) : null, mediaFile, volume: Math.min(8, Math.max(0, Number(raw.volume ?? 1) || 0)), fit: raw.fit === "cover" ? "cover" : "contain" });
+    targetTrack.clips.push({ id, name: String(raw.name || "Clip").slice(0, 160), start, duration, sourceStart, type: targetTrack.kind, linked: raw.linked ? String(raw.linked) : null, mediaJobId: raw.mediaJobId ? String(raw.mediaJobId) : null, sceneId: raw.sceneId && /^[A-Za-z0-9_-]{1,128}$/.test(String(raw.sceneId)) ? String(raw.sceneId) : null, mediaFile, volume: Math.min(8, Math.max(0, Number(raw.volume ?? 1) || 0)), fit: raw.fit === "cover" ? "cover" : "contain" });
   }
   next.timeline = timeline;
   const panels = incoming.ui?.panels || current.ui.panels;
   const panelMode = (value) => ["regular", "expanded", "minimized"].includes(value) ? value : "regular";
   next.ui = { panels: { writer: panelMode(panels?.writer), board: panelMode(panels?.board) }, focus: !!incoming.ui?.focus, zoom: Math.min(3, Math.max(.5, Number(incoming.ui?.zoom) || 1)) };
   if (Array.isArray(incoming.messages)) {
-    const conversation = incoming.messages.slice(-500).map((message) => ({ role: message?.role === "assistant" ? "assistant" : "user", content: String(message?.content || "").slice(0, 32000) }));
+    // "status" survives the round-trip (2026-08-05): terminal failures now land in the chat log
+    // persistently, and a whitelist that coerced them to "user" would replay them as things the
+    // person said.
+    const conversation = incoming.messages.slice(-500).map((message) => ({
+      role: message?.role === "assistant" ? "assistant" : message?.role === "status" ? "status" : "user",
+      content: String(message?.content || "").slice(0, 32000),
+      ...(message?.code ? { code: String(message.code).slice(0, 80) } : {}),
+    }));
     if (JSON.stringify(conversation).length > 2 * 1024 * 1024) fail("video_conversation_large", "The saved video conversation is too large.", 413);
     next.conversation = conversation;
   }
@@ -365,11 +372,18 @@ export function validateVideoRequest(input = {}) {
   }
   const idempotencyKey = String(input.idempotencyKey || "").trim();
   if (idempotencyKey && !SAFE_ID.test(idempotencyKey)) fail("video_idempotency_invalid", "The generation request identity is invalid.");
+  // The storyboard scene this generation belongs to. Tolerant on purpose: an invalid or absent id
+  // degrades to null (an unattached clip) rather than refusing a generation the user already paid
+  // attention to. It rides the request so the queued job, the finished clip, and the scene can
+  // finally agree (2026-08-05; the client had sent it since the studio shipped).
+  const sceneIdRaw = String(input.sceneId || "").trim();
+  const sceneId = sceneIdRaw && sceneIdRaw.length <= 128 && /^[A-Za-z0-9_-]+$/.test(sceneIdRaw) ? sceneIdRaw : null;
   return {
     model, mode, prompt, duration, ratio: String(input.ratio), resolution: String(input.resolution),
     frameImages, referenceImages, referenceVideos, referenceAudios,
     sourceVideo: String(input.sourceVideo || "").trim() || null, videoId: String(input.videoId || "").trim() || null,
     generateAudio: input.generateAudio !== false && input.audio !== false, shots, idempotencyKey: idempotencyKey || null,
+    sceneId,
   };
 }
 
@@ -848,6 +862,20 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     event(tenantId, next, "command.redo", { restoredSeq: targetSeq });
     return save(tenantId, next);
   }
+  /*
+   * Keep the storyboard scene in agreement with the job that renders it (2026-08-05). The client
+   * has sent sceneId since the studio shipped and nothing on this side ever read it, so scene
+   * cards could never show their own clip. Tolerant on purpose: no sceneId, or a scene deleted
+   * mid-flight, is a no-op rather than a failed generation.
+   */
+  function stampScene(s, job, status) {
+    const sceneId = job?.request?.sceneId;
+    if (!sceneId) return;
+    const scene = (s.scenes || []).find((item) => item.id === sceneId);
+    if (!scene) return;
+    scene.status = status;
+    if (status === "generating" || status === "ready") scene.mediaJobId = job.id;
+  }
   function persistProviderResult(tenantId, projectId, jobId, result, eventType, submission = {}) {
     const status = String(result.status || "processing").toLowerCase();
     return mutate(tenantId, projectId, eventType, (s) => {
@@ -857,6 +885,7 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
       target.submission = { ...(target.submission || {}), state: "accepted", acceptedAt: iso(now), ...submission };
       if (status === "success" && !target.output) { target.status = "failed"; target.error = "video_provider_missing_output"; }
       if (["failed", "error"].includes(status)) { target.error = String(result.code || result.error?.code || "video_provider_failed").slice(0, 160); target.providerError = { code: target.error, message: String(result.message || result.error?.message || "Runware reported that this video task failed.").slice(0, 800), status: null }; }
+      if (target.status === "failed") stampScene(s, target, "failed");
     }, { jobId, taskUuid: jobId, status }).jobs.find((item) => item.id === jobId);
   }
   async function submitGeneration(tenantId, projectId, request, billingContext = {}) {
@@ -875,7 +904,7 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     if (!keyForRunware()) fail("video_provider_unavailable", "Video generation is not configured.", 503); if (typeof fetchImpl !== "function") fail("video_provider_unavailable", "Video generation is unavailable.", 503);
     const existing = existingResponse();
     if (existing) return existing;
-    const jobId = randomUUID(); const state = mutate(tenantId, projectId, "job.queued", (s) => { s.jobs.push({ id: jobId, status: "queued", attempt: 0, createdAt: iso(now), request: valid, provider: "runware", taskUuid: jobId, cost: null, submission: { state: "pending", attempts: 1 } }); }, { jobId, model: valid.model });
+    const jobId = randomUUID(); const state = mutate(tenantId, projectId, "job.queued", (s) => { s.jobs.push({ id: jobId, status: "queued", attempt: 0, createdAt: iso(now), request: valid, provider: "runware", taskUuid: jobId, cost: null, submission: { state: "pending", attempts: 1 } }); stampScene(s, s.jobs.at(-1), "generating"); }, { jobId, model: valid.model });
     const task = compileRunwareTask(valid, jobId);
     try {
       const result = await runwareRequest(task); const submitted = persistProviderResult(tenantId, projectId, jobId, result, "job.submitted", { attempts: 1, safeToResubmit: false });
@@ -885,7 +914,7 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
       const retry = classifyVideoRetry(err, 0);
       const failure = providerFailure(err);
       const recovery = submissionRecovery(err);
-      mutate(tenantId, projectId, "job.submit_failed", (s) => { const job = s.jobs.find((j) => j.id === jobId); job.status = retry.retryable ? "retrying" : "failed"; job.retry = retry; job.error = failure.code; job.providerError = failure; job.submission = { state: retry.retryable ? recovery.state : "failed", attempts: 1, safeToResubmit: retry.retryable && recovery.safeToResubmit }; }, { jobId, retry, recovery, providerError: failure });
+      mutate(tenantId, projectId, "job.submit_failed", (s) => { const job = s.jobs.find((j) => j.id === jobId); job.status = retry.retryable ? "retrying" : "failed"; job.retry = retry; job.error = failure.code; job.providerError = failure; job.submission = { state: retry.retryable ? recovery.state : "failed", attempts: 1, safeToResubmit: retry.retryable && recovery.safeToResubmit }; if (job.status === "failed") stampScene(s, job, "failed"); }, { jobId, retry, recovery, providerError: failure });
       if (retry.retryable) return { jobId, taskUuid: jobId, project: projectId, status: "retrying", retryAfterMs: retry.delayMs, recoveredFrom: err instanceof VideoFeatureError ? err.code : "provider_request_failed" };
       throw err;
     }
@@ -894,21 +923,21 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     const state = load(tenantId, projectId); const job = state.jobs.find((j) => j.id === jobId); if (!job) fail("video_job_missing", "Video job not found.", 404); if (terminal.has(job.status)) return clone(job); if (!keyForRunware() || typeof fetchImpl !== "function") fail("video_provider_unavailable", "Video generation is unavailable.", 503);
     if (job.submission?.state === "retry_safe") {
       const attempts = Math.max(1, Number(job.submission.attempts) || 1);
-      if (attempts >= 3) return mutate(tenantId, projectId, "job.resubmit_exhausted", (s) => { const target = s.jobs.find((item) => item.id === jobId); target.status = "failed"; target.error = "video_provider_submit_exhausted"; target.submission = { ...target.submission, state: "failed", safeToResubmit: false }; }, { jobId, attempts }).jobs.find((item) => item.id === jobId);
+      if (attempts >= 3) return mutate(tenantId, projectId, "job.resubmit_exhausted", (s) => { const target = s.jobs.find((item) => item.id === jobId); target.status = "failed"; target.error = "video_provider_submit_exhausted"; target.submission = { ...target.submission, state: "failed", safeToResubmit: false }; stampScene(s, target, "failed"); }, { jobId, attempts }).jobs.find((item) => item.id === jobId);
       try {
         const result = await runwareRequest(compileRunwareTask(job.request, jobId));
         return persistProviderResult(tenantId, projectId, jobId, result, "job.resubmitted", { attempts: attempts + 1, safeToResubmit: false });
       } catch (err) {
         const retry = classifyVideoRetry(err, Number(job.attempt || 0)); const failure = providerFailure(err); const recovery = submissionRecovery(err); const nextAttempts = attempts + 1;
         const retrySafe = retry.retryable && recovery.safeToResubmit && nextAttempts < 3; const acknowledgementUnknown = retry.retryable && !recovery.safeToResubmit;
-        return mutate(tenantId, projectId, "job.resubmit_failed", (s) => { const target = s.jobs.find((item) => item.id === jobId); target.attempt = Number(target.attempt || 0) + 1; target.status = retrySafe || acknowledgementUnknown ? "retrying" : "failed"; target.retry = retry; target.error = failure.code; target.providerError = failure; target.submission = { state: retrySafe ? "retry_safe" : acknowledgementUnknown ? "ack_unknown" : "failed", attempts: nextAttempts, safeToResubmit: retrySafe }; }, { jobId, retry, recovery, providerError: failure }).jobs.find((item) => item.id === jobId);
+        return mutate(tenantId, projectId, "job.resubmit_failed", (s) => { const target = s.jobs.find((item) => item.id === jobId); target.attempt = Number(target.attempt || 0) + 1; target.status = retrySafe || acknowledgementUnknown ? "retrying" : "failed"; target.retry = retry; target.error = failure.code; target.providerError = failure; target.submission = { state: retrySafe ? "retry_safe" : acknowledgementUnknown ? "ack_unknown" : "failed", attempts: nextAttempts, safeToResubmit: retrySafe }; if (target.status === "failed") stampScene(s, target, "failed"); }, { jobId, retry, recovery, providerError: failure }).jobs.find((item) => item.id === jobId);
       }
     }
     try {
       const result = await runwareRequest({ taskType: "getResponse", taskUUID: job.taskUuid || job.id });
       return persistProviderResult(tenantId, projectId, jobId, result, "job.polled", { attempts: Math.max(1, Number(job.submission?.attempts) || 1), safeToResubmit: false });
     }
-    catch (err) { const retry = classifyVideoRetry(err, Number(job.attempt || 0)); const failure = providerFailure(err, "video_provider_poll_failed"); const unknownTask = job.submission?.state === "ack_unknown" && ["taskNotFound", "taskUUIDNotFound"].includes(failure.code); const keepPolling = retry.retryable || unknownTask; return mutate(tenantId, projectId, "job.poll_failed", (s) => { const target = s.jobs.find((j) => j.id === jobId); target.attempt = Number(target.attempt || 0) + 1; target.status = keepPolling ? "retrying" : "failed"; target.retry = { ...retry, retryable: keepPolling, delayMs: keepPolling ? Math.max(3_000, retry.delayMs || 30_000) : 0 }; target.error = failure.code; target.providerError = failure; }, { jobId, retry, acknowledgementUnknown: unknownTask, providerError: failure }).jobs.find((j) => j.id === jobId); }
+    catch (err) { const retry = classifyVideoRetry(err, Number(job.attempt || 0)); const failure = providerFailure(err, "video_provider_poll_failed"); const unknownTask = job.submission?.state === "ack_unknown" && ["taskNotFound", "taskUUIDNotFound"].includes(failure.code); const keepPolling = retry.retryable || unknownTask; return mutate(tenantId, projectId, "job.poll_failed", (s) => { const target = s.jobs.find((j) => j.id === jobId); target.attempt = Number(target.attempt || 0) + 1; target.status = keepPolling ? "retrying" : "failed"; target.retry = { ...retry, retryable: keepPolling, delayMs: keepPolling ? Math.max(3_000, retry.delayMs || 30_000) : 0 }; target.error = failure.code; target.providerError = failure; if (target.status === "failed") stampScene(s, target, "failed"); }, { jobId, retry, acknowledgementUnknown: unknownTask, providerError: failure }).jobs.find((j) => j.id === jobId); }
   }
   // Provider URLs are often short-lived.  The media layer owns bytes/FFmpeg verification, while
   // this store owns the durable record and makes the only allowed destination project-local.
@@ -933,11 +962,15 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
         const existingVideo = videoTrack.clips.find((clip) => clip.mediaJobId === jobId || clip.id === clipId);
         const start = existingVideo ? Number(existingVideo.start) : videoTrack.clips.reduce((latest, clip) => Math.max(latest, Number(clip.start || 0) + Number(clip.duration || 0)), 0);
         if (!Number.isFinite(duration) || duration <= 0 || start + duration > MAX_PROJECT_DURATION) fail("video_project_duration_exceeded", "The generated clip cannot fit within the six-hour project limit.", 409);
-        if (!existingVideo) videoTrack.clips.push({ id: clipId, name: "Generated scene", start, duration, sourceStart: 0, type: "video", linked: target.media.hasAudio ? `audio-${jobId}` : null, mediaJobId: jobId, mediaFile: target.mediaFile, volume: 1, fit: "contain" });
+        // The clip carries its scene home (2026-08-05): the UI attaches previews by clip.sceneId.
+        const sceneId = target.request?.sceneId || null;
+        if (!existingVideo) videoTrack.clips.push({ id: clipId, name: "Generated scene", start, duration, sourceStart: 0, type: "video", linked: target.media.hasAudio ? `audio-${jobId}` : null, mediaJobId: jobId, sceneId, mediaFile: target.mediaFile, volume: 1, fit: "contain" });
+        else if (sceneId && !existingVideo.sceneId) existingVideo.sceneId = sceneId;
         if (target.media.hasAudio) {
           const audioTrack = s.timeline.audioTracks[0]; const audioId = `audio-${jobId}`;
-          if (!audioTrack.clips.some((clip) => clip.mediaJobId === jobId || clip.id === audioId)) audioTrack.clips.push({ id: audioId, name: "Generated sound", start, duration, sourceStart: 0, type: "audio", linked: clipId, mediaJobId: jobId, mediaFile: target.mediaFile, volume: 1, fit: "contain" });
+          if (!audioTrack.clips.some((clip) => clip.mediaJobId === jobId || clip.id === audioId)) audioTrack.clips.push({ id: audioId, name: "Generated sound", start, duration, sourceStart: 0, type: "audio", linked: clipId, mediaJobId: jobId, sceneId, mediaFile: target.mediaFile, volume: 1, fit: "contain" });
         }
+        stampScene(s, target, "ready");
       }, { jobId });
       const savedJob = savedState.jobs.find((item) => item.id === jobId);
       const clips = [...savedState.timeline.videoTracks, ...savedState.timeline.audioTracks].flatMap((track) => track.clips.filter((clip) => clip.mediaJobId === jobId).map((clip) => ({ ...clone(clip), trackId: track.id })));

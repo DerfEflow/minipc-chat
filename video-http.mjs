@@ -1531,6 +1531,10 @@ export function createVideoHttp({
       const request = {
         model: cleanText(body.model, 200),
         mode: cleanText(body.mode, 30) || (frameImages.length ? "image" : "text"),
+        // The scene this generation belongs to. The client has sent this since the studio
+        // shipped and the server never read it, so finished clips could not attach to their
+        // storyboard scene - the UI matches clips BY sceneId (2026-08-05).
+        sceneId: singleGeneration ? null : cleanText(body.sceneId, 128) || null,
         prompt: cleanText(body.prompt, 100_000),
         frameImages,
         referenceImages: Array.isArray(body.referenceImages) ? clone(body.referenceImages) : [],
