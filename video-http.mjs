@@ -841,7 +841,38 @@ export function createVideoHttp({
     const directorState = project?.ai?.director?.state || {};
     let compactedSummary = cleanText(directorState.compactedSummary, 100_000);
     let compaction = null;
-    const directorSystem = "You are Dominion's creative director. Plan the whole video and coordinate the screenwriter and liaison. Give a precise change directive based only on the persisted project and the user's request. Consider purpose, destination, duration, aspect ratio, resolution, scene order, continuity, image needs, sound, and efficient high-quality model use. Do not say work is complete. Return only the directive for the liaison.";
+    /*
+     * THE DIRECTOR NOW ROUTES THE JOB (Fred, 2026-08-05). The studio had a screenwriter and a
+     * storyboard that nobody could find a path to: "if I didn't know that it did that, I would be
+     * completely lost." A quick clip should go straight to render; an ad needs copy and a
+     * storyboard so characters hold across scenes. Judging which is which is a reading task, so
+     * the DIRECTOR decides (an LLM reading the whole conversation), never a client-side keyword
+     * match. The verdict rides back as one fenced JSON block after the directive, and
+     * routingFromText below survives any mangling of it.
+     */
+    const directorSystem = [
+      "You are Dominion's creative director. Plan the whole video and coordinate the screenwriter and liaison.",
+      "Give a precise change directive based only on the persisted project and the user's request. Consider purpose,",
+      "destination, duration, aspect ratio, resolution, scene order, continuity, image needs, sound, and efficient",
+      "high-quality model use. Do not say work is complete.",
+      "",
+      "After the directive, append EXACTLY ONE fenced json block routing this job:",
+      '```json',
+      '{"routing":{"path":"quick_clip|scripted|storyboarded","needs_screenwriter":false,"needs_storyboard":false,',
+      '"ready_to_generate":false,"reason":"one short sentence","suggested_recommendation":"screenwriter|storyboard|generate|none",',
+      '"scene_draft":{"title":"","prompt":"","duration":5}}}',
+      '```',
+      "How to route, by what the person is actually trying to make:",
+      "- quick_clip: one shot, one concrete subject, no story. Phrases like 'quick clip', 'just a shot of', or a plain",
+      "  visual description. needs_screenwriter false, needs_storyboard false. Set ready_to_generate true as soon as you",
+      "  know the subject and what it does, and fill scene_draft with a title and a full render prompt.",
+      "- storyboarded: several scenes, recurring characters, an episode, or anything needing visual continuity.",
+      "  needs_storyboard true.",
+      "- scripted: an ad, commercial, brand or campaign piece, product launch, explainer, anything where the words",
+      "  matter. needs_screenwriter true AND needs_storyboard true.",
+      "Set suggested_recommendation to the ONE next step you would push for. Use none while you still need an answer",
+      "from the person. Never set ready_to_generate true without a usable scene_draft.prompt.",
+    ].join("\n");
     const makeProjectContext = () => JSON.stringify({ project: project?.project, screenplay: project?.screenplay, scenes: project?.scenes, timeline: { tracks: project?.tracks, clips: project?.clips }, conversationSummary: compactedSummary || null, recentConversation: conversation, requestContext: context || {} });
     const projected = requestTokenEstimate([{ role: "system", content: directorSystem }, { role: "user", content: `${makeProjectContext()}\n\nUser request:\n${message}` }]);
     if ((project?.ai?.director?.compactionRequired || projected >= DIRECTOR_COMPACT_AT) && conversation.length) {
@@ -886,7 +917,79 @@ export function createVideoHttp({
       },
     });
     await maybeMeterProvider(tenant, nvidia, body.usage, { kind: "video_director", provider: "nvidia", model });
-    return { directive: openAiText(body, "nvidia_director"), usage: body.usage || null, model, compaction };
+    const raw = openAiText(body, "nvidia_director");
+    const routed = routingFromText(raw);
+    return { directive: routed.directive, routing: routed.routing, usage: body.usage || null, model, compaction };
+  }
+
+  /*
+   * Read the director's routing block, and NEVER fail the turn over it. A malformed block means we
+   * lose a recommendation, which costs one chip; throwing would cost the whole conversation, which
+   * is the trade this whole studio has been getting wrong. Everything is whitelisted or coerced:
+   * the block is model output and cannot be trusted to be well-formed or well-behaved.
+   */
+  const ROUTING_PATHS = new Set(["quick_clip", "scripted", "storyboarded"]);
+  const ROUTING_RECOMMENDATIONS = new Set(["screenwriter", "storyboard", "generate", "none"]);
+  const DEFAULT_ROUTING = Object.freeze({
+    path: "unknown", needsScreenwriter: false, needsStoryboard: false, readyToGenerate: false,
+    reason: "", recommendation: "none", sceneDraft: null, parseFailed: true,
+  });
+  function routingFromText(text) {
+    const source = String(text || "");
+    // Take the LAST fenced block, or failing that the last {...}: the directive itself may
+    // legitimately contain braces.
+    const fenced = [...source.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].at(-1);
+    let candidate = fenced ? fenced[1] : null;
+    if (!candidate) {
+      const start = source.lastIndexOf("{");
+      const end = source.lastIndexOf("}");
+      if (start >= 0 && end > start) candidate = source.slice(start, end + 1);
+    }
+    const directive = cleanText(fenced ? source.slice(0, fenced.index) : (candidate ? source.slice(0, source.lastIndexOf("{")) : source), 100_000) || cleanText(source, 100_000);
+    if (!candidate) return { directive, routing: { ...DEFAULT_ROUTING } };
+    let parsed;
+    try { parsed = JSON.parse(candidate); } catch { return { directive, routing: { ...DEFAULT_ROUTING } }; }
+    const r = (parsed && typeof parsed === "object" && parsed.routing && typeof parsed.routing === "object") ? parsed.routing : parsed;
+    if (!r || typeof r !== "object") return { directive, routing: { ...DEFAULT_ROUTING } };
+    const draftSource = r.scene_draft || r.sceneDraft;
+    const draftPrompt = cleanText(draftSource?.prompt, 32_000);
+    const duration = Number(draftSource?.duration);
+    const sceneDraft = draftPrompt ? {
+      title: cleanText(draftSource?.title, 160) || "Scene 1",
+      prompt: draftPrompt,
+      duration: Number.isInteger(duration) && duration > 0 && duration <= 60 ? duration : null,
+    } : null;
+    const path = ROUTING_PATHS.has(String(r.path)) ? String(r.path) : "unknown";
+    const recommendation = ROUTING_RECOMMENDATIONS.has(String(r.suggested_recommendation || r.recommendation))
+      ? String(r.suggested_recommendation || r.recommendation) : "none";
+    return {
+      directive,
+      routing: {
+        path,
+        needsScreenwriter: (r.needs_screenwriter ?? r.needsScreenwriter) === true,
+        needsStoryboard: (r.needs_storyboard ?? r.needsStoryboard) === true,
+        // A "ready" verdict with nothing to render is not ready.
+        readyToGenerate: (r.ready_to_generate ?? r.readyToGenerate) === true && !!sceneDraft,
+        reason: cleanText(r.reason, 500),
+        recommendation,
+        sceneDraft,
+        parseFailed: false,
+      },
+    };
+  }
+
+  /*
+   * The chips the person actually taps. Derived on the SERVER from the director's verdict so the
+   * client never has to guess intent, and always offering an escape hatch: nothing here is forced,
+   * which was Fred's hard requirement.
+   */
+  function chipsFor(routing) {
+    const chips = [];
+    if (!routing || routing.path === "unknown") return chips;
+    if (routing.needsScreenwriter) chips.push({ id: "screenwriter", label: "Bring in the screenwriter" });
+    if (routing.needsStoryboard) chips.push({ id: "storyboard", label: routing.needsScreenwriter ? "Skip to the storyboard" : "Build the storyboard" });
+    if (routing.readyToGenerate) chips.push({ id: "generate", label: chips.length ? "Just generate it" : "Generate this clip" });
+    return chips;
   }
 
   function visualPlanFromText(text) {
@@ -972,11 +1075,40 @@ export function createVideoHttp({
       body: {
         model: SONNET_MODEL,
         max_tokens: maxTokens,
-        system: [{ type: "text", text: "You are Dominion Video's user-facing liaison. Keep the creative director and screenwriter context aligned, explain the exact next change in plain language, and surface every limitation or failure honestly. Never claim a generation, save, edit, charge, or export happened unless the supplied state proves it. Keep the reply useful and concise.", cache_control: { type: "ephemeral" } }],
+        /*
+         * SHE SOUNDS LIKE A PERSON WHO MAKES FILMS (Fred, 2026-08-05: "This is a creative director
+         * and it should sound like a creative director. give it personality. It's one of the
+         * differentiators of this app."). The old prompt produced a competent status clerk. The
+         * honesty constraints are untouched and come LAST, because they outrank the voice.
+         */
+        system: [{ type: "text", text: [
+          "You are the producer in Dominion's video studio: the person the user talks to about the film they want to make.",
+          "You have made a lot of things. You have opinions and you offer them.",
+          "",
+          "HOW YOU TALK: like a working creative director, not a help system. Warm, direct, a little wry.",
+          "Short sentences. Say what you would do and why in one line. Ask ONE sharp question at a time when",
+          "something is genuinely missing, rather than interrogating with a list. Never open with 'Certainly' or",
+          "'I understand'. Never narrate your own process. No bullet lists unless the user asks for one.",
+          "",
+          "WHEN THE DIRECTOR RECOMMENDS A STEP: put it in your own words as a suggestion with a reason, the way a",
+          "colleague would ('An ad lives or dies on the script, so let me get the writer on this first'). The user",
+          "will see buttons for the actual choice, so do not list options or ask them to type a number. Never insist:",
+          "if they want to skip straight to a render, that is their call and you make it work.",
+          "",
+          "HONESTY OUTRANKS EVERYTHING ABOVE. Never claim a generation, save, edit, charge, or export happened",
+          "unless the supplied state proves it. Surface every limitation and failure plainly. If something is not",
+          "configured or not built, say so instead of implying it will happen.",
+        ].join("\n"), cache_control: { type: "ephemeral" } }],
         messages: [
           { role: "user", content: [{ type: "text", text: stableContext, cache_control: { type: "ephemeral" } }] },
           { role: "assistant", content: "I have the persisted project context." },
-          { role: "user", content: `User request:\n${message}\n\nCreative director directive (${director.model}):\n${director.directive}\n\nVisual orchestrator (${visual.model}):\n${visual.available ? JSON.stringify(visual.plan) : `DEGRADED — ${visual.error.code}: ${visual.error.message}`}` },
+          // Three distinct states, and telling them apart matters: a plan, a step we deliberately
+          // did not run, and a step that failed. Calling the first two "DEGRADED" made the
+          // producer apologise for a storyboard nobody asked for (and threw on a null error).
+          { role: "user", content: `User request:\n${message}\n\nCreative director directive (${director.model}):\n${director.directive}\n\nVisual orchestrator (${visual.model}):\n${
+            visual.available ? JSON.stringify(visual.plan)
+              : visual.skipped ? "NOT RUN — no storyboard was requested this turn. Do not mention a storyboard unless the user raised it, and never imply one was built."
+              : `DEGRADED — ${visual.error?.code || "visual_orchestrator_unavailable"}: ${visual.error?.message || "The visual orchestrator did not answer."}`}` },
         ],
       },
     });
@@ -984,18 +1116,22 @@ export function createVideoHttp({
     return { reply: anthropicText(body), usage: body.usage || null, model: SONNET_MODEL };
   }
 
-  async function persistAiTurn(tenantId, projectId, expectedProjectRevision, message, director, visual, liaison) {
+  async function persistAiTurn(tenantId, projectId, expectedProjectRevision, message, director, visual, liaison, { buildStoryboard = true } = {}) {
     const conversation = { at: new Date(Number(now())).toISOString(), user: message, director: director.directive, visualPlan: visual.available ? clone(visual.plan) : null, visualError: visual.available ? null : clone(visual.error), reply: liaison.reply };
     if (typeof feature.updateAiState === "function") {
       const saved = await feature.updateAiState(tenantId, projectId, {
         expectedProjectRevision,
-        director: { model: director.model, usage: clone(director.usage), directive: director.directive, compaction: clone(director.compaction) },
-        visualOrchestrator: { model: visual.model, available: visual.available, usage: clone(visual.usage), plan: clone(visual.plan), error: clone(visual.error) },
+        director: { model: director.model, usage: clone(director.usage), directive: director.directive, routing: clone(director.routing || null), compaction: clone(director.compaction) },
+        // A skipped orchestrator writes NOTHING about itself: passing a record here would stamp an
+        // applyStatus and, worse, hand updateAiState a plan-shaped absence to reason about. The
+        // last real plan stays exactly as it was.
+        visualOrchestrator: buildStoryboard ? { model: visual.model, available: visual.available, usage: clone(visual.usage), plan: clone(visual.plan), error: clone(visual.error) } : null,
         liaison: { model: liaison.model, usage: clone(liaison.usage), reply: liaison.reply },
-        visualPlanScenes: visual.available ? clone(visual.plan.scenes) : null,
+        visualPlanScenes: buildStoryboard && visual.available ? clone(visual.plan.scenes) : null,
         conversation,
       });
-      const applyStatus = cleanText(saved?.ai?.visualOrchestrator?.state?.applyStatus, 80) || (visual.available ? "unknown" : "unavailable");
+      const applyStatus = !buildStoryboard ? "skipped"
+        : cleanText(saved?.ai?.visualOrchestrator?.state?.applyStatus, 80) || (visual.available ? "unknown" : "unavailable");
       return { saved, planApplied: applyStatus === "applied", applyStatus };
     }
     fail(501, "video_ai_checkpoint_unavailable", "The AI turn completed but cannot be saved, so it was not accepted as a project change.");
@@ -1677,17 +1813,38 @@ export function createVideoHttp({
           if (Number(project?.projectRevision) !== expectedProjectRevision) fail(409, "video_project_revision_stale", "The project changed before the video AI team started. Refresh it and send the request again; no provider calls were made.");
           const deadlineAt = Number(now()) + Math.min(AI_TURN_TIMEOUT_MS, Math.max(30_000, Number(nvidia.aiTurnTimeoutMs) || AI_TURN_TIMEOUT_MS));
           const director = await callDirector(tenant, project, message, body.context, deadlineAt);
-          let visual;
-          try { visual = await callVisualOrchestrator(tenant, project, message, director, deadlineAt); }
-          catch (error) {
-            if (!(error instanceof VideoHttpError) || !String(error.code || "").includes("visual_orchestrator")) throw error;
-            visual = { available: false, model: cleanText(nvidia.visualModel || VISUAL_MODEL, 200), plan: null, usage: null, error: { code: error.code, message: error.message } };
+          /*
+           * THE ORCHESTRATOR RUNS ONLY WHEN A STORYBOARD IS ACTUALLY WANTED (2026-08-05).
+           * Every message used to run a 550-billion-parameter planner AND overwrite the whole
+           * storyboard from its output - so idle conversation was expensive, and a stray remark
+           * could silently rewrite scenes the user had edited. Now plain chat is director plus
+           * producer, and the storyboard is only built when the person taps the chip.
+           */
+          const buildStoryboard = String(body.action || "chat") === "build_storyboard";
+          let visual = { available: false, model: cleanText(nvidia.visualModel || VISUAL_MODEL, 200), plan: null, usage: null, error: null, skipped: true };
+          if (buildStoryboard) {
+            try { visual = await callVisualOrchestrator(tenant, project, message, director, deadlineAt); }
+            catch (error) {
+              if (!(error instanceof VideoHttpError) || !String(error.code || "").includes("visual_orchestrator")) throw error;
+              visual = { available: false, model: cleanText(nvidia.visualModel || VISUAL_MODEL, 200), plan: null, usage: null, error: { code: error.code, message: error.message } };
+            }
           }
           const liaison = await callLiaison(tenant, project, message, director, visual, deadlineAt);
-          const persisted = await persistAiTurn(tenantId, projectId, expectedProjectRevision, message, director, visual, liaison);
+          const persisted = await persistAiTurn(tenantId, projectId, expectedProjectRevision, message, director, visual, liaison, { buildStoryboard });
           const stalePlan = visual.available && persisted.applyStatus === "quarantined_stale";
           const visualError = stalePlan ? { code: "visual_plan_quarantined_stale", message: "The project changed while the AI team was working. Its plan was saved for history but did not overwrite the newer storyboard." } : clone(visual.error);
-          return json(res, 200, { reply: liaison.reply, projectId, director: { directive: director.directive, model: director.model }, visualOrchestrator: { model: visual.model, available: visual.available, applied: persisted.planApplied, applyStatus: persisted.applyStatus, plan: clone(visual.plan), error: visualError }, liaison: { model: liaison.model }, saved: true, degraded: visual.available && !stalePlan ? [] : [stalePlan ? "visualPlanStale" : "visualOrchestrator"] });
+          const routing = director.routing || { ...DEFAULT_ROUTING };
+          return json(res, 200, {
+            reply: liaison.reply, projectId,
+            director: { directive: director.directive, model: director.model },
+            routing: clone(routing),
+            chips: chipsFor(routing),
+            sceneDraft: routing.readyToGenerate ? clone(routing.sceneDraft) : null,
+            visualOrchestrator: { model: visual.model, available: visual.available, skipped: visual.skipped === true, applied: persisted.planApplied, applyStatus: persisted.applyStatus, plan: clone(visual.plan), error: visualError },
+            liaison: { model: liaison.model }, saved: true,
+            // A skipped orchestrator is not a degraded one: it was never asked to run.
+            degraded: visual.skipped || (visual.available && !stalePlan) ? [] : [stalePlan ? "visualPlanStale" : "visualOrchestrator"],
+          });
         } finally {
           activeAiProjects.delete(activeKey);
         }
