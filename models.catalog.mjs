@@ -510,23 +510,40 @@ export function outLimitFor(id, mode) {
 // Cheap fast model for internal utility calls (chat titles, short summaries) so they never block.
 // Was mistral-nemo until the 2026-08-03 prune; GLM 5.2 took the job because it is free on the
 // NVIDIA lane, probed clean (answers, tools, no starvation), and needs no reasoning headroom.
-export const UTILITY_MODEL = "z-ai/glm-5.2";
+/*
+ * DEMOTED 2026-08-05. This was z-ai/glm-5.2, which measured a 41.0s MEDIAN time-to-first-token
+ * across four streaming samples (37.5 / 40.2 / 41.9 / 43.2). A utility model runs on paths the
+ * user is waiting through, so a 41-second seat here is a 41-second stall everywhere it is used.
+ * Nemotron 3 Super measured 0.55s with a real tool call on the same sweep. See SEAT_PROBES.
+ */
+export const UTILITY_MODEL = "nvidia/nemotron-3-super-120b-a12b:free";
 
 /* BATTALION (ARSENAL Wave 6, docs/BATTALION-SOW.md). Fred's copy, verbatim, no quality
  * qualifier. The roster is the "handpicked" in his sentence: free-lane seats ONLY, each admitted
  * by the Wave 2 live probe (answers + tools verified on the NVIDIA free endpoint), reviewed at
  * the weekly audit like the Wildfire roster above. No model rides in because it is merely free. */
 export const BATTALION_COPY = "a handpicked swarm of AI models to do more work in less time- for free";
+/*
+ * RE-SEATED 2026-08-05 on measured evidence (SEAT_PROBES). Every seat below now has a median
+ * time-to-first-token under 1.2s. What left, and why:
+ *   nemotron-3-ultra-550b   orchestrator + synthesizer   0.8s..11.8s across four samples. It sat
+ *                           on BOTH ends of every swarm turn, so its variance was paid twice per
+ *                           request. Size is not worth a coin-flip on the critical path.
+ *   z-ai/glm-5.2            code worker                  41.0s median. Not usable at any size.
+ *   minimax/minimax-m3      long-context + vision        11.8s median.
+ * Ultra keeps its catalog seat and stays pickable by name; it is only off the path the swarm
+ * takes automatically. Re-promote it when a probe shows it steady, not when it feels big.
+ */
 export const BATTALION_ROSTER = {
   assess: "openai/gpt-oss-20b",                          // fast free reasoner: the war-council gate
-  orchestrator: "nvidia/nemotron-3-ultra-550b-a55b",     // 550B free flagship: plans the split
-  synthesizer: "nvidia/nemotron-3-ultra-550b-a55b",      // and merges the parts into one voice
+  orchestrator: "nvidia/nemotron-3-super-120b-a12b:free", // plans the split (0.55s, tools verified)
+  synthesizer: "nvidia/nemotron-3-super-120b-a12b:free",  // and merges the parts into one voice
   single: "nvidia/nemotron-3-super-120b-a12b:free",      // simple turns: one strong fast seat
   workers: [                                             // the parallel bench, round-robin
-    "nvidia/nemotron-3-super-120b-a12b:free",            //   reasoning
-    "z-ai/glm-5.2",                                      //   code (355B coder, free lane)
-    "openai/gpt-oss-20b",                                //   fast general
-    "minimax/minimax-m3",                                //   long-context + vision seat
+    "nvidia/nemotron-3-super-120b-a12b:free",            //   reasoning            0.55s
+    "nvidia/nemotron-3-nano-omni-30b-a3b",               //   reasoning + vision   0.55s
+    "openai/gpt-oss-20b",                                //   fast general         1.95s
+    "nvidia/nemotron-nano-12b-v2-vl",                    //   quick vision         0.40s
   ],
 };
 // Every roster seat must exist in the catalog — a rename in MODELS must break loudly, not
@@ -585,3 +602,63 @@ export function catalogByCategory() {
 export function catalogPayload() {
   return { updated: CATALOG_UPDATED, default: DEFAULT_MODEL, categories: CATEGORIES, groups: catalogByCategory(), count: MODELS.length };
 }
+
+/* ================================================================================================
+ * SEAT PROBES — "a guest may only pick a seat we have watched answer" (Fred, 2026-08-05)
+ * ================================================================================================
+ * A guest spent real money on a build and got nothing, and the free lane had quietly rotted
+ * underneath the picker: seats recorded at 238ms on 2026-08-03 measured 17s on 2026-08-05, and
+ * the catalog went on describing one of them as the "strong free coder for planning and building".
+ * The catalog's prose is a claim; a probe is evidence. Guests get seats with evidence.
+ *
+ * ttftMs is the MEDIAN time-to-first-token of a streaming call, because that is the number a user
+ * feels. It is not average latency and not total completion time. `tools` records whether the seat
+ * emitted a real tool call, not whether its model card claims it can.
+ *
+ * These defaults are the 2026-08-05 sweep from a laptop on Fred's home connection. Railway runs in
+ * sfo and its path to the provider differs, so ops/seat-probe.mjs re-measures FROM THE CONTAINER
+ * and writes /data/catalog-probes.json, which the server overlays on top of these. See
+ * FITS/ledgers/ledger.md L-007.
+ */
+export const GUEST_TTFT_CEILING_MS = 10000;   // Fred's call 2026-08-05: under 10s
+export const GUEST_PROBE_MAX_AGE_DAYS = 7;    // and probed within the last week
+
+export const SEAT_PROBES = {
+  // --- measured healthy ---
+  "nvidia/nemotron-3-super-120b-a12b:free":      { at: "2026-08-05", ttftMs: 550,   ok: true, tools: true },
+  "nvidia/nemotron-nano-12b-v2-vl":              { at: "2026-08-05", ttftMs: 400,   ok: true },
+  "nvidia/nemotron-3.5-content-safety":          { at: "2026-08-05", ttftMs: 400,   ok: true },
+  "nvidia/nemotron-3-nano-omni-30b-a3b":         { at: "2026-08-05", ttftMs: 550,   ok: true },
+  "openai/gpt-oss-20b":                          { at: "2026-08-05", ttftMs: 1950,  ok: true },
+  // --- measured degraded: over the ceiling, so guests do not see them ---
+  "nvidia/nemotron-3-ultra-550b-a55b":           { at: "2026-08-05", ttftMs: 8100,  ok: true, tools: true,
+                                                   note: "erratic: 0.8s to 11.8s across four samples" },
+  "minimax/minimax-m3":                          { at: "2026-08-05", ttftMs: 11800, ok: true },
+  "meta/llama-3.1-70b-instruct":                 { at: "2026-08-05", ttftMs: 17300, ok: true,
+                                                   note: "recorded at 238ms on 2026-08-03; the endpoint moved under us" },
+  "z-ai/glm-5.2":                                { at: "2026-08-05", ttftMs: 41050, ok: true,
+                                                   note: "37.5-43.2s across four samples: dead for anything interactive" },
+};
+
+const dayMs = 86400000;
+/**
+ * Why a seat is not fit for a guest, or "" when it is.
+ * UNMEASURED IS NOT BLOCKED. Only the free lane has been swept; blocking every unprobed seat would
+ * empty the picker of the paid direct lanes that are carrying the product today. A seat is refused
+ * only on EVIDENCE that it is bad or that its evidence went stale. That is the honest reading of
+ * "100% working and tested" against the data that actually exists. See ledger L-008.
+ */
+export function guestSeatRefusal(id, now = Date.now(), probes = SEAT_PROBES) {
+  const p = probes && probes[id];
+  if (!p) return "";                                  // never measured: not evidence of failure
+  if (p.ok === false) return "did not answer when last checked";
+  const at = Date.parse(p.at + "T00:00:00Z");
+  if (Number.isFinite(at) && now - at > GUEST_PROBE_MAX_AGE_DAYS * dayMs) {
+    return "last checked more than " + GUEST_PROBE_MAX_AGE_DAYS + " days ago";
+  }
+  if (Number.isFinite(p.ttftMs) && p.ttftMs > GUEST_TTFT_CEILING_MS) {
+    return "too slow to answer (" + (p.ttftMs / 1000).toFixed(1) + "s to first word)";
+  }
+  return "";
+}
+export const isGuestSeat = (id, now = Date.now(), probes = SEAT_PROBES) => !guestSeatRefusal(id, now, probes);

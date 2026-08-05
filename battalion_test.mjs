@@ -239,7 +239,18 @@ await t("e2e: a complex turn convenes the swarm and returns the $0 manifest", as
   if (done.meta.costUsd !== 0) throw new Error("battalion billed: " + done.meta.costUsd);
   if (mf.mode !== "swarm" || mf.parts !== 2 || mf.models.length < 2) throw new Error(JSON.stringify(mf));
   // The wire really carried the roster's direct ids (assess + orchestrator + workers + synth).
-  if (!nvSeen.includes("openai/gpt-oss-20b") || !nvSeen.includes("nvidia/nemotron-3-ultra-550b-a55b")) throw new Error("seats on the wire: " + [...new Set(nvSeen)].join(","));
+  /*
+   * Derived from the roster, never hardcoded. This assertion named nemotron-3-ultra directly and
+   * broke on 2026-08-05 when the orchestrator seat was re-seated on measured latency — a stale
+   * test failing an intended change teaches nothing. What matters is that the wire carried the
+   * roster's OWN assess and orchestrator seats, whatever they currently are.
+   */
+  const directOf = (id) => (MODELS.find((m) => m.id === id) || {}).directId || id;
+  for (const seat of [BATTALION_ROSTER.assess, BATTALION_ROSTER.orchestrator]) {
+    if (!nvSeen.includes(directOf(seat))) {
+      throw new Error("roster seat " + seat + " never reached the wire. seats seen: " + [...new Set(nvSeen)].join(","));
+    }
+  }
 });
 
 console.log(`\nbattalion: ${passed} passed, ${failed} failed`);

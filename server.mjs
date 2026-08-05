@@ -33,7 +33,7 @@ import { routeOf, escalateForContext, consumeNeeds, askSliceOf, NO_RETRIEVAL_RE 
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
-import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL, BATTALION_COPY, BATTALION_ROSTER, resolveModelId, REASONING_FLOOR } from "./models.catalog.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL, BATTALION_COPY, BATTALION_ROSTER, resolveModelId, REASONING_FLOOR, guestSeatRefusal } from "./models.catalog.mjs";
 import { createUsageLimits } from "./usage-limits.mjs";
 import { effectiveForgeTier } from "./sequential.mjs";
 import { createBattalion } from "./battalion.mjs";
@@ -3769,6 +3769,23 @@ async function runIdeBuild(job, {
   const knownIncomplete = [];
   const expectedFiles = new Set();
   const coveredFiles = new Set();
+  /*
+   * Files THIS build actually wrote, normalized. The anti-echo contract and the guest's real
+   * failure pull in opposite directions and this set is what separates them:
+   *   - a model echoing back a PRE-EXISTING file unchanged is fake completion -> still a failure
+   *   - a task whose owned file was already written to exactly this content by an EARLIER TASK IN
+   *     THIS BUILD has genuinely nothing to do -> satisfied, not failed
+   * Without the distinction, task 3 of the guest's build failed forever: tasks 3-6 all owned
+   * src/main.js, task 2 wrote it complete, and every later task then produced identical bytes.
+   * See FITS/ledgers/ledger.md L-002 and crucible_execution_contract_test.mjs.
+   */
+  const wroteThisBuild = new Set();
+  const normPath = (file) => String(typeof file === "string" ? file : file && file.path || "")
+    .trim().replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase();
+  const markWritten = (paths) => { for (const p of paths || []) { const n = normPath(p); if (n) wroteThisBuild.add(n); } };
+  // True only when every unchanged file was written earlier in THIS build.
+  const satisfiedByEarlierTask = (unchanged) =>
+    Array.isArray(unchanged) && unchanged.length > 0 && unchanged.every((p) => wroteThisBuild.has(normPath(p)));
   const markCovered = (files) => {
     for (const file of files || []) {
       const normalized = String(typeof file === "string" ? file : file && file.path || "")
@@ -4333,13 +4350,22 @@ async function runIdeBuild(job, {
           return { sealed: true, failures };
         }
         const write = await engine.writeFiles(job, workspace, own.kept);
-        if (write.failed.length || (!allowEmpty && !write.written.length)) {
+        // An all-unchanged write is forgiven ONLY when this build wrote those bytes itself. Echoing
+        // a pre-existing file back is still fake completion and still fails.
+        const preSatisfied = satisfiedByEarlierTask(write.unchanged);
+        if (write.failed.length || (!allowEmpty && !write.written.length && !preSatisfied)) {
           ideJobs.emit(job.id, { type: "move", id: s.move.id, title: s.move.title, state: "failed",
             message: write.failed.length ? write.failed.length + " owned file write(s) failed." : "No owned file changed." });
           failures.push(s.move);
           continue;
         }
         markCovered(own.kept);
+        markWritten(write.written);
+        if (!write.written.length && preSatisfied) {
+          ideJobs.emit(job.id, { type: "move", id: s.move.id, title: s.move.title, state: "done", files: 0, unchanged: true,
+            message: "Already satisfied: an earlier task in this build already wrote " + write.unchanged.join(", ") + " with exactly this content." });
+          continue;
+        }
         ideJobs.emit(job.id, { type: "move", id: s.move.id, title: s.move.title, state: "done", files: write.written.length });
       }
       return { sealed: false, failures };
@@ -4499,6 +4525,30 @@ async function runIdeBuild(job, {
         finally { gate.leave(); }
       };
 
+      /*
+       * RETRIES ARE NOT BILLED (Fred's call, 2026-08-05). A guest paid for task 3 twice and got
+       * nothing both times. First attempt bills, because real tokens burned on a task the user
+       * asked for. A re-attempt after OUR failure is on the house: the user did not ask for the
+       * work twice, and offering a retry that then charges again is how $0.235 of nothing happens.
+       * The cost event is still emitted with billed:false, so the Blueprint tells the truth about
+       * what was spent even when nothing was charged.
+       * Declared HERE, above unitsForTask, because the divider inside it meters too and a const
+       * declared further down would be in its temporal dead zone.
+       */
+      const retriedTasks = new Set();
+      const taskNumberOf = (moveId) => Number(String(moveId || "").match(/^tg-(\d+)/)?.[1] || 0);
+      const meterUnlessRetry = async (costUsd, moveId) => {
+        if (!costUsd) return;
+        const n = taskNumberOf(moveId);
+        if (n && retriedTasks.has(n)) {
+          ideJobs.emit(job.id, { type: "cost", usd: costUsd, move: moveId, billed: false,
+            note: "Retry of a failed task — spent, not billed." });
+          return;
+        }
+        await meterTurn(T, costUsd, prompt, "");
+        ideJobs.emit(job.id, { type: "cost", usd: costUsd, move: moveId });
+      };
+
       // Expand a task into the UNITS that will run for it. One agent -> one unit. More than one ->
       // the task is divided by the same divider+referee; the verdict (clean/partial/irreducible)
       // is reported honestly and only disjoint sub-parts become units.
@@ -4563,7 +4613,7 @@ async function runIdeBuild(job, {
         // Recursive division of THIS task.
         const dv = await gatedChat({ model: divModel, messages: dividerMessages({ goal: reduceTaskGoal(task, a.agents), maxParts: a.agents, register: reg, persona }) });
         spend(dv.costUsd);
-        if (dv.costUsd) { await meterTurn(T, dv.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: dv.costUsd, move: "tg-" + task.n }); }
+        await meterUnlessRetry(dv.costUsd, "tg-" + task.n);   // re-dividing a retried task is free too
         const plan = dv.ok ? parseDividerPlan(dv.content, a.agents) : { ok: false, parts: [] };
         const dj = plan.ok ? verifyDisjoint(plan.parts) : { ok: false };
         // Sub-parts may only own files THIS task was granted (a divider cannot invent new files).
@@ -4600,8 +4650,8 @@ async function runIdeBuild(job, {
       const settleTaskUnits = async (settled) => {
         let ok = true, filesWritten = 0, reason = "";
         for (const r of settled) {
-          spend(r.res.costUsd);
-          if (r.res.costUsd) { await meterTurn(T, r.res.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: r.res.costUsd, move: r.id }); }
+          spend(r.res.costUsd);            // job budget always counts real spend, billed or not
+          await meterUnlessRetry(r.res.costUsd, r.id);
           try {
             const outTok = (r.res.usage && (r.res.usage.completion_tokens ?? r.res.usage.output_tokens)) || 0;
             if (outTok > 0 && r.res.ms > 0 && r.res.model) buildTelemetry.record({ model: r.res.model, outTokens: outTok, ms: r.res.ms, costUsd: r.res.costUsd || 0 });
@@ -4635,13 +4685,32 @@ async function runIdeBuild(job, {
             return { ok: false, carve: true };
           }
           const write = await engine.writeFiles(job, workspace, own.kept);
-          if (write.failed.length || !write.written.length) {
+          /*
+           * SATISFIED IS NOT FAILED (Fred, 2026-08-05). A guest's build charged him twice for
+           * task 3 and delivered nothing: tasks 3-6 all owned src/main.js, task 2 wrote that file
+           * COMPLETE, and every later task then produced byte-identical content. writeFiles
+           * separates `unchanged` from `written` and this gate read only `written`, so "the file
+           * already says what I was asked to make it say" became a write failure, offered as a
+           * retry that is deterministic: identical input, identical bytes, identical failure,
+           * billed again. See FITS/ledgers/ledger.md L-002.
+           * The anti-echo contract still holds. Forgiveness requires that THIS BUILD wrote those
+           * exact bytes in an earlier task; echoing back a pre-existing file still fails.
+           */
+          const preSatisfied = satisfiedByEarlierTask(write.unchanged);
+          if (write.failed.length || (!write.written.length && !preSatisfied)) {
             ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "failed",
               message: write.failed.length ? write.failed.length + " owned file write(s) failed." : "No owned file changed." });
             reason = "owned file writes failed";
             ok = false; continue;
           }
+          if (!write.written.length) {
+            markCovered(own.kept);
+            ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "done", files: 0, unchanged: true,
+              message: "Already satisfied: an earlier task in this build already wrote " + write.unchanged.join(", ") + " with exactly this content." });
+            continue;
+          }
           markCovered(own.kept);
+          markWritten(write.written);
           filesWritten += own.kept.length;
           ideJobs.emit(job.id, { type: "move", id: r.id, title: r.title, state: "done", files: own.kept.length });
         }
@@ -4688,8 +4757,11 @@ async function runIdeBuild(job, {
           if (ANSWER.retry.test(answer)) return "retry";
           return "skip";
         },
-        onRetry: (ns) => ideJobs.emit(job.id, { type: "run", command: "schedule", ok: true,
-          output: "Retrying task(s) " + ns.join(", ") + ". A step whose endpoint was down reroutes to a backup engine automatically." }),
+        onRetry: (ns) => {
+          for (const n of ns) retriedTasks.add(Number(n));
+          ideJobs.emit(job.id, { type: "run", command: "schedule", ok: true,
+            output: "Retrying task(s) " + ns.join(", ") + " at no charge. A step whose endpoint was down reroutes to a backup engine automatically." });
+        },
       });
       poolFatal = pool.outcome !== "drained";
       await settleChain.catch(() => {});   // every queued write/meter lands before anything terminal
@@ -10339,7 +10411,23 @@ const server = http.createServer(async (req, res) => {
       // The orchestrator slot is the one place a model may be refused (Vibe Coder SOW 5.1), and the
       // UI needs to know which rows to offer without re-deriving the rule: the flag rides every
       // model for every caller. Same copy-then-flag discipline as broadAccess above.
-      for (const g of payload.groups || []) g.models = (g.models || []).map((m) => ({ ...m, orchestratorOk: isOrchestratorApproved(m.id) }));
+      /*
+       * GUESTS ONLY SEE SEATS WE HAVE WATCHED ANSWER (Fred, 2026-08-05: "grey out any models for
+       * guests that are not 100% working and tested"). The refusal is evidence-driven: a seat is
+       * greyed only when a DATED probe says it failed, went stale, or answers too slowly. Seats
+       * never probed are left alone, because blocking the unmeasured would empty the picker of the
+       * paid direct lanes carrying the product. The owner always sees everything, with the same
+       * reason attached, so Fred can see what his guests cannot pick and why.
+       */
+      const probeNow = Date.now();
+      for (const g of payload.groups || []) g.models = (g.models || []).map((m) => {
+        const refusal = guestSeatRefusal(m.id, probeNow);
+        return {
+          ...m,
+          orchestratorOk: isOrchestratorApproved(m.id),
+          ...(refusal ? { unproven: refusal, guestBlocked: !isOwnerHere } : {}),
+        };
+      });
       // moonshot/nvidia are callable whenever EITHER their own key or the OpenRouter fallback key
       // exists (resolveProviderCfg): the picker must not grey out a model that would answer fine.
       payload.available = { openrouter: !!OPENROUTER_KEY, openai: !!OPENAI_KEY, deepseek: !!DEEPSEEK_KEY, anthropic: !!ANTHROPIC_KEY,

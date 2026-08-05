@@ -52,8 +52,10 @@ export const SIMPLIFY_ROUTES = Object.freeze({
     note: "Fred's pick, stands — small, fast, free.",
   }),
   business: Object.freeze({
-    label: "Business", requestedModel: "z-ai/glm-5.2",
-    note: "Fred's pick, stands — long-horizon planning, free via NVIDIA.",
+    label: "Business", requestedModel: "nvidia/nemotron-3-super-120b-a12b:free",
+    note: "RE-SEATED 2026-08-05 — Fred's pick (GLM 5.2) measured a 41.0s median time to first token "
+      + "on four streaming samples and cannot hold a chat route. Nemotron 3 Super is the largest free "
+      + "seat left standing (1M context, 0.55s, real tool call verified the same day).",
   }),
   safety: Object.freeze({
     label: "Safety", requestedModel: "nvidia/nemotron-3.5-content-safety",
@@ -61,10 +63,12 @@ export const SIMPLIFY_ROUTES = Object.freeze({
       + "a seat in models.catalog.mjs. BLOCKED until Fred adds it or approves the fallback.",
   }),
   empathetic: Object.freeze({
-    label: "Empathetic", requestedModel: "meta/llama-3.1-70b-instruct",
-    note: "SUBSTITUTED for the 3.3 generation (45,581ms to first token, unusable on a chat surface); "
-      + "the 3.1 id measured 238ms but is ALSO not a seat in models.catalog.mjs. BLOCKED until Fred "
-      + "adds it or approves the fallback.",
+    label: "Empathetic", requestedModel: "nvidia/nemotron-3-nano-omni-30b-a3b",
+    note: "RE-SEATED 2026-08-05. The 3.3 Llama was dropped for a 45,581ms first token; the 3.1 id "
+      + "replaced it on a measured 238ms and was added to the catalog. Two days later the SAME id "
+      + "measured 0.9 / 10.8 / 23.8 / 42.6s — a 17.3s median. The endpoint moved under a seat chosen "
+      + "on latency, which is why seats now carry a dated probe (models.catalog.mjs SEAT_PROBES) "
+      + "instead of a one-off measurement in a comment. Nano Omni holds the route at 0.55s.",
   }),
   literary: Object.freeze({
     label: "Literary", requestedModel: "arcee-ai/trinity-large-thinking",

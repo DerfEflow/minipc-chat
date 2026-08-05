@@ -126,12 +126,37 @@ test("Crucible steering stays tenant-local and honors guest training opt-out", (
   assert.match(source, /mayDistillSteering && \["format_retry", "verification_retry", "no_change", "false_completion"\]\.includes\(kind\)/);
 });
 
-test("AF workers and task-graph units cannot succeed by echoing unchanged files", () => {
+/*
+ * Tightened 2026-08-05. The old contract rejected EVERY all-unchanged write, which was correct
+ * against a lazy model echoing its input back and wrong against a task whose owned file an earlier
+ * task in the same build had already written correctly. A guest's build hit the second case: tasks
+ * 3-6 all owned src/main.js, task 2 wrote it complete, and task 3 then failed forever on identical
+ * bytes and was billed for each deterministic retry. The invariant is now narrower and stronger:
+ * unchanged is forgiven ONLY for files this build wrote itself.
+ */
+test("AF workers and task-graph units cannot succeed by echoing files this build did not write", () => {
   const source = readFileSync(new URL("./server.mjs", import.meta.url), "utf8");
-  assert.match(source, /write\.failed\.length \|\| \(!allowEmpty && !write\.written\.length\)/,
-    "mutation-required AF workers must reject an all-unchanged write");
-  assert.match(source, /write\.failed\.length \|\| !write\.written\.length/,
-    "task-graph units must reject an all-unchanged write");
+  assert.match(source, /const satisfiedByEarlierTask = \(unchanged\) =>[\s\S]{0,200}wroteThisBuild\.has\(normPath\(p\)\)/,
+    "forgiveness must be scoped to files THIS build wrote, never to pre-existing files");
+  assert.match(source, /write\.failed\.length \|\| \(!allowEmpty && !write\.written\.length && !preSatisfied\)/,
+    "mutation-required AF workers must reject an all-unchanged write unless this build wrote it");
+  assert.match(source, /write\.failed\.length \|\| \(!write\.written\.length && !preSatisfied\)/,
+    "task-graph units must reject an all-unchanged write unless this build wrote it");
+  // wroteThisBuild may only grow from writeFiles' `written` list, never from `unchanged`.
+  assert.match(source, /markWritten\(write\.written\)/, "only genuinely written files enter wroteThisBuild");
+  assert.doesNotMatch(source, /markWritten\(write\.unchanged\)/,
+    "an unchanged file must never seed the set that forgives unchanged files");
+});
+
+test("a retried task is not billed a second time", () => {
+  const source = readFileSync(new URL("./server.mjs", import.meta.url), "utf8");
+  assert.match(source, /const retriedTasks = new Set\(\)/);
+  assert.match(source, /for \(const n of ns\) retriedTasks\.add\(Number\(n\)\)/,
+    "the retry fork must record which tasks are re-attempts");
+  assert.match(source, /if \(n && retriedTasks\.has\(n\)\)[\s\S]{0,220}billed: false/,
+    "a re-attempt emits a truthful cost event but does not meter the tenant");
+  assert.doesNotMatch(source, /if \(r\.res\.costUsd\) \{ await meterTurn/,
+    "the task-pool settle must route metering through meterUnlessRetry");
 });
 
 test("an exhausted workspace-inspection window returns a resumable incomplete checkpoint", () => {

@@ -1169,11 +1169,22 @@ function updateModelTrigger() {
 }
 
 function modelRowHtml(o, cur, mode) {
-  const disabled = o.noKey || o.blocked, sel = o.id === cur;
+  /*
+   * o.unproven is the dated-probe refusal from models.catalog.mjs (SEAT_PROBES): the seat failed,
+   * went stale, or is too slow to answer. o.guestBlocked is true only for a guest, so the owner
+   * sees the same warning without losing the seat. A greyed row states the measured reason rather
+   * than a bare "unavailable", because a guest who cannot pick a model deserves to know it was
+   * measured, not merely disliked.
+   */
+  const disabled = o.noKey || o.blocked || o.guestBlocked, sel = o.id === cur;
   const cls = ["model-row"]; if (sel) cls.push("is-selected"); if (disabled) cls.push("is-disabled"); if (o.blocked) cls.push("is-blocked");
+  if (o.unproven) cls.push("is-unproven");
   const tierCls = "mr-price--" + String(o.priceTier || "").toLowerCase();
   const price = `<span class="mr-price ${tierCls}">${escapeHtml(o.priceTier || "")}</span>`;
-  const note = o.blocked ? `<span class="mr-note">blocked · ${escapeHtml(mode)}</span>` : (o.noKey ? `<span class="mr-note">key needed</span>` : "");
+  const note = o.blocked ? `<span class="mr-note">blocked · ${escapeHtml(mode)}</span>`
+    : o.noKey ? `<span class="mr-note">key needed</span>`
+    : o.unproven ? `<span class="mr-note">${o.guestBlocked ? "unavailable" : "not guest-ready"} · ${escapeHtml(o.unproven)}</span>`
+    : "";
   const facts = [o.ctxLabel ? o.ctxLabel + " context" : "", o.speedTier || ""].filter(Boolean)
     .map((f) => `<span class="mr-fact">${escapeHtml(f)}</span>`).join("");
   /*
