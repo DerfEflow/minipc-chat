@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 const read = name => readFileSync(new URL(name, import.meta.url), "utf8");
 const html = read("./public/index.html");
@@ -33,11 +33,11 @@ function hasCssDeclaration(selector, property, expected, label = `${selector} ${
 }
 
 test("versioned video assets match the offline shell", () => {
-  for (const asset of ["/dominion-video.css?v=8", "/dominion-video.js?v=14"]) {
+  for (const asset of ["/dominion-video.css?v=9", "/dominion-video.js?v=15"]) {
     includes(html, asset, `${asset} in index`);
     includes(sw, `"${asset}"`, `${asset} in service worker`);
   }
-  includes(js, "l.href='/dominion-video.css?v=8'", "dynamic stylesheet fallback version");
+  includes(js, "l.href='/dominion-video.css?v=9'", "dynamic stylesheet fallback version");
 });
 
 test("the editor exposes the promised models and seven media layers", () => {
@@ -201,7 +201,9 @@ test("storyboard is a visual thumbnail grid rather than a compact text list", ()
 
 test("timeline stays secondary but has a clear reversible editor focus mode", () => {
   includes(js, "case 'focus': mutate(state.focus?'Exited editor focus':'Entered editor focus'", "reversible editor focus action");
-  includes(js, "state.focus?'↙ Exit player + editor':'⛶ Player + editor'", "clear player and editor focus exit control");
+  // The label still names the way out; only the leading glyph became one of Fred's medallions.
+  includes(js, "state.focus?'Exit player + editor':'Player + editor'", "clear player and editor focus exit control");
+  includes(js, 'dv-ico dv-ico-expand" aria-hidden="true"></i>${state.focus?', "focus toggle keeps its icon when its label is repainted");
   includes(js, "node.classList.add(state.panels[p])", "panel states retained across focus render");
   hasCssDeclaration(".dv-focus-mode .dv-timeline-panel", "display", /^(?:block|grid|flex)$/, "focus mode promotes the secondary timeline into a usable editor surface");
 });
@@ -271,6 +273,43 @@ test("the numbered pipeline reflects real project state and never invents a step
   includes(js, 'class="dv-step-badge"', "panels carry their step number");
   hasCssDeclaration(".dv-stage-step[data-state=\"current\"]", "color", /#/, "the current stage is lit");
   hasCssDeclaration(".dv-stage-step[data-state=\"skipped\"]", "opacity", /^\./, "a skipped stage is dimmed rather than hidden");
+});
+
+/*
+ * THE CONTROL FACES (Fred, 2026-08-05, supplying his own medallion sheets). Two ways this could rot
+ * silently: a class named in the markup with no rule behind it renders an invisible 17px gap, and a
+ * rule pointing at a file nobody shipped renders the same gap after a deploy. Both are checked
+ * against the real filesystem rather than against another string in the same file.
+ */
+test("every control face is defined, shipped, and actually reachable", () => {
+  const declared = new Map();
+  for (const match of css.matchAll(/\.dv-ico-([a-z]+)\{background-image:url\("(\/assets\/video\/[^"]+)"\)\}/g)) declared.set(match[1], match[2]);
+  if (declared.size < 8) throw new Error(`expected the medallion set to be declared in CSS; found ${declared.size}`);
+  const used = new Set([...js.matchAll(/dv-ico-(?:\$\{[^}]*\}|([a-z]+))/g)].map(m => m[1]).filter(Boolean));
+  for (const name of used) if (!declared.has(name)) throw new Error(`markup uses dv-ico-${name} with no CSS rule behind it`);
+  for (const [name, href] of declared) {
+    const file = new URL(`./public${href}`, import.meta.url);
+    if (!existsSync(file)) throw new Error(`dv-ico-${name} points at ${href}, which is not shipped`);
+  }
+  // The two faces the play control swaps between are chosen at runtime, so the scan above cannot
+  // see them. They are the whole reason the transport exists.
+  for (const name of ["play", "pause", "stop", "loop"]) if (!declared.has(name)) throw new Error(`the transport needs a ${name} face`);
+  hasCssDeclaration(".dv-ico", "background", /center\s*\/\s*contain/, "medallions scale to their control");
+});
+
+test("the preview transport is real: stop rewinds, play swaps its face, loop latches", () => {
+  for (const [needle, why] of [
+    ["case 'stop':", "stop is a handled action"],
+    ["video.currentTime=0", "stop rewinds to the head rather than merely pausing"],
+    ["case 'loop':", "loop is a handled action"],
+    ["video.loop=state.loop", "the loop latch reaches the real media element"],
+    ["function paintTransport()", "the transport repaints in place"],
+  ]) includes(js, needle, why);
+  // A full render would rebuild <video> and throw away the playhead the user is standing on.
+  const play = js.slice(js.indexOf("case 'play':"), js.indexOf("case 'import':"));
+  if (/\brender\(/.test(play)) throw new Error("transport actions must repaint in place, not re-render the player");
+  includes(js, `aria-pressed="${"${state.loop?'true':'false'}"}"`, "loop reports its latched state to assistive tech");
+  hasCssDeclaration('.dv-tbtn[aria-pressed="true"]:after', "background", /--dv-green/, "a latched control is marked in the studio's own state colour, not gold");
 });
 
 if (!process.exitCode) console.log(`\nvideo UI: ${passed} passed, 0 failed`);

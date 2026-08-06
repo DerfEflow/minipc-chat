@@ -35,6 +35,31 @@ usage cost is rejected without changing the screenplay or charging Dominion cred
 - Storage is bounded per project and per tenant, project count and mutation rates are capped, and
   the worker preserves a low-disk reserve. Expired one-off mobile workspaces are cleaned hourly.
 
+## The control faces
+
+The studio's operable controls wear medallions cut from Fred's own icon sheets
+(`Z:\Dominion VIdeo Icons`, sheet `exec-2d6d5df5…`, chosen over the other two purely on legibility
+at 17px). Twelve circular 80px PNGs live in `public/assets/video/<name>-v1.png` and are attached by
+a single class pair: `.dv-ico` sizes and positions, `.dv-ico-<name>` supplies the face. Sizing is
+per-context through the `--dv-ico` custom property, never by editing the images.
+
+The palette rule that keeps the studio recognisable: **gold is hardware** — the things you operate,
+which is every medallion — and **green stays state**: the liaison pulse, done pipeline steps,
+primary actions, the loop latch's pip. A gold medallion on a lime primary is ringed
+(`.dv-top-actions .dv-primary .dv-ico`) so it reads as an inset badge rather than a smudge.
+
+Assignments: play/pause/stop/loop drive the preview transport under the monitor; `gear` marks the
+settings bar (as a `::before`, so the `nth-child` rules that hide fields on narrow screens are
+untouched); `wand` is the screenwriter, `frame` the storyboard, `filmstrip` the sequence editor,
+`camera` every generate control, `upload` Import, `download` Export, `expand` the focus toggles. The
+producer's chips wear the medallion of the panel they open, so the suggestion and its destination
+are recognisably the same tool.
+
+The medallions are deliberately **not** in the service worker's `SHELL`: they total ~190 KB and only
+matter inside the studio, so the runtime network-first cache picks them up on first open instead of
+charging every install for them. `video-ui_test.mjs` checks each declared face against the real
+filesystem, so a face that is never shipped fails the suite rather than rendering a 17px hole.
+
 ## Runware video generation
 
 All four models use Runware's array request endpoint, `POST https://api.runware.ai/v1`, with

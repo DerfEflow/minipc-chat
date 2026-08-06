@@ -216,3 +216,15 @@ screenwriter and the storyboard still work, and the banner goes away once the ke
 ## Q: Why is there no free video option like there is for images?
 Video generation is dramatically more expensive to run than an image, so there is no free lane that
 would be honest to offer. Images have one precisely because they are cheap enough.
+
+## Q: How do I loop the preview?
+Press the loop medallion, the third control in the transport under the monitor. It latches on with a
+small green dot and the clip repeats until you press it again.
+
+## Q: What are the three round buttons under the video monitor?
+That is the preview transport: stop, play/pause, and loop. Stop rewinds the clip to its first frame
+rather than just pausing it, and loop keeps it repeating while you review a shot.
+
+## Q: How do I rewind the preview to the start?
+Press the stop medallion, the left control in the transport. Pause leaves the playhead where it is;
+stop returns it to the head of the clip.
