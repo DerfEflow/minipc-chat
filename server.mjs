@@ -153,6 +153,7 @@ import { createStripe } from "./stripe.mjs";
 import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore, buildInstallerZip } from "./forge.mjs";
 import { createSimplifyChatHandler } from "./simplify.mjs";
+import { createTaskKernel } from "./taskkernel.mjs";
 import {
   createAltana, createAltanaStore, altanaChatTools, wrapToolResult,
   ALTANA_SETTABLE_SETTINGS, ALTANA_TOOLS, runAltanaTurn, confirmationToken, retrieve,
@@ -1681,6 +1682,23 @@ function ideEscalate(job, event) {
     if (r.sent) console.log("[dominion-ai] ide push: " + note.tag + " to " + r.sent + " device(s)");
   }).catch(() => {});
 }
+
+/*
+ * The task kernel: one durable spine for every long-running surface (see taskkernel.mjs for why
+ * five separate job systems was the disease rather than the design). Surfaces migrate onto it one
+ * at a time, and each one that does inherits durability, concurrency, stall detection and
+ * notification without writing any of them again. Simplify is first; the older stores keep running
+ * beside it until their surface moves, because a migration that breaks chat to tidy the
+ * architecture would be a bad trade.
+ */
+const tasks = createTaskKernel({ dir: dataPath("tasks"), log: (m) => console.log("[dominion-ai] " + m) });
+if (tasks.orphanedAtBoot) console.log(`[dominion-ai] tasks: sealed ${tasks.orphanedAtBoot} orphaned at boot`);
+tasks.register("simplify", {
+  // Simplify has no per-conversation anchor of its own yet, so the deep link lands on the panel.
+  describe: (t) => (t.status === "done" ? "Your Simplify answer is ready" : "A Simplify answer did not finish"),
+  href: () => "/?simplify=1",
+  maxAgeMs: 20 * 60000,
+});
 
 const ideJobs = createIdeJobs({ dir: dataPath("ide"), log: (m) => console.log(m), onEvent: ideEscalate });
 // Restart recovery. Jobs whose journal has no terminal event were being driven by a process that
@@ -10739,7 +10757,9 @@ const server = http.createServer(async (req, res) => {
       if (!T.isOwner && !T.invited) return sjson(res, 403, { error: "needs_invite" });
       if (!T.isOwner && T.role === "credit" && !billing.canChat(T.email)) return sjson(res, 402, { error: "needs_credits" });
       // The tenant is captured HERE, in a closure for this one request. See simplifyBilling.
-      return simplifyChat(req, res, { onTurnBilled: simplifyBilling(T) });
+      // `tasks` rides in for the same per-request reason: it scopes the durable record to this
+      // caller, so a Simplify turn survives the panel closing and reattaches to the right person.
+      return simplifyChat(req, res, { onTurnBilled: simplifyBilling(T), tasks, tenant: T });
     }
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
     if (path === "/chat/fire-alarm" && req.method === "POST") return handleFireAlarm(req, res);

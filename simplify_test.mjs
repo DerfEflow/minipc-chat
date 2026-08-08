@@ -155,11 +155,6 @@ await t("dominion-simplify.css has balanced braces and no dangling rule", () => 
   assert.ok(!/\/\*(?:(?!\*\/)[\s\S])*$/.test(src), "unterminated /* comment at end of file");
 });
 
-// ---- summary ---------------------------------------------------------------------------------------
-
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
-
 /* ---- Simplify carries NO session budget, by Fred's decision ---------------------------------- */
 await t("no session budget is ever created for Simplify (Fred, 2026-08-03)", () => {
   /*
@@ -204,7 +199,10 @@ await t("Simplify meters each turn, skips failed ones, and cannot bill the wrong
    * overwrites the variable while it waits, and the wrong account pays.
    */
   const src = readFileSync(new URL("./simplify.mjs", import.meta.url), "utf8");
-  assert.match(src, /function handleSimplifyChat\(req, res, \{ onTurnBilled = null \} = \{\}\)/,
+  // Matched loosely on purpose: what matters is that onTurnBilled is destructured from the
+  // PER-REQUEST options object, not the exact parameter list. The task kernel and tenant now ride
+  // in beside it (2026-08-08 durability work) for the same per-request reason.
+  assert.match(src, /function handleSimplifyChat\(req, res, \{[^}]*onTurnBilled = null[^}]*\} = \{\}\)/,
     "the billing callback must arrive per request, never at construction");
   assert.match(src, /if \(result && result\.ok && typeof onTurnBilled === "function"\)/,
     "a turn the provider never answered must not be charged");
@@ -226,3 +224,50 @@ await t("Simplify meters each turn, skips failed ones, and cannot bill the wrong
   }
   assert.equal(billed.length, 3);
 });
+
+/* ---- a Simplify turn outlives the panel that started it -------------------------------------- */
+await t("closing the panel no longer kills the answer, and no longer makes it free", async () => {
+  /*
+   * The regression this pins (2026-08-08). simplify.mjs used to wire req.on("close") straight into
+   * ac.abort(), which meant three bad things at once: the model call died, the partial answer was
+   * lost because it lived only in the browser's DOM, and the turn became free, since an aborted
+   * call returns ok:false and the billing block only fires on ok.
+   *
+   * Fred's spec is that a task keeps working no matter what the user starts in the meantime. A
+   * disconnect must therefore mean nothing here.
+   */
+  const src = readFileSync(new URL("./simplify.mjs", import.meta.url), "utf8");
+  const live = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+  assert.ok(!/req\.on\(\s*["']close["']/.test(live),
+    "a client disconnect must never abort a Simplify turn again");
+  assert.ok(!/res\.on\(\s*["']close["']/.test(live),
+    "nor may the response socket closing abort it");
+
+  // The turn must be recorded as it streams, or a reattaching client has nothing to collect.
+  assert.match(live, /tasks\.createTask\(/, "a Simplify turn must open a durable task record");
+  assert.match(live, /kind:\s*["']simplify["']/, "the record must declare its kind so the kernel can route it");
+  assert.match(live, /tasks\.appendRows\(/, "frames must be recorded as they stream, not only at the end");
+  assert.match(live, /tasks\.finish\(/, "the task must be closed out so it can notify");
+
+  // Wire vocabulary is unchanged, so an older client mid-rollover keeps working.
+  assert.match(live, /type:\s*["']delta["']/, "the wire shape must stay {type:'delta'} for compatibility");
+  // ...while storage uses the kernel's shape so token runs coalesce into single rows.
+  assert.match(live, /type:\s*["']token["'],\s*delta:/, "storage must use the kernel's token shape");
+
+  const server = readFileSync(new URL("./server.mjs", import.meta.url), "utf8");
+  assert.match(server, /simplifyChat\(req, res, \{[^}]*tasks[^}]*\}\)/,
+    "the route must hand the kernel to the handler, or none of the above is reachable");
+  assert.match(server, /tasks\.register\(["']simplify["']/,
+    "the simplify kind must be registered so its notification knows where to link back");
+});
+
+// ---- summary ---------------------------------------------------------------------------------
+/*
+ * This block lives at the END of the file, and that matters. It used to sit above the billing and
+ * session-budget tests, which meant those tests incremented a counter nothing checked again and
+ * their failures exited zero. Three real assertions, including the cross-tenant billing one, were
+ * decorative. Anything appended below this line is in the same trap, so append above it.
+ */
+console.log(`\n${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);

@@ -30,6 +30,7 @@
  * exports resolveProviderCfg, this duplicate block should be deleted in favor of the real one.
  */
 
+import { randomUUID } from "node:crypto";
 import { modelById, resolveModelId, isCatalogModel, outLimitFor } from "./models.catalog.mjs";
 import { askSliceOf } from "./routing.mjs";
 import { runTool } from "./tools.mjs";
@@ -352,7 +353,12 @@ export function createSimplifyChatHandler({ env = process.env } = {}) {
    * for this one request, so two people using Simplify at once can never bill each other. See the
    * simplifyBilling note in server.mjs for the race this shape exists to prevent.
    */
-  return async function handleSimplifyChat(req, res, { onTurnBilled = null } = {}) {
+  /*
+   * `tasks` (the task kernel) and `tenant` arrive per request for the same reason onTurnBilled
+   * does: they describe THIS caller. Both are optional, and with them absent the handler behaves
+   * exactly as it did before the kernel existed, which is what keeps the older unit tests honest.
+   */
+  return async function handleSimplifyChat(req, res, { onTurnBilled = null, tasks = null, tenant = null } = {}) {
     let raw;
     try {
       raw = await readCappedBody(req, 262144);
@@ -375,9 +381,51 @@ export function createSimplifyChatHandler({ env = process.env } = {}) {
     res.writeHead(200, {
       "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no",
     });
-    const sse = (o) => { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
+
+    /*
+     * DURABILITY (Fred's concurrent-work spec, 2026-08-08).
+     *
+     * This handler used to wire req.on("close") straight into ac.abort(). That single line meant
+     * closing the Simplify panel, switching to the Crucible, or simply reloading killed the model
+     * call and threw away the partial answer, which existed nowhere but the browser's DOM. It also
+     * quietly made those turns free: an aborted call lands in the catch below with ok:false, and
+     * the billing block at the end only fires on ok, so a user who closed the panel mid-answer
+     * burned provider tokens at no charge.
+     *
+     * A disconnect now means nothing at all. The turn runs to completion, every frame is recorded
+     * to the task kernel as it streams, and the client reattaches by task id to collect whatever it
+     * missed. Only an explicit stop aborts, exactly as /chat has worked since the 18-hour-run work.
+     *
+     * Wire shape stays {type:"delta", text}. The kernel stores {type:"token", delta} so its
+     * coalescing collapses token runs into single rows, and the attach route translates back on
+     * replay, so the client only ever sees one vocabulary.
+     */
+    const task = tasks && tenant
+      ? tasks.createTask({
+          id: "sx-" + randomUUID(), kind: "simplify", surface: "simplify",
+          anchor: String(input.sessionId || "").slice(0, 120),
+          title: userMessage.slice(0, 80), email: tenant.email || "", uid: tenant.uid || "",
+          status: "running",
+        })
+      : null;
+    let seq = 0, chars = 0;
+    const record = (ev) => {
+      if (!task) return;
+      try { tasks.appendRows(task.id, [{ seq, span: 1, ev }], seq + 1, chars); seq++; } catch {}
+    };
+    const sse = (o) => {
+      if (task) {
+        if (o && o.type === "delta") { chars += String(o.text || "").length; record({ type: "token", delta: o.text || "" }); }
+        else if (o && o.type !== "working") record(o);
+      }
+      try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {}
+    };
     const ac = new AbortController();
-    req.on("close", () => { try { ac.abort(); } catch {} });
+    if (task) {
+      // The one thing that DOES abort: a deliberate stop, reached through the kernel by task id.
+      tasks.bindMeta(task.id, { title: userMessage.slice(0, 80) });
+      sse({ type: "task", id: task.id, surface: "simplify" });
+    }
 
     let picked;
     try { picked = pickRoute(userMessage, { env }); } catch { picked = { route: "chat", topic: "", complexity: DEGRADED_COMPLEXITY }; }
@@ -456,6 +504,17 @@ export function createSimplifyChatHandler({ env = process.env } = {}) {
     }
 
     sse({ type: "done" });
+    /*
+     * The task closes AFTER billing, so a crash between the two leaves the row `running` and the
+     * boot sweep seals it orphaned rather than reporting a clean finish for a turn nobody charged.
+     * An honest orphan is recoverable. A false `done` is not.
+     */
+    if (task) {
+      try {
+        tasks.finish(task.id, result && result.ok ? "done" : "failed",
+                     result && result.ok ? null : { error: (result && result.error) || "no answer" });
+      } catch {}
+    }
     try { res.end(); } catch {}
   };
 }
