@@ -342,9 +342,21 @@ function normalizedToolChoice(choice) {
   return cloneValue(choice);
 }
 
+/*
+ * WHICH THINKING SURFACE A MODEL SPEAKS.
+ *
+ * "adaptive" is the modern surface: `thinking:{type:"adaptive"}` + output_config.effort, and NO
+ * sampling parameters at all. Claude Opus 5 joined this list on 2026-08-08 when the learning loop
+ * started calling it (feedback.mjs). Leaving it out was not a missing feature, it was a live 400:
+ * an unrecognised id falls to "other", "other" never sets payload.thinking, and the temperature
+ * branch below only fires when payload.thinking is absent. So the first caller that passed a
+ * temperature would have had it forwarded to a model that rejects temperature, top_p and top_k
+ * outright. The entry is the fix; the ordering inside the group matters too, since "opus-4-8" must
+ * still match itself rather than being shadowed by the shorter "opus-5" alternative.
+ */
 function modelFamily(model) {
   const id = String(model || "").toLowerCase();
-  if (/claude-(?:opus-4-8|sonnet-5)(?:-|$)/.test(id)) return "adaptive";
+  if (/claude-(?:opus-5|opus-4-8|sonnet-5)(?:-|$)/.test(id)) return "adaptive";
   if (/claude-haiku-4-5(?:-|$)/.test(id)) return "manual";
   return "other";
 }

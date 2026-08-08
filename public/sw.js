@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v179-connections-persist";
+const CACHE = "dominion-ai-v180-one-tap-teaches-it";
 const SHELL = [
   "/",
   "/index.html",
@@ -32,12 +32,13 @@ const SHELL = [
   "/dominion-ide.css?v=26",
   "/dominion-ide.js?v=43",
   "/dominion-tour.js?v=6",
-  "/app.js?v=73",
+  "/app.js?v=74",
   "/dominion-markdown.css?v=1",
+  "/dominion-feedback.css?v=1",
   "/dominion-markdown.js?v=1",
   "/dominion-ui.css?v=43",
   "/dominion-ui.js?v=40",
-  "/dominion-cinematic.js?v=43",
+  "/dominion-cinematic.js?v=44",
   "/dominion-cinematic-01.css?v=30",
   "/dominion-cinematic-02.css?v=30",
   "/dominion-cinematic-03.css?v=31",
@@ -77,6 +78,8 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   const dyn = ["/chat", "/memory", "/toolruns", "/tool-confirm", "/artifacts", "/mentor", "/ledger", "/evals", "/rules", "/prompts", "/persona", "/finetune", "/reviews", "/pipeline", "/tool-overlays",
     "/account", "/billing", "/admin", "/forge", "/guide", "/content", "/setup", "/connectors", "/api/images", "/api/video",
+    // The learning loop: a cached review queue would show Fred a decision he already made.
+    "/feedback",
     // Dominion Works: live state, workspaces, and the job SSE stream. Caching any of these would
     // show a stale build or replay a finished job as if it were running.
     "/ide",

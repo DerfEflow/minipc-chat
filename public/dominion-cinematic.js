@@ -245,10 +245,16 @@
     context.classList.toggle("is-live", next === "active");
   }
 
+  /*
+   * 💡 (Save lesson) and 🧪 (Create evaluation) came out on 2026-08-08 with the buttons themselves.
+   * The two teaching buttons that replaced them are deliberately NOT in this map: 👍 and 👎 carry
+   * their meaning in the glyph, and decorateAction() returns early on anything it does not know,
+   * so they pass through untouched with the wording app.js gave them.
+   */
   const actionMap = new Map([
     ["Edit", "edit"], ["Copy", "copy"], ["Save", "save"], ["Critique", "critique"],
     ["Continue", "continue"], ["Regenerate", "regenerate"], ["🔎", "inspect"],
-    ["💡", "lesson"], ["🧪", "eval"], ["Delete", "delete"], ["Back", "continue"],
+    ["Delete", "delete"], ["Back", "continue"],
   ]);
 
   function decorateAction(button) {
@@ -257,7 +263,7 @@
     const name = actionMap.get(text);
     if (!name) return;
     button.dataset.dominionIcon = name;
-    const label = text === "🔎" ? "Inspect" : text === "💡" ? "Save lesson" : text === "🧪" ? "Create evaluation" : text;
+    const label = text === "🔎" ? "Inspect" : text;
     button.textContent = "";
     button.append(icon(name), document.createTextNode(label));
   }

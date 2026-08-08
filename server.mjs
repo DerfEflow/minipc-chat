@@ -133,6 +133,7 @@ import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./cor
 import { createUsersStore } from "./tenancy.mjs";
 import { createTenantResolver, filterToolDefs, toolAllowedFor, FORGE_TOOLS } from "./tenantstores.mjs";
 import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors.mjs";
+import { createFeedback, createDistiller } from "./feedback.mjs";
 import { createAccessVerifier } from "./accessjwt.mjs";
 import { createImagesFeature } from "./images.mjs";
 import { createVideoFeature } from "./video.mjs";
@@ -1733,6 +1734,31 @@ const toolWallFor = (source) => (source === "service-owner" ? DECK_ORCHESTRATOR_
 // Connectors (Fred's "complete access" wave): outside services as MCP tools, per-account. The
 // owner's creds default from env; guests must bring their own. See connectors.mjs for the wall.
 // Google Workspace is provider-backed (native REST + per-account OAuth, google.mjs).
+/*
+ * ---- THE LEARNING LOOP (Fred, 2026-08-08). feedback.mjs holds the rules; this is the wiring.
+ *
+ * The distiller is built here rather than inside the module for one reason: this is where the
+ * Anthropic key lives, and that key is the whole billing story. Every distillation is a plain
+ * server-internal call on Fred's key — it never enters the chat pipeline, so it never reaches
+ * meterTurn() and can never bill a guest for teaching Dominion something. Fred's ruling:
+ * "charged to my account, not the user's."
+ */
+const feedback = createFeedback({
+  dir: dataPath("feedback"),
+  distill: createDistiller({
+    stream: anthropicMessagesStream,
+    apiKey: () => ANTHROPIC_KEY,
+    model: cfgGet("FEEDBACK_MODEL", "claude-opus-5"),
+    // Medium is deliberate: the job is to distil one sentence from one turn, and Opus 5 at medium
+    // is strong at exactly that. Higher effort would spend Fred's money on deliberation the task
+    // does not need. FEEDBACK_EFFORT exists so he can raise it without a deploy.
+    effort: cfgGet("FEEDBACK_EFFORT", "medium"),
+    log: (m) => console.log(m),
+  }),
+  dailyLimit: Number(cfgGet("FEEDBACK_DAILY_LIMIT", "10")) || 10,
+  log: (m) => console.log(m),
+});
+
 const cxCrypto = connectorCrypto({ dir: DATA_DIR, cfgGet });
 const googleProvider = createGoogleProvider({ dir: DATA_DIR, cfgGet, baseUrl: () => APP_BASE_URL, enc: cxCrypto.enc, dec: cxCrypto.dec });
 const connectors = createConnectors({ dir: DATA_DIR, cfgGet, providers: { google: googleProvider } });
@@ -5927,6 +5953,120 @@ async function handleConnectors(req, res, u) {
   if (req.method === "POST" && p === "/connectors/guest-flag") return sjson(res, 200, connectors.setGuestAllowed(T, String(body.id || ""), body.on !== false));
   return sjson(res, 404, { error: "not found" });
 }
+
+/*
+ * The learning loop's HTTP surface (feedback.mjs holds the rules).
+ *
+ * Every owner-only route is gated HERE as well as inside the module. That duplication is
+ * deliberate: the module's guard protects the data model and this one protects the wire, and the
+ * routes below are the ones that spend Fred's money, publish a lesson to every guest, or dispatch
+ * a machine to change code. A single point of failure is not enough for any of those three.
+ */
+async function handleFeedback(req, res, u) {
+  const T = resolveTenant(req);
+  if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
+  const p = u.pathname;
+
+  // The owner's review queue. Anonymous by construction — feedback.pending() reads a projection
+  // with no uid column in it at all, so there is nothing here to accidentally forward.
+  if (req.method === "GET" && p === "/feedback/pending") {
+    if (!T.isOwner) return sjson(res, 403, { error: "owner only" });
+    return sjson(res, 200, { pending: feedback.pending(), recent: feedback.recent(15), count: feedback.pendingCount() });
+  }
+  // The compiled file, served as text so Fred can read or save the whole record at once.
+  if (req.method === "GET" && p === "/feedback/file") {
+    if (!T.isOwner) return sjson(res, 403, { error: "owner only" });
+    try {
+      feedback.writeCompiled();
+      const body = readFileSync(feedback.filePath, "utf8");
+      res.writeHead(200, { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-store" });
+      return res.end(body);
+    } catch (e) { return sjson(res, 500, { error: String((e && e.message) || e) }); }
+  }
+
+  const body = (await readJsonBody(req)) || {};
+
+  // A thumb. Open to everyone: this is the one route a guest is meant to press.
+  if (req.method === "POST" && p === "/feedback/react") {
+    const r = await feedback.react(T, {
+      kind: String(body.kind || ""),
+      question: String(body.question || ""),
+      answer: String(body.answer || ""),
+    });
+    return sjson(res, r.ok ? 200 : (r.rateLimited ? 429 : 400), r);
+  }
+
+  // Critique / Inspect: Fred's adversarial lenses, and his alone.
+  if (req.method === "POST" && p === "/feedback/report") {
+    if (!T.isOwner) return sjson(res, 403, { error: "owner only" });
+    const r = await feedback.report(T, {
+      kind: String(body.kind || ""),
+      question: String(body.question || ""),
+      answer: String(body.answer || ""),
+    });
+    return sjson(res, r.ok ? 200 : 400, r);
+  }
+
+  if (req.method === "POST" && p === "/feedback/decide") {
+    if (!T.isOwner) return sjson(res, 403, { error: "owner only" });
+    const r = feedback.decide(T, body.id, String(body.action || ""));
+    return sjson(res, r.ok ? 200 : 400, r);
+  }
+
+  /*
+   * "A button triggers a call to claude code Opus 5 to work directly on the fix and deploy it."
+   *
+   * This is the highest-blast-radius control in the feature: it points a coding agent at the real
+   * repository and tells it to ship. Three things therefore hold, and all three are server-side
+   * rather than UI politeness:
+   *
+   *   - owner only, checked here and unreachable from a guest session;
+   *   - `confirm: true` must be present in the body, so a mis-click on a button cannot dispatch a
+   *     deploy — the client asks first and this refuses without the answer;
+   *   - it rides the EXISTING work-order rail (the Command Deck bridge, same path as the
+   *     claude_work_order tool), which already snapshots before it changes anything and is
+   *     rollback-able from the Forge. A new deploy path would have been a second thing to trust.
+   *
+   * With no SYNC_SECRET configured it says so plainly instead of reporting a success that never
+   * left the building.
+   */
+  if (req.method === "POST" && p === "/feedback/dispatch-fix") {
+    if (!T.isOwner) return sjson(res, 403, { error: "owner only" });
+    if (body.confirm !== true) return sjson(res, 400, { error: "this dispatches a real build and deploy — confirm first" });
+    if (!CTX.syncKey) return sjson(res, 409, { error: "No SYNC_SECRET is configured on this server, so there is no Claude Code bridge to send this to. Nothing was dispatched." });
+    const title = String(body.title || "").trim() || "Dominion fix from Inspect";
+    const finding = String(body.report || "").trim();
+    const fix = String(body.fix || "").trim();
+    if (!finding && !fix) return sjson(res, 400, { error: "nothing to fix — run Inspect first" });
+    const instructions = [
+      "This work order came from Dominion's Inspect review. Fred approved dispatching it.",
+      "",
+      "## The finding", finding || "(none recorded)",
+      "", "## The proposed fix", fix || "(none recorded)",
+      "",
+      "Verify the finding against the real code before changing anything — the review read one",
+      "answer, not the repository, so treat the proposed fix as a hypothesis. If it is wrong, say",
+      "so and fix the actual defect instead. Snapshot before you change anything, run the tests,",
+      "and deploy only if they pass.",
+    ].join("\n");
+    try {
+      const r = await fetch(CTX.baseUrl + "/api/jobs", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-sync-key": CTX.syncKey },
+        body: JSON.stringify({ title, instructions, repo: String(body.repo || ""), target: body.target === "laptop" ? "laptop" : "" }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 200 && d.job) {
+        console.log(`[feedback] dispatched Claude Code work order ${d.job.id} — "${d.job.title}"`);
+        return sjson(res, 200, { ok: true, jobId: d.job.id, title: d.job.title,
+          note: "Queued. It snapshots before changing anything and is rollback-able from the Forge. If it sits unclaimed, the bridge poller is not running." });
+      }
+      return sjson(res, 502, { error: "Could not queue the work order: " + (d.error || `HTTP ${r.status}`) });
+    } catch (e) { return sjson(res, 502, { error: "Could not reach the Command Deck bridge: " + String((e && e.message) || e) }); }
+  }
+
+  return sjson(res, 404, { error: "not found" });
+}
 // Auto mentor review — DEFAULT ON per Fred's LAX call (the self-improving loop stays alive):
 // tiered + sampled + fire-and-forget, all local (zero egress). AUTO_MENTOR=0 is the cautious flip.
 const AUTO_MENTOR = String(cfgGet("AUTO_MENTOR", "1")) !== "0";
@@ -8402,6 +8542,17 @@ async function handleChat(req, res) {
   }
   const activeRules = flywheel.activeRules(mode).filter((r) => r.scope !== "retrieval");   // Phase 5: learned prompt rules
   if (activeRules.length) messages.push({ role: "system", content: "Active learned rules — follow these:\n" + activeRules.map((r) => "- " + r.content).join("\n") });
+  /*
+   * What the thumbs actually bought (feedback.mjs). Two scopes in one block: lessons Fred approved
+   * globally, then lessons approved for THIS account only. It sits here, beside the learned rules,
+   * because a system message is folded into the cached system prefix — and this block only changes
+   * when Fred decides something, so it stays byte-stable across a conversation and costs one cache
+   * write per decision rather than a re-billed transcript every turn.
+   */
+  try {
+    const learned = feedback.promptBlock(T);
+    if (learned) messages.push({ role: "system", content: learned });
+  } catch (e) { console.log("[feedback] prompt block failed:", String(e && e.message || e).slice(0, 120)); }
   // Deck-orchestrator directive: injected server-side (the deck's 2000-char persona field is too
   // small to carry doctrine), enforced by the tool wall above it either way.
   if (req.dominionIdentity && req.dominionIdentity.source === "service-owner") {
@@ -10472,6 +10623,7 @@ const server = http.createServer(async (req, res) => {
      */
     if (/^\/(?:altana|guide)\/(?:ask|complaints|complaint\/resolve)$/.test(path)) return handleAltana(req, res, u);
     if (path === "/connectors" || path.startsWith("/connectors/")) return handleConnectors(req, res, u);
+    if (path.startsWith("/feedback/")) return handleFeedback(req, res, u);
 
     if (path === "/api/video" || path.startsWith("/api/video/")) return videoHttp.handle(req, res, u);
     if (path === "/api/ocr" && req.method === "POST") return handleOcr(req, res);

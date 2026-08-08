@@ -781,14 +781,34 @@ function renderMsg(m, i, isLastAi, mount = wrap) {
   else {
     acts.appendChild(mkAct("Copy", () => copyText(m.content)));
     acts.appendChild(mkAct("Save", () => saveAsArtifact(m.content), "Save as artifact"));
-    acts.appendChild(mkAct("Critique", () => critiqueMessage(i), "Full mentor critique"));
-    // F1 (audit items 23-25): distinct per-message spec controls, compact glyphs to fit 375px.
-    acts.appendChild(mkAct("🔎", () => critiqueMessage(i, "hallucination_check"), "Hallucination check"));
-    acts.appendChild(mkAct("💡", () => saveLesson(i), "Save lesson"));
-    acts.appendChild(mkAct("🧪", () => convertToEval(i), "Convert to eval"));
+    /*
+     * THE TWO SHAPES OF THIS ROW (Fred, 2026-08-08).
+     *
+     * A guest gets the two teaching buttons in place of the reviewer controls: "In the guest
+     * accounts I want the following icons to replace the critique, inspect, save lesson and create
+     * evaluation buttons." Those four were built for the person who tunes the system, and a guest
+     * pressing "create evaluation" was being handed a lever with nothing on the other end.
+     *
+     * Fred keeps Critique and Inspect — now adversarial reviews rather than mentor scores — and
+     * gets the same two teaching buttons ADDED on their own row underneath, per his "do not
+     * replace the buttons, just add these additional buttons just below them". Save lesson and
+     * create evaluation are gone for everyone; the thumbs replaced what they were for.
+     */
+    if (isOwnerNow()) {
+      acts.appendChild(mkAct("Critique", () => critiqueMessage(i, "critique"), "Adversarial review: unsuitable, irrelevant, or incomplete?"));
+      acts.appendChild(mkAct("🔎", () => critiqueMessage(i, "inspect"), "Adversarial technical review of the approach and the code, with a proposed fix"));
+    }
     if (isLastAi && !busyFor(curId)) { acts.appendChild(mkAct("Continue", () => continueLast())); acts.appendChild(mkAct("Regenerate", () => regenerate())); }
   }
-  turn.appendChild(acts); mount.appendChild(turn);
+  turn.appendChild(acts);
+  // The teaching row. Guests: it is their only row. Owner: it sits below his reviewer row.
+  if (m.role === "assistant") {
+    const teach = document.createElement("div"); teach.className = "acts acts-teach";
+    teach.appendChild(mkAct("👍", () => teachFromMessage(i, "positive", teach), "Good job — do more answers like this"));
+    teach.appendChild(mkAct("👎", () => teachFromMessage(i, "negative", teach), "This answer sucked — stop answering like this"));
+    turn.appendChild(teach);
+  }
+  mount.appendChild(turn);
 }
 // F4: expandable context detail — lists the actual memory/artifact/chat items the server loaded.
 function toggleCtxDetail(turn, anchor, ci) {
@@ -801,34 +821,17 @@ function toggleCtxDetail(turn, anchor, ci) {
   d.textContent = lines.length ? lines.join("\n") : "(nothing was loaded)";
   anchor.after(d);
 }
-// F1 (item 24): Save lesson — pick where it lands: failure ledger / eval case / prompt rule.
-async function saveLesson(i) {
-  const c = cur(); if (!c || !c.messages[i]) return;
-  const answer = c.messages[i].content, orig = precedingUser(c, i);
-  const kind = (await askText({ kicker: "Teach Dominion", title: "Save this lesson as…", multiline: false, value: "failure",
-    hint: "Type one: failure (log what went wrong), eval (a re-runnable test), or rule (a standing instruction).", saveLabel: "Continue" }) || "").trim().toLowerCase();
-  if (!kind) return;
-  if (kind.startsWith("f")) {
-    const note = await askText({ kicker: "Failure ledger", title: "The lesson", placeholder: "What should have happened instead…",
-      hint: "This is filed against the answer above so the model learns from it." }); if (note == null) return;
-    const r = await aApi("/ledger", { category: "manual", severity: "low", originalRequest: orig.slice(0, 2000), flawedOutput: answer.slice(0, 4000), correctedOutput: note.trim(), detectedBy: "user" });
-    alert(r.item ? "Lesson logged to the failure ledger." : "Ledger: " + (r.error || "failed"));
-  } else if (kind.startsWith("e")) {
-    await convertToEval(i);
-  } else if (kind.startsWith("r")) {
-    const t = await askText({ kicker: "Standing rule", title: "A rule the assistant should follow", placeholder: "A compact instruction…" }); if (t == null || !t.trim()) return;
-    const r = await aApi("/rules", { content: t.trim(), scope: "global", status: "candidate" });
-    alert(r.item ? "Saved as a candidate rule — test/activate it in Mentor & Improvement." : "Rule: " + (r.error || "failed"));
-  } else alert("Unknown kind — use failure, eval, or rule.");
-}
-// F1 (item 25): Convert to eval — the preceding user prompt becomes the eval input.
-async function convertToEval(i) {
-  const c = cur(); if (!c || !c.messages[i]) return;
-  const orig = precedingUser(c, i) || c.messages[i].content;
-  const exp = await askText({ kicker: "Evaluation", title: "Expected behavior", placeholder: "What a good answer must do…" }); if (exp == null) return;
-  const r = await aApi("/evals", { title: orig.replace(/\s+/g, " ").slice(0, 80), input: orig.slice(0, 4000), expectedBehavior: exp, source: "manual" });
-  alert(r.item ? "Eval case saved — run it from Mentor & Improvement." : "Eval: " + (r.error || "failed"));
-}
+/*
+ * Save lesson (F1 item 24) and Convert to eval (item 25) lived here until 2026-08-08. Both asked
+ * the reader to do the distilling — type the lesson, name the expected behaviour, choose between a
+ * ledger entry, an eval case and a rule — and both are replaced by the two teaching buttons, which
+ * ask for a thumb and let Opus 5 write the lesson. Fred: "Save lesson and evaluation buttons can be
+ * removed." Their server routes (/ledger, /evals, /rules) are untouched and still drive the Mentor
+ * & Improvement panel; only these two per-message shortcuts are gone.
+ */
+// The owner flag arrives asynchronously with the model catalog, so the action row asks at render
+// time and the app re-renders once the answer lands (see the dominion-owner-known listener below).
+const isOwnerNow = () => window.dominionIsOwner === true;
 /*
  * The ledger rail: which engine each stretch of the transcript ran on.
  *
@@ -2862,16 +2865,131 @@ async function saveAsArtifact(content) {
 const escapeHtml = (s) => String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 // F1 (item 23): taskType picks the lens — the default full critique or the distinct
 // hallucination_check (the server maps it to the factual-review specialist rubric).
-async function critiqueMessage(i, taskType = "answer_review") {
+/*
+ * ONE TAP TEACHES IT SOMETHING (Fred, 2026-08-08).
+ *
+ * The button reports what happened where the thumb was pressed rather than in a toast at the other
+ * end of the screen, because the guest who pressed it wants to know their tap landed. The lesson
+ * Opus 5 wrote is shown back to them: it is what the assistant will carry forward, and a person who
+ * can see it can tell Fred when it is wrong.
+ */
+async function teachFromMessage(i, kind, row) {
+  const c = cur(); if (!c || !c.messages[i]) return;
+  const answer = c.messages[i].content, orig = precedingUser(c, i);
+  if (!String(answer || "").trim()) return;
+  const buttons = Array.from(row.querySelectorAll("button"));
+  buttons.forEach((b) => { b.disabled = true; });
+  const note = document.createElement("span");
+  note.className = "teachnote"; note.textContent = "Reading that answer… (~10s)";
+  row.appendChild(note);
+  try {
+    const d = await aApi("/feedback/react", { kind, question: orig, answer });
+    if (!d || d.ok !== true) {
+      note.className = "teachnote teachnote-warn";
+      note.textContent = (d && d.error) || "That did not go through.";
+      buttons.forEach((b) => { b.disabled = false; });
+      return;
+    }
+    note.className = "teachnote teachnote-ok";
+    // The owner's lands immediately; a guest's waits for him. Say which, so nobody is left guessing
+    // whether a tap did anything.
+    note.textContent = (d.applied ? "Learned: " : "Sent to Fred to approve: ") + (d.lesson || "noted")
+      + (d.remaining != null ? `  ·  ${d.remaining} left today` : "");
+  } catch (e) {
+    note.className = "teachnote teachnote-warn";
+    note.textContent = "That did not go through.";
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+  scroll();
+}
+
+/*
+ * Critique and Inspect, rebuilt as ADVERSARIAL reviews on Opus 5 (Fred, 2026-08-08). Both used to
+ * call the mentor for a score out of ten; the mentor still runs automatically elsewhere, but these
+ * two buttons now assume Fred is dissatisfied and go looking for the reason:
+ *
+ *   critique — is the ANSWER unsuitable, irrelevant, or incomplete (a communication lens)
+ *   inspect  — is the APPROACH or the CODE wrong, and what is the concrete fix (a technical lens)
+ *
+ * Each also distils one standing lesson, which lands in the review queue at global scope — his
+ * ruling is that an approved one applies to his account and to every guest at once, so it waits for
+ * a deliberate yes rather than applying itself.
+ */
+async function critiqueMessage(i, kind = "critique") {
   const c = cur(); if (!c || !c.messages[i]) return;
   const answer = c.messages[i].content; const orig = precedingUser(c, i);
   const card = document.createElement("div"); card.className = "critique";
-  card.textContent = (taskType === "hallucination_check" ? "🔎 Checking for hallucinations…" : "🎓 Mentor reviewing…") + " (~15s)";
+  card.textContent = (kind === "inspect" ? "🔎 Tearing into the approach and the code…" : "⚔ Looking for what is wrong with that answer…") + " (~20s)";
   wrap.appendChild(card); scroll();
   try {
-    const d = await aApi("/mentor/review", { content: answer, originalRequest: orig, taskType, privacyMode: settings.privacy || "redacted_external", chatId: c.id });
-    renderCritiqueCard(card, d.critique || {}, orig, answer, { reviewId: d.reviewId, ledgerId: d.ledgerId, taskType });
-  } catch { card.textContent = "Mentor review failed."; }
+    const d = await aApi("/feedback/report", { kind, question: orig, answer });
+    if (!d || d.ok !== true) { card.textContent = (d && d.error) || "The review did not come back."; return; }
+    renderReportCard(card, d);
+  } catch { card.textContent = "The review did not come back."; }
+}
+
+function renderReportCard(card, d) {
+  card.innerHTML = "";
+  const head = document.createElement("div"); head.className = "crhead";
+  head.appendChild(Object.assign(document.createElement("span"), { className: "scorepill", textContent: d.kind === "inspect" ? "INSPECT" : "CRITIQUE" }));
+  head.appendChild(Object.assign(document.createElement("span"), { className: "crsec", textContent: "adversarial · " + (d.model || "opus 5") }));
+  const x = document.createElement("button"); x.className = "act"; x.textContent = "✕"; x.title = "Dismiss"; x.style.marginLeft = "auto";
+  x.onclick = () => { card.remove(); if (d.id) aApi("/feedback/decide", { id: d.id, action: "later" }).catch(() => {}); };
+  head.appendChild(x); card.appendChild(head);
+
+  const block = (label, text) => {
+    if (!text) return;
+    const el = document.createElement("div"); el.className = "crsec";
+    el.innerHTML = "<b>" + label + ":</b> ";
+    const body = document.createElement("div");
+    if (window.DominionMarkdown) window.DominionMarkdown.renderInto(body, text); else body.textContent = text;
+    el.appendChild(body); card.appendChild(el);
+  };
+  block("Findings", d.report);
+  block("Proposed fix", d.fix);
+
+  if (d.lesson) {
+    const l = document.createElement("div"); l.className = "crsec";
+    l.innerHTML = "<b>Lesson:</b> " + escapeHtml(d.lesson) + (d.why ? "<br><span class='crwhy'>" + escapeHtml(d.why) + "</span>" : "");
+    card.appendChild(l);
+    const row = document.createElement("div"); row.className = "cand";
+    row.appendChild(Object.assign(document.createElement("span"), { textContent: "Apply this everywhere — your account and every guest" }));
+    const decide = (action, label) => {
+      const b = document.createElement("button"); b.textContent = label;
+      b.onclick = async () => {
+        row.querySelectorAll("button").forEach((x2) => { x2.disabled = true; });
+        try {
+          const r = await aApi("/feedback/decide", { id: d.id, action });
+          b.textContent = r && r.ok ? (action === "approve" ? "live everywhere ✓" : action === "deny" ? "discarded" : "saved for later") : (r && r.error) || "failed";
+        } catch { b.textContent = "failed"; }
+      };
+      return b;
+    };
+    row.append(decide("approve", "Approve"), decide("deny", "Deny"), decide("later", "Decide later"));
+    card.appendChild(row);
+  }
+
+  /*
+   * The dispatch button. It is the only control in the app that can start a build and a deploy from
+   * a single tap, so it asks first — the server refuses without an explicit confirm, and this is
+   * the confirmation that produces it.
+   */
+  if (d.kind === "inspect" && (d.fix || d.report)) {
+    const row = document.createElement("div"); row.className = "cand";
+    row.appendChild(Object.assign(document.createElement("span"), { textContent: "🛠 Send this to Claude Code to fix and deploy" }));
+    const b = document.createElement("button"); b.textContent = "Fix & deploy";
+    b.onclick = async () => {
+      if (!confirm("This queues a real work order: Claude Code will verify the finding against the code, make the change, run the tests, and deploy if they pass. It snapshots first and is rollback-able from the Forge.\n\nDispatch it?")) return;
+      b.disabled = true; b.textContent = "dispatching…";
+      try {
+        const r = await aApi("/feedback/dispatch-fix", { confirm: true, report: d.report, fix: d.fix, title: "Dominion fix from Inspect" });
+        b.textContent = r && r.ok ? "queued ✓" : (r && r.error) || "failed";
+        if (r && r.note) row.appendChild(Object.assign(document.createElement("span"), { className: "crwhy", textContent: r.note }));
+      } catch { b.textContent = "failed"; b.disabled = false; }
+    };
+    row.appendChild(b); card.appendChild(row);
+  }
+  scroll();
 }
 function renderCritiqueCard(card, c, orig, answer, ids = {}) {
   card.innerHTML = "";
@@ -3197,6 +3315,93 @@ if (personaBtn) {
   pdistill.addEventListener("click", distillProfile);
   pfilterKind.addEventListener("change", loadPersonaList);
 }
+/*
+ * ---- THE REVIEW QUEUE, AT THE DOOR (Fred, 2026-08-08) ------------------------------------------
+ *
+ * "These distillations must be compiled in a file that is triggered when I open Dominion AI so that
+ * I may review them. I approve, deny-then the approvals become incorporated into the prompt cache
+ * for that user."
+ *
+ * So it opens itself, once, when he arrives and something is waiting. Nothing here carries a uid or
+ * an email: the server hands back an anonymous projection (feedback.pending()), and this only
+ * renders what it is given — the lesson, why it matters, and whether approving it would touch one
+ * account or all of them. "Decide later" leaves the item in the queue so it comes back next time,
+ * which is the third button he asked for.
+ */
+let feedbackPanelShown = false;
+async function openFeedbackReview(force = false) {
+  if (!isOwnerNow()) return;
+  if (feedbackPanelShown && !force) return;
+  let data;
+  try { data = await aApi("/feedback/pending"); } catch { return; }
+  const rows = (data && data.pending) || [];
+  if (!rows.length && !force) return;
+  feedbackPanelShown = true;
+
+  const back = document.createElement("div"); back.className = "modal fbmodal";
+  const box = document.createElement("div"); box.className = "fbbox";
+  const close = () => back.remove();
+
+  const head = document.createElement("div"); head.className = "fbhead";
+  head.appendChild(Object.assign(document.createElement("div"), { className: "fbkick", textContent: "Learned from your users" }));
+  head.appendChild(Object.assign(document.createElement("h2"), { className: "fbtitle", textContent: rows.length ? `${rows.length} lesson${rows.length === 1 ? "" : "s"} waiting on you` : "Nothing waiting" }));
+  head.appendChild(Object.assign(document.createElement("p"), { className: "fbnote",
+    textContent: "Distilled by Claude Opus 5 from the thumbs people pressed. No account details are shown here by design — just the lesson and what it would change." }));
+  box.appendChild(head);
+
+  const list = document.createElement("div"); list.className = "fblist";
+  for (const r of rows) {
+    const item = document.createElement("div"); item.className = "fbitem";
+    const tag = document.createElement("div"); tag.className = "fbtags";
+    const kindLabel = { positive: "👍 do more of this", negative: "👎 stop doing this", critique: "⚔ critique", inspect: "🔎 inspect" }[r.kind] || r.kind;
+    tag.appendChild(Object.assign(document.createElement("span"), { className: "fbtag", textContent: kindLabel }));
+    tag.appendChild(Object.assign(document.createElement("span"), { className: "fbtag " + (r.scope === "global" ? "fbtag-global" : ""), textContent: r.scope === "global" ? "would apply to everyone" : "one account" }));
+    if (r.status === "later") tag.appendChild(Object.assign(document.createElement("span"), { className: "fbtag", textContent: "deferred" }));
+    item.appendChild(tag);
+    item.appendChild(Object.assign(document.createElement("div"), { className: "fblesson", textContent: r.lesson }));
+    if (r.why) item.appendChild(Object.assign(document.createElement("div"), { className: "fbwhy", textContent: r.why }));
+    const btns = document.createElement("div"); btns.className = "fbbtns";
+    const act = (action, label) => {
+      const b = document.createElement("button"); b.className = "act"; b.textContent = label;
+      b.onclick = async () => {
+        btns.querySelectorAll("button").forEach((x) => { x.disabled = true; });
+        try {
+          const out = await aApi("/feedback/decide", { id: r.id, action });
+          item.classList.add("fbdone");
+          btns.innerHTML = "";
+          btns.appendChild(Object.assign(document.createElement("span"), { className: "fbwhy",
+            textContent: out && out.ok
+              ? (action === "approve" ? (r.scope === "global" ? "Live for you and every guest." : "Live on that account.") : action === "deny" ? "Discarded." : "Kept for next time.")
+              : (out && out.error) || "That did not go through." }));
+        } catch {
+          btns.querySelectorAll("button").forEach((x) => { x.disabled = false; });
+        }
+      };
+      return b;
+    };
+    btns.append(act("approve", "Approve"), act("deny", "Deny"), act("later", "Decide later"));
+    item.appendChild(btns);
+    list.appendChild(item);
+  }
+  if (!rows.length) list.appendChild(Object.assign(document.createElement("div"), { className: "fbwhy", textContent: "Nothing is waiting. Lessons appear here when someone presses a thumb." }));
+  box.appendChild(list);
+
+  const foot = document.createElement("div"); foot.className = "fbfoot";
+  const file = document.createElement("a"); file.className = "act"; file.href = "/feedback/file"; file.target = "_blank"; file.rel = "noopener"; file.textContent = "Open the compiled file";
+  const done = document.createElement("button"); done.className = "act"; done.textContent = "Done";
+  done.onclick = close;
+  foot.append(file, done);
+  box.appendChild(foot);
+  back.appendChild(box);
+  back.addEventListener("click", (e) => { if (e.target === back) close(); });
+  document.body.appendChild(back);
+}
+// The owner flag lands with the model catalog, after first paint. That event is both the cue to
+// re-render the action rows (Critique/Inspect only exist for him) and the cue to check the queue.
+document.addEventListener("dominion-owner-known", () => {
+  try { renderAll(); } catch {}
+  setTimeout(() => { openFeedbackReview().catch(() => {}); }, 1200);
+});
 iaddbtn.addEventListener("click", addImprove);
 document.querySelectorAll(".itab").forEach((el) => el.addEventListener("click", () => setITab(el.dataset.tab)));
 personaSel.addEventListener("change", () => { personaCustom.hidden = personaSel.value !== "custom"; });
