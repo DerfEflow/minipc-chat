@@ -401,13 +401,43 @@
     beginDialog("release", sheet);
   }
 
-  // ---- One-time install prompt (shown after the tutorial, never while installed) ----
+  /* ---- Installing the app ------------------------------------------------------------------
+   *
+   * Two surfaces, because a one-time card is not the same thing as being findable (Fred,
+   * 2026-08-08: "I was hoping this would install like it does on the phone").
+   *
+   *   maybeShowInstall()  the original nudge: once, after the tutorial, then never again.
+   *   installEntryPoint() a permanent button in the rail that is there whenever the app is not
+   *                       already installed — which is what "make it visible" actually needs.
+   *
+   * The dismissal flag deliberately governs only the nudge. Someone who pressed "Not now" months
+   * ago had no way back to installing at all, and the desktop story suffered worst: Chrome fires
+   * beforeinstallprompt only after its own engagement heuristics are satisfied, so on a laptop the
+   * card frequently never appeared in the first place and the app looked mobile-only. The button
+   * below is always there, and when the browser has given us no prompt to fire it explains the
+   * manual route for that browser rather than doing nothing.
+   */
   const INSTALL_LS = "dominion.installNudge.v1";
   let installPrompt = null;
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
     installPrompt = event;
     maybeShowInstall();
+    syncInstallEntry();     // the permanent button becomes a real one-click install the moment we can
+  });
+  /*
+   * Chrome fires this when the install completes, including from its own address-bar icon.
+   *
+   * It has to be recorded as a FACT rather than deferred to isInstalled(), because the tab you
+   * installed from is not the installed app: Chrome opens the app in a new standalone window and
+   * leaves the original tab an ordinary tab, still reporting display-mode "browser". Asking
+   * isInstalled() here would therefore answer "no" immediately after a successful install, and the
+   * button would sit there inviting you to do the thing you just did. Caught in the browser rather
+   * than reasoned about — the first version of this did exactly that.
+   */
+  let installedThisSession = false;
+  window.addEventListener("appinstalled", () => {
+    installPrompt = null; installedThisSession = true; installDone(); syncInstallEntry();
   });
   const isInstalled = () => window.matchMedia?.("(display-mode: standalone)").matches || window.navigator.standalone === true;
   const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
@@ -447,8 +477,86 @@
     state.layer.append(card);
   }
 
+  /*
+   * THE PERMANENT ENTRY POINT. Lives in the rail beside the Setup door, so it is somewhere a person
+   * would look rather than somewhere they had to be standing when a card happened to fire.
+   *
+   * It removes itself once the app is installed (both the display-mode check and Chrome's
+   * appinstalled event), so it never advertises something already done.
+   */
+  function installEntryPoint() {
+    if (isInstalled() || installedThisSession) return null;
+    let el = document.getElementById("dt-install-entry");
+    if (el) return el;
+    const rail = document.getElementById("sidebar");
+    const anchor = document.getElementById("sb-setup");
+    if (!rail || !anchor) return null;
+    el = document.createElement("button");
+    el.id = "dt-install-entry";
+    el.type = "button";
+    el.className = "sb-install";
+    el.innerHTML = '<span class="sb-install-core" aria-hidden="true"></span><span>Install Dominion AI as an app</span>';
+    el.addEventListener("click", () => openInstallHelp());
+    anchor.insertAdjacentElement("beforebegin", el);
+    return el;
+  }
+  function syncInstallEntry() {
+    const el = document.getElementById("dt-install-entry");
+    if (isInstalled() || installedThisSession) { if (el) el.remove(); return; }
+    installEntryPoint();
+  }
+
+  /*
+   * One click, three outcomes, because the browsers genuinely differ and a button that silently
+   * does nothing on two of them is worse than no button:
+   *   Chrome/Edge with a captured prompt -> the real install dialog, one click, done.
+   *   iOS Safari                         -> the Share-sheet route, which is the only route there.
+   *   anything else (incl. Chrome before its engagement heuristics fire) -> name the menu item to
+   *                                         look for, rather than pretending nothing is possible.
+   */
+  async function openInstallHelp() {
+    if (installPrompt) {
+      const p = installPrompt; installPrompt = null;
+      try { p.prompt(); await p.userChoice; } catch {}
+      installDone(); syncInstallEntry();
+      return;
+    }
+    ensureLayer();
+    const existing = document.querySelector(".dt-install");
+    if (existing) existing.remove();
+    const card = node("div", "dt-install");
+    const copy = node("div", "dt-install-copy");
+    const ua = navigator.userAgent;
+    const edge = /edg\//i.test(ua);
+    const chromeish = /chrome|chromium|crios/i.test(ua) && !edge;
+    copy.append(node("b", "", "Install Dominion AI"));
+    if (isIos()) {
+      copy.append(node("span", "", 'Tap the Share button (the square with the arrow pointing up), then choose "Add to Home Screen".'));
+    } else if (chromeish || edge) {
+      // The address-bar icon is always available on desktop Chromium even when beforeinstallprompt
+      // has not fired, so this is a real instruction rather than a consolation message.
+      copy.append(node("span", "", edge
+        ? 'Open the ••• menu, choose Apps, then "Install this site as an app".'
+        : 'Click the install icon in the address bar (a screen with a downward arrow, at the right-hand end), or open the ⋮ menu and choose "Cast, save and share" then "Install page as app".'));
+      copy.append(node("span", "", "It opens in its own window with an icon, exactly like the phone."));
+    } else {
+      copy.append(node("span", "", "This browser does not offer app installation. Chrome or Edge on a computer, or Safari on an iPhone, will."));
+    }
+    const actions = node("div", "dt-install-actions");
+    const got = node("button", "dt-primary-button", "Got it");
+    got.type = "button";
+    got.addEventListener("click", () => card.remove());
+    actions.append(got);
+    card.append(copy, actions);
+    state.layer.append(card);
+  }
+
   async function runInit() {
     ensureLayer();
+    // The rail button does not wait on the account call: installing the app is the same act for
+    // everyone and needs no identity, and a guest whose /account request is slow or refused should
+    // still be able to install. Every early return below this line would otherwise skip it.
+    syncInstallEntry();
     let account;
     try { account = await api("/account"); }
     catch (error) {
@@ -498,5 +606,12 @@
 
   // showRelease is exported so the notes can be reopened after they are dismissed (and so they can
   // be demonstrated on request). Appending ?whats-new to the URL forces them for the same reason.
-  window.DominionTenant = Object.freeze({ init, showRelease: () => { ensureLayer(); showReleaseNotes(); } });
+  window.DominionTenant = Object.freeze({
+    init,
+    showRelease: () => { ensureLayer(); showReleaseNotes(); },
+    // Exported so any surface can offer installation without duplicating the browser branching —
+    // the Setup page's Forge section uses it to say "you may not need to install anything at all".
+    showInstall: () => openInstallHelp(),
+    isInstalled,
+  });
 })();
