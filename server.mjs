@@ -7601,6 +7601,63 @@ async function handleFireAlarm(req, res) {
   return json(200, { ok: true, turns, machineJobs: machines.killed, nodes: machines.nodes, scope: T.isOwner ? "everything" : "your own sessions and machine" });
 }
 
+/*
+ * GET /api/simplify/attach?task=<id>&from=<n> — catch-up replay for a Simplify turn.
+ *
+ * Simpler than /chat/attach because the kernel has no RAM tail to reconcile: simplify.mjs flushes
+ * each frame as it streams, so the durable rows ARE the whole story and a replay is a plain read.
+ *
+ * Vocabulary translation happens here, once. Storage uses the kernel's {type:"token", delta} so
+ * token runs coalesce into single rows; the wire has always spoken {type:"delta", text}. Doing the
+ * translation server-side means dominion-simplify.js keeps exactly one vocabulary and an older
+ * client mid-rollover is unaffected.
+ *
+ * If `from` lands inside a coalesced row we cannot split it, so we tell the client to reset and
+ * replay whole. Correct, just a bigger catch-up, and the same choice /chat/attach makes.
+ */
+function handleSimplifyAttach(req, res, u) {
+  const T = resolveTenant(req);
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
+  const write = (o) => { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
+  const id = String(u.searchParams.get("task") || "");
+  const from = Math.max(0, Math.floor(Number(u.searchParams.get("from")) || 0));
+  const row = id ? tasks.get(id) : null;
+  // A foreign task must be indistinguishable from a nonexistent one: same reply, no probing.
+  if (!row || row.kind !== "simplify" || (T.role === "anon") || (!T.isOwner && row.uid !== T.uid)) {
+    write({ type: "gone" });
+    return res.end();
+  }
+  const toWire = (ev) => (ev && ev.type === "token" ? { type: "delta", text: ev.delta || "" } : ev);
+  try {
+    let rows = tasks.replayRows(id, from);
+    if (from > 0 && !(rows.length && rows[0].seq === from)) { write({ type: "reset" }); rows = tasks.replayRows(id, 0); }
+    for (const r of rows) write(toWire(r.ev));
+  } catch { write({ type: "gone" }); return res.end(); }
+  write({ type: "cursor", seq: row.eventCount });
+  // A live turn is still being written by its own request; the client polls back rather than
+  // holding this socket open, which keeps this route a pure read with no listener bookkeeping.
+  if (tasks.TERMINAL.has(row.status)) { write({ type: "done" }); tasks.collect(id); }
+  return res.end();
+}
+
+/*
+ * GET /api/simplify/tasks — the caller's own Simplify turns worth acting on: anything still live
+ * (reattach it) and anything that finished unseen (deliver it). This is what lets a user who
+ * closed the panel mid-answer come back to a finished reply instead of an empty box.
+ */
+function handleSimplifyTasks(req, res) {
+  const T = resolveTenant(req);
+  if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
+  let live = [], unseen = [];
+  try {
+    live = tasks.liveFor(T.uid).filter((r) => r.kind === "simplify");
+    unseen = tasks.unseenFor(T.uid, 10).filter((r) => r.kind === "simplify");
+  } catch {}
+  const shape = (r) => ({ id: r.id, status: r.status, title: r.title, startedAt: r.startedAt,
+                          endedAt: r.endedAt, eventCount: r.eventCount });
+  return sjson(res, 200, { live: live.map(shape), unseen: unseen.map(shape) });
+}
+
 // GET /chat/attach?job=<id>&from=<n> — SSE catch-up + live-tail, in one of three modes:
 //   1. RAM job, cursor within the tail: exact index-for-index replay, then live-tail (the fast
 //      path every quick reconnect takes — byte-identical to the original contract).
@@ -10761,6 +10818,8 @@ const server = http.createServer(async (req, res) => {
       // caller, so a Simplify turn survives the panel closing and reattaches to the right person.
       return simplifyChat(req, res, { onTurnBilled: simplifyBilling(T), tasks, tenant: T });
     }
+    if (path === "/api/simplify/attach" && req.method === "GET") return handleSimplifyAttach(req, res, u);
+    if (path === "/api/simplify/tasks" && req.method === "GET") return handleSimplifyTasks(req, res);
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
     if (path === "/chat/fire-alarm" && req.method === "POST") return handleFireAlarm(req, res);
     if (path === "/chat/attach" && req.method === "GET") return handleChatAttach(req, res, u);

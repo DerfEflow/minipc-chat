@@ -262,6 +262,29 @@ await t("closing the panel no longer kills the answer, and no longer makes it fr
     "the simplify kind must be registered so its notification knows where to link back");
 });
 
+/* ---- the answer is reachable again after the panel closed ------------------------------------ */
+await t("attach replays a Simplify turn, and cannot be pointed at someone else's", () => {
+  const server = readFileSync(new URL("./server.mjs", import.meta.url), "utf8");
+
+  assert.match(server, /path === "\/api\/simplify\/attach"/, "a returning client needs a catch-up route");
+  assert.match(server, /path === "\/api\/simplify\/tasks"/, "and a way to discover which turn to reattach to");
+
+  const fn = server.slice(server.indexOf("function handleSimplifyAttach"));
+  const body = fn.slice(0, fn.indexOf("\nfunction "));
+
+  // Identity scoping is the whole ballgame: a Simplify turn is somebody's private conversation.
+  assert.match(body, /row\.uid !== T\.uid/, "a caller must not attach to another user's turn");
+  assert.match(body, /role === "anon"/, "an anonymous caller must not attach at all");
+  // A foreign id and a nonexistent id must be indistinguishable, or the route becomes an oracle
+  // for whether a given task id exists.
+  const goneBranch = body.slice(body.indexOf("if (!row"), body.indexOf("const toWire"));
+  assert.match(goneBranch, /type: "gone"/, "foreign and unknown must give the same answer");
+
+  // Storage speaks token/delta so runs coalesce; the wire has always spoken delta/text.
+  assert.match(body, /type === "token".*type: "delta"/s, "the route must translate storage shape back to the wire shape");
+  assert.match(body, /type: "reset"/, "a cursor landing inside a coalesced row must force a clean replay");
+});
+
 // ---- summary ---------------------------------------------------------------------------------
 /*
  * This block lives at the END of the file, and that matters. It used to sit above the billing and
