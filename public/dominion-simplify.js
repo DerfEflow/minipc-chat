@@ -22,6 +22,7 @@
   const LS_LINE = "dominion.simplify.lineColor";
   const LS_TEXT = "dominion.simplify.textColor";
   const LS_HISTORY = "dominion.simplify.history";
+  const LS_TASK = "dominion.simplify.task";
   const DEFAULT_LINE = "#39ff14";
   const DEFAULT_TEXT = "#6bffc3";
   const ENDPOINT = "/api/simplify/chat";
@@ -32,6 +33,8 @@
   let history = [];       // [{role: "user"|"assistant", content: string}]
   let sending = false;
   let currentAbort = null;
+  let activeTaskId = null;
+  let resumeTimer = null;
 
   const esc = (s) => String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -136,7 +139,12 @@
               if (!m) continue;
               let evt;
               try { evt = JSON.parse(m[1]); } catch { continue; }
-              if (evt.type === "delta" && typeof evt.text === "string") {
+              if (evt.type === "task" && evt.id) {
+                // The server opened a durable record for this turn. Remember it, so closing the
+                // panel or reloading the page can rejoin the answer instead of losing it.
+                activeTaskId = String(evt.id);
+                try { localStorage.setItem(LS_TASK, activeTaskId); } catch {}
+              } else if (evt.type === "delta" && typeof evt.text === "string") {
                 assistantText += evt.text;
                 assistantEl.textContent = assistantText;
                 assistantEl.appendChild(cursor);
@@ -170,6 +178,107 @@
       if (!sawError && assistantText) { history.push({ role: "assistant", content: assistantText }); persistHistory(); }
       input.focus();
     }
+  }
+
+  /*
+   * ---- rejoining an answer that kept working without you ----------------------------------------
+   *
+   * A Simplify turn is a durable task server-side, so closing the panel, switching to the Crucible,
+   * or reloading the page no longer ends it. These three functions are how the answer finds its way
+   * back to the person who asked for it.
+   *
+   * Replay is always from zero and REPLACES the rendered text, rather than splicing from an offset.
+   * The main chat does the harder incremental thing because an 18-hour run cannot be re-sent; a
+   * Simplify answer is one capped Haiku reply, so replaying it whole costs nothing and removes the
+   * entire class of bug where a cursor lands mid-token-run and the text silently corrupts.
+   */
+  async function readSse(url, onEvent) {
+    const res = await fetch(url, { headers: { accept: "text/event-stream" } });
+    if (!res.ok || !res.body) return false;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of frame.split("\n")) {
+          const m = /^data:\s?(.*)$/.exec(line.trim());
+          if (!m) continue;
+          let evt; try { evt = JSON.parse(m[1]); } catch { continue; }
+          onEvent(evt);
+        }
+      }
+    }
+    return true;
+  }
+
+  // Widening backoff, then a steady beat. A turn that is still running after two minutes is either
+  // a long answer or a stuck one, and either way there is nothing to gain from asking every second.
+  const RESUME_DELAYS = [1200, 2500, 5000, 9000, 15000];
+  const resumeDelay = (attempt) => RESUME_DELAYS[Math.min(attempt, RESUME_DELAYS.length - 1)];
+
+  async function resumeTask(id, attempt = 0) {
+    if (!id) return;
+    let el = document.querySelector("#simplify-feed .simplify-resumed");
+    if (!el) { el = addTurn("assistant", ""); el.classList.add("simplify-resumed"); }
+    let text = "", terminal = false, gone = false, errored = "";
+    try {
+      const ok = await readSse(`/api/simplify/attach?task=${encodeURIComponent(id)}&from=0`, (evt) => {
+        if (evt.type === "delta" && typeof evt.text === "string") text += evt.text;
+        else if (evt.type === "gone") { gone = true; terminal = true; }
+        else if (evt.type === "done") terminal = true;
+        else if (evt.type === "error") errored = evt.message || "That answer did not finish.";
+        else if (evt.type === "reset") text = "";
+      });
+      if (!ok) throw new Error("attach unavailable");
+    } catch {
+      // The network, not the task. Keep trying: the answer is safe on the server either way.
+      resumeTimer = setTimeout(() => resumeTask(id, attempt + 1), resumeDelay(attempt));
+      return;
+    }
+
+    if (gone) { clearActiveTask(); el.remove(); return; }
+    if (text) { el.textContent = text; scrollFeedToBottom(); }
+
+    if (!terminal) {
+      resumeTimer = setTimeout(() => resumeTask(id, attempt + 1), resumeDelay(attempt));
+      return;
+    }
+    el.classList.remove("simplify-resumed");
+    if (errored && !text) { el.classList.add("simplify-error"); el.textContent = errored; }
+    else if (text) { history.push({ role: "assistant", content: text }); persistHistory(); }
+    clearActiveTask();
+  }
+
+  function clearActiveTask() {
+    activeTaskId = null;
+    if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
+    try { localStorage.removeItem(LS_TASK); } catch {}
+  }
+
+  /*
+   * On open, the SERVER is the authority on what is outstanding, not localStorage. A turn started
+   * on the phone and finished while the laptop was closed is invisible to this device's storage,
+   * and that is exactly the case worth handling. The stored id is only a fast path for the common
+   * same-device reopen.
+   */
+  async function reconcileTasks() {
+    if (sending) return;
+    let stored = null;
+    try { stored = localStorage.getItem(LS_TASK); } catch {}
+    let live = [], unseen = [];
+    try {
+      const res = await fetch("/api/simplify/tasks", { headers: { accept: "application/json" } });
+      if (res.ok) { const j = await res.json(); live = j.live || []; unseen = j.unseen || []; }
+    } catch {}
+    const pick = live[0] || unseen[0] || (stored ? { id: stored } : null);
+    if (pick && pick.id) resumeTask(pick.id, 0);
+    else if (stored) clearActiveTask();
   }
 
   function buildPanel() {
@@ -236,12 +345,22 @@
       root.classList.add("simplify-open");
       input.focus();
     }));
+    // Anything still running, or finished while this panel was shut, comes home now.
+    void reconcileTasks();
   }
 
   function close() {
     if (!root) return;
     root.classList.remove("simplify-open");
-    if (currentAbort) { try { currentAbort.abort(); } catch {} }
+    /*
+     * Closing the panel used to abort the in-flight turn, which was the client half of the same
+     * bug the server had: the answer died, the partial text went with it, and the turn was never
+     * billed. The turn now runs to completion server-side and this just stops watching it. The
+     * task id stays in localStorage, so reopening (or reloading, or another device) picks the
+     * answer back up. See handleSimplifyAttach in server.mjs.
+     */
+    if (currentAbort) { try { currentAbort.abort("detach"); } catch {} }
+    if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
     const done = () => { root.hidden = true; };
     let fired = false;
     const onEnd = () => { if (fired) return; fired = true; root.removeEventListener("transitionend", onEnd); done(); };

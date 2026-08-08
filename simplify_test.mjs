@@ -285,6 +285,34 @@ await t("attach replays a Simplify turn, and cannot be pointed at someone else's
   assert.match(body, /type: "reset"/, "a cursor landing inside a coalesced row must force a clean replay");
 });
 
+/* ---- the client rejoins instead of abandoning ------------------------------------------------ */
+await t("the panel stops killing its own answer, and comes back for it", () => {
+  const src = readFileSync(join(__dirname, "public", "dominion-simplify.js"), "utf8");
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+  // The client half of the same bug the server had. close() aborting was why the answer died even
+  // after the server was willing to keep going.
+  // Search forward from close(), not from zero: DominionSimplify is referenced near the top of the
+  // file too, and slicing to that earlier hit yields an empty string that passes every negative
+  // assertion vacuously.
+  const closeAt = code.indexOf("function close()");
+  const closeFn = code.slice(closeAt, code.indexOf("window.DominionSimplify", closeAt));
+  assert.ok(closeFn.length > 100, "failed to isolate close() — this test would otherwise pass on nothing");
+  assert.ok(!/currentAbort\.abort\(\)\s*;/.test(closeFn),
+    "closing the panel must detach, not abort the turn");
+  assert.match(closeFn, /abort\("detach"\)/, "the abort reason must mark this as a detach");
+
+  // The task id has to be captured and persisted or there is nothing to come back to.
+  assert.match(code, /evt\.type === "task"/, "the client must capture the durable task id");
+  assert.match(code, /localStorage\.setItem\(LS_TASK/, "the id must survive a page reload");
+
+  // Reattach on open, with the server as the authority rather than this device's storage.
+  assert.match(code, /function reconcileTasks/, "opening the panel must look for unfinished work");
+  assert.match(code, /\/api\/simplify\/tasks/, "the server decides what is outstanding, not localStorage");
+  assert.match(code, /\/api\/simplify\/attach\?task=/, "and the answer is fetched back by task id");
+  assert.match(code, /RESUME_DELAYS/, "polling must back off rather than hammer");
+});
+
 // ---- summary ---------------------------------------------------------------------------------
 /*
  * This block lives at the END of the file, and that matters. It used to sit above the billing and
