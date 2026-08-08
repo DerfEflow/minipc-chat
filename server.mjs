@@ -5901,6 +5901,18 @@ async function handleConnectors(req, res, u) {
     }
     if (req.method === "GET" && oauthMatch[2] === "callback") {
       const r = await prov.handleCallback(u.searchParams);
+      /*
+       * Connecting IS consenting to use it (guest report, 2026-08-08): a guest who just walked the
+       * OAuth consent screen believed the connector was live, but the token landed with the switch
+       * still off and no Google tool ever reached his chats. First successful connect now flips the
+       * switch for the account the SIGNED state named (the same identity the token was saved
+       * under), unless that account explicitly turned this connector off before. The guest wall
+       * still applies inside enableIfUnset via usable().
+       */
+      if (r.ok && r.uid) {
+        const CT = r.uid === "owner" ? { isOwner: true, uid: "owner" } : { isOwner: false, uid: r.uid };
+        try { connectors.enableIfUnset(CT, oauthMatch[1]); } catch (e) { console.log("[connectors] enable-after-connect failed: " + (e && e.message)); }
+      }
       res.writeHead(302, { location: "/setup?" + oauthMatch[1] + "=" + (r.ok ? "connected" : "error:" + encodeURIComponent(r.error || "failed")) });
       return res.end();
     }

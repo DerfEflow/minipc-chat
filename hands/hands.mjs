@@ -689,6 +689,7 @@ async function localOllamaEmbed(payload) {
 // ---- the dial-out loop: one SSE stream in, results POSTed back --------------------------------
 const log = (m) => console.log(`[hands:${NODE_NAME}] ${m}`);
 let backoffMs = 1000;
+let authFails = 0;                  // consecutive 401/403s from the hub; 3 = the token is dead, stop
 const HEARTBEAT_LAPSE_MS = 50000;   // hub beats every 20s; two misses + slack = dead stream
 
 async function postResult(jobId, result) {
@@ -794,9 +795,14 @@ async function connectOnce() {
       headers: authHeaders({ accept: "text/event-stream" }),
       signal: ac.signal,
     });
-    if (!r.ok) throw new Error("hub refused the stream: HTTP " + r.status);
+    if (!r.ok) {
+      const err = new Error("hub refused the stream: HTTP " + r.status);
+      err.status = r.status;
+      throw err;
+    }
     log("connected to " + HANDS_URL);
     backoffMs = 1000;   // a good connection resets the backoff
+    authFails = 0;      // a good connection proves the token; only consecutive 401/403s count
     const dec = new TextDecoder();
     let buf = "";
     for await (const chunk of r.body) {
@@ -827,7 +833,32 @@ async function main() {
   log(`starting  ·  access=${MAX_ACCESS ? "MAX (all drives minus carve-outs)" : "scoped"}  ·  roots=${ROOTS.join(", ") || "(none)"}  ·  elevated=${ELEVATED}  ·  self-protected dirs=${SELF_PROTECT.length}  ·  platform=${process.platform}`);
   for (;;) {
     try { await connectOnce(); }
-    catch (e) { log(`disconnected: ${e && e.message}`); }
+    catch (e) {
+      log(`disconnected: ${e && e.message}`);
+      /*
+       * A dead token must not retry forever (guest report, 2026-08-08). Every fresh installer
+       * download replaces the account's token, so an older extracted copy turns into a window that
+       * says "connecting" and never will — a silent zombie the user reads as "Dominion keeps
+       * disconnecting me". Three consecutive 401/403s is a settled verdict, not a blip (409 =
+       * another copy of this node is already connected, and 5xx/network errors reset the count):
+       * say what actually happened in plain words and exit 2, which the launcher scripts treat as
+       * "stop relaunching".
+       */
+      if (e && (e.status === 401 || e.status === 403)) {
+        authFails++;
+        if (authFails >= 3) {
+          console.error("");
+          console.error("  Dominion no longer accepts this connection file. That usually means a");
+          console.error("  newer installer was downloaded for this account - each download replaces");
+          console.error("  the one before it. Open Dominion -> Setup -> Your machine, download a");
+          console.error("  fresh installer, and run that one instead.");
+          console.error("");
+          process.exit(2);
+        }
+      } else if (e && e.status !== 409) {
+        authFails = 0;   // non-auth trouble (server restart, network) is not evidence against the token
+      }
+    }
     const jitter = Math.floor(Math.random() * 500);
     await new Promise((r) => setTimeout(r, backoffMs + jitter));
     backoffMs = Math.min(backoffMs * 2, 30000);   // capped, jittered — never a retry storm

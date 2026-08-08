@@ -468,6 +468,27 @@ export function createConnectors({ dir, cfgGet, providers = {} }) {
     if (!on) { const k = cacheKey(T, id); const c = conns.get(k); if (c && c.kind === "stdio" && c.conn) { try { c.conn.child.kill(); } catch {} } conns.delete(k); }
     return { ok: true, enabled: !!on };
   }
+  /*
+   * FIRST SUCCESSFUL SETUP SWITCHES THE CONNECTOR ON (guest report, 2026-08-08). A guest connected
+   * Google on 2026-07-31: the token was saved, the toast said "connected", and the connector then
+   * sat OFF forever, because turning it on was a second, separate switch nobody told him about. Not
+   * one Google tool call ever ran on that account. Custom connectors have always enabled themselves
+   * on add (addCustom below) — this brings providers and keyed connectors to the same rule.
+   *
+   * The guard is deliberate: only an enabled-state that has NEVER been set flips on. An explicit
+   * off (enabled[id] === false) is a person's decision and stays off through any reconnect or
+   * credential update. usable() still runs, so the guest wall and the owner's per-connector guest
+   * flags refuse here exactly as they refuse everywhere else.
+   */
+  function enableIfUnset(T, id) {
+    const s = loadState(T);
+    if ((s.enabled || {})[id] !== undefined) return { ok: true, enabled: !!s.enabled[id], turnedOn: false };
+    const u = usable(T, id);
+    if (!u.ok) return { ok: false, error: u.reason, turnedOn: false };
+    s.enabled = s.enabled || {}; s.enabled[id] = true;
+    saveState(T, s);
+    return { ok: true, enabled: true, turnedOn: true };
+  }
   function setConfig(T, id, fields) {
     const e = entryFor(T, id);
     if (!e || e.builtin || e.pending || e.custom) return { ok: false, error: "no credentials to set here" };
@@ -481,7 +502,9 @@ export function createConnectors({ dir, cfgGet, providers = {} }) {
     }
     saveState(T, s);
     conns.delete(cacheKey(T, id));   // force fresh connection with the new creds
-    return { ok: true, configured: configured(T, id) };
+    const isConfigured = configured(T, id);
+    const on = isConfigured ? enableIfUnset(T, id) : { turnedOn: false };
+    return { ok: true, configured: isConfigured, turnedOn: !!on.turnedOn };
   }
   function addCustom(T, { name, url, token }) {
     name = String(name || "").trim(); url = String(url || "").trim();
@@ -684,5 +707,5 @@ export function createConnectors({ dir, cfgGet, providers = {} }) {
     return typeof v === "string" ? v : "";
   }
 
-  return { listFor, setEnabled, setConfig, addCustom, removeCustom, setGuestAllowed, test, toolDefsFor, disabledFor, run, metaFor, disconnect, provider, secretFor, usable, REGISTRY };
+  return { listFor, setEnabled, setConfig, enableIfUnset, addCustom, removeCustom, setGuestAllowed, test, toolDefsFor, disabledFor, run, metaFor, disconnect, provider, secretFor, usable, REGISTRY };
 }

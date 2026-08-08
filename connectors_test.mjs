@@ -220,6 +220,46 @@ await t("provider disconnect wipes enablement and returns to needs-auth", async 
   assert.equal((await cx2.toolDefsFor(OWNER)).length, 0);
 });
 
+// ---- first successful setup switches the connector on (guest report, 2026-08-08) ----
+const CAROL = { isOwner: false, uid: "u_carol", role: "credit" };
+
+await t("first credential save switches the connector on by itself", async () => {
+  const r = cx.setConfig(CAROL, "zapier", { url: `http://127.0.0.1:${PORT}/mcp`, token: "sesame" });
+  assert.equal(r.ok, true);
+  assert.equal(r.turnedOn, true, "first successful setup reports it switched on");
+  const row = (await cx.listFor(CAROL)).find((x) => x.id === "zapier");
+  assert.equal(row.status, "ready", "no second hidden switch required");
+  assert.equal(await cx.run(CAROL, "cx_zapier__echo_shout", { text: "carol" }), "CAROL!");
+});
+
+await t("an explicit OFF is a decision: credential re-saves never override it", async () => {
+  cx.setEnabled(CAROL, "zapier", false);
+  const r = cx.setConfig(CAROL, "zapier", { url: `http://127.0.0.1:${PORT}/mcp`, token: "sesame" });
+  assert.equal(r.turnedOn, false, "re-save must not flip an explicit off");
+  const row = (await cx.listFor(CAROL)).find((x) => x.id === "zapier");
+  assert.equal(row.status, "off");
+});
+
+await t("enableIfUnset after provider connect turns it on; the guest wall still refuses", async () => {
+  // Owner connects google -> auto-enabled without touching the toggle.
+  connectedSet.add("owner");
+  const on = cx2.enableIfUnset(OWNER, "google");
+  assert.equal(on.turnedOn, true);
+  assert.equal((await cx2.listFor(OWNER)).find((r) => r.id === "google").status, "ready");
+  // A guest connect on a guest-locked provider is refused by the same wall as everywhere else.
+  connectedSet.add("u_carol");
+  const guest = cx2.enableIfUnset(CAROL, "google");
+  assert.equal(guest.ok, false, "google is closed to guests by default in this rig");
+  assert.equal((await cx2.toolDefsFor(CAROL)).length, 0);
+});
+
+await t("disconnect then reconnect auto-enables again (disconnect clears the decision)", async () => {
+  cx2.disconnect(OWNER, "google");
+  connectedSet.add("owner");
+  const again = cx2.enableIfUnset(OWNER, "google");
+  assert.equal(again.turnedOn, true, "a fresh connect after disconnect is a fresh yes");
+});
+
 await t("real google.mjs: authUrl shape + bad-state callback rejected + crypto roundtrip", async () => {
   const crypto = connectorCrypto({ dir: dir2, cfgGet: (k, d) => d });
   const gp = createGoogleProvider({ dir: dir2, cfgGet: (k, d) => ({ GOOGLE_CLIENT_ID: "cid", GOOGLE_CLIENT_SECRET: "sec" }[k] ?? d),

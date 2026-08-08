@@ -72,13 +72,14 @@ function readZipEntries(buf) {
 const { createRequire } = await import("node:module");
 const require = createRequire(import.meta.url);
 
-await t("installer zip: contains all four files, token baked in, no CF fields anywhere", () => {
+await t("installer zip: contains all six files, token baked in, no CF fields anywhere", () => {
   const zip = buildInstallerZip({
     url: "https://app.dominion.tools", token: "dfk_deadbeef", nodeName: "forge-abc12345",
     handsSrc: "// hands.mjs body", snapshotSrc: "// snapshot.mjs body",
   });
   const names = listZip(zip);
-  assert.deepEqual(names.sort(), ["Connect Me To Dominion.bat", "READ ME FIRST.txt", "hands.mjs", "snapshot.mjs"].sort());
+  assert.deepEqual(names.sort(), ["Connect Me To Dominion.bat", "Dominion Forge Quiet Start.cmd", "Stop Auto Connect.bat",
+    "READ ME FIRST.txt", "hands.mjs", "snapshot.mjs"].sort());
   const entries = readZipEntries(zip);
   const bat = entries["Connect Me To Dominion.bat"].toString("utf8");
   assert.match(bat, /HANDS_URL=https:\/\/app\.dominion\.tools/);
@@ -89,6 +90,31 @@ await t("installer zip: contains all four files, token baked in, no CF fields an
   assert.equal(entries["snapshot.mjs"].toString("utf8"), "// snapshot.mjs body");
   const readme = entries["READ ME FIRST.txt"].toString("utf8");
   assert.match(readme, /Extract All/);
+});
+await t("installer zip: the connection survives the daily cycle (auto-start offer + quiet runner + off switch)", () => {
+  const zip = buildInstallerZip({
+    url: "https://app.dominion.tools", token: "dfk_deadbeef", nodeName: "forge-abc12345",
+    handsSrc: "// hands.mjs body", snapshotSrc: "// snapshot.mjs body",
+  });
+  const entries = readZipEntries(zip);
+  const bat = entries["Connect Me To Dominion.bat"].toString("utf8");
+  const quiet = entries["Dominion Forge Quiet Start.cmd"].toString("utf8");
+  const stop = entries["Stop Auto Connect.bat"].toString("utf8");
+  // The main bat offers auto-start (default YES on a timer) and writes the Startup pointer.
+  assert.match(bat, /choice \/c YN \/n \/t 20 \/d Y/);
+  assert.match(bat, /Startup\\Dominion Forge\.cmd/);
+  assert.match(bat, /Dominion Forge Quiet Start\.cmd/);
+  // A dead token (exit 2) is explained in plain words, not silently retried.
+  assert.match(bat, /if errorlevel 2/);
+  assert.match(bat, /newer installer was downloaded/);
+  // The quiet runner has its own creds (Startup does not inherit the bat's env), restarts a crash,
+  // and stops for good on exit 2.
+  assert.match(quiet, /HANDS_TOKEN=dfk_deadbeef/);
+  assert.match(quiet, /:loop/);
+  assert.match(quiet, /if errorlevel 2 exit \/b 2/);
+  assert.match(quiet, /timeout \/t 15/);
+  // The off switch removes exactly the Startup pointer the bat wrote.
+  assert.match(stop, /del "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\Dominion Forge\.cmd"/);
 });
 
 // ---- hub cross-user isolation ----

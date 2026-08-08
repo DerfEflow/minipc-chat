@@ -154,4 +154,14 @@
     scrollbar-width: thin;
     scrollbar-color: rgba(102, 255, 91, .25) transparent;
   }
+  /* The scroller above only helps if the rail's modules KEEP their height. They are flex children
+     of a too-short column, so at 720p-and-under they were each squeezed instead: #chatlist
+     collapsed to an 8px sliver (a guest read that as "my session history is gone" — it was
+     present, 8 pixels tall) and .sb-head crushed the New button's three-line label into
+     overlapping clipped rows that read as gibberish ("START A NEW CONVERSA|OR..."). Modules now
+     refuse to shrink and the rail scrolls, which is what the scroller was for all along. */
+  #sidebar > * { flex-shrink: 0; }
+  /* The archive stays the one compressible region so a short rail is mostly history + doors, but
+     it can never again be squeezed below roughly three visible conversations. */
+  #chatlist { flex-shrink: 1; min-height: 140px; }
 }

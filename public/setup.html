@@ -1206,7 +1206,13 @@
           save.addEventListener("click", async () => {
             const fields = {};
             for (const k of Object.keys(inputs)) if (inputs[k].value.trim()) fields[k] = inputs[k].value.trim();
-            try { await api("/connectors/config", { method: "POST", body: { id: r.id, fields } }); toast("Saved " + r.name + " credentials", "success"); loadConnectors(); }
+            try {
+              const saved = await api("/connectors/config", { method: "POST", body: { id: r.id, fields } });
+              // The server switches a first-time setup on by itself now; say so, or the flipped
+              // toggle looks like the UI acting on its own.
+              toast(saved.turnedOn ? "Saved " + r.name + " credentials — switched on" : "Saved " + r.name + " credentials", "success");
+              loadConnectors();
+            }
             catch (error) { setMessage(cxMessage, errorLabel(error), "error"); }
           });
           const test = node("button", "dt-button dt-button-secondary dt-button-small", "Test");
