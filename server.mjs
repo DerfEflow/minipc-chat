@@ -5571,6 +5571,9 @@ async function cfAllowEmail(email) {
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
+// Past this, a hand-run credit move needs an explicit confirm. 5000 credits = $50 of token value.
+const ADMIN_ADJUST_MAX_UNCONFIRMED = 5000;
+
 // Owner-only admin: users, codes (mint invite/free at will), balances.
 async function handleAdmin(req, res, u) {
   const T = resolveTenant(req);
@@ -5584,14 +5587,69 @@ async function handleAdmin(req, res, u) {
   }
   if (req.method === "GET" && p === "/admin/codes") return sjson(res, 200, { codes: billing.listCodes(Number(u.searchParams.get("limit")) || 200) });
   const body = (await readJsonBody(req)) || {};
+  /*
+   * POST /admin/user — role, status, sponsored cap, and the one hand-operated way to move credits.
+   *
+   * The credit adjustment used to be a single unguarded line: any number in `adjustCredits` went
+   * straight to the ledger under the fixed reason "admin adjust". It worked, and it had four ways
+   * to hurt somebody, each of which is now closed. This is the only route in the app that moves
+   * money by hand, and it stays the only one: a second endpoint with different guards is how two
+   * money paths end up disagreeing.
+   *
+   *   MAGNITUDE. An extra zero is the classic mistake and it applied silently. Anything past
+   *     ADMIN_ADJUST_MAX_UNCONFIRMED now needs confirm:true, making a big move a two-key operation.
+   *   EMAIL TYPO. This endpoint legitimately CREATES users, so ensure() minting a row is correct
+   *     here. Minting one and putting credits on it in the same breath is not: a grant to
+   *     fred@gmial.com would look like it worked. A credit move to an account that did not exist a
+   *     moment ago needs createIfMissing:true.
+   *   DOUBLE SUBMIT. A double-clicked button granted twice. An optional idempotencyKey is stamped
+   *     into the ledger reason and checked first, the same trick grantSession uses with the Stripe
+   *     session id.
+   *   UNTRACEABLE MONEY. Every adjustment carried the same four words, so the ledger could not
+   *     tell a comp from a correction from a test. A caller-supplied reason is recorded when given.
+   *
+   * Negative deltas stay allowed: correcting an over-grant is as legitimate as making one, and
+   * billing.apply already floors a balance at zero, so this cannot drive anyone negative.
+   */
   if (req.method === "POST" && p === "/admin/user") {
     const email = String(body.email || "").toLowerCase(); if (!email) return sjson(res, 400, { error: "email required" });
+    // Read existence BEFORE ensure(), or the typo guard below can never fire.
+    let existed = false;
+    try { existed = usersStore.list().some((r) => String(r.email || "").toLowerCase() === email); } catch {}
     usersStore.ensure(email);
     if (body.role) usersStore.setRole(email, body.role);
     if (body.status) usersStore.setStatus(email, body.status);
     if (typeof body.capUsd === "number") usersStore.setSponsoredCap(email, body.capUsd);
-    if (typeof body.adjustCredits === "number") billing.adminAdjust(email, body.adjustCredits, "admin adjust");
-    return sjson(res, 200, { ok: true });
+
+    let credit = null;
+    if (typeof body.adjustCredits === "number") {
+      const delta = Math.round(body.adjustCredits);
+      if (!Number.isFinite(delta) || delta === 0) return sjson(res, 400, { error: "adjustCredits must be a non-zero number" });
+      if (Math.abs(delta) > ADMIN_ADJUST_MAX_UNCONFIRMED && body.confirm !== true) {
+        return sjson(res, 400, { error: "large credit adjustment needs confirm:true", credits: delta,
+                                 usdValue: +(delta / 100).toFixed(2), threshold: ADMIN_ADJUST_MAX_UNCONFIRMED });
+      }
+      if (!existed && body.createIfMissing !== true) {
+        return sjson(res, 400, { error: "refusing to put credits on an account that did not exist until this request — pass createIfMissing:true if that is intended", email });
+      }
+      const reason = String(body.reason || "").trim().slice(0, 200);
+      const idem = String(body.idempotencyKey || "").trim().slice(0, 80);
+      const stamped = (reason || "admin adjust") + (idem ? ` [idem:${idem}]` : "");
+      let replay = null;
+      if (idem) {
+        try { replay = billing.ledger(email, 200).find((r) => String(r.reason || "").includes(`[idem:${idem}]`)) || null; } catch {}
+      }
+      if (replay) {
+        credit = { replay: true, credits: replay.delta, balance: replay.balanceAfter };
+      } else {
+        const before = billing.balance(email);
+        const after = billing.adminAdjust(email, delta, stamped);
+        credit = { credits: delta, usdValue: +(delta / 100).toFixed(2), balanceBefore: before, balance: after,
+                   kind: delta >= 0 ? "grant" : "correction" };
+        console.log(`[dominion-ai] ADMIN CREDIT ${credit.kind}: ${email} ${delta >= 0 ? "+" : ""}${delta} (${before} -> ${after}) — ${reason || "no reason given"}`);
+      }
+    }
+    return sjson(res, 200, { ok: true, credit });
   }
   if (req.method === "POST" && p === "/admin/codes/mint") {
     const count = Math.max(1, Math.min(100, Number(body.count) || 1));

@@ -1022,9 +1022,40 @@
         const cap = row.querySelector("[data-dt-user-cap]").value;
         const adjustment = Number(row.querySelector("[data-dt-user-adjust]").value || 0);
         if (cap !== "") body.capUsd = Number(cap);
-        if (adjustment) body.adjustCredits = adjustment;
+        /*
+         * A credit move now asks for a stated cause and, past a threshold, a second confirmation.
+         * The server enforces both; this just collects them, because a 400 the user cannot answer
+         * from the screen is worse than no guard at all. Existing rows are real accounts, so
+         * createIfMissing is safe to assert here: the typo guard exists for hand-typed emails,
+         * and this form only ever adjusts a row it already listed.
+         */
+        if (adjustment) {
+          const why = window.prompt(
+            `Adjusting ${body.email} by ${adjustment > 0 ? "+" : ""}${adjustment} credits ` +
+            `($${(adjustment / 100).toFixed(2)} of value).\n\nWhy? This is recorded in the ledger.`, "");
+          if (why === null) { toast("Credit adjustment cancelled", "info"); return; }
+          if (why.trim().length < 3) return toast("A reason is required for a credit change", "error");
+          if (Math.abs(adjustment) > 5000 && !window.confirm(
+            `That is ${adjustment > 0 ? "+" : ""}${adjustment} credits, about $${Math.abs(adjustment / 100).toFixed(2)} of value.\n\nApply it?`)) {
+            return toast("Credit adjustment cancelled", "info");
+          }
+          body.adjustCredits = adjustment;
+          body.reason = why.trim();
+          body.createIfMissing = true;
+          if (Math.abs(adjustment) > 5000) body.confirm = true;
+          // Survives a double-click and a retried save: the server reports a replay instead of
+          // granting twice. Scoped per email+amount+reason so a deliberate repeat still works.
+          body.idempotencyKey = `ui-${body.email}-${adjustment}-${why.trim().slice(0, 24)}`;
+        }
         setBusy(button, true, "Saving");
-        try { await api("/admin/user", { method: "POST", body }); await loadUsers(); toast("User updated", "success"); }
+        try {
+          const r = await api("/admin/user", { method: "POST", body });
+          await loadUsers();
+          const c = r && r.credit;
+          if (c && c.replay) toast("Already applied — balance unchanged", "info");
+          else if (c) toast(`User updated · balance ${c.balanceBefore} → ${c.balance}`, "success");
+          else toast("User updated", "success");
+        }
         catch (error) { toast(errorLabel(error), "error"); setBusy(button, false); }
       }
 
