@@ -625,6 +625,48 @@ const MODEL_TIER_LABEL = {
 const isCloudModel = (v) => typeof v === "string" && v.includes("/");
 // Toggle the header "via OpenRouter" spend indicator to match the current selection.
 function updateCloudBadge() { if (cloudBadge) cloudBadge.hidden = !isCloudModel(modelSel ? modelSel.value : ""); }
+
+/* ---------- swarm plans (blueprint fan-outs) ------------------------------------------------
+ * BATTALION spends an orchestrator seat every complex turn to invent a split, and that call can
+ * fail outright. Ten blueprints already declare one - "security, performance, correctness,
+ * readability" - so where a request matches, handing the swarm that split skips a call and gets a
+ * designed division of labour instead of an invented one.
+ *
+ * The control only exists while BATTALION is selected, and lists ONLY those ten. The other 39
+ * blueprints would supply nothing: their steps are a pipeline, not a fan-out, and offering them
+ * here would promise a speed-up that never arrives. Loaded once, lazily, on first need.
+ */
+const planPicker = document.getElementById("plan-picker");
+const planSel = document.getElementById("bp-plan");
+let planLoaded = false;
+
+async function loadSwarmPlans() {
+  if (planLoaded || !planSel) return;
+  planLoaded = true;
+  try {
+    const r = await fetch("/ide/blueprints");
+    if (!r.ok) return;
+    const cat = await r.json();
+    const fanned = (cat.groups || []).flatMap((g) => g.items.filter((i) => i.lanes > 0));
+    for (const i of fanned) {
+      const o = document.createElement("option");
+      o.value = i.id;
+      o.textContent = i.title + " (" + i.lanes + " at once)";
+      planSel.append(o);
+    }
+  } catch { planLoaded = false; }   // a failed load must be retryable, not permanently empty
+}
+
+function paintPlanPicker() {
+  if (!planPicker || !planSel) return;
+  const isSwarm = (modelSel && modelSel.value) === "battalion";
+  planPicker.hidden = !isSwarm;
+  // Choosing a different engine drops the plan: a split designed for a swarm means nothing to a
+  // single model, and a stale id riding along on later turns would be a lie in the payload.
+  if (!isSwarm) planSel.value = "";
+  else loadSwarmPlans();
+}
+if (modelSel) modelSel.addEventListener("change", paintPlanPicker);
 const relTime = (ts) => { const d = Date.now() - (ts || 0); const m = Math.round(d / 60000); if (m < 60) return m + "m"; const h = Math.round(m / 60); if (h < 24) return h + "h"; return Math.round(h / 24) + "d"; };
 function renderSidebar() {
   chatlist.innerHTML = "";
@@ -2046,6 +2088,9 @@ async function streamReply(c) {
         // server's auto-routing may still know the local lane, but the app no longer offers it.
         model: (st.modelId && st.modelId !== "local" && st.modelId !== "auto") ? st.modelId : (defaultCloudModel() || "auto"),
         privacyMode: privacyModeSel ? privacyModeSel.value : "normal",
+        // A ready-made split for the swarm, when one was chosen. Only meaningful in BATTALION, and
+        // the picker clears itself on any other engine, so this is empty on every other turn.
+        blueprintId: (planSel && !planPicker.hidden) ? planSel.value : "",
         persona: resolvePersona(),
         // FAST LANE, one turn only. The switch disarms itself after every send, because it doubles
         // the price of the turn, and a control somebody flipped last Tuesday and forgot is exactly

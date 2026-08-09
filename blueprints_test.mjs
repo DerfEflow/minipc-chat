@@ -9,7 +9,7 @@
  * decomposition whose stated human review never happens, which is worse than offering no blueprint.
  */
 import assert from "node:assert/strict";
-import { BLUEPRINTS, blueprintById, blueprintCatalog, blueprintSeed, blueprintVision, BLUEPRINT_CATEGORIES } from "./blueprints.mjs";
+import { BLUEPRINTS, blueprintById, blueprintCatalog, blueprintSeed, blueprintVision, blueprintParts, BLUEPRINT_CATEGORIES } from "./blueprints.mjs";
 import { parseIntake, VISION_MARKER } from "./ideintake.mjs";
 
 let passed = 0;
@@ -41,6 +41,20 @@ t("the picker payload stays small — it must not ship steps, inputs or metrics"
   assert.equal(item.success_metrics, undefined);
   // The full catalog is ~96KB; the picker draws none of that detail. Guard the gap, not a byte count.
   assert.ok(JSON.stringify(c).length < 40_000, "picker payload has grown past 40KB: " + JSON.stringify(c).length);
+});
+
+t("the picker payload carries a lane COUNT, so a caller can filter without fetching 49 records", () => {
+  const items = blueprintCatalog().groups.flatMap((g) => g.items);
+  assert.equal(items.length, 49);
+  for (const i of items) assert.equal(typeof i.lanes, "number", i.id + " is missing a lane count");
+  const fanned = items.filter((i) => i.lanes > 0);
+  assert.equal(fanned.length, 10, "exactly ten blueprints declare a fan-out");
+  // Every count must survive battalion's own bounds, or the chat picker offers a plan that would be
+  // rejected the moment it was used.
+  for (const i of fanned) assert.ok(i.lanes >= 2 && i.lanes <= 4, i.id + " offers " + i.lanes + " lanes");
+  // And the count must agree with the parts actually supplied, or the label lies about the swarm.
+  for (const i of fanned) assert.equal(blueprintParts(i.id).length, i.lanes, i.id + " lane count disagrees with its parts");
+  for (const i of items.filter((x) => !x.lanes)) assert.equal(blueprintParts(i.id), null, i.id + " reports no lanes but supplies parts");
 });
 
 t("an unknown id returns null rather than throwing", () => {

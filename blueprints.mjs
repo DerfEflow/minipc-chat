@@ -76,6 +76,10 @@ export function blueprintCatalog() {
     items: BLUEPRINTS.filter((b) => b.category === c).map((b) => ({
       id: b.id, title: b.title, summary: b.summary, complexity: b.complexity,
       patterns: b.patterns, steps: b.steps.length, gate: b.gate,
+      // How many parallel lanes this one can hand a swarm, 0 for the 39 with none. A boolean would
+      // do for filtering, but the count is what a caller needs to say "four models at once" without
+      // fetching the whole record back.
+      lanes: b.fanout ? b.fanout.lanes.length : 0,
     })),
   })).filter((g) => g.items.length);
   return { count: BLUEPRINTS.length, groups };

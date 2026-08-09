@@ -262,6 +262,20 @@
         <div class="model-panel" id="model-panel" role="listbox" aria-label="Choose a model" hidden></div>
       </div>
 
+      <!-- Only shown when BATTALION is the chosen engine, and only the blueprints that declare a
+           fan-out appear in it. A swarm plans its own split by spending an orchestrator seat; a
+           blueprint that already HAS a split makes that call unnecessary. The other 39 blueprints
+           are deliberately absent here: they would supply nothing, and offering them would promise
+           a speed-up that never arrives. -->
+      <label class="command-select plan-select" id="plan-picker" hidden>
+        <svg class="glyph control-glyph"><use href="#i-mode"></use></svg>
+        <span class="control-copy"><small>Swarm plan</small>
+          <select id="bp-plan" aria-label="Swarm plan" title="Give the swarm a ready-made split instead of planning one">
+            <option value="">Let the swarm plan it</option>
+          </select>
+        </span>
+      </label>
+
       <label class="command-select mode-select">
         <svg class="glyph control-glyph"><use href="#i-mode"></use></svg>
         <span class="control-copy"><small>Operating mode</small>
