@@ -80,6 +80,27 @@ export function historyTail(history, capChars = HISTORY_TAIL_CHARS) {
 }
 
 const TOOL_ROUNDS = 4;   // per part; a worker that has not answered in four rounds is looping
+/*
+ * SYNTH_TOKENS is a CHUNK, not a ceiling (Fred, 2026-08-09).
+ *
+ * It used to be the ceiling, and that made the swarm narrower than its own inputs: four workers can
+ * produce up to 4 x PART_TOKENS of material, and the editor was told to fit the merge into 8192. So
+ * the more the swarm gathered, the harder it compressed, and "give me the long version" was the one
+ * thing it could not do. Ironically the FAILURE path preserved more, because stitched parts skip the
+ * merge entirely.
+ *
+ * The single-engine path solved this years ago: resume on finish_reason "length" and keep streaming
+ * until the model reaches a natural stop. Same thing here, same bounded budget, same nudge wording,
+ * so a long merged answer behaves the way a long answer from one model already does.
+ */
+const SYNTH_CONT_MAX = 8;
+const LENGTH_STOP = /^(?:length|max_output_tokens?|token_limit)$/i;
+// Mirrors server.mjs CONTINUE_NUDGE: user role, because agent-tuned models weight a trailing user
+// turn highest, and an explicit ban on the recap that otherwise opens every continuation.
+const CONTINUE_NUDGE = "[Dominion system notice] Your reply was cut off at the output-length limit "
+  + "before it finished. Continue from the EXACT point you stopped. Do not repeat any earlier text, "
+  + "do not add a preface, recap, or apology, do not restate the last line — resume mid-sentence if "
+  + "that is where you stopped and write straight through to the natural end of the full response.";
 
 export function createBattalion({ callSeat, roster, isSimple = () => false, log = () => {},
                                   tools = null, runTool = null, projectTurn = null }) {
@@ -257,15 +278,45 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
         if (good.length && !isAborted()) {
           // 4. SYNTHESIZE, streaming: this stage IS the visible answer.
           working("battalion: merging " + good.length + " parts");
-          const synth = await seat(roster.synthesizer, [
+          const synthMsgs = [
             { role: "system", content: "You are the BATTALION editor. Merge the specialists' parts into ONE complete, coherent answer in a single voice: resolve overlaps, reconcile interfaces and terminology, keep every substantive detail, add nothing false. Never mention the parts, the specialists, or this process." },
             ...preamble,
             { role: "user", content: "THE REQUEST:\n" + question + "\n\n" + good.map((g, i) => "=== PART " + (i + 1) + ": " + g.title + " ===\n" + g.text).join("\n\n") },
-          ], { tokens: SYNTH_TOKENS, onDelta: onToken, signal });
-          manifest.stages.push({ stage: "synthesize", seat: roster.synthesizer, ms: synth.ms, ok: !!synth.ok });
-          if (synth.ok && String(synth.content || "").trim()) {
+          ];
+          const synth = await seat(roster.synthesizer, synthMsgs, { tokens: SYNTH_TOKENS, onDelta: onToken, signal });
+          let merged = String(synth.content || "");
+          let synthMs = synth.ms, continued = 0;
+          /*
+           * Resume past the output cap instead of stopping at it. Deltas keep flowing through the
+           * same onToken, so the user sees one continuous answer rather than a seam. The running
+           * tail is the continuity anchor and is bounded, because the whole answer replayed on every
+           * continuation would eat the context the merge still needs.
+           */
+          if (synth.ok && merged.trim() && LENGTH_STOP.test(String(synth.finishReason || ""))) {
+            let fr = synth.finishReason, left = SYNTH_CONT_MAX;
+            while (LENGTH_STOP.test(String(fr || "")) && left-- > 0 && !isAborted()) {
+              working("battalion: still writing");
+              synthMsgs.push({ role: "assistant", content: merged.slice(-6000) });
+              synthMsgs.push({ role: "user", content: CONTINUE_NUDGE });
+              const cont = await seat(roster.synthesizer, synthMsgs, { tokens: SYNTH_TOKENS, onDelta: onToken, signal });
+              synthMs += cont.ms;
+              if (!cont.ok || !String(cont.content || "").trim()) {
+                manifest.notes.push("the merged answer was cut short: continuation " + (continued + 1) + " did not come back");
+                break;
+              }
+              merged += cont.content;
+              continued++;
+              fr = cont.finishReason;
+            }
+            if (LENGTH_STOP.test(String(fr || "")) && continued >= SYNTH_CONT_MAX) {
+              manifest.notes.push("the merged answer reached its continuation limit (" + SYNTH_CONT_MAX + " passes) and may still be unfinished");
+            }
+          }
+          manifest.stages.push({ stage: "synthesize", seat: roster.synthesizer, ms: synthMs, ok: !!synth.ok,
+            ...(continued ? { continuations: continued } : {}) });
+          if (synth.ok && merged.trim()) {
             manifest.models = seatsUsed(manifest); manifest.ms = Date.now() - t0;
-            return { ok: true, manifest, content: synth.content };
+            return { ok: true, manifest, content: merged };
           }
           // Synthesis died: the parts still exist — deliver them as honest sections, announced.
           manifest.notes.push("synthesis seat failed; parts delivered as sections");
