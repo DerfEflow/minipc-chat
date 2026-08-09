@@ -7904,10 +7904,17 @@ const swarmToolDefs = () => toolDefs(flywheel.activeToolOverlays())
 const battalion = createBattalion({
   callSeat: (id, msgs, opts, onDelta) => cloudChatStream(id, msgs, opts, onDelta),
   tools: swarmToolDefs,
-  // The swarm has no chat context, no workspace and no job: a worker gets the same base tool context
-  // every other unscoped call gets, and the carve-outs (customer DBs, backups) are enforced inside
-  // runTool regardless of who is asking.
-  runTool: (name, args, signal) => runTool(name, args, CTX, signal),
+  /*
+   * The tenant context arrives PER RUN and there is no fallback, deliberately.
+   *
+   * This line first read `runTool(name, args, CTX, signal)`, bound to the module-level context. CTX
+   * carries CTX.hands, which is the OWNER'S connected machine, and BATTALION is a free lane every
+   * guest can select. A guest turn could therefore have had a worker read Fred's drives. Every other
+   * tool path in this file scopes with `{...(T.ctxBase || CTX), tenant: T}`; the swarm now does the
+   * same, and battalion.mjs refuses to run any tool at all when no context was supplied, so the
+   * failure mode is "no tools" rather than "somebody else's machine".
+   */
+  runTool: (name, args, signal, ctx) => runTool(name, args, ctx, signal),
   // Providers disagree about the shape of an assistant tool-call turn; battalion should not have to
   // learn provider names to find that out, so the projection is injected.
   projectTurn: (r, calls) => (r && r.assistantTurn)
@@ -8240,6 +8247,9 @@ async function handleChat(req, res) {
       onToken: (delta) => { if (delta) sse({ type: "token", delta }); },
       working, signal: ac.signal, isAborted: () => aborted,
       plan: bpParts,
+      // Same shape the single-engine path builds at its own tool boundary, so a swarm worker can
+      // never reach further than the caller could reach on their own turn.
+      toolContext: { ...(T.ctxBase || CTX), chatId, mode: "battalion", model: "battalion", tenant: T },
     });
     workStop();
     if (aborted) { sse({ type: "stopped", reason: "stopped" }); return endStream(); }

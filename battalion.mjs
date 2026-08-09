@@ -124,7 +124,20 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
    * tool-call turn, and battalion should not learn provider names to find that out.
    */
   const toolDefs = typeof tools === "function" ? tools : () => (Array.isArray(tools) ? tools : []);
-  const toolsReady = () => typeof runTool === "function" && toolDefs().length > 0;
+  /*
+   * FAIL CLOSED WITHOUT A TENANT CONTEXT (2026-08-09, same day, found on the first real turn).
+   *
+   * The first cut injected runTool bound to the module-level CTX, with a comment claiming the swarm
+   * "has no chat context, so a worker gets the same base tool context every other unscoped call
+   * gets". That was wrong twice over. There are no unscoped calls: every other tool path in the
+   * server builds `{...(T.ctxBase || CTX), tenant: T}` per request. And CTX carries CTX.hands, which
+   * is the OWNER's connected machine, so a guest on the free lane could have had a worker list the
+   * owner's drives.
+   *
+   * The context is therefore per-run and mandatory. No context means no tools, never a fallback to
+   * a global, because the failure mode of that fallback is cross-tenant machine access.
+   */
+  const toolsReady = (toolContext) => typeof runTool === "function" && !!toolContext && toolDefs().length > 0;
   const offeredNames = () => new Set(toolDefs().map((d) => d && d.function && d.function.name).filter(Boolean));
   const seatsUsed = (manifest) => [...new Set(manifest.stages.map((s) => s.seat))];
 
@@ -141,8 +154,8 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
    * to look something up. A worker that has not written its part after four rounds of reading is
    * not converging, and the swarm has three other parts waiting on it.
    */
-  async function seatWithTools(catalogId, messages, { tokens, signal, manifest, label }) {
-    if (!toolsReady()) return seat(catalogId, messages, { tokens, signal });
+  async function seatWithTools(catalogId, messages, { tokens, signal, manifest, label, onDelta = null, toolContext = null }) {
+    if (!toolsReady(toolContext)) return seat(catalogId, messages, { tokens, onDelta, signal });
     const offered = offeredNames();
     const defs = toolDefs();
     const convo = messages.map((m) => ({ ...m }));
@@ -150,7 +163,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
     for (let round = 0; round <= TOOL_ROUNDS; round++) {
       const t0 = Date.now();
       const r = await callSeat(catalogId, convo,
-        { num_predict: tokens, signal, tools: round < TOOL_ROUNDS ? defs : null }, null);
+        { num_predict: tokens, signal, tools: round < TOOL_ROUNDS ? defs : null }, onDelta);
       totalMs += Date.now() - t0;
       const calls = Array.isArray(r.toolCalls) ? r.toolCalls : [];
       if (!r.ok || !calls.length) return { ...r, ms: totalMs, toolsUsed: used, toolsRefused: refused };
@@ -174,7 +187,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
             + (name || "an unnamed tool") + ", which the swarm does not offer");
         } else {
           used++;
-          try { out = String(await runTool(name, args, signal)); }
+          try { out = String(await runTool(name, args, signal, toolContext)); }
           catch (e) { out = "that tool failed: " + String((e && e.message) || e).slice(0, 300); }
         }
         convo.push({ role: "tool", tool_call_id: c.id, content: String(out).slice(0, 64_000) });
@@ -184,7 +197,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
   }
 
   // One part, with one announced replacement on failure: the roster IS the bench.
-  async function runPart(part, idx, context, workers, signal, manifest) {
+  async function runPart(part, idx, context, workers, signal, manifest, toolContext) {
     const primary = workers[idx % workers.length];
     const sys = "You are one specialist in BATTALION, a crew of models splitting one request. " +
       "Produce ONLY your assigned part, fully worked: no preamble, no summary of the other parts, " +
@@ -195,14 +208,14 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
       { role: "user", content: "THE ASSIGNED PART (" + (idx + 1) + "): " + part.title + "\n\n" + part.instructions },
     ];
     const label = "part " + (idx + 1);
-    let r = await seatWithTools(primary, msgs, { tokens: PART_TOKENS, signal, manifest, label });
+    let r = await seatWithTools(primary, msgs, { tokens: PART_TOKENS, signal, manifest, label, toolContext });
     if (r.ok && String(r.content || "").trim()) {
       manifest.stages.push({ stage: label, title: part.title, seat: primary, ms: r.ms, ok: true, tools: r.toolsUsed || 0 });
       return { title: part.title, text: r.content };
     }
     const backup = workers[(idx + 1) % workers.length];
     log(`battalion: part ${idx + 1} failed on ${primary} (${String(r.error || "empty").slice(0, 80)}) — replacing with ${backup}`);
-    const r2 = await seatWithTools(backup, msgs, { tokens: PART_TOKENS, signal, manifest, label });
+    const r2 = await seatWithTools(backup, msgs, { tokens: PART_TOKENS, signal, manifest, label, toolContext });
     if (r2.ok && String(r2.content || "").trim()) {
       manifest.stages.push({ stage: label, title: part.title, seat: backup, ms: r2.ms, ok: true, replaced: primary, tools: r2.toolsUsed || 0 });
       manifest.notes.push("part " + (idx + 1) + " seat " + primary + " failed; " + backup + " took it over");
@@ -218,7 +231,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
    * onToken. Returns { ok:true, manifest } after streaming the answer, or { ok:false, error }
    * WITHOUT having streamed anything (so the caller can offer the normal model honestly).
    */
-  async function run({ question, history = [], contextBlock = "", personaStyle = "", onToken, working = () => {}, signal, isAborted = () => false, plan: suppliedPlan = null }) {
+  async function run({ question, history = [], contextBlock = "", personaStyle = "", onToken, working = () => {}, signal, isAborted = () => false, plan: suppliedPlan = null, toolContext = null }) {
     const t0 = Date.now();
     const manifest = { mode: "single", parts: 0, stages: [], notes: [], models: [], ms: 0, costUsd: 0 };
     // A caller-supplied split (a blueprint's fan-out lanes). Malformed input falls through to the
@@ -273,7 +286,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
         manifest.parts = parts.length;
         working("battalion: " + parts.length + " models working in parallel");
         const partCtx = [...preamble, ...context, { role: "user", content: "THE FULL REQUEST (for context; you handle only your part):\n" + question }];
-        const results = await Promise.all(parts.map((p, i) => runPart(p, i, partCtx, roster.workers, signal, manifest)));
+        const results = await Promise.all(parts.map((p, i) => runPart(p, i, partCtx, roster.workers, signal, manifest, toolContext)));
         const good = results.filter(Boolean);
         if (good.length && !isAborted()) {
           // 4. SYNTHESIZE, streaming: this stage IS the visible answer.
@@ -334,12 +347,25 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
     manifest.mode = manifest.mode === "swarm" ? "single (swarm fell through)" : "single";
     working("battalion: answering");
     const msgs = [...preamble, ...context, { role: "user", content: question }];
-    let r = await seat(roster.single, msgs, { tokens: SYNTH_TOKENS, onDelta: onToken, signal });
+    /*
+     * THE SINGLE SEAT GETS TOOLS TOO, and leaving it out was the bug Fred hit on the first real turn
+     * (2026-08-09). He asked for a run-down of the projects on two drives. That question is 91
+     * characters, under the 160 the assess gate requires, so it never convened a swarm: it went
+     * straight here, to the one seat that had no tools, and the model answered with a hallucinated
+     * {"command":"ls","path":"F:\\"} as prose.
+     *
+     * Tools were scoped to workers because that is where the PARALLEL value is. That reasoning
+     * skipped the path most turns actually take. It is also the safest seat in the module: it runs
+     * alone, so the concurrency argument that keeps writes away from workers does not even apply
+     * here. It stays read-only anyway, because the swarm is advertised as never changing anything
+     * and a build ask still detours to a real engine with full tools.
+     */
+    let r = await seatWithTools(roster.single, msgs, { tokens: SYNTH_TOKENS, onDelta: onToken, signal, manifest, label: "answer", toolContext });
     manifest.stages.push({ stage: "answer", seat: roster.single, ms: r.ms, ok: !!r.ok });
     if (!r.ok || !String(r.content || "").trim()) {
       const backup = roster.workers.find((w) => w !== roster.single) || roster.orchestrator;
       log("battalion: single seat failed (" + String(r.error || "empty").slice(0, 80) + ") — replacing with " + backup);
-      r = await seat(backup, msgs, { tokens: SYNTH_TOKENS, onDelta: onToken, signal });
+      r = await seatWithTools(backup, msgs, { tokens: SYNTH_TOKENS, onDelta: onToken, signal, manifest, label: "answer", toolContext });
       manifest.stages.push({ stage: "answer", seat: backup, ms: r.ms, ok: !!r.ok, replaced: roster.single });
       manifest.notes.push("answer seat " + roster.single + " failed; " + backup + " took it over");
     }
