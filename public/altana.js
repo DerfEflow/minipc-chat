@@ -303,8 +303,32 @@ function gatherContext(doc) {
   return out;
 }
 
+/*
+ * ALTANA HAD NO MEMORY BECAUSE NOBODY EVER SENT HER ANY (Fred, 2026-08-09: "It cant remember the
+ * context of a conversation two responses before").
+ *
+ * The server has accepted `history` since the module was written — altana.messagesFor takes the
+ * last 10 user/assistant turns and puts them ahead of the question. This function never sent the
+ * field. Not truncated, not capped: absent. So every question arrived as the first thing she had
+ * ever been asked, and the transcript on screen was a record only the human could read.
+ *
+ * That also silently disabled the complaint book, which is the second half of the same report ("it
+ * says it will report issues to me, but it does not"). Her instructions say to offer to log a
+ * problem and ASK BEFORE LOGGING, which is a two-turn handshake by construction: she asks, the user
+ * says yes, she files it. With no history the second turn is the word "yes" attached to nothing, so
+ * there was never anything to file. The complaints table has been empty since it was created.
+ *
+ * The history sent is what the user can already see in the panel, nothing more: her words and
+ * theirs. System notices, errors and blocked-tool lines stay out, being the app talking about
+ * itself rather than the conversation. Ten turns matches the server's own slice, so nothing is sent
+ * that would only be thrown away.
+ */
 function buildAskBody(question, doc) {
-  return Object.assign({ question }, gatherContext(doc));
+  const body = Object.assign({ question }, gatherContext(doc));
+  const state = panels.get(doc);
+  const turns = state && Array.isArray(state.turns) ? state.turns.slice(-10) : [];
+  if (turns.length) body.history = turns;
+  return body;
 }
 
 /*
@@ -425,7 +449,11 @@ function ensurePanel(doc) {
   root.append(inner);
   doc.body.appendChild(root);
 
-  state = { root, log, input, form, closeBtn, sending: false };
+  /*
+   * `turns` is the conversation. Its absence was the whole of Fred's "it cant remember the context
+   * of a conversation two responses before" (2026-08-09) — see buildAskBody.
+   */
+  state = { root, log, input, form, closeBtn, sending: false, turns: [] };
   panels.set(doc, state);
 
   closeBtn.addEventListener("click", () => { try { closePanel(doc); } catch {} });
@@ -476,6 +504,17 @@ function appendMessage(doc, kind, text) {
   row.className = "altana-msg altana-msg-" + kind;
   row.textContent = String(text);
   state.log.append(row);
+  /*
+   * The transcript records itself here rather than at each call site, so a message that reaches the
+   * screen by any path is a message she will remember, and one that never rendered can never be
+   * claimed as said. Only the two conversational roles: "system", "error" and the blocked-tool
+   * notices are the app narrating itself, and feeding those back would teach her to discuss her own
+   * plumbing. Bounded at 20 so a long session cannot grow without limit; the send slices 10.
+   */
+  if (kind === "user" || kind === "altana") {
+    state.turns.push({ role: kind === "user" ? "user" : "assistant", content: String(text).slice(0, 3000) });
+    if (state.turns.length > 20) state.turns.splice(0, state.turns.length - 20);
+  }
   scrollLogToEnd(state);
   // Anything SHE says lands with light. Her own words are the only thing worth flashing for:
   // a system note or an error already carries its own colour.
@@ -653,11 +692,16 @@ function handleAskResult(doc, data, requestBody) {
 async function submitQuestion(doc, question) {
   const state = panels.get(doc);
   if (!state) return;
+  /*
+   * BUILT BEFORE THE QUESTION IS APPENDED, and the order is load-bearing. appendMessage is what
+   * records a turn now, and the server puts `question` after `history` itself — building the body
+   * afterwards would send this question twice and have her answer her own echo.
+   */
+  const body = buildAskBody(question, doc);
   appendMessage(doc, "user", question);
   state.sending = true;
   showThinking(doc);
   try {
-    const body = buildAskBody(question, doc);
     const data = await postAsk(body);
     hideThinking(doc);
     handleAskResult(doc, data, body);

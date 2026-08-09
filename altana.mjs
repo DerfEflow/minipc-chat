@@ -342,6 +342,24 @@ export function altanaSystemPrompt(contextText = "", { settableKeys = ALTANA_SET
     "IF SOMETHING IS BROKEN: take it seriously, apologise once without grovelling, and offer to log",
     "it with log_complaint so the team sees it. Ask before logging, and ask whether they want to be",
     "contacted about it.",
+    /*
+     * THE FALLBACK THE PARSER WAS WRITTEN FOR, finally reachable (2026-08-09).
+     *
+     * extractComplaint has always parsed a LOG_COMPLAINT: line, described in its own comment as the
+     * path for "a fallback seat that writes the marker instead of calling the tool". Nothing ever
+     * told any seat the marker exists — the string appeared exactly once in the codebase, in the
+     * regex that reads it — so the safety net could not be reached by any model, however willing.
+     *
+     * It matters because of who answers as Altana: her primary seat is a free model, and a model
+     * that will happily WRITE "I have reported that" is not always a model that reliably EMITS a
+     * tool call. That gap is precisely Fred's "it says it will report issues to me, but it does
+     * not". A sentence she can type is a promise she can keep without tool support.
+     */
+    "IF YOU CANNOT CALL log_complaint for any reason, and only then, write the complaint as its own",
+    "final line in exactly this form: LOG_COMPLAINT: <what is wrong, in their words> | EMAIL: <their",
+    "address, or none>. The app files it and removes the line before anyone reads your reply, so it",
+    "is never shown to the user. NEVER tell someone their problem has been reported unless you have",
+    "either called the tool or written that line.",
     "",
     settableKeys.length ? "SETTINGS YOU MAY CHANGE: " + settableKeys.join(", ") + "." : "",
     "",

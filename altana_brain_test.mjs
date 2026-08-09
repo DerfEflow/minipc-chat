@@ -656,6 +656,46 @@ t("a turn carries the context, the knowledge and this thread, and nothing else",
   assert.ok(altana.ready() && altana.sectionCount() >= 8);
 });
 
+t("the thread is actually IN the turn, ahead of the question, in order", () => {
+  /*
+   * The server half of Fred's "it cant remember the context of a conversation two responses
+   * before" (2026-08-09). This side was never broken - messagesFor has taken history since it was
+   * written - but nothing asserted that the turns SURVIVE into the array, so the field could have
+   * been quietly dropped and every test here would still have passed. The panel not sending it
+   * went unnoticed for the same reason: no test on either side ever looked at a second turn.
+   */
+  const altana = createAltana({ knowledgePath: KPATH, store: createAltanaStore({ dir }) });
+  const msgs = altana.messagesFor("what did I just say was broken?", {
+    history: [
+      { role: "user", content: "the estimator totals are wrong" },
+      { role: "assistant", content: "I am sorry about that. Shall I log it?" },
+      { role: "system", content: "a notice the app wrote about itself" },
+    ],
+  });
+  const roles = msgs.map((m) => m.role);
+  const texts = msgs.map((m) => String(m.content || ""));
+  assert.equal(roles[0], "system", "her instructions still lead");
+  assert.ok(texts.some((c) => c.includes("the estimator totals are wrong")), "the user's earlier words are in the turn");
+  assert.ok(texts.some((c) => c.includes("Shall I log it?")), "her own earlier words are in the turn");
+  assert.ok(!texts.some((c) => c.includes("a notice the app wrote about itself")),
+    "a system line in history is filtered out, not relayed as if she said it");
+  // Ordering is the whole point: an earlier turn placed AFTER the question is not memory.
+  const iEarlier = texts.findIndex((c) => c.includes("the estimator totals are wrong"));
+  const iQuestion = texts.findIndex((c) => c.includes("what did I just say was broken?"));
+  assert.ok(iEarlier > 0 && iEarlier < iQuestion, "history sits between the instructions and the question");
+});
+
+t("only the last ten turns ride, so a long thread cannot crowd out her instructions", () => {
+  const altana = createAltana({ knowledgePath: KPATH, store: createAltanaStore({ dir }) });
+  const history = [];
+  for (let i = 1; i <= 30; i++) history.push({ role: i % 2 ? "user" : "assistant", content: "turn " + i });
+  const msgs = altana.messagesFor("and now?", { history });
+  const texts = msgs.map((m) => String(m.content || ""));
+  assert.ok(texts.some((c) => c === "turn 30"), "the most recent turn is kept");
+  assert.ok(!texts.some((c) => c === "turn 20"), "an old turn is dropped rather than sent");
+  assert.equal(msgs.filter((m) => /^turn \d+$/.test(String(m.content || ""))).length, 10, "exactly ten");
+});
+
 /* ============================================================================================== *
  * LIVE PROOF. Real APIs, real models, real output pasted into the lane report.
  * ============================================================================================== */

@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { faceForSignIn, altanaMount, altanaState, altanaCheckAnchoring, altanaHome, ALTANA_FACES } from "./public/altana.js";
-import { retrieve, splitKnowledge } from "./altana.mjs";
+import { retrieve, splitKnowledge, altanaSystemPrompt, extractComplaint } from "./altana.mjs";
 
 let passed = 0;
 const ok = (n) => { console.log("  PASS  " + n); passed++; };
@@ -448,6 +448,111 @@ function collectText(node) {
   ok("a non-JSON response is handled the same honest way as a network failure");
 }
 
+/* ---- 14b. SHE REMEMBERS THE CONVERSATION, because the panel finally sends it ---------------- */
+{
+  /*
+   * Fred, 2026-08-09: "it cant remember the context of a conversation two responses before".
+   *
+   * The server has taken a `history` field since the module was written and slices the last 10
+   * user/assistant turns ahead of the question. The panel never sent the field at all, so every
+   * question arrived as the first thing she had ever been asked and the transcript on screen was a
+   * record only the human could read.
+   *
+   * This also silently disabled the complaint book, which is why the assertions below are worth
+   * more than they look: her instructions say to offer to log a problem and ASK BEFORE LOGGING,
+   * which is a two-turn handshake. With no history, turn two is the word "yes" attached to nothing.
+   * The live complaints table had zero rows across its entire life.
+   */
+  const d = stubDoc();
+  const bodies = [];
+  global.fetch = async (url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return fakeRes({ reply: "Answer " + bodies.length + ".", logged: null, clientActions: [],
+      model: "x", lane: "free", billed: false, fallback: null, confirm: [], blocked: [] });
+  };
+  const el = altanaMount({ doc: d, enabled: true, signins: 0 });
+  fireClick(el);
+  const panel = d.getElementById("altana-panel");
+
+  await submit(panel, "the estimator is showing the wrong total");
+  assert.equal(bodies[0].history, undefined, "the very first question has no history to send");
+
+  await submit(panel, "yes please");
+  assert.ok(Array.isArray(bodies[1].history), "the second question must carry the conversation");
+  assert.deepEqual(bodies[1].history, [
+    { role: "user", content: "the estimator is showing the wrong total" },
+    { role: "assistant", content: "Answer 1." },
+  ], "both sides of the first exchange, in order, in the roles the server filters on");
+
+  /*
+   * The load-bearing negative. appendMessage is what records a turn, so building the body after
+   * appending would put this question in `history` AND in `question`, and the server appends
+   * `question` itself — she would answer her own echo. Cheap to get wrong, silent when wrong.
+   */
+  assert.ok(!bodies[1].history.some((m) => m.content === "yes please"),
+    "the question being asked must not also appear in its own history");
+
+  await submit(panel, "third");
+  assert.equal(bodies[2].history.length, 4, "the conversation accumulates rather than resetting");
+  ok("she is sent the conversation so far, once each, without the current question doubled");
+}
+
+/* ---- 14c. the app narrating itself is not part of the conversation -------------------------- */
+{
+  /*
+   * A system notice, an error, a blocked-tool line: the app talking ABOUT the conversation rather
+   * than in it. Feeding those back would teach her to discuss her own plumbing, and an error she
+   * never caused would read to her as something she said.
+   */
+  const d = stubDoc();
+  const bodies = [];
+  global.fetch = async (url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return fakeRes({ reply: "Understood.", logged: null, clientActions: [],
+      model: "x", lane: "free", billed: false,
+      fallback: { text: "Her main brain was busy, so a backup answered." },
+      confirm: [], blocked: [{ tool: "delete_everything", reason: "not one of Altana's tools" }] });
+  };
+  const el = altanaMount({ doc: d, enabled: true, signins: 0 });
+  fireClick(el);
+  const panel = d.getElementById("altana-panel");
+  await submit(panel, "first");
+  await submit(panel, "second");
+
+  const sent = JSON.stringify(bodies[1].history);
+  assert.ok(sent.includes("Understood."), "her own words are remembered");
+  assert.ok(!sent.includes("backup answered"), "a system notice is not something she said");
+  assert.ok(!sent.includes("delete_everything"), "a blocked-tool notice is not part of the conversation");
+  assert.ok(bodies[1].history.every((m) => m.role === "user" || m.role === "assistant"),
+    "only the two roles the server keeps");
+  ok("system notices, fallbacks and blocked-tool lines stay out of what she is sent");
+}
+
+/* ---- 14d. the fallback complaint marker is actually TAUGHT, not just parsed ------------------ */
+{
+  /*
+   * extractComplaint has always parsed a LOG_COMPLAINT: line, and its own comment calls it the path
+   * for "a fallback seat that writes the marker instead of calling the tool". Nothing ever told any
+   * seat the marker exists: the string appeared exactly once in the whole codebase, in the regex
+   * that reads it. A safety net no model can reach is not a safety net.
+   *
+   * This is the second half of Fred's report — "it says it will report issues to me, but it does
+   * not" — and it matters because her primary seat is a free model, which will write "I have
+   * reported that" far more reliably than it will emit a tool call.
+   */
+  const prompt = altanaSystemPrompt("");
+  assert.ok(prompt.includes("LOG_COMPLAINT:"), "the prompt must teach the marker the parser reads");
+  assert.ok(/never tell someone their problem has been reported/i.test(prompt),
+    "she must not be allowed to claim a report she did not file");
+  // And the marker she is taught must be the one the parser actually accepts.
+  const { reply, complaint } = extractComplaint(
+    "I am sorry about that, I have passed it on.\nLOG_COMPLAINT: the estimator totals are wrong | EMAIL: fred@example.com");
+  assert.equal(complaint.summary, "the estimator totals are wrong");
+  assert.equal(complaint.email, "fred@example.com");
+  assert.ok(!reply.includes("LOG_COMPLAINT"), "the marker is stripped before the user sees the reply");
+  ok("the complaint marker is taught in the exact form the parser accepts, and never shown to the user");
+}
+
 /* ---- 15. she is actually TURNED ON, and the whole loop she needs is wired ------------------- */
 {
   /*
@@ -650,4 +755,4 @@ function collectText(node) {
   ok(`the ${CORPUS.length}-entry FAQ answers real questions and still declines the ones it cannot`);
 }
 
-console.log(`\n${passed}/28 checks passed - Altana mounts on body, floats above every surface and below every transient, rotates every ten sign-ins, guards her own anchoring, can always be sent home, opens into a conversation that never claims more than clientActions actually dispatched, and is switched ON.`);
+console.log(`\n${passed}/31 checks passed - Altana mounts on body, floats above every surface and below every transient, rotates every ten sign-ins, guards her own anchoring, can always be sent home, opens into a conversation she is actually SENT and can therefore remember, never claims more than clientActions actually dispatched, can file a complaint even without tool calls, and is switched ON.`);
