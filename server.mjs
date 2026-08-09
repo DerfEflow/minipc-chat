@@ -6657,8 +6657,77 @@ const videoTemporaryCleanupTimer = setInterval(() => {
 }, 60 * 60 * 1000);
 videoTemporaryCleanupTimer.unref?.();
 const videoWorkspace = createVideoWorkspace({ feature: videoFeature, processor: videoMediaProcessor });
+/*
+ * VIDEO ON THE DRIVER.
+ *
+ * The whole generation pipeline (ask Runware, settle the charge, download, verify, attach) used to
+ * run only inside GET /jobs/:id, which meant a browser tab was the engine. Close the tab and the
+ * job stopped advancing; Runware finished the clip anyway and its download URL aged out. The user
+ * had paid for something that then evaporated, and Video Studio's refusal to close during a
+ * generation existed mostly to keep somebody sitting there polling.
+ *
+ * This runs the same sequence from the driver. Two things make that safe to do concurrently with a
+ * client that is also polling:
+ *   - videoMeter.settle is keyed on a settlementKey in its own SQLite table, so the charge is
+ *     exactly-once no matter how many callers race for it. That guarantee predates this work and
+ *     is the reason this is a wiring change rather than a billing change.
+ *   - the kernel's claimDue hands a task to one lane at a time, so the driver never races itself.
+ *
+ * The tenant is rebuilt from the task row rather than captured at submit, because a captured
+ * tenant object would be a stale snapshot by the time a slow generation finishes, and metering
+ * against a stale account is exactly the class of bug this app has been burned by before.
+ */
+tasks.register("video", {
+  describe: (t) => (t.status === "done" ? "Your video clip is ready" : "A video generation did not finish"),
+  href: (t) => "/?video=1" + (t.anchor ? "&project=" + encodeURIComponent(t.anchor) : ""),
+  maxAgeMs: 60 * 60000,
+  poll: async (task, api) => {
+    const tenantId = task.uid, projectId = task.anchor, jobId = task.externalId;
+    if (!tenantId || !projectId || !jobId) return { failed: true, code: "incomplete_record", message: "This generation is missing the details needed to finish it." };
+
+    let job = await videoFeature.pollJob(tenantId, projectId, jobId);
+    if (!job) return { failed: true, code: "job_gone", message: "The provider no longer knows about this generation." };
+    if (job.status === "failed") {
+      return { failed: true, code: "provider_failed",
+               message: String((job.providerError && job.providerError.message) || "Video generation failed.").slice(0, 300) };
+    }
+    if (job.status !== "ready") return { retryInMs: Number(job.retry && job.retry.delayMs) || 0 };
+
+    // Settle before download. A clip we hold but never charged for is a smaller problem than a
+    // charge with no clip, and settle() being exactly-once means an interrupted run can retry here.
+    if (Number(job.cost) > 0 && !(job.settlement && job.settlement.status === "settled")) {
+      const T = task.email && lcEmail(task.email) === lcEmail(OWNER_EMAIL || "")
+        ? OWNER_T : { isOwner: false, uid: tenantId, email: task.email || "", role: "credit" };
+      const settlement = await videoMeter.settle(T, Number(job.cost), {
+        kind: "video_generation", provider: "runware", jobId, projectId,
+      });
+      if (typeof videoFeature.markJobSettled === "function") {
+        job = await videoFeature.markJobSettled(tenantId, projectId, jobId, settlement || {});
+      }
+      api.emit({ type: "cost", costUsd: Number(job.cost) || 0 });
+    }
+
+    if (job.output && !job.localOutput) {
+      job = await videoFeature.downloadJobOutput(tenantId, projectId, jobId);
+      // Not a failure yet: the provider URL may still be live and the deadline is what ends this.
+      if (!job.localOutput) return { retryInMs: 5000 };
+    }
+    return { done: true, resultRef: job.localOutput || "", meta: { projectId, jobId } };
+  },
+});
+
 const videoHttp = createVideoHttp({
   feature: videoFeature,
+  log: (m) => console.log("[dominion-ai] " + m),
+  onJobQueued: ({ tenantId, tenant, projectId, jobId, prompt }) => {
+    tasks.createTask({
+      id: "vid-" + jobId, kind: "video", surface: "video", anchor: projectId,
+      title: String(prompt || "Video generation").slice(0, 80),
+      email: (tenant && tenant.email) || "", uid: tenantId,
+      status: "running", externalId: jobId,
+      pollAt: Date.now() + 3000,   // Runware is never ready instantly; the first ask can wait.
+    });
+  },
   media: videoWorkspace,
   resolveTenant,
   billing: { account: (email) => billing.account(email), canChat: (email) => billing.canChat(email) },

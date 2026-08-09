@@ -378,6 +378,10 @@ export function createVideoHttp({
   anthropic = {},
   privacy = {},
   desktopPresence = null,
+  // Called once per queued generation so the task kernel can drive it to completion with no
+  // browser present. Optional: absent, this file behaves exactly as it did before the kernel.
+  onJobQueued = null,
+  log = () => {},
   now = Date.now,
 } = {}) {
   if (!feature || typeof feature !== "object") throw new TypeError("feature is required");
@@ -1684,6 +1688,21 @@ export function createVideoHttp({
         generateAudio: body.generateAudio ?? body.audio ?? true,
       };
       const submitted = await feature.submitGeneration(tenantId, projectId, request, { tenant: clone(tenant) });
+      /*
+       * Hand the job to the task kernel so the SERVER keeps polling it. Before this, the only
+       * thing that ever advanced a generation was a browser sending GET /jobs/:id, so a user who
+       * closed the tab could come back to a clip Runware had finished and whose download URL had
+       * since expired. The kernel record is what lets the driver finish the job with nobody
+       * watching, and what lets the notice find the user afterwards.
+       *
+       * Deliberately after submitGeneration and deliberately non-fatal: the generation is already
+       * paid for and recorded in the project by this point, so a kernel hiccup must not turn a
+       * successful submit into an error the user sees. Worst case without it is the old behaviour.
+       */
+      if (typeof onJobQueued === "function") {
+        try { onJobQueued({ tenantId, tenant: clone(tenant), projectId, jobId: submitted.jobId, prompt: request.prompt, singleGeneration }); }
+        catch (e) { log("video: task kernel handoff failed for " + submitted.jobId + ": " + ((e && e.message) || e)); }
+      }
       return json(res, 202, { ...clone(submitted), id: submitted.jobId, projectId, status: submitted.status || "queued", singleGeneration, message: submitted.deduplicated ? "That generation request is already saved; Dominion will keep polling the original task." : submitted.status === "retrying" ? "Runware did not confirm the saved task yet; Dominion will recover it by task UUID." : "Video generation was queued and will be verified before it reaches the timeline." });
     }
 
