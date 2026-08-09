@@ -16,6 +16,7 @@
 import http from "node:http";
 import https from "node:https";
 import { readFile, writeFile, appendFile, mkdir } from "node:fs/promises";
+import * as fsp from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync, appendFileSync, statSync, mkdirSync } from "node:fs";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { join, normalize, extname, basename } from "node:path";
@@ -6567,8 +6568,76 @@ function meterOcr(T, costUsd) {
 
 // Dominion Forge Images (images.mjs): OpenAI image generation + Batch API, riding the same
 // wall/metering rails as OCR. Pixels are never stored server-side — the device gallery owns them.
+/*
+ * IMAGE RETENTION (Fred approved, 2026-08-08: "we can keep a copy temporarily").
+ *
+ * This feature was built to keep nothing, and the client comment still says the server keeps no
+ * copy. That stance is what turned a dropped connection into a paid-for image that existed
+ * nowhere. Holding the bytes briefly is what makes the generation collectable later, and the
+ * charge now depends on it (see images.mjs).
+ *
+ * Deliberately a SHORT window. This is a delivery buffer, not a gallery: the vault in the
+ * browser's IndexedDB is still where an image lives permanently. IMAGE_RETAIN_MS is the whole
+ * privacy story, so it is one number, in one place, stated in the manual.
+ */
+const IMAGE_RETAIN_MS = Number(cfgGet("IMAGE_RETAIN_MS", String(48 * 3600000))) || 48 * 3600000;
+const IMAGE_KEEP_DIR = dataPath("images-kept");
+tasks.register("image", {
+  describe: (t) => (t.status === "done" ? "Your image is ready" : "An image generation did not finish"),
+  href: (t) => "/?images=1" + (t.id ? "&pick=" + encodeURIComponent(t.id) : ""),
+  maxAgeMs: 30 * 60000,
+});
+
+async function retainImages(T, images, meta) {
+  if (!images || !images.length) return "";
+  const id = "img-" + randomUUID();
+  const dir = join(IMAGE_KEEP_DIR, id);
+  await fsp.mkdir(dir, { recursive: true });
+  const names = [];
+  for (let i = 0; i < images.length; i++) {
+    const name = `${i}.png`;
+    await fsp.writeFile(join(dir, name), Buffer.from(images[i], "base64"));
+    names.push(name);
+  }
+  // The record exists only after the bytes are on disk, so a task can never point at nothing.
+  tasks.createTask({
+    id, kind: "image", surface: "images", anchor: id,
+    title: String(meta.prompt || "Image").slice(0, 80),
+    email: T.email || "", uid: T.uid || "", status: "running",
+  });
+  tasks.bindMeta(id, { resultRef: dir });
+  tasks.finish(id, "done", { count: names.length, quality: meta.quality, aspect: meta.aspect,
+                             costUsd: meta.costUsd, draft: !!meta.draft, files: names });
+  return dir;
+}
+
+/*
+ * GET /api/images/kept?task=<id> — collect an image generated while you were somewhere else.
+ * Identity-scoped exactly like the Simplify attach: a foreign id and an unknown id answer the
+ * same, so this cannot be used to probe which ids exist.
+ */
+async function handleImageKept(req, res, u) {
+  const T = resolveTenant(req);
+  const id = String(u.searchParams.get("task") || "");
+  const row = id ? tasks.get(id) : null;
+  if (!row || row.kind !== "image" || T.role === "anon" || (!T.isOwner && row.uid !== T.uid)) {
+    return sjson(res, 404, { error: "not found" });
+  }
+  let meta = null; try { meta = row.meta ? JSON.parse(row.meta) : null; } catch {}
+  const files = (meta && meta.files) || [];
+  const out = [];
+  for (const name of files) {
+    try { out.push({ b64: (await fsp.readFile(join(row.resultRef, name))).toString("base64"), format: "png" }); }
+    catch { /* swept already; report what survives rather than failing the whole collection */ }
+  }
+  if (!out.length) return sjson(res, 410, { error: "that image is no longer held", retainedForMs: IMAGE_RETAIN_MS });
+  tasks.collect(id); tasks.markSeen(id);
+  return sjson(res, 200, { images: out, meta });
+}
+
 const imagesFeature = createImagesFeature({
   key: () => OPENAI_KEY,
+  retain: retainImages,
   apiBase: cfgGet("OPENAI_IMAGES_BASE", "https://api.openai.com"),
   model: cfgGet("DOMINION_IMAGE_MODEL", "gpt-image-2"),
   refineModel: cfgGet("DOMINION_IMAGE_REFINE_MODEL", "gpt-5.6-luna"),
@@ -10758,6 +10827,7 @@ const server = http.createServer(async (req, res) => {
     if (path === "/api/video" || path.startsWith("/api/video/")) return videoHttp.handle(req, res, u);
     if (path === "/api/ocr" && req.method === "POST") return handleOcr(req, res);
     if (path === "/api/images/config" && req.method === "GET") return imagesFeature.handleConfig(req, res);
+    if (path === "/api/images/kept" && req.method === "GET") return handleImageKept(req, res, u);
     if (path === "/api/images/generate" && req.method === "POST") return imagesFeature.handleGenerate(req, res);
     if (path === "/api/images/refine" && req.method === "POST") return imagesFeature.handleRefine(req, res);
     if (path === "/api/images/batch" && req.method === "POST") return imagesFeature.handleBatchCreate(req, res);
@@ -11118,6 +11188,23 @@ server.listen(PORT, HOST, () => {
   // Retention sweep: running jobs are never touched; collected results shed events after
   // CHATJOBS_COLLECTED_TTL_MS, uncollected after CHATJOBS_UNCOLLECTED_TTL_MS (0 = keep forever).
   setInterval(() => { try { jobStore.gcRetention({ collectedTtlMs: CHATJOBS_COLLECTED_TTL_MS, uncollectedTtlMs: CHATJOBS_UNCOLLECTED_TTL_MS }); } catch {} }, 3600000).unref?.();
+  /*
+   * Task retention, and the reason it is not just a row delete: gcRetention hands back the
+   * resultRefs it dropped precisely so the caller can delete what they point at. Skipping that
+   * turns a short privacy window into an unbounded folder of other people's pictures, which is
+   * the opposite of what the retention window is for.
+   */
+  setInterval(() => {
+    try {
+      const swept = tasks.gcRetention({ collectedTtlMs: IMAGE_RETAIN_MS, uncollectedTtlMs: IMAGE_RETAIN_MS });
+      for (const ref of swept.orphanedRefs || []) {
+        if (typeof ref === "string" && ref.startsWith(IMAGE_KEEP_DIR)) {
+          fsp.rm(ref, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+      if (swept.rowsGone) console.log(`[dominion-ai] tasks: swept ${swept.rowsGone} finished task(s), ${(swept.orphanedRefs || []).length} artifact(s)`);
+    } catch {}
+  }, 3600000).unref?.();
   /*
    * Deploy drain (Fred, 2026-07-30). Railway swaps containers with SIGTERM; nineteen same-day
    * deploys executed two of his live builds at the 14:18 and 15:43 cutovers, and the screen kept

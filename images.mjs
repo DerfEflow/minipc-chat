@@ -159,6 +159,10 @@ export function createImagesFeature(deps) {
     isMetered = () => false,// (T) => does meter() actually charge this tenant?
     billingAccount = null,  // (email) => { balance } | null — for batch affordability checks
     logUsage = async () => {},
+    // (T, images[b64], meta) => Promise<resultRef|""> — keep a copy so a user who navigated away
+    // can still collect it. Optional: absent, generation behaves as it did before, EXCEPT that a
+    // disconnected client is no longer charged for an image nobody received.
+    retain = null,
     log = () => {},
   } = deps;
 
@@ -355,7 +359,45 @@ export function createImagesFeature(deps) {
     if (!images.length) return json(res, 502, { error: "OpenAI returned no images." });
 
     const costUsd = usageCostUsd(out.usage) ?? +(priceFor(item.quality, item.aspect) * images.length).toFixed(6);
-    meter(T, costUsd);
+
+    /*
+     * KEEP IT BEFORE YOU CHARGE FOR IT (Fred's concurrent-work spec, 2026-08-08).
+     *
+     * This used to read `meter(T, costUsd)` right here, followed by json(res, 200, ...). The
+     * generation itself was never the fragile part: Node does not abort a handler when a client
+     * disconnects, so the image always arrived from OpenAI. What was fragile was everything after.
+     * The charge landed unconditionally, the response was written to a socket that might be gone,
+     * and this feature deliberately kept no copy, so a user who navigated away mid-generation paid
+     * in full for an image that then existed nowhere. Every other long task in this app got a
+     * durable record; this one never did.
+     *
+     * The image is now kept first, and the charge is decided by who actually ended up with it:
+     *
+     *   kept                          -> charge. They can fetch it whenever they come back.
+     *   not kept, socket still open   -> charge. It is going out inline in the next few lines.
+     *   not kept, socket already gone -> DO NOT CHARGE. Nobody received anything, and billing for
+     *                                    silence is the surprise this app refuses.
+     *
+     * The third case costs Dominion the provider fee, which is the right way round: OpenAI has
+     * already been paid either way, and eating that is strictly better than taking money from
+     * somebody for nothing. It is logged loudly because a rise in that line means retention is
+     * broken, not that users are unlucky.
+     */
+    let resultRef = "";
+    if (typeof retain === "function") {
+      try {
+        resultRef = (await retain(T, images, {
+          prompt: item.prompt, quality: item.quality, aspect: item.aspect, costUsd, draft: isDraft,
+        })) || "";
+      } catch (e) {
+        log("image retain failed: " + ((e && e.message) || e));
+      }
+    }
+    const clientGone = !!(res.writableEnded || res.destroyed || req.destroyed);
+    if (resultRef || !clientGone) meter(T, costUsd);
+    else {
+      log(`image gen NOT CHARGED ($${costUsd}): client gone and no copy kept — ${T.isOwner ? "owner" : T.email || T.uid}`);
+    }
     await logUsage({
       ts: startedAt, model, mode: "image", status: "completed", images: images.length,
       quality: item.quality, aspect: item.aspect, refs: parsedRefs.refs.length || null,
