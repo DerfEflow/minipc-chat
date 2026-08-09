@@ -8254,7 +8254,11 @@ async function handleChat(req, res) {
     sse({ type: "done", meta: {
       model: "battalion", mode: "battalion", provider: "nvidia (free)",
       memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length,
-      tools: 0, runIds: [], inputTokens: 0, outputTokens: 0, costUsd: 0,
+      // Was hardcoded 0, which stopped being true the moment workers got tools (2026-08-09). The
+      // manifest counts them per stage, so the turn reports what the swarm actually ran rather than
+      // telling the user "0 tools" under an answer that was built from four file reads.
+      tools: (mf.stages || []).reduce((n, s) => n + (s.tools || 0), 0),
+      runIds: [], inputTokens: 0, outputTokens: 0, costUsd: 0,
       battalion: { mode: mf.mode, parts: mf.parts, models: mf.models, ms: mf.ms, notes: mf.notes },
       completionVerified: false, quality: { confidence: 0.6, hallucinationRisk: "normal", needsReview: false }, warnings: [],
     } });
