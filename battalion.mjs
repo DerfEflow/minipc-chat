@@ -182,9 +182,26 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
   const offeredNames = () => new Set(toolDefs().map((d) => d && d.function && d.function.name).filter(Boolean));
   const seatsUsed = (manifest) => [...new Set(manifest.stages.map((s) => s.seat))];
 
-  async function seat(catalogId, messages, { tokens, onDelta = null, signal } = {}) {
+  /*
+   * A seat that changed WIRES says so, the same way a seat that was replaced says so.
+   *
+   * The caller may wrap callSeat so a transport death is retried on a different host (see
+   * seatfailover.mjs). This module knows nothing about hosts and should not, but it owns the
+   * manifest, and a run where the coder seat was quietly answered by a general-purpose model is not
+   * the run the user was promised. Deduped because a tool loop calls the same seat several times.
+   */
+  const noteFailover = (manifest, r) => {
+    if (!manifest || !r || !r.failoverTo) return;
+    const note = r.failoverFrom + " could not be reached on its own wire; " + r.failoverTo
+      + " answered on a second free wire"
+      + (r.failoverTo === r.failoverFrom ? "" : " (a different model than the seat calls for)");
+    if (!manifest.notes.includes(note)) manifest.notes.push(note);
+  };
+
+  async function seat(catalogId, messages, { tokens, onDelta = null, signal, manifest = null } = {}) {
     const t0 = Date.now();
     const r = await callSeat(catalogId, messages, { num_predict: tokens, signal }, onDelta);
+    noteFailover(manifest, r);
     return { ...r, ms: Date.now() - t0 };
   }
 
@@ -196,7 +213,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
    * not converging, and the swarm has three other parts waiting on it.
    */
   async function seatWithTools(catalogId, messages, { tokens, signal, manifest, label, onDelta = null, toolContext = null }) {
-    if (!toolsReady(toolContext)) return seat(catalogId, messages, { tokens, onDelta, signal });
+    if (!toolsReady(toolContext)) return seat(catalogId, messages, { tokens, onDelta, signal, manifest });
     const offered = offeredNames();
     const defs = toolDefs();
     const convo = messages.map((m) => ({ ...m }));
@@ -216,6 +233,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
       const r = await callSeat(catalogId, convo,
         { num_predict: tokens, signal, tools: round < TOOL_ROUNDS ? defs : null }, null);
       totalMs += Date.now() - t0;
+      noteFailover(manifest, r);
       let calls = Array.isArray(r.toolCalls) ? r.toolCalls : [];
       /*
        * The structured channel was empty, but the model may have written the call as prose. Parse it
@@ -326,7 +344,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
         { role: "system", content: "Classify the user's request. Reply with EXACTLY one word: SIMPLE if one model should answer it directly, COMPLEX if it is large enough to split between several models (multi-part builds, long documents, multi-file code, broad research)." },
         ...context.slice(-4),
         { role: "user", content: question.slice(0, 4000) },
-      ], { tokens: 2500, signal });
+      ], { tokens: 2500, signal, manifest });
       complex = a.ok ? /COMPLEX/i.test(String(a.content || "")) : question.length > 800;
       manifest.stages.push({ stage: "assess", seat: roster.assess, ms: a.ms, ok: !!a.ok });
     }
@@ -342,7 +360,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
           ...preamble,
           ...context,
           { role: "user", content: question },
-        ], { tokens: PLAN_TOKENS, signal });
+        ], { tokens: PLAN_TOKENS, signal, manifest });
         manifest.stages.push({ stage: "plan", seat: roster.orchestrator, ms: plan.ms, ok: !!plan.ok });
         const parsed = plan.ok ? extractPlan(plan.content) : null;
         parts = parsed && parsed.parts.length >= PART_MIN ? parsed.parts : null;
@@ -364,7 +382,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
             ...preamble,
             { role: "user", content: "THE REQUEST:\n" + question + "\n\n" + good.map((g, i) => "=== PART " + (i + 1) + ": " + g.title + " ===\n" + g.text).join("\n\n") },
           ];
-          const synth = await seat(roster.synthesizer, synthMsgs, { tokens: SYNTH_TOKENS, onDelta: onToken, signal });
+          const synth = await seat(roster.synthesizer, synthMsgs, { tokens: SYNTH_TOKENS, onDelta: onToken, signal, manifest });
           let merged = String(synth.content || "");
           let synthMs = synth.ms, continued = 0;
           /*
@@ -379,7 +397,7 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
               working("battalion: still writing");
               synthMsgs.push({ role: "assistant", content: merged.slice(-6000) });
               synthMsgs.push({ role: "user", content: CONTINUE_NUDGE });
-              const cont = await seat(roster.synthesizer, synthMsgs, { tokens: SYNTH_TOKENS, onDelta: onToken, signal });
+              const cont = await seat(roster.synthesizer, synthMsgs, { tokens: SYNTH_TOKENS, onDelta: onToken, signal, manifest });
               synthMs += cont.ms;
               if (!cont.ok || !String(cont.content || "").trim()) {
                 manifest.notes.push("the merged answer was cut short: continuation " + (continued + 1) + " did not come back");

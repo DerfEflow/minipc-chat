@@ -554,6 +554,47 @@ export const BATTALION_ROSTER = {
 export const battalionRosterIds = () => [BATTALION_ROSTER.assess, BATTALION_ROSTER.orchestrator,
   BATTALION_ROSTER.synthesizer, BATTALION_ROSTER.single, ...BATTALION_ROSTER.workers];
 
+/*
+ * A SECOND WIRE FOR EVERY SEAT (Fred, 2026-08-09, ready to give up on BATTALION after a turn died
+ * with "Couldn't reach NVIDIA (direct): read ETIMEDOUT").
+ *
+ * The roster reads like five vendors and is ONE HOST. Every id above resolves to provider "nvidia",
+ * so integrate.api.nvidia.com carries the assess seat, the orchestrator, the synthesizer, the single
+ * seat and all four workers. battalion.mjs does replace a dead seat with another seat, but that
+ * changes the model name in the request body and posts it to the host that just timed out; against a
+ * transport failure it buys nothing. One bad minute on one host therefore reaches the user as "the
+ * free lane is down", which is what it reached Fred as.
+ *
+ * The endpoint was NOT the problem. Probed from the production container the same evening: GET
+ * /v1/models 200 in 109ms, ultra-550b 200 in 482ms, super-120b 200 in 430ms.
+ *
+ * This maps each seat to a route on a DIFFERENT host, and every value is MEASURED rather than
+ * assumed, because the obvious version of this fix quietly starts billing. Probed against OpenRouter
+ * 2026-08-09 from the same container:
+ *
+ *   openai/gpt-oss-20b                      PAID bare ($0.03/$0.13), :free exists  -> :free
+ *   nvidia/nemotron-3-ultra-550b-a55b       PAID bare ($0.60/$3.60), :free exists  -> :free
+ *   nvidia/nemotron-3-super-120b-a12b:free  already a $0 route                     -> itself
+ *   z-ai/glm-5.2                            NO $0 route on OpenRouter at all       -> the free 120B
+ *   minimax/minimax-m3                      NO $0 route on OpenRouter at all       -> the free 120B
+ *
+ * FOUR OF THE FIVE ARE PAID under their bare ids, so a plain __forceProvider reroute would have
+ * charged Fred on a lane whose own failure message says "Nothing was billed". Every value below is a
+ * $0 route, each live-probed HTTP 200. The two seats with no free twin fall to the free 120B: that
+ * loses the coder and the long-context specialist, which is a real downgrade and is announced in the
+ * manifest rather than swallowed. Vision is not among the losses — the swarm refuses picture turns
+ * outright, so the minimax seat's vision never runs here.
+ *
+ * The $0 invariant is enforced by battalion_failover_test, not by this comment.
+ */
+export const BATTALION_FAILOVER = {
+  "openai/gpt-oss-20b": "openai/gpt-oss-20b:free",
+  "nvidia/nemotron-3-ultra-550b-a55b": "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "nvidia/nemotron-3-super-120b-a12b:free": "nvidia/nemotron-3-super-120b-a12b:free",
+  "z-ai/glm-5.2": "nvidia/nemotron-3-super-120b-a12b:free",
+  "minimax/minimax-m3": "nvidia/nemotron-3-super-120b-a12b:free",
+};
+
 // Pretty context window: 262144 -> "256K", 1000000 -> "1M", 2000000 -> "2M".
 export function fmtCtx(n) {
   if (!n) return "?";

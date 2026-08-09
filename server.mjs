@@ -33,10 +33,11 @@ import { routeOf, escalateForContext, consumeNeeds, askSliceOf, NO_RETRIEVAL_RE 
 import { createChatLog } from "./chatlog.mjs";
 import { startWatchdog } from "./watchdog.mjs";
 import { createPersonaStore, fetchUrl, htmlToText, renderFacets, KINDS as PERSONA_KINDS } from "./persona.mjs";
-import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL, BATTALION_COPY, BATTALION_ROSTER, resolveModelId, REASONING_FLOOR } from "./models.catalog.mjs";
+import { MODELS as CATALOG_MODELS, MODEL_IDS as CATALOG_IDS, modelById, providerOf, isToolCapable, isReasoning, isVisionCapable, visionModelNames, outLimitFor, defaultModelFor, catalogPayload, isBroadCapable, broadCapableNames, broadCapableIds, isOrchestratorApproved, ORCHESTRATOR_FALLBACKS, UTILITY_MODEL, BATTALION_COPY, BATTALION_ROSTER, BATTALION_FAILOVER, resolveModelId, REASONING_FLOOR } from "./models.catalog.mjs";
 import { createUsageLimits } from "./usage-limits.mjs";
 import { effectiveForgeTier } from "./sequential.mjs";
 import { createBattalion } from "./battalion.mjs";
+import { createSeatFailover } from "./seatfailover.mjs";
 import { continuationContext, createLoopWatch, contextExceeded, emptyResponseInstruction, reasoningOnlyPause, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
 import { TOOLBOX_OPEN_NAME, withToolbox, openToolbox } from "./toolbox.mjs";
 import { modelToolResult, toolResultFailed, toolMutationSucceeded } from "./toolresult.mjs";
@@ -1107,12 +1108,27 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
           }
           done({ ok: true, ...common });
         });
-        resp.on("error", (e) => done({ ok: false, error: providerLabel + " stream error: " + String(e.message) }));
+        resp.on("error", (e) => done({ ok: false, retryable: true, error: providerLabel + " stream error: " + String(e.message) }));
       }
     );
     currentReq = req;
-    req.on("error", (e) => done({ ok: false, error: "Couldn't reach " + providerLabel + ": " + String(e.message) + ". Try again, or pick a model from another provider." }));
-    req.on("timeout", () => { try { req.destroy(); } catch {} done({ ok: false, error: providerLabel + " timed out. Try again, or pick a model from another provider." }); });
+    /*
+     * A SOCKET DEATH IS RETRYABLE, and saying so here fixes three callers at once (2026-08-09).
+     *
+     * These three results carried no `retryable` flag and no `status`, so every downstream predicate
+     * had to recognise them by their prose. ideRetryableFailure matches /timeout|timed out|network|
+     * socket|.../ and NONE of those appear in "Couldn't reach NVIDIA (direct): read ETIMEDOUT" —
+     * ETIMEDOUT contains "timedout", not "timeout". So the IDE build path classified the single most
+     * common transport failure in Node as permanent and never reached its own stand-in engine, which
+     * exists for exactly this. (The chat rescue lane escaped by luck: its separate predicate happens
+     * to match "couldn't reach".)
+     *
+     * Flagging the result is better than widening two regexes, because the flag is checked FIRST by
+     * both predicates and cannot be defeated by the next error string nobody predicted. `retryable`
+     * only, deliberately: a synthetic status would leak into code that branches on HTTP codes.
+     */
+    req.on("error", (e) => done({ ok: false, retryable: true, error: "Couldn't reach " + providerLabel + ": " + String(e.message) + ". Try again, or pick a model from another provider." }));
+    req.on("timeout", () => { try { req.destroy(); } catch {} done({ ok: false, retryable: true, error: providerLabel + " timed out. Try again, or pick a model from another provider." }); });
     req.write(data); req.end();
     };
     if (opts.signal) opts.signal.addEventListener("abort", () => { try { currentReq && currentReq.destroy(); } catch {} done({ ok: false, aborted: true, error: "stopped" }); }, { once: true });
@@ -7902,7 +7918,24 @@ const swarmToolDefs = () => toolDefs(flywheel.activeToolOverlays())
   });
 
 const battalion = createBattalion({
-  callSeat: (id, msgs, opts, onDelta) => cloudChatStream(id, msgs, opts, onDelta),
+  /*
+   * ONE HOST WAS THE WHOLE PROBLEM (Fred, 2026-08-09, after "read ETIMEDOUT" ended a turn and very
+   * nearly ended the feature).
+   *
+   * Every seat in BATTALION_ROSTER resolves to provider "nvidia", so the roster's five apparent
+   * vendors are one wire. battalion.mjs's announced replacement swaps the model and re-posts to the
+   * host that just timed out, which cannot survive a transport failure by construction. This wraps
+   * every seat call so a transport death gets one attempt on a genuinely different host, using the
+   * measured $0 routes in BATTALION_FAILOVER — measured because four of the five seats are PAID on
+   * OpenRouter under their bare ids, and this lane's own error message promises nothing was billed.
+   */
+  callSeat: createSeatFailover({
+    call: (id, msgs, opts, onDelta) => cloudChatStream(id, msgs, opts, onDelta),
+    map: BATTALION_FAILOVER,
+    keyPresent: () => !!OPENROUTER_KEY,
+    isTransportDeath: (r) => ideRetryableFailure(r),
+    log: (m) => console.log("[dominion-ai] " + m),
+  }),
   tools: swarmToolDefs,
   /*
    * The tenant context arrives PER RUN and there is no fallback, deliberately.
