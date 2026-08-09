@@ -91,6 +91,27 @@ await t("installer zip: contains all six files, token baked in, no CF fields any
   const readme = entries["READ ME FIRST.txt"].toString("utf8");
   assert.match(readme, /Extract All/);
 });
+await t("installer zip: the downloaded-file mark is swept so the Startup entry can actually fire", () => {
+  const zip = buildInstallerZip({
+    url: "https://app.dominion.tools", token: "dfk_deadbeef", nodeName: "forge-abc12345",
+    handsSrc: "// hands.mjs body", snapshotSrc: "// snapshot.mjs body",
+  });
+  const entries = readZipEntries(zip);
+  const bat = entries["Connect Me To Dominion.bat"].toString("utf8");
+  // Folder-wide, not just this bat. The quiet runner carries the same zip mark, and a marked quiet
+  // runner is the invisible failure: auto-reconnect reports on and never fires.
+  assert.match(bat, /Get-ChildItem -LiteralPath \$env:DFDIR -File \| Unblock-File/);
+  // Env var, not an inline path — extraction folders contain apostrophes that break PS quoting.
+  assert.match(bat, /set "DFDIR=%~dp0"/);
+  // Before the Node gate, so a machine sent off to install Node returns to a clean folder.
+  assert.ok(bat.indexOf("Unblock-File") < bat.indexOf("where node"), "unblock must precede the Node gate");
+  // The user-facing half: name the actual dialog, and never point a customer at a switch they
+  // cannot undo. Disabling Smart App Control needs a Windows reinstall to reverse.
+  const readme = entries["READ ME FIRST.txt"].toString("utf8");
+  assert.match(readme, /Run anyway/);
+  assert.match(readme, /Unblock/);
+  assert.doesNotMatch(readme, /smart app control|defender|antivirus|security settings? off/i);
+});
 await t("installer zip: the connection survives the daily cycle (auto-start offer + quiet runner + off switch)", () => {
   const zip = buildInstallerZip({
     url: "https://app.dominion.tools", token: "dfk_deadbeef", nodeName: "forge-abc12345",

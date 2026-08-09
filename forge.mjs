@@ -38,6 +38,22 @@ const mkToken = () => "dfk_" + randomBytes(24).toString("hex");   // Dominion Fo
  * The Startup entry is rewritten on every run of the main bat, so moving the extracted folder heals
  * itself the next time the user double-clicks the bat. No elevation anywhere: the Startup folder is
  * the user's own (%APPDATA%), which is exactly the blast radius a guest node should have.
+ *
+ * MARK OF THE WEB (owner report, 2026-08-08: "it will not let me launch it on my own computer").
+ * Windows stamps every file that comes out of a downloaded zip with a zone marker, and Explorer
+ * refuses to run marked scripts. Two consequences, one visible and one not:
+ *   - the visible one is the blue "Windows protected your PC" box on the first double-click;
+ *   - the silent one is worse. The quiet runner carries the same mark from the same zip, so the
+ *     Startup entry above resolves to a file Windows will not execute. The user is told
+ *     auto-reconnect is on, sees the black window, reboots, and is disconnected with no error
+ *     anywhere. That is the persistence bug above coming back through a side door.
+ * So the main bat sweeps its own folder clear before it does anything else. It cannot save the
+ * very first launch (Explorer reads the mark before any of our code runs, so that one still needs
+ * "More info" then "Run anyway"), but it makes the tax a one-time cost instead of a recurring one.
+ * Note what we deliberately do NOT do: tell the user to turn off Smart App Control. That switch is
+ * irreversible without reinstalling Windows, and shipping "disable your security software" next to
+ * a remote-access agent is how a legitimate tool gets classified as malware. The README routes to
+ * support instead, and a test below holds that line.
  */
 const STARTUP_POINTER = "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\Dominion Forge.cmd";
 export function buildInstallerZip({ url, token, nodeName, handsSrc, snapshotSrc }) {
@@ -45,6 +61,13 @@ export function buildInstallerZip({ url, token, nodeName, handsSrc, snapshotSrc 
     "@echo off",
     "setlocal",
     "title Connect this computer to Dominion Forge",
+    // Clear the downloaded-from-the-internet mark off every file in this folder — see MARK OF THE
+    // WEB above. Folder-wide, not just this bat: the quiet runner is the one whose mark breaks
+    // auto-reconnect invisibly. Runs before the Node gate so a machine that has to go install Node
+    // comes back to a clean folder. Path travels by env var because extraction folders contain
+    // apostrophes ("Fred's laptop") that would otherwise break the PowerShell quoting.
+    "set \"DFDIR=%~dp0\"",
+    "powershell -NoProfile -Command \"Get-ChildItem -LiteralPath $env:DFDIR -File | Unblock-File\" >nul 2>nul",
     "where node >nul 2>nul",
     "if errorlevel 1 (",
     "  echo.",
@@ -131,6 +154,23 @@ export function buildInstallerZip({ url, token, nodeName, handsSrc, snapshotSrc 
     "   Say yes (or just wait) and the connection comes back on its own after",
     "   every restart. \"Stop Auto Connect.bat\" turns that off again.",
     "6. Go back to Dominion and pick which folders it may use.",
+    "",
+    "IF WINDOWS WILL NOT LET IT OPEN",
+    "",
+    "Windows puts a hidden mark on files that arrive inside a downloaded zip, and that",
+    "mark can stop the connector from starting. It is not a problem with the connector.",
+    "",
+    "If you see a blue box saying \"Windows protected your PC\", that is Windows asking",
+    "you to confirm, not refusing. Click \"More info\", then \"Run anyway\". The connector",
+    "clears the mark for you on that first run, so Windows stops asking after that.",
+    "",
+    "If nothing happens at all when you double-click: right-click",
+    "\"Connect Me To Dominion.bat\", choose Properties, tick the \"Unblock\" box at the",
+    "bottom, click OK, then double-click it again.",
+    "",
+    "Please do not switch off any Windows security settings to get around this. Some of",
+    "those changes cannot be undone afterwards. Write to us instead and we will get this",
+    "computer connected another way.",
     "",
     "To stop for now, just close the black window.",
     "If you move this folder somewhere else, double-click \"Connect Me To Dominion.bat\"",
