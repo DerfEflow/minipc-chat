@@ -759,7 +759,7 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
   if (earlyProvider === "openai") {
     const cfg = PROVIDER_CFG.openai;
     const key = cfg.key();
-    if (!key) return Promise.resolve({ ok: false, error: `No ${cfg.label} key configured on the server. Add the key to the box's .env to use this model. Local Qwen still works.` });
+    if (!key) return Promise.resolve({ ok: false, error: `No ${cfg.label} key configured on the server. Add the key to the box's .env, or pick a model from another provider.` });
     const policy = opts.executionPolicy || {};
     const providerRequest = policy.providerOptions && policy.providerOptions.request || {};
     const requestedEffort = opts.reasoningEffort || providerRequest.reasoning?.effort || providerRequest.reasoning_effort;
@@ -835,7 +835,7 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     // the catalog id (which IS the OpenRouter slug).
     const directId = provider === "openrouter" ? catalogId : ((rec && rec.directId) || catalogId);
     const KEY = cfg.key();
-    if (!KEY) return resolve({ ok: false, error: `No ${cfg.label} key configured on the server. Add the key to the box's .env to use this model. Local Qwen still works.` });
+    if (!KEY) return resolve({ ok: false, error: `No ${cfg.label} key configured on the server. Add the key to the box's .env, or pick a model from another provider.` });
     if (opts.signal && opts.signal.aborted) return resolve({ ok: false, aborted: true, error: "stopped" });
     let u; try { u = new URL(cfg.url); } catch { return resolve({ ok: false, error: `${cfg.label} endpoint is misconfigured.` }); }
     // OpenAI chat format. Tool-loop turns carry assistant tool_calls and tool results
@@ -1110,8 +1110,8 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
       }
     );
     currentReq = req;
-    req.on("error", (e) => done({ ok: false, error: "Couldn't reach " + providerLabel + ": " + String(e.message) + ". Local Qwen still works." }));
-    req.on("timeout", () => { try { req.destroy(); } catch {} done({ ok: false, error: providerLabel + " timed out. Try again or use Local Qwen." }); });
+    req.on("error", (e) => done({ ok: false, error: "Couldn't reach " + providerLabel + ": " + String(e.message) + ". Try again, or pick a model from another provider." }));
+    req.on("timeout", () => { try { req.destroy(); } catch {} done({ ok: false, error: providerLabel + " timed out. Try again, or pick a model from another provider." }); });
     req.write(data); req.end();
     };
     if (opts.signal) opts.signal.addEventListener("abort", () => { try { currentReq && currentReq.destroy(); } catch {} done({ ok: false, aborted: true, error: "stopped" }); }, { once: true });
@@ -6510,7 +6510,9 @@ function estimatePreflight(input = {}, isOwner = false) {
   }
   if (pendingImages > 0 && !(cloud && isVisionCapable(cloud))) {
     return { backend: "blocked", blocked: "attachments_unsupported", mode: normalizeMode(input.privacyMode),
-      model: cloud ? ((modelById(cloud) || {}).name || cloud) : "Local Qwen", estCost: "blocked", estLatency: "—",
+      // No cloud model resolved here means the owner's explicit local pick, the only route left to
+      // the local engine. Named plainly rather than advertised: it is not a seat anyone can choose.
+      model: cloud ? ((modelById(cloud) || {}).name || cloud) : "the local engine", estCost: "blocked", estLatency: "—",
       confirm: false, message: "This model can't view pictures — pick one with the 👁 badge." };
   }
   // Phase 2: if the picked cloud model is disallowed by the current privacy mode, the composer chip
@@ -9374,7 +9376,7 @@ async function handleChat(req, res) {
             "Next action: retry this same session and selected model; Dominion will resume from this goal and the saved evidence.",
           ].join("\n\n");
           sse({ type: "token", delta: checkpointText });
-          sse({ type: "error", error: or.error || "The cloud model didn't respond. Try again, or switch back to Local Qwen." });
+          sse({ type: "error", error: or.error || "The cloud model didn't respond. Try again, or pick another model." });
           sse({ type: "checkpoint", state: "retry", complete: false, goal: taskContract.objective,
                 reason: or.error || "provider unavailable", nextAction: "retry this same session and model",
                 evidence: toolSummaries.slice(-40) });
