@@ -1,0 +1,2738 @@
+[
+  {
+    "id": "compliance-monitoring",
+    "category": "business-operations",
+    "title": "Compliance Monitoring",
+    "summary": "Watches regulatory sources and internal control status in parallel: maps new or changed regulations to the controls they touch, collects evidence of control operation on schedule, and flags gaps with owners and deadlines — so audit prep becomes reviewing a living record instead of a quarterly archaeology dig.",
+    "patterns": [
+      "Parallelization",
+      "Tool Use"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Regulatory-change interpretations are drafts until compliance staff confirm applicability.",
+    "steps": [
+      {
+        "name": "watch_sources",
+        "goal": "Poll regulatory feeds and internal control systems in parallel."
+      },
+      {
+        "name": "map_to_controls",
+        "goal": "Link each regulatory change to affected controls and policies."
+      },
+      {
+        "name": "assess_impact",
+        "goal": "Draft an applicability and impact assessment for compliance review."
+      },
+      {
+        "name": "collect_evidence",
+        "goal": "Gather scheduled control-operation evidence from source systems."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Approve the gap items and published evidence index before they reach owners and the audit record."
+      },
+      {
+        "name": "flag_gaps",
+        "goal": "Open gap items with owner, severity, and remediation deadline."
+      },
+      {
+        "name": "report",
+        "goal": "Publish the compliance dashboard data and audit-ready evidence index."
+      }
+    ],
+    "inputs": [
+      "Regulatory feeds for applicable regimes",
+      "Control catalog with owners",
+      "Evidence source systems"
+    ],
+    "outputs": [
+      "Regulation→control mapping updates",
+      "Evidence collection log",
+      "Gap register with owners and due dates"
+    ],
+    "success_metrics": [
+      "Evidence collection on-time rate",
+      "Days from regulation change to assessed impact",
+      "Audit findings per cycle (trend)"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "contract-review",
+    "category": "business-operations",
+    "title": "Contract Review",
+    "summary": "Reviews inbound contracts clause-by-clause against your negotiation playbook: segments the document, analyzes clauses in parallel against standard positions, scores deviations by risk, and drafts redlines with fallback language — producing a counsel-ready markup instead of a cold read.",
+    "patterns": [
+      "Parallelization",
+      "Reflection",
+      "Multi-Agent Collaboration"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "Yes",
+    "review_level": "High",
+    "review_rationale": "Counsel reviews all risk scores and redlines; nothing is sent to a counterparty without sign-off.",
+    "steps": [
+      {
+        "name": "parse_contract",
+        "goal": "Extract and segment the document into typed clauses."
+      },
+      {
+        "name": "parallel_clause_analysis",
+        "goal": "Compare each clause against the playbook position concurrently."
+      },
+      {
+        "name": "score_risk",
+        "goal": "Rate deviations by severity and business impact for this deal's context."
+      },
+      {
+        "name": "draft_redlines",
+        "goal": "Draft markup with primary and fallback language per flagged clause."
+      },
+      {
+        "name": "self_check",
+        "goal": "Verify every redline cites the actual contract text; drop unsupported flags."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Deliver the package to counsel for review and sign-off."
+      }
+    ],
+    "inputs": [
+      "Contract document",
+      "Negotiation playbook (standard positions, fallbacks)",
+      "Deal context (value, term, counterparty)"
+    ],
+    "outputs": [
+      "Clause-by-clause deviation report",
+      "Risk-scored issue list",
+      "Draft redlines with fallback positions"
+    ],
+    "success_metrics": [
+      "Counsel review time per contract",
+      "Deviation catch rate vs. counsel baseline",
+      "Negotiation cycle count"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "expense-report",
+    "category": "business-operations",
+    "title": "Expense Report Processing",
+    "summary": "Turns a shoebox of receipts into a filed, policy-checked expense report: extracts merchant, amount, and category from receipt images, validates each line against expense policy, flags violations with the specific rule cited, and submits the clean report for approval.",
+    "patterns": [
+      "Tool Use",
+      "Routing/Handoff"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Policy-clean reports auto-submit; flagged lines route to the employee, then the approver.",
+    "steps": [
+      {
+        "name": "ingest_receipts",
+        "goal": "Collect receipts from upload, email forward, or photo."
+      },
+      {
+        "name": "extract_fields",
+        "goal": "Pull merchant, date, amount, currency, and line items from each receipt."
+      },
+      {
+        "name": "categorize",
+        "goal": "Assign expense categories and cost centers per company taxonomy."
+      },
+      {
+        "name": "policy_check",
+        "goal": "Validate each line against policy; attach the cited rule to any flag."
+      },
+      {
+        "name": "route_exceptions",
+        "goal": "Return flagged lines to the employee with a plain-language fix."
+      },
+      {
+        "name": "submit",
+        "goal": "File the completed report into the approval chain and confirm."
+      }
+    ],
+    "inputs": [
+      "Receipt images/emails",
+      "Expense policy rules",
+      "Employee and cost-center data"
+    ],
+    "outputs": [
+      "Categorized expense report",
+      "Policy-violation flags with cited rules",
+      "Submission confirmation"
+    ],
+    "success_metrics": [
+      "Extraction accuracy on amounts/merchants",
+      "% reports submitted without rework",
+      "Employee time per report (target < 5 min)"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "invoice-po-matching",
+    "category": "business-operations",
+    "title": "Invoice ↔ PO Matching (Three-Way Match)",
+    "summary": "Automates the three-way match: extracts fields from incoming invoices, retrieves the corresponding purchase order and goods-receipt records, verifies quantities, prices, and terms across all three, and routes clean matches to payment while flagging exceptions to a human queue with a precise discrepancy explanation.",
+    "patterns": [
+      "Tool Use",
+      "Routing/Handoff"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Clean in-tolerance matches post automatically; every exception requires human disposition.",
+    "steps": [
+      {
+        "name": "ingest_invoice",
+        "goal": "Capture the invoice and extract vendor, lines, quantities, prices, terms."
+      },
+      {
+        "name": "fetch_records",
+        "goal": "Retrieve the referenced PO and goods-receipt records from the ERP."
+      },
+      {
+        "name": "three_way_match",
+        "goal": "Compare invoice, PO, and receipt line-by-line against tolerance rules."
+      },
+      {
+        "name": "route_exceptions",
+        "goal": "Send clean matches to payment; route discrepancies with explanations to the AP queue."
+      },
+      {
+        "name": "human_approval",
+        "goal": "AP specialist dispositions exceptions; decisions feed back into tolerance tuning."
+      },
+      {
+        "name": "post_and_log",
+        "goal": "Post approved invoices and write the complete match audit record."
+      }
+    ],
+    "inputs": [
+      "Incoming invoices (PDF/EDI/email)",
+      "ERP access: POs and goods receipts",
+      "Tolerance and approval-limit config"
+    ],
+    "outputs": [
+      "Matched invoices queued for payment",
+      "Exception queue with discrepancy explanations",
+      "Match audit trail"
+    ],
+    "success_metrics": [
+      "Touchless match rate (target > 70%)",
+      "Exception false-positive rate",
+      "Days-payable cycle time reduction"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "meeting-scheduler",
+    "category": "business-operations",
+    "title": "Meeting Scheduler",
+    "summary": "Handles the scheduling volley end-to-end: parses the request, checks all attendees' availability, proposes ranked slots that respect working hours and time zones, negotiates via email or chat when calendars conflict, and books the final slot with the right room or link attached.",
+    "patterns": [
+      "Tool Use",
+      "Planning (Orchestrator-Workers)"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Internal meetings book automatically; external-attendee emails require approval on first contact.",
+    "steps": [
+      {
+        "name": "parse_request",
+        "goal": "Extract attendees, duration, urgency, and hard constraints."
+      },
+      {
+        "name": "fetch_availability",
+        "goal": "Query calendars; normalize across time zones and working hours."
+      },
+      {
+        "name": "propose_slots",
+        "goal": "Rank candidate slots by mutual convenience and preference config."
+      },
+      {
+        "name": "negotiate",
+        "goal": "Send proposals and process replies, iterating until convergence."
+      },
+      {
+        "name": "book_confirm",
+        "goal": "Create the event with room/link, send invites, and confirm to the requester."
+      }
+    ],
+    "inputs": [
+      "Scheduling request (attendees, duration, constraints)",
+      "Calendar API access",
+      "Working-hours and preference config"
+    ],
+    "outputs": [
+      "Booked event with invites and location/link",
+      "Negotiation email thread",
+      "Fallback options if unresolvable"
+    ],
+    "success_metrics": [
+      "% meetings booked without human intervention",
+      "Email round-trips per booking (target ≤ 2)",
+      "Reschedule rate after booking"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "okr-tracking",
+    "category": "business-operations",
+    "title": "OKR Tracking",
+    "summary": "Automates the OKR cadence: pulls key-result metrics from source systems, collects qualitative updates from owners, scores each KR with an on-track/at-risk/off-track call and a stated reason, and drafts the check-in narrative — turning update-chasing into a review meeting that starts from data.",
+    "patterns": [
+      "Prompt Chaining",
+      "Parallelization"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Owners confirm their KR scores before the narrative is published to leadership.",
+    "steps": [
+      {
+        "name": "pull_metrics",
+        "goal": "Fetch current values for every measurable KR from source systems."
+      },
+      {
+        "name": "collect_updates",
+        "goal": "Request and gather qualitative updates from KR owners in parallel."
+      },
+      {
+        "name": "score_krs",
+        "goal": "Score each KR with confidence and a cited data source."
+      },
+      {
+        "name": "draft_narrative",
+        "goal": "Compose the check-in summary: wins, risks, asks, and trend deltas."
+      },
+      {
+        "name": "publish",
+        "goal": "Distribute after owner confirmation and archive the scoring snapshot."
+      }
+    ],
+    "inputs": [
+      "OKR definitions with metric sources",
+      "Metrics/BI system access",
+      "Owner check-in responses"
+    ],
+    "outputs": [
+      "Scored KR dashboard data",
+      "At-risk list with reasons",
+      "Drafted check-in narrative"
+    ],
+    "success_metrics": [
+      "% KRs scored from live data (vs. self-report)",
+      "Check-in prep time saved",
+      "Forecast accuracy of at-risk calls at quarter end"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "vendor-management",
+    "category": "business-operations",
+    "title": "Vendor Management",
+    "summary": "Keeps the vendor lifecycle honest: runs onboarding due-diligence checks, audits the document set for gaps (MSA, DPA, insurance certificates, SOWs), monitors renewal and expiry dates across the portfolio, and raises alerts with enough lead time to actually negotiate rather than auto-renew.",
+    "patterns": [
+      "Routing/Handoff",
+      "Tool Use",
+      "Planning (Orchestrator-Workers)"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Alerts and gap reports are automatic; any communication to a vendor requires approval.",
+    "steps": [
+      {
+        "name": "intake_vendor",
+        "goal": "Register the vendor and classify criticality and data access level."
+      },
+      {
+        "name": "due_diligence",
+        "goal": "Run checklist verifications: registration, sanctions, security posture."
+      },
+      {
+        "name": "doc_gap_analysis",
+        "goal": "Audit the contract set against required documents for the vendor's tier."
+      },
+      {
+        "name": "monitor_renewals",
+        "goal": "Track expiry dates portfolio-wide and maintain the alert ladder."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Approve renewal alerts and the negotiate/renew/replace call before they go to vendor owners."
+      },
+      {
+        "name": "alert_and_recommend",
+        "goal": "Issue renewal alerts with a negotiate/renew/replace recommendation."
+      }
+    ],
+    "inputs": [
+      "Vendor master list",
+      "Contract repository access",
+      "Due-diligence checklist and doc requirements"
+    ],
+    "outputs": [
+      "Onboarding due-diligence reports",
+      "Document gap analysis per vendor",
+      "Renewal alert ladder (90/60/30)"
+    ],
+    "success_metrics": [
+      "% vendors with complete document sets",
+      "Renewals flagged with ≥ 60 days lead",
+      "Unintended auto-renewals (target 0)"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "brand-voice-consistency",
+    "category": "content-creation",
+    "title": "Brand Voice Consistency",
+    "summary": "Audits content against your brand guidelines — voice attributes, terminology, claims rules, formatting — scores each piece, flags deviations with severity and the specific guideline violated, and rewrites flagged passages while preserving meaning. Works as a pre-publish gate or a batch audit over existing content.",
+    "patterns": [
+      "Reflection",
+      "Routing/Handoff"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Rewrites are suggestions; authors accept or reject each with one click.",
+    "steps": [
+      {
+        "name": "load_guidelines",
+        "goal": "Parse the guidelines into checkable rules: voice, terms, claims, format."
+      },
+      {
+        "name": "score_content",
+        "goal": "Evaluate the content against each rule category."
+      },
+      {
+        "name": "flag_deviations",
+        "goal": "Emit findings with severity, location, and the cited guideline."
+      },
+      {
+        "name": "rewrite_flagged",
+        "goal": "Rewrite flagged passages minimally, preserving meaning and facts."
+      },
+      {
+        "name": "verify_rewrite",
+        "goal": "Reflect: confirm rewrites now pass and introduced no meaning drift."
+      }
+    ],
+    "inputs": [
+      "Content to audit (single piece or corpus)",
+      "Brand guidelines document",
+      "Terminology allow/deny lists"
+    ],
+    "outputs": [
+      "Per-piece compliance scores",
+      "Flagged deviations with cited guidelines",
+      "Suggested rewrites preserving meaning"
+    ],
+    "success_metrics": [
+      "Deviation catch rate vs. human editor",
+      "Author acceptance rate of rewrites",
+      "Compliance-score trend across the corpus"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "landing-page-generator",
+    "category": "content-creation",
+    "title": "Landing Page Generator",
+    "summary": "Converts a campaign brief into a complete landing page: distills the value proposition, writes each section's copy (hero, benefits, social proof, FAQ, CTA), critiques the draft against conversion principles — clarity, single CTA, objection handling — and assembles clean HTML or markdown ready for the site.",
+    "patterns": [
+      "Prompt Chaining",
+      "Reflection"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Marketing approves before anything deploys; claims must trace to approved sources.",
+    "steps": [
+      {
+        "name": "intake_brief",
+        "goal": "Extract offer, audience, objections, and the single conversion goal."
+      },
+      {
+        "name": "distill_value_prop",
+        "goal": "Write the core value proposition and message hierarchy."
+      },
+      {
+        "name": "write_sections",
+        "goal": "Draft hero, benefits, proof, FAQ, and CTA sections."
+      },
+      {
+        "name": "conversion_critique",
+        "goal": "Audit against the conversion checklist; revise flagged sections."
+      },
+      {
+        "name": "assemble_page",
+        "goal": "Render the final page structure with copy in place."
+      },
+      {
+        "name": "emit_variants",
+        "goal": "Produce headline/CTA variants for A/B testing."
+      }
+    ],
+    "inputs": [
+      "Campaign brief (offer, audience, goal)",
+      "Brand assets and voice guide",
+      "Proof points and testimonials"
+    ],
+    "outputs": [
+      "Full page copy by section",
+      "Assembled HTML/markdown page",
+      "A/B headline variants"
+    ],
+    "success_metrics": [
+      "Conversion rate vs. control",
+      "Time from brief to review-ready page",
+      "Approval rate on first draft"
+    ],
+    "gate": "downstream"
+  },
+  {
+    "id": "newsletter-generator",
+    "category": "content-creation",
+    "title": "Newsletter Generator",
+    "summary": "Assembles a recurring newsletter: gathers candidate items from configured sources, ranks them for the audience, summarizes each in the newsletter's voice, composes the issue with intro and through-lines, and applies a final tone pass so the issue reads written, not aggregated.",
+    "patterns": [
+      "Prompt Chaining",
+      "Parallelization"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "The editor approves each issue before send; sources are always linked.",
+    "steps": [
+      {
+        "name": "gather_items",
+        "goal": "Collect candidate items from all sources since the last issue."
+      },
+      {
+        "name": "rank_items",
+        "goal": "Score for audience relevance using profile and click history."
+      },
+      {
+        "name": "summarize_items",
+        "goal": "Write each selected item's blurb in the newsletter voice, in parallel."
+      },
+      {
+        "name": "compose_issue",
+        "goal": "Assemble intro, sections, and transitions per the template."
+      },
+      {
+        "name": "tone_pass",
+        "goal": "Edit the full issue for a single coherent voice."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Deliver to the editor for approval and send."
+      }
+    ],
+    "inputs": [
+      "Content sources (feeds, saved links, internal posts)",
+      "Audience profile and past click data",
+      "Voice guide and issue template"
+    ],
+    "outputs": [
+      "Composed issue (HTML/markdown)",
+      "Item selection rationale",
+      "Post-send engagement summary"
+    ],
+    "success_metrics": [
+      "Open and click rates vs. list baseline",
+      "Editor edit rate per issue",
+      "Production time per issue"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "seo-content",
+    "category": "content-creation",
+    "title": "SEO Content Pipeline",
+    "summary": "Takes a target keyword from brief to publishable draft: builds the content brief from search-intent analysis, outlines against what currently ranks, drafts the article, then runs an SEO critique pass — coverage, structure, internal links, metadata — and revises until the checklist passes.",
+    "patterns": [
+      "Prompt Chaining",
+      "Reflection"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "An editor approves before publish; facts and claims are flagged for verification.",
+    "steps": [
+      {
+        "name": "build_brief",
+        "goal": "Analyze search intent and ranking content; define angle, scope, and structure."
+      },
+      {
+        "name": "outline",
+        "goal": "Draft the outline covering intent gaps competitors miss."
+      },
+      {
+        "name": "write_draft",
+        "goal": "Write the full draft per outline and style guide."
+      },
+      {
+        "name": "seo_critique",
+        "goal": "Audit against the SEO checklist: coverage, headings, links, metadata."
+      },
+      {
+        "name": "revise",
+        "goal": "Apply critique items; loop until the checklist passes or cap hits."
+      },
+      {
+        "name": "package",
+        "goal": "Emit final draft, meta title/description, and link suggestions for editorial review."
+      }
+    ],
+    "inputs": [
+      "Target keyword and intent",
+      "SERP/competitor content data",
+      "Brand style guide",
+      "Internal-link inventory"
+    ],
+    "outputs": [
+      "Content brief",
+      "SEO-optimized draft with metadata",
+      "Internal-link suggestions"
+    ],
+    "success_metrics": [
+      "Editor edit rate",
+      "Ranking position at 30/90 days",
+      "Organic clicks per published piece"
+    ],
+    "gate": "downstream"
+  },
+  {
+    "id": "social-media-manager",
+    "category": "content-creation",
+    "title": "Social Media Manager",
+    "summary": "Plans a content calendar against campaign goals, generates channel-native variants of each post (a thread is not a caption is not a LinkedIn essay), runs brand checks, queues everything for approval, schedules the approved set, and reports engagement back into next cycle's planning.",
+    "patterns": [
+      "Planning (Orchestrator-Workers)",
+      "Parallelization"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "All posts are approved before scheduling; replies/engagement are drafted, never auto-sent.",
+    "steps": [
+      {
+        "name": "plan_calendar",
+        "goal": "Map themes and goals onto a dated calendar with per-channel cadence."
+      },
+      {
+        "name": "generate_variants",
+        "goal": "Create native variants per channel concurrently for each calendar slot."
+      },
+      {
+        "name": "brand_check",
+        "goal": "Screen every variant against brand voice and claim rules."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Queue the batch for marketing approval with calendar context."
+      },
+      {
+        "name": "schedule",
+        "goal": "Schedule approved posts via the publishing tool."
+      },
+      {
+        "name": "analyze_engagement",
+        "goal": "Collect performance data and summarize learnings for the next cycle."
+      }
+    ],
+    "inputs": [
+      "Campaign goals and themes",
+      "Brand guidelines",
+      "Channel list with format specs",
+      "Past engagement data"
+    ],
+    "outputs": [
+      "Content calendar",
+      "Approved channel-native post variants",
+      "Engagement report feeding next cycle"
+    ],
+    "success_metrics": [
+      "Engagement rate per channel vs. baseline",
+      "Approval rate of generated posts",
+      "Calendar adherence"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "churn-prediction",
+    "category": "customer-engagement",
+    "title": "Churn Prediction & Intervention",
+    "summary": "Assembles engagement, support, billing, and product-usage signals per account, scores churn risk, explains the *drivers* behind each at-risk score in plain language, selects an appropriate intervention from the playbook, and routes it to the owning CSM — because a risk score without a reason and a next step is just anxiety.",
+    "patterns": [
+      "Tool Use",
+      "Routing/Handoff"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Interventions are recommendations to the CSM; customer-facing actions are human-executed.",
+    "steps": [
+      {
+        "name": "assemble_signals",
+        "goal": "Join usage, support, billing, and relationship signals per account."
+      },
+      {
+        "name": "score_risk",
+        "goal": "Compute churn risk via the model or rubric; calibrate against history."
+      },
+      {
+        "name": "explain_drivers",
+        "goal": "Identify and narrate the top drivers behind each at-risk score."
+      },
+      {
+        "name": "select_intervention",
+        "goal": "Match drivers to playbook interventions with expected impact."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Approve the account brief and intervention before it is delivered to the owning CSM."
+      },
+      {
+        "name": "route_csm",
+        "goal": "Deliver the account brief and recommendation to the owning CSM."
+      }
+    ],
+    "inputs": [
+      "Account usage and engagement data",
+      "Support and billing history",
+      "Churn-risk model or scoring rubric",
+      "Intervention playbook"
+    ],
+    "outputs": [
+      "Risk-scored account list",
+      "Plain-language driver explanations",
+      "Routed intervention recommendations"
+    ],
+    "success_metrics": [
+      "Risk-score precision at top decile",
+      "Save rate on intervened accounts",
+      "CSM action rate on recommendations"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "feedback-analysis",
+    "category": "customer-engagement",
+    "title": "Feedback Analysis",
+    "summary": "Aggregates feedback from reviews, NPS verbatims, support tickets, and social mentions, clusters it into themes, quantifies each theme's frequency and sentiment trend, and produces a report that connects themes to concrete product areas — turning ten thousand fragments into a ranked list of things to fix.",
+    "patterns": [
+      "Parallelization",
+      "Prompt Chaining"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "The report is decision input for product; no automated actions are taken.",
+    "steps": [
+      {
+        "name": "collect_feedback",
+        "goal": "Pull new feedback from all connected sources; dedupe cross-postings."
+      },
+      {
+        "name": "normalize",
+        "goal": "Strip PII, standardize format, attach source and date metadata."
+      },
+      {
+        "name": "cluster_themes",
+        "goal": "Group items into themes in parallel batches; map to product areas."
+      },
+      {
+        "name": "quantify",
+        "goal": "Count frequency, compute sentiment, and calculate trend vs. baseline."
+      },
+      {
+        "name": "compose_report",
+        "goal": "Rank themes and write the report with representative verbatims."
+      }
+    ],
+    "inputs": [
+      "Feedback sources (reviews, NPS, tickets, social)",
+      "Product-area taxonomy",
+      "Prior-period theme baseline"
+    ],
+    "outputs": [
+      "Themed, quantified feedback clusters",
+      "Sentiment trends per theme",
+      "Ranked issues report with representative quotes"
+    ],
+    "success_metrics": [
+      "Theme stability across runs",
+      "Coverage (% feedback assigned to a theme)",
+      "Product-team actions traced to reports"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "lead-qualification",
+    "category": "customer-engagement",
+    "title": "Lead Qualification",
+    "summary": "Scores inbound leads while they're still warm: enriches each with firmographic and technographic data, scores fit against your ICP and intent from behavior signals, routes qualified leads to the right rep with a context brief, and logs everything to the CRM with the scoring rationale attached.",
+    "patterns": [
+      "Prompt Chaining",
+      "Tool Use"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Routing is automatic; the score rationale is visible and contestable by reps in the CRM.",
+    "steps": [
+      {
+        "name": "capture_lead",
+        "goal": "Ingest the lead and dedupe against existing CRM contacts and accounts."
+      },
+      {
+        "name": "enrich",
+        "goal": "Pull firmographic, technographic, and role data from enrichment sources."
+      },
+      {
+        "name": "score_fit",
+        "goal": "Score against the ICP rubric with an explicit factor-by-factor rationale."
+      },
+      {
+        "name": "score_intent",
+        "goal": "Rate buying intent from behavior: pages viewed, content, recency, frequency."
+      },
+      {
+        "name": "route_and_brief",
+        "goal": "Route by score band; give the rep a one-paragraph context brief."
+      },
+      {
+        "name": "log_crm",
+        "goal": "Write scores, rationale, and routing decision back to the CRM."
+      }
+    ],
+    "inputs": [
+      "Inbound leads (forms, signups, events)",
+      "Enrichment APIs",
+      "ICP definition and scoring rubric",
+      "CRM access"
+    ],
+    "outputs": [
+      "Fit + intent scores with rationale",
+      "Routed leads with context briefs",
+      "CRM records updated"
+    ],
+    "success_metrics": [
+      "Qualified-lead → opportunity conversion",
+      "Speed-to-first-touch on hot leads",
+      "Rep agreement rate with scores"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "personalized-outreach",
+    "category": "customer-engagement",
+    "title": "Personalized Outreach",
+    "summary": "Researches each prospect across public signals — role, company news, tech stack, recent posts — selects a relevance angle, drafts genuinely personalized outreach, and runs a critique pass that rejects anything template-flavored before a human approves the send. Personalization here means 'shows work', not 'mail-merged first name'.",
+    "patterns": [
+      "Parallelization",
+      "Reflection"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Every outbound message is human-approved before send; no autonomous sending.",
+    "steps": [
+      {
+        "name": "research_prospect",
+        "goal": "Gather role, company, news, and activity signals in parallel per prospect."
+      },
+      {
+        "name": "select_angle",
+        "goal": "Choose the single most relevant hook connecting their context to your value."
+      },
+      {
+        "name": "draft_sequence",
+        "goal": "Write the sequence: opener, follow-ups, and break-up note."
+      },
+      {
+        "name": "critique_personalization",
+        "goal": "Reject drafts lacking specific, verifiable prospect facts; revise."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Queue for rep approval with the research brief attached."
+      },
+      {
+        "name": "schedule_send",
+        "goal": "Schedule approved sequences and track engagement."
+      }
+    ],
+    "inputs": [
+      "Prospect list with target personas",
+      "Research sources (site, news, socials)",
+      "Value propositions per persona",
+      "Sequence templates"
+    ],
+    "outputs": [
+      "Per-prospect research briefs",
+      "Approved personalized sequences",
+      "Send/response tracking data"
+    ],
+    "success_metrics": [
+      "Reply rate vs. template baseline",
+      "Approval rate of drafts (target > 80%)",
+      "Meetings booked per 100 sends"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "support-ticket-triage",
+    "category": "customer-engagement",
+    "title": "Support Ticket Triage",
+    "summary": "Classifies every inbound ticket by product area and issue type, assigns priority from impact signals, checks for duplicates and known issues before a human ever reads it, routes to the owning queue, and drafts a first response — so agents open tickets that are labeled, prioritized, and half-answered.",
+    "patterns": [
+      "Routing/Handoff",
+      "Tool Use"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Drafted responses are suggestions in the agent console; P1 classifications page a human.",
+    "steps": [
+      {
+        "name": "ingest_ticket",
+        "goal": "Normalize the ticket and extract product area, symptoms, and customer tier."
+      },
+      {
+        "name": "check_known_issues",
+        "goal": "Search known issues and open incidents; link matches immediately."
+      },
+      {
+        "name": "classify_priority",
+        "goal": "Score priority from impact, scope, tier, and sentiment signals."
+      },
+      {
+        "name": "route_queue",
+        "goal": "Assign to the owning queue per the ownership map; page on P1."
+      },
+      {
+        "name": "draft_response",
+        "goal": "Draft a first response grounded in KB articles, queued for agent review."
+      }
+    ],
+    "inputs": [
+      "Inbound tickets (email, chat, form)",
+      "Known-issue and KB index",
+      "Queue ownership map",
+      "Priority rubric"
+    ],
+    "outputs": [
+      "Classified, prioritized, routed tickets",
+      "Known-issue links",
+      "Draft first responses"
+    ],
+    "success_metrics": [
+      "Routing accuracy (reassignment rate)",
+      "First-response time reduction",
+      "Duplicate-link precision"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "anomaly-detection",
+    "category": "data-analysis",
+    "title": "Anomaly Detection & Explanation",
+    "summary": "Watches metric streams, detects anomalies with statistical methods (deterministic, cheap, and honest about uncertainty), then applies the model where it adds value: correlating the anomaly with deploys, campaigns, and seasonality to produce a ranked explanation — and deciding whether anyone should actually be woken up.",
+    "patterns": [
+      "Tool Use",
+      "Reflection"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Alerts route to on-call with the explanation attached; suppression rules are human-owned.",
+    "steps": [
+      {
+        "name": "ingest_metrics",
+        "goal": "Pull metric windows and maintain baseline models per series."
+      },
+      {
+        "name": "detect_statistical",
+        "goal": "Run detection (STL residuals, EWMA, or configured method) and score deviations."
+      },
+      {
+        "name": "contextualize",
+        "goal": "Join anomalies against deploy, campaign, and seasonal calendars."
+      },
+      {
+        "name": "explain",
+        "goal": "Draft ranked explanations citing the correlated evidence."
+      },
+      {
+        "name": "critique_explanation",
+        "goal": "Reflect: does the evidence actually support the top explanation? Demote if not."
+      },
+      {
+        "name": "route_alert",
+        "goal": "Send actionable alerts to the right owner; log suppressed ones with reasons."
+      }
+    ],
+    "inputs": [
+      "Metric streams / warehouse tables",
+      "Detection config (methods, sensitivity)",
+      "Change-event feeds (deploys, campaigns)"
+    ],
+    "outputs": [
+      "Anomaly records with scores",
+      "Ranked candidate explanations with evidence",
+      "Calibrated alerts (or documented suppressions)"
+    ],
+    "success_metrics": [
+      "Alert precision (actionable / sent)",
+      "Median time-to-explanation",
+      "False-negative postmortem count"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "budget-variance",
+    "category": "data-analysis",
+    "title": "Budget Variance Analysis",
+    "summary": "Automates the monthly variance ritual: loads actuals and budget, computes variances at every rollup level, drills into significant deltas to identify the driving line items and transactions, and drafts the variance commentary that finance currently reverse-engineers by hand at close.",
+    "patterns": [
+      "Prompt Chaining",
+      "Tool Use"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Finance reviews commentary before distribution; materiality thresholds are config, not vibes.",
+    "steps": [
+      {
+        "name": "load_data",
+        "goal": "Import actuals and budget; align periods, currencies, and hierarchies."
+      },
+      {
+        "name": "compute_variances",
+        "goal": "Calculate absolute and percentage variances across every rollup."
+      },
+      {
+        "name": "identify_material",
+        "goal": "Apply materiality thresholds to select variances worth explaining."
+      },
+      {
+        "name": "drill_drivers",
+        "goal": "Trace each material variance to driving line items and transactions."
+      },
+      {
+        "name": "draft_commentary",
+        "goal": "Write per-variance commentary citing the identified drivers."
+      },
+      {
+        "name": "package_report",
+        "goal": "Assemble the variance report for finance review and distribution."
+      }
+    ],
+    "inputs": [
+      "Actuals (GL export or warehouse)",
+      "Budget/forecast by period and cost center",
+      "Materiality thresholds"
+    ],
+    "outputs": [
+      "Variance table at all rollup levels",
+      "Driver analysis per material variance",
+      "Drafted variance commentary"
+    ],
+    "success_metrics": [
+      "Close-cycle time reduction",
+      "% material variances with identified drivers",
+      "Reviewer edit rate on commentary"
+    ],
+    "gate": "downstream"
+  },
+  {
+    "id": "dashboard-generation",
+    "category": "data-analysis",
+    "title": "Dashboard Generation",
+    "summary": "Goes from 'we need a dashboard for X' to a working artifact: profiles the available data, plans a layout matched to the audience's questions, generates and validates the queries, builds the charts, and assembles a self-contained dashboard — with a QA pass that checks every displayed number against a direct query.",
+    "patterns": [
+      "Planning (Orchestrator-Workers)",
+      "Tool Use"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "The data owner approves the metric definitions before the dashboard is shared.",
+    "steps": [
+      {
+        "name": "profile_data",
+        "goal": "Inspect schemas, freshness, and quality of candidate tables."
+      },
+      {
+        "name": "plan_layout",
+        "goal": "Map audience questions to a KPI/chart layout; get owner sign-off on definitions."
+      },
+      {
+        "name": "generate_queries",
+        "goal": "Write and validate the query per panel against the warehouse."
+      },
+      {
+        "name": "build_charts",
+        "goal": "Render charts with correct types, scales, and annotations."
+      },
+      {
+        "name": "assemble",
+        "goal": "Compose panels into the dashboard with filters and drill-downs."
+      },
+      {
+        "name": "qa_numbers",
+        "goal": "Re-verify every displayed figure with an independent direct query."
+      }
+    ],
+    "inputs": [
+      "Dashboard request (audience, questions, cadence)",
+      "Warehouse/database access",
+      "Style and tooling preferences"
+    ],
+    "outputs": [
+      "Dashboard artifact (HTML or BI-tool spec)",
+      "Validated query library",
+      "Metric-definition doc"
+    ],
+    "success_metrics": [
+      "QA pass rate on displayed numbers (target 100%)",
+      "Stakeholder adoption (views/week)",
+      "Requests requiring rework after delivery"
+    ],
+    "gate": "downstream"
+  },
+  {
+    "id": "financial-statement-analysis",
+    "category": "data-analysis",
+    "title": "Financial Statement Analysis (10-Q / 10-K)",
+    "summary": "Ingests a 10-Q or 10-K filing, extracts the financial statements and MD&A, runs parallel analyses over the income statement, balance sheet, cash flow statement, and management discussion, computes the standard ratio set with period-over-period deltas, and synthesizes an analyst-style memo — then fact-checks every number in the memo against the extracted tables.",
+    "patterns": [
+      "Prompt Chaining",
+      "Parallelization",
+      "Reflection"
+    ],
+    "complexity": "High",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "An analyst reviews the memo before it informs any decision; numbers carry source citations.",
+    "steps": [
+      {
+        "name": "fetch_filing",
+        "goal": "Retrieve the filing and identify statement and MD&A sections."
+      },
+      {
+        "name": "extract_statements",
+        "goal": "Parse income statement, balance sheet, and cash flow into structured tables."
+      },
+      {
+        "name": "parallel_analyses",
+        "goal": "Analyze each statement and the MD&A concurrently for trends and anomalies."
+      },
+      {
+        "name": "compute_ratios",
+        "goal": "Calculate liquidity, leverage, profitability, and efficiency ratios with deltas."
+      },
+      {
+        "name": "synthesize_memo",
+        "goal": "Draft the memo: thesis, supporting evidence, risks, open questions."
+      },
+      {
+        "name": "fact_check",
+        "goal": "Verify every figure in the memo against extracted tables; correct or flag."
+      }
+    ],
+    "inputs": [
+      "Filing document (10-Q/10-K, EDGAR or PDF)",
+      "Prior-period filings for comparison",
+      "Ratio/threshold config"
+    ],
+    "outputs": [
+      "Structured financial-statement extract",
+      "Ratio table with period deltas",
+      "Fact-checked analyst memo with citations"
+    ],
+    "success_metrics": [
+      "Numeric extraction accuracy (target > 99%)",
+      "Memo fact-check pass rate",
+      "Analyst prep time per filing"
+    ],
+    "gate": "downstream"
+  },
+  {
+    "id": "forecasting",
+    "category": "data-analysis",
+    "title": "Forecasting",
+    "summary": "Produces forecasts with honest uncertainty: prepares the series, selects and fits candidate models, backtests them against held-out history, generates prediction intervals, and writes a narrative that states assumptions and breakpoints explicitly — because a number without its assumptions is a trap.",
+    "patterns": [
+      "Tool Use",
+      "Reflection"
+    ],
+    "complexity": "High",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "A domain owner reviews assumptions and the narrative before the forecast enters planning.",
+    "steps": [
+      {
+        "name": "prepare_data",
+        "goal": "Clean the series: outliers, calendar effects, structural breaks."
+      },
+      {
+        "name": "select_models",
+        "goal": "Choose candidates fit to the series' shape (ETS, ARIMA, gradient boosting)."
+      },
+      {
+        "name": "fit_backtest",
+        "goal": "Fit candidates and evaluate on rolling holdouts against naive baselines."
+      },
+      {
+        "name": "generate_intervals",
+        "goal": "Produce point forecasts with calibrated prediction intervals."
+      },
+      {
+        "name": "write_narrative",
+        "goal": "Draft the story: drivers, assumptions, risks, and breakpoints."
+      },
+      {
+        "name": "review_assumptions",
+        "goal": "Reflect on assumption fragility; flag which future events would invalidate the forecast."
+      }
+    ],
+    "inputs": [
+      "Historical series with exogenous drivers",
+      "Forecast horizon and granularity",
+      "Known future events (launches, price changes)"
+    ],
+    "outputs": [
+      "Point forecast with prediction intervals",
+      "Backtest report vs. baselines",
+      "Assumption-explicit narrative"
+    ],
+    "success_metrics": [
+      "Backtest error vs. seasonal-naive baseline",
+      "Interval coverage calibration",
+      "Forecast revision magnitude over time"
+    ],
+    "gate": "downstream"
+  },
+  {
+    "id": "portfolio-monitoring",
+    "category": "data-analysis",
+    "title": "Portfolio Monitoring",
+    "summary": "Monitors an investment portfolio's positions, exposures, and relevant news in parallel: computes concentration and drawdown against policy thresholds, scans filings and headlines for held names, and produces a daily digest that separates 'informational' from 'needs attention'. Strictly decision support — it surfaces, it never trades.",
+    "patterns": [
+      "Parallelization",
+      "Tool Use"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "All threshold-breach flags route to the owner; the system has no execution pathway.",
+    "steps": [
+      {
+        "name": "fetch_positions",
+        "goal": "Load current positions and reconcile against the prior snapshot."
+      },
+      {
+        "name": "parallel_scan",
+        "goal": "Concurrently compute exposures, pull prices, and scan news/filings for held names."
+      },
+      {
+        "name": "check_thresholds",
+        "goal": "Evaluate concentration, drawdown, and volatility against policy limits."
+      },
+      {
+        "name": "flag_events",
+        "goal": "Rank news and breaches by materiality to the portfolio."
+      },
+      {
+        "name": "compose_digest",
+        "goal": "Produce the daily digest: attention items first, informational after."
+      }
+    ],
+    "inputs": [
+      "Position data (holdings, cost basis)",
+      "Market data feed",
+      "Policy thresholds (concentration, drawdown)",
+      "News/filings sources"
+    ],
+    "outputs": [
+      "Daily exposure and P&L summary",
+      "Threshold-breach flags with context",
+      "News digest scoped to held names"
+    ],
+    "success_metrics": [
+      "Breach detection latency",
+      "Digest relevance (owner feedback)",
+      "Coverage of held names in news scan"
+    ],
+    "gate": "downstream"
+  },
+  {
+    "id": "bug-triage",
+    "category": "development",
+    "title": "Bug Triage",
+    "summary": "Takes raw bug reports from any channel, checks for duplicates against the existing tracker, assesses severity and reproducibility, and routes each issue to the owning team with a cleaned-up, actionable ticket. The goal: no engineer ever opens a ticket that says 'it doesn't work'.",
+    "patterns": [
+      "Routing/Handoff",
+      "Tool Use"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Sev-1 classifications page a human for confirmation; routine routing is automatic.",
+    "steps": [
+      {
+        "name": "ingest_report",
+        "goal": "Normalize the report: extract symptoms, environment, and any repro info."
+      },
+      {
+        "name": "dedupe_check",
+        "goal": "Search the tracker for existing matching issues; link instead of filing if found."
+      },
+      {
+        "name": "assess_severity",
+        "goal": "Score severity and reproducibility from impact, scope, and evidence."
+      },
+      {
+        "name": "enrich_ticket",
+        "goal": "Rewrite the report as an actionable ticket: repro steps, expected vs. actual."
+      },
+      {
+        "name": "route_assign",
+        "goal": "Assign to the owning team from the ownership map; page a human for sev-1."
+      },
+      {
+        "name": "notify",
+        "goal": "Confirm to the reporter with the ticket link and severity rationale."
+      }
+    ],
+    "inputs": [
+      "Bug reports (support, monitoring, users)",
+      "Issue-tracker API",
+      "Team ownership map"
+    ],
+    "outputs": [
+      "Deduplicated, severity-labeled tickets",
+      "Routing assignments",
+      "Repro-steps summary per ticket"
+    ],
+    "success_metrics": [
+      "Duplicate-detection precision/recall",
+      "Misroute rate (reassignments after triage)",
+      "Median time from report to assigned ticket"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "code-migration",
+    "category": "development",
+    "title": "Code Migration",
+    "summary": "Plans and executes large migrations — framework upgrades, language ports, API deprecations — by inventorying every affected site, batching them into safe units, translating each batch, running tests, and tracking progress until the old pattern count hits zero. Built for migrations too big for one heroic PR.",
+    "patterns": [
+      "Planning (Orchestrator-Workers)",
+      "Parallelization",
+      "Reflection"
+    ],
+    "complexity": "High",
+    "multi_agent": "Yes",
+    "review_level": "High",
+    "review_rationale": "Humans review each batch PR; the agent never merges. Batch size shrinks automatically after failures.",
+    "steps": [
+      {
+        "name": "inventory",
+        "goal": "Find every occurrence of the source pattern; record in the progress ledger."
+      },
+      {
+        "name": "plan_batches",
+        "goal": "Group occurrences into low-risk batches with explicit dependency ordering."
+      },
+      {
+        "name": "translate_batch",
+        "goal": "Apply the transformation to one batch; keep changes mechanical."
+      },
+      {
+        "name": "run_tests",
+        "goal": "Run affected tests; on failure, self-repair once, then shrink the batch and retry."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Open the batch PR for human review with before/after summaries."
+      },
+      {
+        "name": "update_ledger",
+        "goal": "Mark completed occurrences and publish the burndown."
+      }
+    ],
+    "inputs": [
+      "Migration spec (from-pattern → to-pattern)",
+      "Repository + test suite",
+      "Progress ledger location"
+    ],
+    "outputs": [
+      "Full occurrence inventory",
+      "Batched migration PRs with test results",
+      "Progress ledger and burndown"
+    ],
+    "success_metrics": [
+      "Occurrences migrated per week",
+      "Batch revert rate (target < 5%)",
+      "Zero-regression test pass rate per batch"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "code-review",
+    "category": "development",
+    "title": "Code Review Agent",
+    "summary": "Reviews pull requests through parallel specialist lenses — security, performance, correctness, readability — then deduplicates, ranks by severity, and self-checks findings against the diff before posting comments. It aims to catch the mechanical 80% so human reviewers spend attention on design.",
+    "patterns": [
+      "Parallelization",
+      "Reflection",
+      "Multi-Agent Collaboration"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "Yes",
+    "review_level": "Medium",
+    "review_rationale": "Findings post as comments only; a human always merges. Severity-critical findings page a human.",
+    "steps": [
+      {
+        "name": "fetch_diff",
+        "goal": "Pull the PR diff, changed-file context, and repository conventions."
+      },
+      {
+        "name": "parallel_lenses",
+        "goal": "Run security, performance, correctness, and readability reviews concurrently."
+      },
+      {
+        "name": "aggregate",
+        "goal": "Merge lens findings, dedupe overlapping comments, rank by severity."
+      },
+      {
+        "name": "self_check",
+        "goal": "Re-verify each finding against the actual diff; drop unsupported claims."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Approve the surviving findings before they post as comments on the pull request."
+      },
+      {
+        "name": "post_comments",
+        "goal": "Post surviving comments with severity labels and suggested fixes."
+      }
+    ],
+    "inputs": [
+      "PR diff and metadata",
+      "Repo context (conventions, CI config)",
+      "Severity rubric"
+    ],
+    "outputs": [
+      "Ranked review comments with file/line anchors",
+      "Severity summary for the PR",
+      "False-positive audit log"
+    ],
+    "success_metrics": [
+      "Precision of findings (accepted / posted)",
+      "Escaped-defect rate on reviewed PRs",
+      "Human review time saved per PR"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "deployment-orchestrator",
+    "category": "development",
+    "title": "Deployment Orchestrator",
+    "summary": "Drives a gated production deployment: preflight verification (CI, approvals, migrations, feature flags), a canary rollout with automated health monitoring against predefined rollback triggers, and promotion or rollback with a full decision log. The rollback criteria are written down *before* the deploy, when everyone is still calm.",
+    "patterns": [
+      "Planning (Orchestrator-Workers)",
+      "Tool Use"
+    ],
+    "complexity": "High",
+    "multi_agent": "No",
+    "review_level": "High",
+    "review_rationale": "Human gate before deploy start and before canary promotion; rollback is automatic on triggers.",
+    "steps": [
+      {
+        "name": "preflight_checks",
+        "goal": "Verify CI status, approvals, migration readiness, and flag states."
+      },
+      {
+        "name": "plan_rollout",
+        "goal": "Produce the rollout plan: canary size, health metrics, rollback triggers."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Release owner approves the plan and authorizes the deploy."
+      },
+      {
+        "name": "deploy_canary",
+        "goal": "Ship to the canary slice and begin structured health monitoring."
+      },
+      {
+        "name": "monitor_health",
+        "goal": "Watch error rates, latency, and saturation against trigger thresholds."
+      },
+      {
+        "name": "promote_or_rollback",
+        "goal": "On human approval promote; on tripped triggers roll back automatically and report."
+      }
+    ],
+    "inputs": [
+      "Release candidate (build ID)",
+      "Deploy checklist and rollback triggers",
+      "CI/CD and monitoring APIs"
+    ],
+    "outputs": [
+      "Preflight report",
+      "Canary health timeline",
+      "Deploy/rollback decision log",
+      "Post-deploy summary"
+    ],
+    "success_metrics": [
+      "Change failure rate",
+      "Mean time to rollback on bad deploys",
+      "% deploys with complete decision logs (target 100%)"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "documentation-generator",
+    "category": "development",
+    "title": "Documentation Generator",
+    "summary": "Indexes a codebase, plans a documentation structure appropriate to its shape (API reference, guides, architecture notes), generates each section grounded in the actual code, and verifies that examples compile and cross-references resolve. Docs drift is treated as a bug: reruns diff against existing docs.",
+    "patterns": [
+      "Prompt Chaining",
+      "Planning (Orchestrator-Workers)"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "A maintainer approves the doc plan and reviews generated pages before merge.",
+    "steps": [
+      {
+        "name": "index_code",
+        "goal": "Parse the repo: modules, public APIs, entry points, existing docs."
+      },
+      {
+        "name": "plan_structure",
+        "goal": "Propose a doc tree with per-page scope; get maintainer sign-off."
+      },
+      {
+        "name": "generate_sections",
+        "goal": "Write each page grounded in the indexed code, with examples."
+      },
+      {
+        "name": "verify_examples",
+        "goal": "Execute every example; fix or flag failures before proceeding."
+      },
+      {
+        "name": "cross_link",
+        "goal": "Resolve internal links and produce the navigation structure."
+      },
+      {
+        "name": "emit_drift_report",
+        "goal": "On reruns, diff generated docs against current pages and summarize drift."
+      }
+    ],
+    "inputs": [
+      "Repository (source + existing docs)",
+      "Doc conventions/template",
+      "Public API surface definition"
+    ],
+    "outputs": [
+      "Generated doc pages (markdown)",
+      "Verified, runnable code examples",
+      "Docs-drift report on reruns"
+    ],
+    "success_metrics": [
+      "% public API covered by docs",
+      "Example execution pass rate (target 100%)",
+      "Maintainer edit rate on generated pages"
+    ],
+    "gate": "downstream"
+  },
+  {
+    "id": "refactoring-assistant",
+    "category": "development",
+    "title": "Refactoring Assistant",
+    "summary": "Identifies code smells, plans a refactor as a sequence of small, independently safe transformations, and applies them one at a time — running the test suite after every step and stopping the moment anything breaks. Big-bang refactors are structurally impossible by design.",
+    "patterns": [
+      "Planning (Orchestrator-Workers)",
+      "Reflection"
+    ],
+    "complexity": "High",
+    "multi_agent": "No",
+    "review_level": "High",
+    "review_rationale": "A developer approves the refactor plan and reviews the final diff; no direct pushes.",
+    "steps": [
+      {
+        "name": "identify_smells",
+        "goal": "Scan the target for smells: duplication, god functions, tangled deps."
+      },
+      {
+        "name": "plan_refactor",
+        "goal": "Sequence small safe transformations, each with a stated invariant."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Present the plan with risk notes for developer sign-off."
+      },
+      {
+        "name": "apply_step",
+        "goal": "Apply one transformation; keep the diff minimal and mechanical."
+      },
+      {
+        "name": "run_tests",
+        "goal": "Run the suite; on red, revert the step and replan instead of patching forward."
+      },
+      {
+        "name": "summarize",
+        "goal": "Produce the final diff summary and metrics delta for review."
+      }
+    ],
+    "inputs": [
+      "Target module or smell report",
+      "Full test suite",
+      "Refactoring goal (readability, coupling, performance)"
+    ],
+    "outputs": [
+      "Sequenced refactor plan",
+      "Applied changes as reviewable commits",
+      "Per-step test results"
+    ],
+    "success_metrics": [
+      "Test suite green rate across steps (target 100%)",
+      "Complexity metrics delta (cyclomatic, coupling)",
+      "Plan-approval-to-merge time"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "security-scan",
+    "category": "development",
+    "title": "Security Scan & Triage",
+    "summary": "Runs static analyzers and dependency audits in parallel, normalizes their findings, then uses the model for what scanners cannot do: triaging exploitability in the context of *this* codebase, collapsing duplicates, and writing remediation guidance an engineer can act on directly.",
+    "patterns": [
+      "Parallelization",
+      "Tool Use",
+      "Reflection"
+    ],
+    "complexity": "High",
+    "multi_agent": "No",
+    "review_level": "High",
+    "review_rationale": "A security engineer reviews all high/critical triage decisions and any downgrade.",
+    "steps": [
+      {
+        "name": "run_scanners",
+        "goal": "Execute SAST, dependency, and secret scanners concurrently."
+      },
+      {
+        "name": "normalize",
+        "goal": "Map all findings to one schema: location, class, raw severity, evidence."
+      },
+      {
+        "name": "triage_findings",
+        "goal": "Assess exploitability in deployment context; dedupe and re-rank."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Security engineer reviews rankings and approves downgrades."
+      },
+      {
+        "name": "create_tickets",
+        "goal": "File remediation tickets with concrete fix guidance and owners."
+      },
+      {
+        "name": "track_recurrence",
+        "goal": "Compare against prior runs; flag regressions and recurring classes."
+      }
+    ],
+    "inputs": [
+      "Repository + build config",
+      "Scanner toolchain (SAST, deps, secrets)",
+      "Deployment context (exposure, data sensitivity)"
+    ],
+    "outputs": [
+      "Normalized, deduplicated finding list",
+      "Exploitability-ranked triage report",
+      "Remediation tickets with fix guidance"
+    ],
+    "success_metrics": [
+      "Triage precision on high/critical findings",
+      "Mean time from scan to ticketed remediation",
+      "Recurrence rate of previously fixed finding classes"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "technical-debt-tracker",
+    "category": "development",
+    "title": "Technical Debt Tracker",
+    "summary": "Continuously inventories technical debt — TODO/FIXME mining, complexity hotspots, outdated dependencies, low-coverage modules — then estimates each item's carrying cost and remediation effort to produce a prioritized, defensible paydown backlog. Debt stops being folklore and becomes a ranked list with numbers attached.",
+    "patterns": [
+      "Parallelization",
+      "Prompt Chaining"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "The ranked backlog is a proposal; engineering leads own final prioritization.",
+    "steps": [
+      {
+        "name": "scan_repo",
+        "goal": "Run parallel scans: marker mining, complexity metrics, dep freshness, coverage."
+      },
+      {
+        "name": "classify_debt",
+        "goal": "Categorize items: design, test, dependency, documentation, tooling."
+      },
+      {
+        "name": "estimate_costs",
+        "goal": "Estimate remediation effort and carrying cost (interest) per item."
+      },
+      {
+        "name": "prioritize",
+        "goal": "Rank by interest-to-effort ratio, boosted by incident correlation."
+      },
+      {
+        "name": "report",
+        "goal": "Publish the backlog and quarterly trend deltas to the engineering channel."
+      }
+    ],
+    "inputs": [
+      "Repository history and source",
+      "Static-analysis and coverage tooling",
+      "Incident/hotfix history (optional)"
+    ],
+    "outputs": [
+      "Categorized debt inventory",
+      "Ranked paydown backlog with effort/interest estimates",
+      "Quarterly trend report"
+    ],
+    "success_metrics": [
+      "Debt items resolved per quarter",
+      "Hotspot churn-complexity trend",
+      "Incident rate in flagged hotspots"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "test-generation",
+    "category": "development",
+    "title": "Test Generation",
+    "summary": "Analyzes coverage gaps, plans test cases that target untested branches and edge conditions, generates the tests, runs them, and repairs its own failures — a closed loop anchored by the test runner, the one critic that cannot be argued with.",
+    "patterns": [
+      "Planning (Orchestrator-Workers)",
+      "Reflection",
+      "Tool Use"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "A developer reviews generated tests before merge; assertion quality is human-audited.",
+    "steps": [
+      {
+        "name": "analyze_coverage",
+        "goal": "Run coverage tooling and identify untested functions and branches."
+      },
+      {
+        "name": "plan_cases",
+        "goal": "For each gap, derive test cases from the spec: happy path, edges, error paths."
+      },
+      {
+        "name": "generate_tests",
+        "goal": "Write tests in the project's framework and style conventions."
+      },
+      {
+        "name": "run_suite",
+        "goal": "Execute the new tests; separate genuine bugs from broken tests."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Approve which failures are real bugs before any are filed as tickets."
+      },
+      {
+        "name": "repair_failures",
+        "goal": "Fix broken generated tests; file discovered real bugs as tickets."
+      },
+      {
+        "name": "report",
+        "goal": "Emit the coverage delta and a summary of cases added and bugs found."
+      }
+    ],
+    "inputs": [
+      "Source code + existing test suite",
+      "Coverage report",
+      "Test framework config"
+    ],
+    "outputs": [
+      "New passing test files",
+      "Coverage delta report",
+      "List of discovered bugs (tests that fail correctly)"
+    ],
+    "success_metrics": [
+      "Branch coverage delta per run",
+      "Mutation-score improvement",
+      "% generated tests kept after human review"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "capacity-planning",
+    "category": "infrastructure",
+    "title": "Capacity Planning",
+    "summary": "Forecasts infrastructure needs before they become incidents or invoices: collects utilization across compute, storage, and network, models growth from trends and known business events, simulates scenarios (launch spikes, regional failover, organic growth), and recommends provisioning with explicit lead times and costs.",
+    "patterns": [
+      "Tool Use",
+      "Planning (Orchestrator-Workers)"
+    ],
+    "complexity": "High",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Provisioning recommendations are reviewed by infrastructure leadership before purchase.",
+    "steps": [
+      {
+        "name": "collect_utilization",
+        "goal": "Aggregate utilization across compute, storage, network, and services."
+      },
+      {
+        "name": "model_growth",
+        "goal": "Fit growth trends; overlay known business events."
+      },
+      {
+        "name": "simulate_scenarios",
+        "goal": "Run structured what-if scenarios against the architecture topology."
+      },
+      {
+        "name": "identify_gaps",
+        "goal": "Find where projected demand crosses capacity within lead-time windows."
+      },
+      {
+        "name": "recommend_provisioning",
+        "goal": "Draft the provisioning plan with costs, lead times, and triggers."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Approve the provisioning plan and its stated assumptions before publication to leadership."
+      },
+      {
+        "name": "report",
+        "goal": "Publish the plan for leadership review with assumptions stated."
+      }
+    ],
+    "inputs": [
+      "Utilization history across resource classes",
+      "Growth drivers and business-event calendar",
+      "Architecture topology",
+      "Lead-time and cost data"
+    ],
+    "outputs": [
+      "Utilization forecasts per resource class",
+      "Scenario simulation results",
+      "Provisioning plan with lead times and costs"
+    ],
+    "success_metrics": [
+      "Forecast error at planning horizon",
+      "Capacity-related incidents (target 0)",
+      "Over-provisioned spend vs. plan"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "cost-optimization",
+    "category": "infrastructure",
+    "title": "Cloud Cost Optimization",
+    "summary": "Continuously mines billing and utilization data for waste — idle resources, oversized instances, unattached volumes, commitment gaps — sizes each opportunity in dollars, risk-checks recommendations against workload patterns so 'savings' don't cause outages, files tickets with owners, and tracks realized (not estimated) savings over time.",
+    "patterns": [
+      "Tool Use",
+      "Parallelization"
+    ],
+    "complexity": "High",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Recommendations become tickets; resource changes are executed by owning teams, not the agent.",
+    "steps": [
+      {
+        "name": "ingest_billing",
+        "goal": "Load billing and utilization data; normalize across accounts."
+      },
+      {
+        "name": "detect_waste",
+        "goal": "Scan for idle, oversized, unattached, and uncommitted spend in parallel."
+      },
+      {
+        "name": "size_opportunities",
+        "goal": "Quantify each finding in monthly dollars with confidence."
+      },
+      {
+        "name": "risk_check",
+        "goal": "Validate against long-window load patterns and dependencies."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Approve each recommendation, its dollar impact and its rollback note before tickets are filed."
+      },
+      {
+        "name": "create_tickets",
+        "goal": "File recommendations with owners, dollar impact, and rollback notes."
+      },
+      {
+        "name": "track_savings",
+        "goal": "Compare subsequent billing to baseline; report realized savings."
+      }
+    ],
+    "inputs": [
+      "Cloud billing exports",
+      "Utilization metrics (long window)",
+      "Resource tagging/ownership map",
+      "Commitment inventory"
+    ],
+    "outputs": [
+      "Waste findings sized in dollars",
+      "Risk-checked recommendations as owned tickets",
+      "Realized-savings tracking report"
+    ],
+    "success_metrics": [
+      "Realized savings per quarter",
+      "Recommendation acceptance rate",
+      "Incidents caused by optimizations (target 0)"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "incident-response",
+    "category": "infrastructure",
+    "title": "Incident Response",
+    "summary": "Accelerates the human-led incident loop: triages alerts into severity calls, gathers diagnostics across logs, metrics, traces, and recent deploys in parallel, generates ranked root-cause hypotheses with supporting evidence, proposes remediations behind a human gate, and drafts the postmortem from the recorded timeline while memories are still accurate.",
+    "patterns": [
+      "Routing/Handoff",
+      "Tool Use",
+      "Planning (Orchestrator-Workers)"
+    ],
+    "complexity": "High",
+    "multi_agent": "Yes",
+    "review_level": "High",
+    "review_rationale": "Severity calls above SEV-3 and all remediation actions require on-call approval.",
+    "steps": [
+      {
+        "name": "triage_alert",
+        "goal": "Classify the alert: severity, blast radius, affected services."
+      },
+      {
+        "name": "gather_diagnostics",
+        "goal": "Pull logs, metrics, traces, and recent changes concurrently."
+      },
+      {
+        "name": "hypothesize_causes",
+        "goal": "Rank root-cause hypotheses, each with its supporting evidence."
+      },
+      {
+        "name": "propose_remediation",
+        "goal": "Match hypotheses to runbook actions with risk notes."
+      },
+      {
+        "name": "human_approval",
+        "goal": "On-call approves the remediation before any execution."
+      },
+      {
+        "name": "execute_monitored",
+        "goal": "Apply the approved action; watch recovery metrics."
+      },
+      {
+        "name": "draft_postmortem",
+        "goal": "Assemble the timeline, decisions, and follow-ups into a postmortem draft."
+      }
+    ],
+    "inputs": [
+      "Alert stream",
+      "Observability stack access (logs, metrics, traces)",
+      "Deploy/change history",
+      "Runbook library"
+    ],
+    "outputs": [
+      "Severity-triaged incidents",
+      "Diagnostic bundles with ranked hypotheses",
+      "Gated remediation proposals",
+      "Draft postmortems"
+    ],
+    "success_metrics": [
+      "Mean time to mitigation (MTTM)",
+      "Hypothesis hit rate (top-3 contains root cause)",
+      "Postmortem completion within 48h"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "log-analysis",
+    "category": "infrastructure",
+    "title": "Log Analysis",
+    "summary": "Turns log volume into signal: parses and normalizes heterogeneous logs, detects emerging error patterns and rare-event signatures, correlates patterns with deploys and incidents, summarizes what a human should look at and why, and proposes new alert rules for patterns that preceded past incidents — closing the loop between analysis and prevention.",
+    "patterns": [
+      "Parallelization",
+      "Tool Use",
+      "Reflection"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Proposed alert rules require SRE approval before deployment; summaries are informational.",
+    "steps": [
+      {
+        "name": "ingest_logs",
+        "goal": "Pull log windows across services; apply parsing schemas in parallel."
+      },
+      {
+        "name": "normalize",
+        "goal": "Extract structured events: service, level, signature, context."
+      },
+      {
+        "name": "detect_patterns",
+        "goal": "Cluster signatures; score by novelty, growth rate, and severity."
+      },
+      {
+        "name": "correlate",
+        "goal": "Join top patterns against deploys and incident history."
+      },
+      {
+        "name": "summarize_findings",
+        "goal": "Write the investigation summary: what, where, evidence, suggested owner."
+      },
+      {
+        "name": "propose_alert_rules",
+        "goal": "Draft alert rules for validated precursors, with backtest support."
+      }
+    ],
+    "inputs": [
+      "Log streams/aggregator access",
+      "Parsing schemas per service",
+      "Deploy and incident history"
+    ],
+    "outputs": [
+      "Normalized pattern inventory",
+      "Novelty-ranked findings with correlations",
+      "Proposed alert rules with backtest evidence"
+    ],
+    "success_metrics": [
+      "Incident precursors caught before alerting did",
+      "Alert-rule acceptance rate",
+      "Analyst time per investigation"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "calendar-email-docs-agent",
+    "category": "productivity",
+    "title": "Calendar, Email & Docs Agent",
+    "summary": "A unified personal-operations agent that reads your calendar, inbox, and documents through tool calls, then drafts replies, schedules meetings, and files or retrieves documents on request. It turns three context-switching chores into one conversational surface, with every outbound action gated behind your approval.",
+    "patterns": [
+      "Tool Use",
+      "Routing/Handoff"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Outbound emails, calendar changes, and document edits require approval before execution.",
+    "steps": [
+      {
+        "name": "ingest_request",
+        "goal": "Parse the user's request and extract the intent, entities, and constraints."
+      },
+      {
+        "name": "route_intent",
+        "goal": "Classify the request as calendar, email, docs, or mixed, and pick the tool plan."
+      },
+      {
+        "name": "gather_context",
+        "goal": "Pull the relevant threads, events, and documents via read-only tool calls."
+      },
+      {
+        "name": "draft_action",
+        "goal": "Compose the email draft, event proposal, or document operation."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Present the drafted action with full context for approval."
+      },
+      {
+        "name": "execute",
+        "goal": "Perform the approved action via tool calls and log the result."
+      }
+    ],
+    "inputs": [
+      "Natural-language request (chat or voice)",
+      "Calendar API access (read/propose)",
+      "Email API access (read/draft)",
+      "Document store access"
+    ],
+    "outputs": [
+      "Drafted emails awaiting approval",
+      "Proposed calendar events",
+      "Retrieved or filed documents",
+      "Action audit log"
+    ],
+    "success_metrics": [
+      "% of requests completed without human correction",
+      "Time saved per week vs. manual handling",
+      "Approval rate of drafted actions (target > 85%)"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "document-workflow",
+    "category": "productivity",
+    "title": "Document Workflow (Draft → Review → Publish)",
+    "summary": "Manages a document through its lifecycle: intake of the request, structured drafting, an automated self-critique pass, human review with tracked feedback, revision, and publication to the destination system. It standardizes the path every important document should take but rarely does.",
+    "patterns": [
+      "Prompt Chaining",
+      "Reflection"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "High",
+    "review_rationale": "A human approves every document before publication; the agent never publishes autonomously.",
+    "steps": [
+      {
+        "name": "intake",
+        "goal": "Capture the document request: type, audience, purpose, sources, deadline."
+      },
+      {
+        "name": "draft",
+        "goal": "Produce a structured first draft from the sources and the applicable template."
+      },
+      {
+        "name": "self_critique",
+        "goal": "Critique the draft against the style guide and the request; revise once."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Route the improved draft to the named reviewer and collect feedback."
+      },
+      {
+        "name": "revise",
+        "goal": "Apply reviewer feedback faithfully; flag any conflicting instructions."
+      },
+      {
+        "name": "publish",
+        "goal": "Publish to the destination system and record the final version."
+      }
+    ],
+    "inputs": [
+      "Document request (type, audience, key points)",
+      "Style guide / templates",
+      "Source material"
+    ],
+    "outputs": [
+      "Reviewed, approved document in the target format",
+      "Revision history",
+      "Publication record"
+    ],
+    "success_metrics": [
+      "Review cycles per document (target ≤ 2)",
+      "Time from request to publish",
+      "Post-publication correction rate"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "focus-session",
+    "category": "productivity",
+    "title": "Focus Session (Pomodoro Orchestrator)",
+    "summary": "Runs structured deep-work sessions: plans the block against your task list, starts Pomodoro timers, triages interruptions as they arrive (defer, delegate, or break protocol for true emergencies), and closes with a logged retrospective. The agent's job is defending the block, not just timing it.",
+    "patterns": [
+      "Tool Use",
+      "Routing/Handoff"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "None",
+    "review_rationale": "Fully automated; interruption escalation thresholds are user-configured.",
+    "steps": [
+      {
+        "name": "plan_session",
+        "goal": "Pick the session's tasks from the priority list and set the block structure."
+      },
+      {
+        "name": "start_timer",
+        "goal": "Begin the work interval; silence non-critical notification channels."
+      },
+      {
+        "name": "triage_interruptions",
+        "goal": "Classify each incoming interruption: defer, quick-answer at break, or escalate."
+      },
+      {
+        "name": "log_outcome",
+        "goal": "At session end, record work completed and interruption dispositions."
+      },
+      {
+        "name": "retrospective",
+        "goal": "Summarize the session and suggest one adjustment for the next block."
+      }
+    ],
+    "inputs": [
+      "Prioritized task list",
+      "Session length and break preferences",
+      "Notification stream during the session"
+    ],
+    "outputs": [
+      "Session plan and timer events",
+      "Interruption log with dispositions",
+      "Session retrospective entry"
+    ],
+    "success_metrics": [
+      "Completed pomodoros per planned pomodoro",
+      "Interruptions deferred vs. allowed through",
+      "Self-reported focus quality trend"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "habit-tracking",
+    "category": "productivity",
+    "title": "Habit Tracking & Coaching",
+    "summary": "Tracks habit completions from lightweight check-ins, computes streaks and adherence trends, and — the agentic part — analyzes *why* habits slip (day-of-week patterns, conflicting events, streak-break triggers) and adjusts its nudges accordingly. A tracker records; this coaches.",
+    "patterns": [
+      "Tool Use",
+      "Reflection"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "None",
+    "review_rationale": "Fully automated; the user is the feedback loop.",
+    "steps": [
+      {
+        "name": "log_ingest",
+        "goal": "Record check-ins and backfill misses from the check-in channel."
+      },
+      {
+        "name": "compute_streaks",
+        "goal": "Update streaks, adherence rates, and rolling trends per habit."
+      },
+      {
+        "name": "analyze_patterns",
+        "goal": "Find slip patterns: days, contexts, and events that precede misses."
+      },
+      {
+        "name": "generate_nudges",
+        "goal": "Draft targeted nudges timed and phrased to the user's observed patterns."
+      },
+      {
+        "name": "weekly_review",
+        "goal": "Reflect on nudge effectiveness and adjust cadence and tone."
+      }
+    ],
+    "inputs": [
+      "Habit definitions and targets",
+      "Daily check-ins (chat, app, or shortcut)",
+      "Calendar (optional, for conflict analysis)"
+    ],
+    "outputs": [
+      "Streak and adherence dashboard data",
+      "Personalized nudges",
+      "Weekly pattern-analysis report"
+    ],
+    "success_metrics": [
+      "30-day adherence rate per habit",
+      "Nudge→completion conversion",
+      "Retention of tracking behavior itself"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "meeting-intelligence",
+    "category": "productivity",
+    "title": "Meeting Intelligence",
+    "summary": "Turns raw meeting transcripts into a decision log, an action-item list with owners and due dates, and a shareable summary — then routes each artifact to the people who need it. Nothing said in a meeting should die in the recording.",
+    "patterns": [
+      "Prompt Chaining",
+      "Parallelization"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Spot-check summaries weekly; action items with external recipients get a send gate.",
+    "steps": [
+      {
+        "name": "ingest_transcript",
+        "goal": "Load the transcript, normalize speaker labels, and segment by topic."
+      },
+      {
+        "name": "parallel_extract",
+        "goal": "Run summary, decision, and action-item extraction lenses concurrently."
+      },
+      {
+        "name": "synthesize",
+        "goal": "Merge lens outputs, resolve owner names against the attendee list, dedupe items."
+      },
+      {
+        "name": "format_outputs",
+        "goal": "Render the summary, decision log, and task list in their target formats."
+      },
+      {
+        "name": "distribute",
+        "goal": "Send artifacts to attendees and push action items to the task tracker."
+      }
+    ],
+    "inputs": [
+      "Meeting transcript or recording (via STT)",
+      "Attendee list",
+      "Optional agenda"
+    ],
+    "outputs": [
+      "Executive summary",
+      "Decision log",
+      "Action items (owner, due date)",
+      "Distribution notifications"
+    ],
+    "success_metrics": [
+      "Action-item capture rate vs. human note-taker",
+      "Summary edit rate by recipients",
+      "Time from meeting end to distribution (target < 10 min)"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "note-synthesis",
+    "category": "productivity",
+    "title": "Note Synthesis",
+    "summary": "Ingests scattered notes — meeting scribbles, highlights, voice memos, browser clips — clusters them by theme, and synthesizes each cluster into a clean, linked knowledge page. It converts note-taking (cheap) into knowledge-building (valuable) without the weekly manual review you keep not doing.",
+    "patterns": [
+      "Prompt Chaining",
+      "Parallelization"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Synthesized pages are drafts in the notes app; originals are never modified or deleted.",
+    "steps": [
+      {
+        "name": "gather_notes",
+        "goal": "Collect new notes since the last run and normalize formats."
+      },
+      {
+        "name": "cluster_themes",
+        "goal": "Group notes by topic using embeddings or LLM classification."
+      },
+      {
+        "name": "synthesize_clusters",
+        "goal": "Summarize each cluster into a coherent page, in parallel, citing source notes."
+      },
+      {
+        "name": "cross_link",
+        "goal": "Link new pages to existing knowledge-base pages and propose tags."
+      },
+      {
+        "name": "publish_digest",
+        "goal": "Write pages as drafts and produce a run digest with an orphan-note list."
+      }
+    ],
+    "inputs": [
+      "Raw note files / notes-app export",
+      "Existing knowledge-base structure (optional)"
+    ],
+    "outputs": [
+      "Themed synthesis pages with source links",
+      "Suggested tags and cross-links",
+      "Orphan-note report"
+    ],
+    "success_metrics": [
+      "% of notes reachable from a synthesis page",
+      "Pages reread within 30 days",
+      "Synthesis factual-error rate on spot checks"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "personal-assistant-messaging",
+    "category": "productivity",
+    "title": "Personal Assistant over Messaging",
+    "summary": "A single-agent assistant that lives where you already are — Slack, Telegram, or SMS — and handles quick tasks: reminders, lookups, short research, list-keeping. Low ceremony by design: the value is response speed and zero app-switching.",
+    "patterns": [
+      "Routing/Handoff",
+      "Tool Use"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "Read-only actions run free; anything that messages third parties requires approval.",
+    "steps": [
+      {
+        "name": "receive_message",
+        "goal": "Accept the inbound message and load recent conversation context."
+      },
+      {
+        "name": "classify",
+        "goal": "Determine request type: reminder, lookup, list op, small talk, or out-of-scope."
+      },
+      {
+        "name": "execute_action",
+        "goal": "Run the matching tool call or compose the informational answer."
+      },
+      {
+        "name": "respond",
+        "goal": "Reply in the channel, concise by default, with links to anything created."
+      },
+      {
+        "name": "log_interaction",
+        "goal": "Record the request, action, and outcome for weekly quality review."
+      }
+    ],
+    "inputs": [
+      "Inbound messages from the chat platform",
+      "Reminder store",
+      "Search/lookup tools"
+    ],
+    "outputs": [
+      "Chat replies",
+      "Created reminders and lists",
+      "Escalations for out-of-scope requests"
+    ],
+    "success_metrics": [
+      "Median response latency (target < 5 s)",
+      "% requests resolved without escalation",
+      "Daily active usage retention"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "task-prioritization",
+    "category": "productivity",
+    "title": "Task Prioritization (Eisenhower Matrix)",
+    "summary": "Collects tasks from your trackers and inbox, enriches each with deadline and stakeholder context, and places it in the Eisenhower matrix — urgent/important quadrants — then proposes a concrete daily plan: do, schedule, delegate, or drop. The reflection pass challenges its own urgency calls, which is where most prioritization systems quietly fail.",
+    "patterns": [
+      "Prompt Chaining",
+      "Reflection"
+    ],
+    "complexity": "Low",
+    "multi_agent": "No",
+    "review_level": "Low",
+    "review_rationale": "The user confirms the daily plan; drops and delegations are proposals, never automatic.",
+    "steps": [
+      {
+        "name": "collect_tasks",
+        "goal": "Aggregate open tasks from all connected sources and dedupe."
+      },
+      {
+        "name": "enrich",
+        "goal": "Attach deadlines, blockers, stakeholders, and effort estimates to each task."
+      },
+      {
+        "name": "classify_quadrants",
+        "goal": "Score urgency and importance independently; place tasks in the matrix."
+      },
+      {
+        "name": "critique_plan",
+        "goal": "Reflect: challenge urgency-inflated items and surface neglected Q2 work."
+      },
+      {
+        "name": "propose_schedule",
+        "goal": "Emit a daily plan: do-now list, calendar blocks, delegations, drops."
+      }
+    ],
+    "inputs": [
+      "Task list exports (tracker, inbox, notes)",
+      "Calendar for deadline context",
+      "User priorities/goals"
+    ],
+    "outputs": [
+      "Populated Eisenhower matrix",
+      "Ranked daily plan",
+      "Delegation and drop suggestions"
+    ],
+    "success_metrics": [
+      "% of planned Q1/Q2 tasks completed",
+      "User overrides per plan (target trending down)",
+      "Deadline misses after adoption"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "competitive-intelligence",
+    "category": "research-intelligence",
+    "title": "Competitive Intelligence",
+    "summary": "Tracks competitors continuously across pricing pages, release notes, job postings, filings, and press: collects signals in parallel per competitor, analyzes what changed and why it matters, maintains living battlecards, and alerts on material moves — the difference between intelligence and a pile of screenshots is the 'so what' analysis.",
+    "patterns": [
+      "Planning (Orchestrator-Workers)",
+      "Parallelization",
+      "Tool Use"
+    ],
+    "complexity": "High",
+    "multi_agent": "Yes",
+    "review_level": "Low",
+    "review_rationale": "Battlecard updates auto-publish with change logs; material-move alerts are human-verified before broad distribution.",
+    "steps": [
+      {
+        "name": "plan_collection",
+        "goal": "Orchestrate the source list per competitor for this run."
+      },
+      {
+        "name": "collect_signals",
+        "goal": "Scrape/fetch all mapped sources concurrently; snapshot everything."
+      },
+      {
+        "name": "detect_deltas",
+        "goal": "Diff against prior snapshots; discard unchanged sources."
+      },
+      {
+        "name": "analyze_changes",
+        "goal": "For each delta, assess what changed, why, and competitive implications."
+      },
+      {
+        "name": "update_battlecards",
+        "goal": "Merge validated analysis into battlecards with change logs."
+      },
+      {
+        "name": "alert_material",
+        "goal": "Route moves meeting materiality criteria for human verification and alert."
+      }
+    ],
+    "inputs": [
+      "Competitor list with source maps",
+      "Prior snapshots per source",
+      "Materiality criteria",
+      "Battlecard templates"
+    ],
+    "outputs": [
+      "Per-competitor change reports",
+      "Updated battlecards with change logs",
+      "Material-move alerts"
+    ],
+    "success_metrics": [
+      "Detection lead time vs. team awareness",
+      "Alert precision (material / sent)",
+      "Battlecard freshness (max staleness)"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "market-sizing",
+    "category": "research-intelligence",
+    "title": "Market Sizing (TAM / SAM / SOM)",
+    "summary": "Estimates market size the defensible way — twice: a top-down pass from industry reports and a bottom-up pass from customer counts and pricing, then reconciles the two, runs sensitivity analysis on the assumptions that drive the spread, and writes a memo where every number carries its source and its confidence.",
+    "patterns": [
+      "Planning (Orchestrator-Workers)",
+      "Tool Use",
+      "Reflection"
+    ],
+    "complexity": "High",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "Assumptions are reviewed by the requesting stakeholder before the memo circulates.",
+    "steps": [
+      {
+        "name": "define_market",
+        "goal": "Pin the market definition, segments, and geographic scope."
+      },
+      {
+        "name": "topdown_estimate",
+        "goal": "Derive TAM from industry data; filter to SAM/SOM with explicit assumptions."
+      },
+      {
+        "name": "bottomup_estimate",
+        "goal": "Build from target-customer counts × realistic pricing and penetration."
+      },
+      {
+        "name": "reconcile",
+        "goal": "Compare approaches; investigate and document divergences."
+      },
+      {
+        "name": "sensitivity_analysis",
+        "goal": "Vary the driving assumptions; report the ranges they produce."
+      },
+      {
+        "name": "compose_memo",
+        "goal": "Write the memo with every figure sourced and confidence-labeled."
+      }
+    ],
+    "inputs": [
+      "Market definition and segmentation",
+      "Industry reports and public data sources",
+      "Pricing and unit-economics assumptions"
+    ],
+    "outputs": [
+      "TAM/SAM/SOM estimates with ranges",
+      "Reconciliation of top-down vs. bottom-up",
+      "Sensitivity analysis and sourced memo"
+    ],
+    "success_metrics": [
+      "Estimate spread (top-down vs. bottom-up ratio)",
+      "% figures with cited sources (target 100%)",
+      "Stakeholder challenge survival rate"
+    ],
+    "gate": "downstream"
+  },
+  {
+    "id": "news-aggregation-summarization",
+    "category": "research-intelligence",
+    "title": "News Aggregation & Summarization",
+    "summary": "Monitors configured feeds and topics, deduplicates the same story across outlets, clusters coverage into events, summarizes each event with multi-source grounding, ranks by relevance to your interests, and delivers a briefing sized for its reading slot — five minutes should mean five minutes.",
+    "patterns": [
+      "Parallelization",
+      "Prompt Chaining"
+    ],
+    "complexity": "Medium",
+    "multi_agent": "No",
+    "review_level": "None",
+    "review_rationale": "Fully automated delivery; source links accompany every summary for verification.",
+    "steps": [
+      {
+        "name": "fetch_sources",
+        "goal": "Pull new items from all feeds concurrently."
+      },
+      {
+        "name": "dedupe_cluster",
+        "goal": "Group items covering the same underlying event across outlets."
+      },
+      {
+        "name": "summarize_events",
+        "goal": "Summarize each cluster in parallel, grounded in all its sources."
+      },
+      {
+        "name": "rank_relevance",
+        "goal": "Score events against the interest profile."
+      },
+      {
+        "name": "compose_briefing",
+        "goal": "Assemble the briefing to the length budget, links included."
+      }
+    ],
+    "inputs": [
+      "Feed/source list",
+      "Interest profile with priority topics",
+      "Delivery schedule and length budget"
+    ],
+    "outputs": [
+      "Deduplicated event clusters",
+      "Multi-source event summaries with links",
+      "Ranked briefing per schedule"
+    ],
+    "success_metrics": [
+      "Duplicate leakage per briefing",
+      "Reader relevance feedback",
+      "Briefing read-through rate"
+    ],
+    "gate": "none"
+  },
+  {
+    "id": "patent-analysis",
+    "category": "research-intelligence",
+    "title": "Patent Analysis",
+    "summary": "Maps a patent landscape for a technology area: queries patent databases, clusters filings by claimed subject matter, analyzes claim scope and assignee activity, assesses proximity of your own concepts to existing claims, and produces a landscape report that tells R&D where the field is crowded and where it is open.",
+    "patterns": [
+      "Parallelization",
+      "Reflection",
+      "Tool Use"
+    ],
+    "complexity": "High",
+    "multi_agent": "No",
+    "review_level": "High",
+    "review_rationale": "Patent counsel reviews all proximity assessments; no output constitutes a legal opinion.",
+    "steps": [
+      {
+        "name": "query_databases",
+        "goal": "Run keyword, classification, and citation searches across patent DBs."
+      },
+      {
+        "name": "cluster_filings",
+        "goal": "Group results by claimed subject matter, in parallel batches."
+      },
+      {
+        "name": "analyze_claims",
+        "goal": "Assess independent-claim scope and prosecution status per cluster."
+      },
+      {
+        "name": "assess_proximity",
+        "goal": "Screen your concepts against clusters; flag close claims with reasoning."
+      },
+      {
+        "name": "self_check",
+        "goal": "Verify flags cite actual claim language; strip anything resembling legal advice."
+      },
+      {
+        "name": "human_approval",
+        "goal": "Deliver the report to patent counsel for review."
+      }
+    ],
+    "inputs": [
+      "Technology-area definition and keywords",
+      "Patent database access",
+      "Your concept descriptions (for proximity screening)"
+    ],
+    "outputs": [
+      "Clustered landscape map with assignee activity",
+      "Claim-scope analyses per cluster",
+      "Proximity-screening flags for counsel"
+    ],
+    "success_metrics": [
+      "Landscape recall vs. counsel benchmark search",
+      "Cluster coherence on expert review",
+      "Counsel time saved per screening"
+    ],
+    "gate": "in_flow"
+  },
+  {
+    "id": "research-synthesis",
+    "category": "research-intelligence",
+    "title": "Research Synthesis",
+    "summary": "Builds a literature review from a research question: scopes the question into sub-questions, retrieves and screens the corpus, extracts structured findings from each source in parallel, synthesizes across sources — surfacing agreements, contradictions, and gaps — and verifies that every claim in the review traces to a specific source.",
+    "patterns": [
+      "Planning (Orchestrator-Workers)",
+      "Parallelization",
+      "Reflection"
+    ],
+    "complexity": "High",
+    "multi_agent": "No",
+    "review_level": "Medium",
+    "review_rationale": "The researcher reviews the synthesis; the citation-check report ships alongside it.",
+    "steps": [
+      {
+        "name": "scope_question",
+        "goal": "Decompose the question into sub-questions and search strategies."
+      },
+      {
+        "name": "retrieve_screen",
+        "goal": "Retrieve candidates and screen against inclusion criteria."
+      },
+      {
+        "name": "extract_findings",
+        "goal": "Extract methods, findings, and limitations per source, in parallel."
+      },
+      {
+        "name": "synthesize",
+        "goal": "Integrate across sources: agreements, contradictions, open gaps."
+      },
+      {
+        "name": "verify_citations",
+        "goal": "Check every synthesis claim against its cited extraction; fix or flag."
+      },
+      {
+        "name": "compose_review",
+        "goal": "Produce the final review with the citation-check report attached."
+      }
+    ],
+    "inputs": [
+      "Research question and scope",
+      "Corpus sources (papers, reports, internal docs)",
+      "Inclusion/exclusion criteria"
+    ],
+    "outputs": [
+      "Screened corpus with inclusion decisions",
+      "Per-source structured extractions",
+      "Cited synthesis with agreements/contradictions/gaps"
+    ],
+    "success_metrics": [
+      "Citation-check pass rate (target 100%)",
+      "Corpus recall vs. expert reference list",
+      "Researcher time saved per review"
+    ],
+    "gate": "downstream"
+  }
+]

@@ -174,6 +174,7 @@ import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
 import { createAdoptScanner, composeBrief, analysisPrompt } from "./ideadopt.mjs";
 import { intakeMessages, parseIntake, hasImages, planchatMessages, PLAN_WINDOWS, VISION_MARKER, CHANGE_MARKER, PROJECT_SETTINGS_SHOWN, PLAN_MAX_DOCS, PLAN_DOC_CHARS } from "./ideintake.mjs";
+import { blueprintCatalog, blueprintById, blueprintSeed, blueprintVision } from "./blueprints.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
 import { sweepFindings, sweepReport, brokenReferenceFindings, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
 import { helpVoice } from "./idehelp.mjs";
@@ -1942,6 +1943,21 @@ async function handleIde(req, res, u) {
   if (req.method === "GET" && path === "/ide/jobs") return send(ideFeature.listJobs(T));
   if (req.method === "GET" && path === "/ide/workspaces") return send(ideFeature.listWorkspaces(T));
   if (req.method === "GET" && path === "/ide/push/key") return send(ideFeature.pushKey(T));
+  /*
+   * Project blueprints: 49 shapes a build can start from, instead of a blank interview (Fred,
+   * 2026-08-09). No id returns the picker payload, trimmed to what the picker draws (23KB rather
+   * than the 96KB catalog). An id returns the full record plus two ways to start it: `seed` opens
+   * the intake conversation as a user turn so the interview can translate it into the caller's
+   * register and stay adjustable, and `vision` is a ready-made VISION READY block for skipping
+   * the interview outright. Static reference data, so no tenancy branch and nothing to meter.
+   */
+  if (req.method === "GET" && path === "/ide/blueprints") {
+    const id = String(u.searchParams.get("id") || "").trim();
+    if (!id) return send({ status: 200, body: blueprintCatalog() });
+    const b = blueprintById(id);
+    if (!b) return send({ status: 404, body: { error: "No blueprint by that name." } });
+    return send({ status: 200, body: { blueprint: b, seed: blueprintSeed(id), vision: blueprintVision(id) } });
+  }
   if (req.method === "GET" && path === "/ide/node") {
     const blocked = ideFeature.wall(T);
     if (blocked) return send(blocked);
