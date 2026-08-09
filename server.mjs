@@ -174,7 +174,7 @@ import { phrase, plannerVoice, ANSWER, normalizeRegister } from "./idelang.mjs";
 import { createRunAndSee, runPlanFor } from "./idesee.mjs";
 import { createAdoptScanner, composeBrief, analysisPrompt } from "./ideadopt.mjs";
 import { intakeMessages, parseIntake, hasImages, planchatMessages, PLAN_WINDOWS, VISION_MARKER, CHANGE_MARKER, PROJECT_SETTINGS_SHOWN, PLAN_MAX_DOCS, PLAN_DOC_CHARS } from "./ideintake.mjs";
-import { blueprintCatalog, blueprintById, blueprintSeed, blueprintVision } from "./blueprints.mjs";
+import { blueprintCatalog, blueprintById, blueprintSeed, blueprintVision, blueprintParts } from "./blueprints.mjs";
 import { normalizeMode as normalizeCrucibleMode, visionExtras, costBand, personaVoice } from "./idemodes.mjs";
 import { sweepFindings, sweepReport, brokenReferenceFindings, fidelityMessages, parseFidelity, visionFromPrompt } from "./idefurnace.mjs";
 import { helpVoice } from "./idehelp.mjs";
@@ -8186,10 +8186,18 @@ async function handleChat(req, res) {
     working("battalion: assembling");
     let ctxInfo = { used: [], artifactsUsed: [], chatsUsed: [], block: "" };
     try { ctxInfo = await buildContext(lastUserText, chatId, { mode: "battalion", model: "battalion" }, T); } catch {}
+    /*
+     * If the turn names a blueprint that declares a fan-out, hand battalion that split instead of
+     * paying an orchestrator seat to invent one. Only the blueprint's ONE parallel step travels;
+     * its step sequence is a pipeline and would deadlock a parallel executor (see blueprintParts).
+     * A blueprint without a declared fan-out returns null, which is the ordinary path unchanged.
+     */
+    const bpParts = typeof input.blueprintId === "string" ? blueprintParts(input.blueprintId) : null;
     const r = await battalion.run({
       question, history, contextBlock: ctxInfo.block, personaStyle,
       onToken: (delta) => { if (delta) sse({ type: "token", delta }); },
       working, signal: ac.signal, isAborted: () => aborted,
+      plan: bpParts,
     });
     workStop();
     if (aborted) { sse({ type: "stopped", reason: "stopped" }); return endStream(); }

@@ -57,7 +57,20 @@
       "Days from regulation change to assessed impact",
       "Audit findings per cycle (trend)"
     ],
-    "gate": "in_flow"
+    "gate": "in_flow",
+    "fanout": {
+      "step": "watch_sources",
+      "lanes": [
+        {
+          "title": "Regulatory feeds",
+          "instructions": "Poll external regulatory sources for new or amended requirements since the last run and capture effective dates."
+        },
+        {
+          "title": "Internal controls",
+          "instructions": "Poll internal control systems for current operating status, owners, and evidence freshness."
+        }
+      ]
+    }
   },
   {
     "id": "contract-review",
@@ -888,7 +901,28 @@
       "Approval rate of drafts (target > 80%)",
       "Meetings booked per 100 sends"
     ],
-    "gate": "in_flow"
+    "gate": "in_flow",
+    "fanout": {
+      "step": "research_prospect",
+      "lanes": [
+        {
+          "title": "Role",
+          "instructions": "Establish the prospect's current role, seniority, tenure, and likely responsibilities."
+        },
+        {
+          "title": "Company",
+          "instructions": "Establish the company's size, market, recent funding or results, and stated priorities."
+        },
+        {
+          "title": "News",
+          "instructions": "Find recent news mentioning the prospect or their company that would justify reaching out now."
+        },
+        {
+          "title": "Activity signals",
+          "instructions": "Find recent public activity by the prospect that indicates what they currently care about."
+        }
+      ]
+    }
   },
   {
     "id": "support-ticket-triage",
@@ -1166,7 +1200,28 @@
       "Memo fact-check pass rate",
       "Analyst prep time per filing"
     ],
-    "gate": "downstream"
+    "gate": "downstream",
+    "fanout": {
+      "step": "parallel_analyses",
+      "lanes": [
+        {
+          "title": "Income statement",
+          "instructions": "Analyze revenue, margin and expense trends across the reported periods and flag anomalies."
+        },
+        {
+          "title": "Balance sheet",
+          "instructions": "Analyze asset quality, leverage, liquidity and working capital movements across the reported periods."
+        },
+        {
+          "title": "Cash flow",
+          "instructions": "Analyze operating, investing and financing cash flows and reconcile them against reported earnings."
+        },
+        {
+          "title": "MD&A",
+          "instructions": "Analyze management's discussion for tone, changed language versus prior periods, and claims unsupported by the statements."
+        }
+      ]
+    }
   },
   {
     "id": "forecasting",
@@ -1275,7 +1330,24 @@
       "Digest relevance (owner feedback)",
       "Coverage of held names in news scan"
     ],
-    "gate": "downstream"
+    "gate": "downstream",
+    "fanout": {
+      "step": "parallel_scan",
+      "lanes": [
+        {
+          "title": "Exposures",
+          "instructions": "Compute current position weights, sector and factor exposures, and concentration against limits."
+        },
+        {
+          "title": "Prices",
+          "instructions": "Pull current prices and the period move for every held name."
+        },
+        {
+          "title": "News and filings",
+          "instructions": "Scan news and regulatory filings for held names and flag anything price-relevant."
+        }
+      ]
+    }
   },
   {
     "id": "bug-triage",
@@ -1445,7 +1517,28 @@
       "Escaped-defect rate on reviewed PRs",
       "Human review time saved per PR"
     ],
-    "gate": "in_flow"
+    "gate": "in_flow",
+    "fanout": {
+      "step": "parallel_lenses",
+      "lanes": [
+        {
+          "title": "Security",
+          "instructions": "Review the diff for security defects only: injection, authz gaps, unsafe deserialization, secret handling, and unvalidated input. Cite file and line for each finding."
+        },
+        {
+          "title": "Performance",
+          "instructions": "Review the diff for performance defects only: N+1 queries, unbounded loops and allocations, blocking calls on hot paths, and missing indexes. Cite file and line."
+        },
+        {
+          "title": "Correctness",
+          "instructions": "Review the diff for correctness defects only: logic errors, off-by-one, unhandled error paths, race conditions, and broken invariants. Cite file and line."
+        },
+        {
+          "title": "Readability",
+          "instructions": "Review the diff for clarity only: naming, dead code, misleading comments, and structure that will be hard to change later. Cite file and line."
+        }
+      ]
+    }
   },
   {
     "id": "deployment-orchestrator",
@@ -1671,7 +1764,24 @@
       "Mean time from scan to ticketed remediation",
       "Recurrence rate of previously fixed finding classes"
     ],
-    "gate": "in_flow"
+    "gate": "in_flow",
+    "fanout": {
+      "step": "run_scanners",
+      "lanes": [
+        {
+          "title": "SAST",
+          "instructions": "Run static application security testing over the changed code and report each finding with rule id, location, and severity."
+        },
+        {
+          "title": "Dependencies",
+          "instructions": "Audit declared and transitive dependencies for known vulnerabilities; report package, installed version, fixed version, and severity."
+        },
+        {
+          "title": "Secrets",
+          "instructions": "Scan for committed credentials, tokens, private keys and connection strings; report location and credential type, never the value itself."
+        }
+      ]
+    }
   },
   {
     "id": "technical-debt-tracker",
@@ -1906,7 +2016,28 @@
       "Recommendation acceptance rate",
       "Incidents caused by optimizations (target 0)"
     ],
-    "gate": "in_flow"
+    "gate": "in_flow",
+    "fanout": {
+      "step": "detect_waste",
+      "lanes": [
+        {
+          "title": "Idle",
+          "instructions": "Find resources with no meaningful utilization over the window and quantify their monthly cost."
+        },
+        {
+          "title": "Oversized",
+          "instructions": "Find resources provisioned well above observed peak demand and quantify the cost of the gap."
+        },
+        {
+          "title": "Unattached",
+          "instructions": "Find orphaned volumes, addresses, snapshots and load balancers with no attached workload."
+        },
+        {
+          "title": "Uncommitted",
+          "instructions": "Find steady-state usage running at on-demand rates that a commitment or savings plan would cover."
+        }
+      ]
+    }
   },
   {
     "id": "incident-response",
@@ -1969,7 +2100,28 @@
       "Hypothesis hit rate (top-3 contains root cause)",
       "Postmortem completion within 48h"
     ],
-    "gate": "in_flow"
+    "gate": "in_flow",
+    "fanout": {
+      "step": "gather_diagnostics",
+      "lanes": [
+        {
+          "title": "Logs",
+          "instructions": "Pull error and warning logs for the affected services across the incident window and summarize the dominant failure signatures."
+        },
+        {
+          "title": "Metrics",
+          "instructions": "Pull latency, error-rate, saturation and traffic metrics across the incident window and identify which moved first."
+        },
+        {
+          "title": "Traces",
+          "instructions": "Pull representative failing traces and identify the span where latency or errors originate."
+        },
+        {
+          "title": "Recent changes",
+          "instructions": "List deploys, config edits, feature-flag flips and infrastructure changes in the window before onset."
+        }
+      ]
+    }
   },
   {
     "id": "log-analysis",
@@ -2297,7 +2449,24 @@
       "Summary edit rate by recipients",
       "Time from meeting end to distribution (target < 10 min)"
     ],
-    "gate": "none"
+    "gate": "none",
+    "fanout": {
+      "step": "parallel_extract",
+      "lanes": [
+        {
+          "title": "Summary",
+          "instructions": "Produce a faithful narrative summary of what the meeting covered, in the order it was discussed."
+        },
+        {
+          "title": "Decisions",
+          "instructions": "Extract only decisions that were actually reached, each with who decided and what was ruled out."
+        },
+        {
+          "title": "Action items",
+          "instructions": "Extract only commitments to act, each with an owner and a due date where one was stated. Never invent an owner."
+        }
+      ]
+    }
   },
   {
     "id": "note-synthesis",
@@ -2733,6 +2902,23 @@
       "Corpus recall vs. expert reference list",
       "Researcher time saved per review"
     ],
-    "gate": "downstream"
+    "gate": "downstream",
+    "fanout": {
+      "step": "extract_findings",
+      "lanes": [
+        {
+          "title": "Methods",
+          "instructions": "For each source, extract the study design, sample, and measurement approach."
+        },
+        {
+          "title": "Findings",
+          "instructions": "For each source, extract the reported results and effect sizes, with the numbers as published."
+        },
+        {
+          "title": "Limitations",
+          "instructions": "For each source, extract stated limitations, conflicts of interest, and threats to validity."
+        }
+      ]
+    }
   }
 ]

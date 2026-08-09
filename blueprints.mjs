@@ -125,6 +125,32 @@ export function blueprintSeed(id) {
 }
 
 /*
+ * A blueprint's fan-out lanes, in the shape BATTALION's workers take.
+ *
+ * Only ONE STEP of a blueprint is ever a fan-out, never the sequence. 162 of the 285 steps in this
+ * catalog reference a prior step's output, and battalion's own orchestrator prompt demands the
+ * opposite: "independent parts that different models can work IN PARALLEL without coordinating".
+ * Handing it the step list would run `aggregate` beside `parallel_lenses` with no access to what the
+ * lenses produced, and every downstream worker would invent its input.
+ *
+ * So this returns the lanes of the one declared fan-out step, or null. Null is the common answer -
+ * 39 of 49 blueprints have no fixed fan-out, either because nothing in them is parallel or because
+ * their parallelism is per-input-item ("summarize each cluster") with a lane count unknowable before
+ * the data arrives. Null means battalion plans the turn the way it always has.
+ */
+export function blueprintParts(id) {
+  const b = blueprintById(id);
+  if (!b || !b.fanout || !Array.isArray(b.fanout.lanes)) return null;
+  return b.fanout.lanes.map((l) => ({ title: l.title, instructions: l.instructions }));
+}
+
+/** Which step of the blueprint the fan-out belongs to, for anything that needs to say so. */
+export const blueprintFanoutStep = (id) => {
+  const b = blueprintById(id);
+  return b && b.fanout ? b.fanout.step : null;
+};
+
+/*
  * The fast path: a ready-made VISION READY block that parseIntake accepts, for skipping the
  * interview entirely. Marker on its own line with bullets under it, matching what intakeSystem
  * instructs the model to produce, so one parser serves both.

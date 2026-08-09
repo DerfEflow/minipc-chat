@@ -41,6 +41,30 @@ export function extractPlan(text) {
   return null;
 }
 
+/*
+ * A plan the CALLER already has, held to exactly the bounds extractPlan enforces on the
+ * orchestrator's own output (Fred, 2026-08-09, blueprint fan-outs).
+ *
+ * The point is not saving the orchestrator call, though it saves one. It is that a blueprint's
+ * fan-out lanes are a DESIGNED split - "security, performance, correctness, readability" - where the
+ * orchestrator invents one per turn and sometimes cannot be reached at all ("orchestrator
+ * unreachable; single seat answered"). A designed split beats an invented one wherever it applies.
+ *
+ * Validated rather than trusted: the same 2-4 bound and the same standalone-instruction contract
+ * protect the workers regardless of who wrote the parts. A supplied plan that fails these checks is
+ * DISCARDED and the orchestrator runs as usual, because a bad hand-off must degrade to the normal
+ * path and never break the turn.
+ */
+export function normalizePlan(parts) {
+  if (!Array.isArray(parts)) return null;
+  const clean = parts
+    .filter((p) => p && typeof p.title === "string" && typeof p.instructions === "string"
+      && p.title.trim() && p.instructions.trim())
+    .map((p) => ({ title: p.title.slice(0, 160), instructions: p.instructions.slice(0, 2000) }));
+  if (clean.length < PART_MIN || clean.length > PART_MAX) return null;
+  return clean;
+}
+
 export function historyTail(history, capChars = HISTORY_TAIL_CHARS) {
   const out = [];
   let used = 0;
@@ -98,9 +122,13 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
    * onToken. Returns { ok:true, manifest } after streaming the answer, or { ok:false, error }
    * WITHOUT having streamed anything (so the caller can offer the normal model honestly).
    */
-  async function run({ question, history = [], contextBlock = "", personaStyle = "", onToken, working = () => {}, signal, isAborted = () => false }) {
+  async function run({ question, history = [], contextBlock = "", personaStyle = "", onToken, working = () => {}, signal, isAborted = () => false, plan: suppliedPlan = null }) {
     const t0 = Date.now();
     const manifest = { mode: "single", parts: 0, stages: [], notes: [], models: [], ms: 0, costUsd: 0 };
+    // A caller-supplied split (a blueprint's fan-out lanes). Malformed input falls through to the
+    // normal orchestrator path rather than failing the turn, and either outcome is announced.
+    const supplied = suppliedPlan ? normalizePlan(suppliedPlan) : null;
+    if (suppliedPlan && !supplied) manifest.notes.push("a supplied plan was rejected as malformed; the orchestrator planned this turn instead");
     const context = historyTail(history);
     const preamble = [
       ...(personaStyle ? [{ role: "system", content: personaStyle }] : []),
@@ -110,7 +138,12 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
     // 1. ASSESS. The heuristic answers the easy cases for free; the light seat gets the rest.
     // "When appropriate" is this gate: a two-line question never convenes a war council.
     let complex = false;
-    if (!isSimple(question) && question.length > 160) {
+    if (supplied) {
+      // The caller already decided this splits, and how. Sizing it up again spends a seat call to
+      // reopen a settled question.
+      complex = true;
+      manifest.notes.push("plan supplied by the caller (" + supplied.length + " parts); no sizing or orchestrator seat was called");
+    } else if (!isSimple(question) && question.length > 160) {
       working("battalion: sizing up the job");
       const a = await seat(roster.assess, [
         { role: "system", content: "Classify the user's request. Reply with EXACTLY one word: SIMPLE if one model should answer it directly, COMPLEX if it is large enough to split between several models (multi-part builds, long documents, multi-file code, broad research)." },
@@ -123,17 +156,21 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
 
     // 2-4. SWARM (or the single seat).
     if (complex && !isAborted()) {
-      working("battalion: drawing the plan");
-      const plan = await seat(roster.orchestrator, [
-        { role: "system", content: "You are the BATTALION orchestrator. Split the user's request into " + PART_MIN + "-" + PART_MAX + " independent parts that different models can work IN PARALLEL without coordinating. Parts must not overlap. Reply with ONLY JSON: {\"parts\":[{\"title\":\"...\",\"instructions\":\"complete standalone instructions for that part\"}]}. If the request genuinely should not be split, reply {\"parts\":[]}." },
-        ...preamble,
-        ...context,
-        { role: "user", content: question },
-      ], { tokens: PLAN_TOKENS, signal });
-      manifest.stages.push({ stage: "plan", seat: roster.orchestrator, ms: plan.ms, ok: !!plan.ok });
-      const parsed = plan.ok ? extractPlan(plan.content) : null;
-      const parts = parsed && parsed.parts.length >= PART_MIN ? parsed.parts : null;
-      if (!parts) manifest.notes.push(plan.ok ? "orchestrator chose not to split; single seat answered" : "orchestrator unreachable; single seat answered");
+      // A supplied plan skips this entirely: no orchestrator seat, no JSON to recover from prose.
+      let parts = supplied;
+      if (!parts) {
+        working("battalion: drawing the plan");
+        const plan = await seat(roster.orchestrator, [
+          { role: "system", content: "You are the BATTALION orchestrator. Split the user's request into " + PART_MIN + "-" + PART_MAX + " independent parts that different models can work IN PARALLEL without coordinating. Parts must not overlap. Reply with ONLY JSON: {\"parts\":[{\"title\":\"...\",\"instructions\":\"complete standalone instructions for that part\"}]}. If the request genuinely should not be split, reply {\"parts\":[]}." },
+          ...preamble,
+          ...context,
+          { role: "user", content: question },
+        ], { tokens: PLAN_TOKENS, signal });
+        manifest.stages.push({ stage: "plan", seat: roster.orchestrator, ms: plan.ms, ok: !!plan.ok });
+        const parsed = plan.ok ? extractPlan(plan.content) : null;
+        parts = parsed && parsed.parts.length >= PART_MIN ? parsed.parts : null;
+        if (!parts) manifest.notes.push(plan.ok ? "orchestrator chose not to split; single seat answered" : "orchestrator unreachable; single seat answered");
+      }
 
       if (parts && !isAborted()) {
         manifest.mode = "swarm";
