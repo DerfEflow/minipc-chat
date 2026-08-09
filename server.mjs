@@ -9009,6 +9009,38 @@ async function handleChat(req, res) {
       let answer = "", streamedAny = false,
         completionApproved = !completionRequired && !requiredToolsUnavailable,
         completionNudges = 0;
+      /*
+       * WHAT THIS TURN COST, AND SETTLING IT ON EVERY EXIT (Fred, 2026-08-09: "it should count for
+       * that session no matter what model is chosen or when").
+       *
+       * Only the completed path used to meter. A turn that ran eight tool rounds and then died on a
+       * provider error recorded costUsd undefined, charged nobody, and — because the budget event
+       * rides the same block — left the budget window frozen on its last good number. Fred read that
+       * frozen window as "the calculator stopped counting when I switched models". It had not; his
+       * four DeepSeek R1 turns all failed, and a failed turn was worth nothing to the meter no matter
+       * how many tokens it had already burned. OpenRouter still billed those tokens.
+       *
+       * So settlement is one function called from all three exits (completed, provider error,
+       * interrupted). Guests are charged in credits through meterTurn exactly as before and the owner
+       * in USD, so the fix lands on both. It is idempotent because the abort path can be reached
+       * twice, and double-charging a guest for one turn is worse than the bug being fixed.
+       */
+      const turnCostUsd = () => (sawCost || sawTok) ? +(costTotal + catalogCostTotal).toFixed(6) : null;
+      let spendSettled = false;
+      async function settleTurnSpend() {
+        if (spendSettled) return { costUsd: turnCostUsd(), metered: null };
+        spendSettled = true;
+        const cost = turnCostUsd();
+        const metered = await meterTurn(T, cost, lastUserText, answer);
+        if (SB && chatId) {
+          const spendAmt = T.isOwner ? (cost || 0) : ((metered && metered.credits) || 0);
+          const sbr = sessionBudgets.recordSpend(sbEmail, chatId, spendAmt);
+          // Repaint the budget window even when the amount is zero: a live zero is information, a
+          // stale number from two turns ago is the thing that misled Fred.
+          if (!sbr.error) sse({ type: "budget", event: "state", budget: SB.budget, spent: sbr.spent, remaining: sbr.remaining, over: sbr.over || undefined, unit: SB.unit });
+        }
+        return { costUsd: cost, metered };
+      }
       // Unsatisfiable-demand breaker state (see the gate below): identical rejections are counted,
       // and the conditions that could not be met ride out to the user instead of looping.
       let repeatedRejections = 0, lastRejectionSig = "", completionCaveats = [];
@@ -9322,7 +9354,13 @@ async function handleChat(req, res) {
           await logUsage({ ts: startedAt, model: cloudModel, mode, reason: "tools_unsupported_fallback", route: routeInfo, provider: cloudProvider, status: "tools_fallback" });
         }
         workStop();
-        if (aborted) { sse({ type: "stopped" }); await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "interrupted", rounds: roundsUsed, tools: toolCount }); return endStream(); }
+        if (aborted) {
+          sse({ type: "stopped" });
+          // Stopping mid-turn does not un-spend what the provider already streamed.
+          const s = await settleTurnSpend();
+          await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "interrupted", rounds: roundsUsed, tools: toolCount, promptTokens: sawTok ? inTokTotal : null, outputTokens: sawTok ? outTokTotal : null, costUsd: s.costUsd });
+          return endStream();
+        }
         if (!or.ok) {
           bumpUsage(or && or.usage);
           // Same-model retries were exhausted. Preserve the session/model choice and mark the task
@@ -9342,7 +9380,10 @@ async function handleChat(req, res) {
                 evidence: toolSummaries.slice(-40) });
           sse({ type: "stopped", reason: "provider_retry_exhausted", complete: false });
           try { T.chatlog.record(chatId, history, checkpointText); } catch {}
-          await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "error", error: String(or.error || "").slice(0, 200), rounds: roundsUsed, tools: toolCount });
+          // The rounds that DID succeed before the provider gave out were billed upstream, so they
+          // are billed here too. This is the entry that read "cost=undefined" on every failed R1 run.
+          const s = await settleTurnSpend();
+          await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "error", error: String(or.error || "").slice(0, 200), rounds: roundsUsed, tools: toolCount, promptTokens: sawTok ? inTokTotal : null, outputTokens: sawTok ? outTokTotal : null, costUsd: s.costUsd });
           return endStream();
         }
         bumpUsage(or.usage);
@@ -9886,23 +9927,16 @@ async function handleChat(req, res) {
         hitPct: inTok ? Math.round((cacheReadTotal / inTok) * 100) : null,
       } : null;
       // OpenRouter reports real cost; direct providers don't — derive it from catalog prices.
-      const costUsd = (sawCost || sawTok)
-        ? +(costTotal + catalogCostTotal).toFixed(6)
-        : null;
+      const costUsd = turnCostUsd();
       console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=${toolCount} rounds=${roundsUsed} conf=${quality.confidence}`);
       const executionStatus = executionPause
         ? (reasoningOnlyPaused ? "paused_empty_response" : executionPause.decision)
         : "completed";
       await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: executionStatus, rounds: roundsUsed, tools: toolCount, images: imagesThisTurn || undefined, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo || undefined, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
       try { T.chatlog.record(chatId, history, answer); } catch {}
-      const metered = await meterTurn(T, costUsd, lastUserText, answer);   // SaaS: charge credits / draw cap / training sink (non-owner only)
-      // Session budget: mirror the REAL deduction (guest credits from meterTurn; owner turn cost in
-      // USD). over=true rides the budget event so the UI shows the pause the moment the cap is hit.
-      if (SB && chatId) {
-        const spendAmt = T.isOwner ? (costUsd || 0) : ((metered && metered.credits) || 0);
-        const sbr = sessionBudgets.recordSpend(sbEmail, chatId, spendAmt);
-        if (!sbr.error) sse({ type: "budget", event: "state", budget: SB.budget, spent: sbr.spent, remaining: sbr.remaining, over: sbr.over || undefined, unit: SB.unit });
-      }
+      // SaaS charge + session budget, through the one settlement path the error and interrupt exits
+      // also use (see settleTurnSpend): guest credits via meterTurn, owner USD, budget event either way.
+      await settleTurnSpend();
       if (executionPause) {
         sse({
           type: "checkpoint", state: executionPause.decision, complete: false,

@@ -210,8 +210,28 @@ export const MODELS = [
     specialty: "Strong free coder for planning and building" },
 
   // ---- Reasoning & Math ---------------------------------------------------------------------
+  /*
+   * R1's numbers were wrong in BOTH directions and every call failed (Fred, 2026-08-09: four runs,
+   * four failures). Corrected against OpenRouter's own model record and the errors the wire returned:
+   *
+   *   maxOut was 16384; the endpoint's max_completion_tokens is 16000. Dominion asked for 384 more
+   *   output tokens than the model will ever grant, so a request could be rejected on that alone.
+   *
+   *   ctx was 163000. OpenRouter advertises 163840, but that is the best case ACROSS the providers
+   *   it routes to, not a promise about the one that serves any given call. The provider that took
+   *   Fred's turns answered "this endpoint's maximum context length is 64000 tokens". Believing the
+   *   headline number is what broke him: the router saw a 163k window, escalated to long_context
+   *   ("post-retrieval long-context escalation" on all four runs), packed a prompt to match, and the
+   *   real endpoint refused it. The wrong number both TRIGGERED the escalation and then failed it.
+   *
+   * So ctx is the observed floor, not the advertised ceiling. This trades some headroom when routing
+   * lands on a larger provider for turns that actually complete on every provider. Same correction
+   * Fred accepted for Qwen3 Coder on 2026-08-03 when its live window came back 262,144 against a
+   * catalogued 1,000,000 — the catalog is a promise the router relies on, so it has to be the one
+   * number we are sure of.
+   */
   { id: "deepseek/deepseek-r1", name: "DeepSeek R1", origin: "DeepSeek (China)",
-    category: "Reasoning & Math", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.70, outCost: 2.50, ctx: 163000, maxOut: 16384, reasoning: true,
+    category: "Reasoning & Math", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.70, outCost: 2.50, ctx: 64000, maxOut: 16000, reasoning: true,
     specialty: "Shows its reasoning step by step as it thinks" },
   // NVIDIA DIRECT (Fred, 2026-07-28): the build.nvidia.com developer endpoint serves these free
   // (63 free endpoints; Fred: "limits are extremely generous"). While NVIDIA_API_KEY is absent

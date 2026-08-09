@@ -105,6 +105,29 @@ t("Gemini prices match Google's published AI Studio rates of 2026-08-03", () => 
   }
 });
 
+/*
+ * DeepSeek R1's limits, pinned to what the WIRE enforces rather than what the model page advertises.
+ * Both numbers here were wrong on 2026-08-09 and every R1 call failed because of it. They are pinned
+ * with the evidence so nobody "corrects" them back up to the advertised figures:
+ *   maxOut 16000 - OpenRouter's max_completion_tokens for this endpoint. The old 16384 asked for
+ *                  more output than the model will ever return.
+ *   ctx    64000 - the limit the serving provider actually enforced ("this endpoint's maximum
+ *                  context length is 64000 tokens"). OpenRouter's advertised 163840 is the best
+ *                  case across providers, not a guarantee for the one that takes your call, and
+ *                  trusting it made the router escalate into long_context and then blow the limit.
+ */
+t("DeepSeek R1's window and output cap match what the endpoint enforces, not what it advertises", () => {
+  const r1 = byId("deepseek/deepseek-r1");
+  assert.equal(r1.maxOut, 16000, "R1 output cap must not exceed OpenRouter's max_completion_tokens");
+  assert.equal(r1.ctx, 64000, "R1 context must be the enforced floor, not the advertised 163840");
+  // The failure mode was a request whose input + output together crossed the endpoint limit, so the
+  // reserve has to be real: a full-size answer must still leave room for a prompt.
+  assert.ok(r1.maxOut < r1.ctx / 2, "R1 must reserve most of its window for input, not output");
+  // No provider field = OpenRouter (finalize defaults it). R1 has no direct or NVIDIA route, so if
+  // this ever gains a provider the routing assumption above needs revisiting.
+  assert.equal(r1.provider, "openrouter", "R1 is reachable only through OpenRouter");
+});
+
 t("no catalog row carries a negative or absurd price", () => {
   for (const m of CATALOG) {
     const i = Number(m.inCost), o = Number(m.outCost);
@@ -115,4 +138,4 @@ t("no catalog row carries a negative or absurd price", () => {
   }
 });
 
-console.log(`\n${passed}/7 checks passed - the published prices are pinned, and fast mode costs what it costs`);
+console.log(`\n${passed}/8 checks passed - the published prices are pinned, and fast mode costs what it costs`);
