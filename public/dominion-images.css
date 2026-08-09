@@ -510,24 +510,48 @@ body.dfi-open #dfi-root .scene { transform: none; }
 }
 #dfi-root .generation-strip strong { color: var(--lime); font: 700 15px/1 var(--font-mono); text-align: right; }
 
-#dfi-root .gallery { position: relative; z-index: 1; flex: 1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(260px, 1fr); gap: 14px; padding: 16px 18px; }
+/*
+ * A fluid grid rather than a fixed column count. The old rule hard-coded 2 columns, overridden to
+ * 3 on wide and back to 1 on mobile, so the tiles were only ever right at three exact widths and
+ * a phone showed one enormous picture per screen (Fred, 2026-08-08: "a sleek multi grid (Bigger on
+ * desktop) preview of all of the pictures that can be scrolled"). auto-fill with a min track size
+ * fits as many as the space allows at every width, and the min grows on bigger screens so desktop
+ * gets larger tiles rather than merely more of them.
+ */
+#dfi-root .gallery { position: relative; z-index: 1; flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--tile, 210px), 1fr)); grid-auto-rows: var(--tile-h, 210px); gap: 12px; padding: 16px 18px; align-content: start; overflow-y: auto; }
 #dfi-root .gallery-empty { grid-column: 1 / -1; align-self: center; text-align: center; color: #7b948c; font: 500 var(--t-body)/1.75 var(--font-mono); padding: 48px 24px; }
-#dfi-root .creation-card { position: relative; min-height: 270px; overflow: hidden; cursor: pointer; border: 1px solid rgba(151,222,202,.17); background: #020806; clip-path: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%, 0 9px); transition: transform .2s ease, border-color .25s, box-shadow .25s; }
+#dfi-root .creation-card { position: relative; min-height: 0; overflow: hidden; cursor: pointer; border: 1px solid rgba(151,222,202,.17); background: #020806; clip-path: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%, 0 9px); transition: transform .2s ease, border-color .25s, box-shadow .25s; }
 #dfi-root .creation-card:hover { transform: translateY(-2px); border-color: rgba(121,255,82,.43); box-shadow: 0 13px 28px rgba(0,0,0,.42), 0 0 20px rgba(121,255,82,.07); }
 #dfi-root .creation-card.hidden-card { display: none; }
 #dfi-root .creation-art { position: absolute; inset: 0; overflow: hidden; background: #03100c; }
 #dfi-root .creation-art::before { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.03), transparent 45%, rgba(0,6,4,.72)); z-index: 5; }
 #dfi-root .creation-art::after { content: ""; position: absolute; inset: 0; opacity: .38; background-image: radial-gradient(circle, rgba(215,255,199,.7) 0 1px, transparent 1.5px); background-size: 37px 43px; mask-image: linear-gradient(transparent, #000 25%, transparent 80%); animation: dfi-dust-drift 14s linear infinite; }
 #dfi-root .creation-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-/* pending batch job card art: the foundry rings from the mockup */
-#dfi-root .art-forge { background:
-  radial-gradient(circle at 51% 50%, #fff1ca 0 1%, #ff9c48 2%, rgba(213,79,14,.6) 7%, transparent 18%),
-  conic-gradient(from 10deg at 50% 50%, transparent, rgba(255,111,34,.2), transparent 13%, rgba(121,255,82,.1), transparent 31%, rgba(255,111,34,.24), transparent 48%, rgba(121,255,82,.11), transparent 72%),
-  radial-gradient(circle at 50% 50%, #291006, #08120d 56%, #020604); }
-#dfi-root .art-forge i { position: absolute; inset: calc(12% + var(--i, 0%)); border: 1px solid rgba(226,130,63,.38); border-radius: 50%; box-shadow: inset 0 0 17px rgba(255,117,34,.08); }
-#dfi-root .art-forge i:nth-child(1) { --i: 0%; }
-#dfi-root .art-forge i:nth-child(2) { --i: 8%; border-style: dashed; animation: dfi-reactor-spin 19s linear infinite; }
-#dfi-root .art-forge i:nth-child(3) { --i: 18%; border-color: rgba(121,255,82,.25); }
+/*
+ * The waiting tile. This used to be `.art-forge`: a radial "light" with three orbiting rings that
+ * read as a glowing eye on desktop and as a smudge on a phone, and told the user nothing (Fred,
+ * 2026-08-08: "it has some kind of gradient placeholder that just looks strange... that can be
+ * deleted"). An honest indeterminate bar says the same thing without pretending to be artwork.
+ */
+#dfi-root .art-waiting { background: linear-gradient(180deg, #071310, #020806); display: flex; align-items: center; justify-content: center; }
+#dfi-root .art-bar { position: relative; width: min(62%, 190px); height: 3px; overflow: hidden; background: rgba(151,222,202,.13); border-radius: 2px; }
+#dfi-root .art-bar i { position: absolute; inset: 0 auto 0 0; width: 38%; background: linear-gradient(90deg, transparent, var(--lime-hot, #79ff52), transparent); animation: dfi-wait-slide 1.5s ease-in-out infinite; }
+@keyframes dfi-wait-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(320%); } }
+
+/*
+ * Per-tile download and delete. They sit on the art rather than in the meta row so they are
+ * reachable without opening the picture first, which is what makes clearing out a batch bearable.
+ * Always visible on touch: a hover-reveal control does not exist on a phone.
+ */
+#dfi-root .card-tools { position: absolute; z-index: 8; right: 10px; bottom: 10px; display: flex; gap: 7px; opacity: 0; transition: opacity .18s ease; }
+#dfi-root .creation-card:hover .card-tools, #dfi-root .creation-card:focus-within .card-tools { opacity: 1; }
+@media (hover: none) { #dfi-root .card-tools { opacity: 1; } }
+#dfi-root .card-tool { width: 38px; height: 38px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; border: 1px solid rgba(151,222,202,.28); color: #cfe4dd; background: rgba(0,9,7,.82); backdrop-filter: blur(8px); border-radius: 8px; }
+#dfi-root .card-tool:hover { border-color: rgba(121,255,82,.55); color: var(--lime-hot, #79ff52); }
+#dfi-root .card-tool.danger:hover { border-color: rgba(199,90,60,.6); color: #ffb49a; }
+#dfi-root .card-tool[disabled] { opacity: .45; cursor: default; }
+#dfi-root .card-tool svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
 #dfi-root .card-chrome { position: absolute; z-index: 7; top: 11px; left: 11px; right: 11px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 #dfi-root .card-chrome > span { padding: 6px 10px; border: 1px solid rgba(151,222,202,.17); color: #a3bab2; background: rgba(0,7,5,.74); backdrop-filter: blur(8px); font: 700 var(--t-micro)/1 var(--font-mono); letter-spacing: .14em; }
 #dfi-root .favorite { flex: none; width: 34px; height: 34px; display: grid; place-items: center; cursor: pointer; border: 1px solid rgba(151,222,202,.18); color: #8aa198; background: rgba(0,7,5,.72); font-size: 16px; }
@@ -579,6 +603,21 @@ body.dfi-open #dfi-root .scene { transform: none; }
 
 /* ---------- viewer (live addition, design vocabulary) ---------- */
 #dfi-root .dfi-viewer { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 18px; background: rgba(0, 4, 3, .82); backdrop-filter: blur(6px); }
+/*
+ * FULLSCREEN, not a boxed card (Fred, 2026-08-08: "it pops up and goes full screen with an X to
+ * minimize it back"). The old card capped at 760px, so a 1024px picture was shown smaller than it
+ * actually is and the whole point of opening it was lost. The image now takes the room it needs and
+ * the meta sits under it. .dfi-keep-card keeps the old boxed treatment, since that dialog is a
+ * question rather than a picture.
+ */
+#dfi-root .dfi-viewer:not(.dfi-keep) { padding: 0; }
+#dfi-root .dfi-viewer:not(.dfi-keep) .dfi-viewer-card { max-width: 100%; max-height: 100%; width: 100%; height: 100dvh; display: flex; flex-direction: column; border: 0; clip-path: none; background: rgba(1,6,5,.97); }
+#dfi-root .dfi-viewer:not(.dfi-keep) .dfi-viewer-card img { flex: 1; min-height: 0; width: 100%; height: auto; object-fit: contain; }
+#dfi-root .dfi-viewer:not(.dfi-keep) .dfi-viewer-meta { flex: 0 0 auto; }
+/* The X. Always in the same corner, always reachable, never scrolled away with the meta block. */
+#dfi-root .dfi-viewer-x { position: fixed; z-index: 3; top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); width: 46px; height: 46px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; border: 1px solid rgba(151,222,202,.3); border-radius: 50%; color: #dceee9; background: rgba(0,9,7,.72); backdrop-filter: blur(10px); font: 400 22px/1 var(--font-mono); }
+#dfi-root .dfi-viewer-x:hover { border-color: rgba(121,255,82,.55); color: var(--lime-hot, #79ff52); }
+
 #dfi-root .dfi-viewer-card { max-width: min(94vw, 760px); max-height: 94vh; overflow-y: auto; border: 1px solid rgba(121,255,82,.4); background: linear-gradient(180deg, rgba(6,20,16,.96), rgba(2,9,7,.97)); box-shadow: 0 30px 80px rgba(0,0,0,.6), 0 0 34px rgba(121,255,82,.1); clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px); }
 #dfi-root .dfi-viewer-card img { width: 100%; display: block; }
 #dfi-root .dfi-viewer-meta { padding: 17px 19px 19px; }
@@ -634,7 +673,7 @@ body.dfi-open #dfi-root .scene { transform: none; }
    Small screens now drop columns and chrome instead, and hold the type scale. */
 @media (min-width: 1500px) {
   #dfi-root .forge-layout { grid-template-columns: 440px minmax(0, 1fr); }
-  #dfi-root .gallery { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  #dfi-root .gallery { --tile: 260px; --tile-h: 260px; }
   #dfi-root .hero-card { grid-column: span 2; }
 }
 
@@ -644,8 +683,8 @@ body.dfi-open #dfi-root .scene { transform: none; }
   #dfi-root .vault-header { align-items: flex-start; }
   #dfi-root .vault-actions { flex-wrap: wrap; justify-content: flex-end; }
   #dfi-root .search-control { width: 230px; }
-  #dfi-root .gallery { grid-template-columns: 1fr; }
-  #dfi-root .creation-card { min-height: 320px; }
+  #dfi-root .gallery { --tile: 200px; --tile-h: 200px; }
+  #dfi-root .creation-card { min-height: 0; }
 }
 
 /* Backdrop art direction, mirrored from #rendered-scene so the two views stay identical at every
@@ -676,7 +715,7 @@ body.dfi-open #dfi-root .scene { transform: none; }
   #dfi-root .vault-header { flex-direction: column; padding: 22px 18px 18px; }
   #dfi-root .vault-actions { width: 100%; justify-content: flex-start; }
   #dfi-root .search-control { flex: 1; width: auto; }
-  #dfi-root .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: 280px; padding: 12px; }
+  #dfi-root .gallery { --tile: 180px; --tile-h: 180px; padding: 12px; }
   #dfi-root .generation-strip { grid-template-columns: 38px 1fr 44px; }
   #dfi-root .progress-track { grid-column: 2 / -1; }
 }
@@ -706,10 +745,25 @@ body.dfi-open #dfi-root .scene { transform: none; }
   #dfi-root .vault-header h2 { font-size: 24px; letter-spacing: .12em; }
   #dfi-root .vault-actions { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
   #dfi-root .search-control { width: 100%; grid-column: 1 / -1; }
-  #dfi-root .gallery { grid-template-columns: 1fr; grid-auto-rows: 300px; padding: 12px 10px; }
+  #dfi-root .gallery { --tile: 132px; --tile-h: 132px; gap: 10px; padding: 12px; justify-content: center; }
   #dfi-root .generation-strip { margin: 10px 10px 0; padding: 12px; }
-  #dfi-root .creation-card { min-height: 300px; }
+  #dfi-root .creation-card { min-height: 0; }
   #dfi-root .vault-footer { flex-wrap: wrap; gap: 10px; padding: 12px 15px; }
+  /*
+   * CENTRING ON A PHONE (Fred, 2026-08-08: "the layout is slightly off center to the right").
+   *
+   * The shell is a fixed, scrolling container, so anything sized in vw ignores the scroll gutter
+   * and any child wider than the viewport drags the whole column sideways. `overflow-x: hidden` on
+   * the root hides the resulting scrollbar, which is exactly why it presents as a mysterious
+   * rightward shift rather than as obvious horizontal scrolling. Three guards: nothing may exceed
+   * the container, the column centres itself, and the notch insets are respected so a phone with a
+   * cutout does not push the content off-axis in landscape.
+   */
+  #dfi-root .app-shell { width: 100%; max-width: 100%; margin-inline: auto; padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+  #dfi-root .app-shell > * { max-width: 100%; }
+  #dfi-root .command-rail, #dfi-root .control-deck, #dfi-root .vault, #dfi-root .forge-layout { max-width: 100%; margin-inline: auto; }
+  /* The one element that is meant to scroll sideways keeps doing so, on its own, not as a page. */
+  #dfi-root .rail-status { max-width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

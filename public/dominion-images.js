@@ -188,14 +188,46 @@
   const permOf = async (h) => (typeof h.queryPermission === "function" ? h.queryPermission({ mode: "readwrite" }) : "granted");
   const askPerm = async (h) => (typeof h.requestPermission === "function" ? h.requestPermission({ mode: "readwrite" }) : "granted");
 
+  /*
+   * KEEPING THE FOLDER CHOICE (Fred, 2026-08-08: "I have had to choose one multiple times").
+   *
+   * Two different things were being conflated, and only one of them was ever a bug.
+   *
+   * The GRANT legitimately lapses. Chrome drops a directory handle's permission back to "prompt"
+   * on a fresh page load by design, and no amount of storage work changes that. The bar already
+   * handles it correctly with a one-click RECONNECT that reuses the stored handle rather than
+   * reopening the picker, so that path is fine and stays as it is.
+   *
+   * The HANDLE is what must never be lost, and it had two ways to vanish. Storage was never marked
+   * persistent, so a browser under pressure may evict the whole vault, handle included, and the
+   * panel then presents as though a folder had never been chosen. And a restore that threw was
+   * swallowed into the same "NOT SET" state as never having picked one, so an evicted or broken
+   * handle looked identical to a first run and the only offered action was to pick again.
+   *
+   * Requesting persistence is best-effort by nature: browsers grant it on engagement and may
+   * refuse. Asking costs nothing and is the difference between "your folder is remembered" and
+   * "your folder is remembered until the browser needs the space".
+   */
+  let folderRestoreFailed = false;
+  async function requestPersistence() {
+    try {
+      if (!navigator.storage || typeof navigator.storage.persist !== "function") return false;
+      if (await navigator.storage.persisted()) return true;
+      return await navigator.storage.persist();
+    } catch { return false; }
+  }
   async function restoreFolder() {
     if (!folderSupported()) return;
+    void requestPersistence();
     try {
       const h = await handleGet(FOLDER_KEY);
       if (!h) return;
       folderHandle = h;
       folderPerm = await permOf(h);
-    } catch { folderHandle = null; folderPerm = "none"; }
+    } catch {
+      // Distinct from "never chose one": say so, or the only obvious move is to pick again.
+      folderHandle = null; folderPerm = "none"; folderRestoreFailed = true;
+    }
   }
   async function linkFolder() {
     if (!folderSupported()) return;
@@ -326,8 +358,13 @@
     }
     if (!folderHandle) {
       bar.dataset.state = "unlinked";
-      nameEl.textContent = "NOT SET";
-      setStatus("Choose a folder on this computer and every new image is saved there automatically.");
+      nameEl.textContent = folderRestoreFailed ? "LOST" : "NOT SET";
+      // A folder that was chosen and then lost is a different message from one never chosen. The
+      // old copy said the same thing for both, so an evicted handle read as a first run and the
+      // only obvious move was to pick again, every time.
+      setStatus(folderRestoreFailed
+        ? "This browser lost the link to your folder, usually because it cleared site data to free space. Choose it once more and Dominion will ask the browser to hold onto it."
+        : "Choose a folder on this computer and every new image is saved there automatically.");
       mkBtn("CHOOSE FOLDER", () => linkFolder(), "active");
       return;
     }
@@ -1190,7 +1227,7 @@
     card.dataset.kind = "batch";
     const label = JOB_LABELS[j.status] || j.status.toUpperCase();
     card.innerHTML = `
-      <div class="creation-art art-forge"><i></i><i></i><i></i></div>
+      <div class="creation-art art-waiting"><span class="art-bar"><i></i></span></div>
       <div class="card-chrome"><span>BATCH · ${esc(label)}</span></div>
       <div class="creation-meta"><div><b>BATCH OF ${j.count} IMAGE${j.count === 1 ? "" : "S"}</b><small>${new Date(j.ts).toLocaleString()} · ${fmtUsd(j.estUsd)} charged when sent</small></div></div>`;
     const meta = card.querySelector(".creation-meta");
@@ -1245,7 +1282,7 @@
       const waiting = document.createElement("article");
       waiting.className = "creation-card pending-card";
       waiting.innerHTML = `
-        <div class="creation-art art-forge"><i></i><i></i><i></i></div>
+        <div class="creation-art art-waiting"><span class="art-bar"><i></i></span></div>
         <div class="card-chrome"><span>BEING MADE NOW</span></div>
         <div class="creation-meta"><div><b>YOUR PICTURE IS ON ITS WAY</b><small>It appears right here when it is done. More detail and bigger shapes take longer.</small></div></div>`;
       gallery.append(waiting);
@@ -1299,12 +1336,39 @@
         renderGallery();
       });
       card.querySelector(".card-chrome").append(fav);
-      const open = document.createElement("button");
-      open.className = "card-action";
-      open.setAttribute("aria-label", "Open image");
-      open.innerHTML = '<svg viewBox="0 0 24 24"><path d="M7 17 17 7M9 7h8v8"/></svg>';
-      open.addEventListener("click", (e) => { e.stopPropagation(); openViewer(rec, url); });
-      card.querySelector(".creation-meta").append(open);
+      /*
+       * Download and delete live ON THE TILE, not only behind the viewer. Clearing out forty
+       * pictures used to be forty open-and-close round trips. stopPropagation on each is what
+       * keeps the tile's own click (which opens the viewer) from firing underneath them.
+       */
+      const tools = document.createElement("div");
+      tools.className = "card-tools";
+
+      const dl = document.createElement("button");
+      dl.className = "card-tool";
+      dl.type = "button";
+      dl.title = "Download";
+      dl.setAttribute("aria-label", "Download this image");
+      dl.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>';
+      dl.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        dl.disabled = true;
+        try { await downloadRecord(rec); } finally { dl.disabled = false; renderGallery(); }
+      });
+
+      const del = document.createElement("button");
+      del.className = "card-tool danger";
+      del.type = "button";
+      del.title = "Delete";
+      del.setAttribute("aria-label", "Delete this image");
+      del.innerHTML = '<svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2m-7 0 1 12h8l1-12"/></svg>';
+      del.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (await deleteRecord(rec)) renderGallery();
+      });
+
+      tools.append(dl, del);
+      card.querySelector(".creation-art").append(tools);
       card.addEventListener("click", () => openViewer(rec, url));
       gallery.append(card);
     });
@@ -1332,6 +1396,57 @@
       $("#dfi-vault-load").textContent = `${gb(est.usage || 0)} GB / ${Math.round((est.quota || 0) / 1e9)} GB`;
       $("#dfi-vault-stats").textContent = `${count} image${count === 1 ? "" : "s"} · ${gb(est.usage || 0)} GB used`;
     } catch {}
+  }
+
+  /*
+   * ---- getting an image OUT, and getting rid of it -----------------------------------------------
+   *
+   * Both actions used to live only inside the viewer, which meant deleting forty pictures was forty
+   * open-and-close round trips (Fred, 2026-08-08). They are now on the tile itself, and these two
+   * helpers are shared so the tile and the viewer can never drift into behaving differently.
+   */
+
+  /*
+   * Download routes THROUGH the folder when one is linked, because a browser download lands in the
+   * downloads folder and the user has already told us where they want their pictures. With no
+   * folder linked, choosing one IS the download step: a picker that appears the first time is
+   * better than a silent save somewhere they did not ask for.
+   */
+  async function downloadRecord(rec) {
+    if (folderSupported()) {
+      if (!folderHandle) { await linkFolder(); }
+      else if (!folderReady()) { await reconnectFolder(); }
+      if (folderReady()) {
+        const ok = await writeToFolder(rec);
+        renderFolderBar();
+        if (ok) { stripDone(`Saved to ${folderHandle.name}`); return true; }
+      }
+    }
+    // No folder support (or the user declined): fall back to an ordinary browser download so the
+    // button is never a dead end.
+    const url = URL.createObjectURL(rec.blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileNameFor(rec);
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    return true;
+  }
+
+  /*
+   * Delete removes the picture from BOTH places it exists, because a delete that leaves the file
+   * sitting in the folder is not a delete, it is a filing error the user finds out about later.
+   * The folder removal is best-effort on purpose: the file may have been moved or the permission
+   * may have lapsed, and neither is a reason to refuse to clear it from the app.
+   */
+  async function deleteRecord(rec, { confirmFirst = true } = {}) {
+    if (confirmFirst && !confirm("Delete this picture?" + (rec.savedName ? "\n\nIt will also be removed from your folder." : ""))) return false;
+    if (rec.savedName && folderReady()) {
+      try { await folderHandle.removeEntry(rec.savedName); }
+      catch { /* moved, renamed, or permission lapsed: clearing the app copy still stands */ }
+    }
+    if (rec.id) await vaultDelete(rec.id);
+    return true;
   }
 
   function openViewer(rec, url) {
@@ -1393,10 +1508,28 @@
     const onPop = () => { hasHist = false; removeScrim(); };
     const dismiss = () => { if (hasHist) { hasHist = false; try { history.back(); return; } catch {} } removeScrim(); };
 
+    /*
+     * The X. The viewer already had a CLOSE button, but it sat at the end of the action row below
+     * the picture, which on a phone meant scrolling past the image to get out of the image. This
+     * one is pinned to the corner and always reachable. It routes through dismiss(), so the single
+     * history path stays intact and the pushed entry never dangles.
+     */
+    const x = document.createElement("button");
+    x.className = "dfi-viewer-x";
+    x.type = "button";
+    x.setAttribute("aria-label", "Close image");
+    x.textContent = "✕";
+    x.addEventListener("click", (e) => { e.stopPropagation(); dismiss(); });
+    card.append(x);
+    // Clicking the backdrop closes too, which is what everyone expects of a lightbox.
+    scrim.addEventListener("click", (e) => { if (e.target === scrim) dismiss(); });
+
     const del = document.createElement("button");
     del.className = "danger";
     del.textContent = "DELETE";
-    del.addEventListener("click", async () => { if (rec.id) await vaultDelete(rec.id); dismiss(); renderGallery(); });
+    // Shared with the tile's delete, so the folder copy goes too. This used to call vaultDelete
+    // directly, which cleared the app and quietly left the file sitting in the linked folder.
+    del.addEventListener("click", async () => { if (await deleteRecord(rec)) { dismiss(); renderGallery(); } });
     const close = document.createElement("button");
     close.textContent = "CLOSE";
     close.addEventListener("click", dismiss);
