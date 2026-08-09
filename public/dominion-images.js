@@ -1473,8 +1473,15 @@
 
   // ---------- open/close (the slide) ----------
   function openPanel() {
-    if (window.closeForgeDial) window.closeForgeDial();   // one reveal at a time
-    if (window.closeIdeMode) window.closeIdeMode();       // ...including Dominion Works
+    /*
+     * One reveal at a time is a LOOK, not a lifecycle. Closing these hides them; it has never
+     * stopped their work, and since the task kernel landed that is true of every surface. The
+     * comment that used to sit here read as though opening Images cancelled a build, which is
+     * what made people afraid to switch screens mid-run (Fred, 2026-08-08: "break down the walls
+     * to make it one system"). Whatever is running keeps running and will come find you.
+     */
+    if (window.closeForgeDial) window.closeForgeDial();
+    if (window.closeIdeMode) window.closeIdeMode();
     if (!$("#dfi-root")) buildPanel();
     state.open = true;
     document.body.classList.add("dfi-anim");

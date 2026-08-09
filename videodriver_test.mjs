@@ -181,6 +181,44 @@ await t("server.mjs registers the video kind and hands jobs to it at submit", as
   assert.match(hook, /catch/, "a kernel hiccup must not turn a paid, submitted generation into an error");
 });
 
+/* ---- the walls come down once the server is the engine --------------------------------------- */
+await t("Video Studio no longer holds you hostage to a generation", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("./public/dominion-video.js", import.meta.url), "utf8");
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "");
+  const closeFn = code.slice(code.indexOf("async function close()"), code.indexOf("function init()"));
+  assert.ok(closeFn.length > 200, "failed to isolate close()");
+
+  // Isolate the REFUSAL CONDITION only. Slicing to `closing=true` would also swallow the advisory
+  // toast that now tells the user their generation keeps running, and that toast legitimately
+  // mentions generation — a looser slice would pass while the wall was still standing.
+  const refusalStart = closeFn.indexOf("if(projectSwitching");
+  const refusal = closeFn.slice(refusalStart, closeFn.indexOf("return toast", refusalStart));
+  assert.ok(!/state\.inflight\.generation/.test(refusal),
+    "a running generation must not block leaving — the server finishes it now");
+  assert.ok(!/activeJobs\.size/.test(refusal), "nor may an active job entry block leaving");
+
+  /*
+   * The remaining blockers are deliberate and the distinction is the point: an unsaved draft, an
+   * import, an export and a project switch all hold state that lives in the TAB and would be
+   * destroyed by leaving. A generation's state lives on the server. Waiting is only justified
+   * when leaving would lose something.
+   */
+  for (const kept of ["state.inflight.chat", "state.inflight.import", "state.inflight.export", "projectSwitching"]) {
+    assert.ok(refusal.includes(kept), `${kept} must STILL block closing — leaving would lose tab-local work`);
+  }
+  assert.match(closeFn, /keeps running/, "leaving mid-generation should say so, not go silent");
+});
+
+await t("opening one panel does not read as cancelling another's work", async () => {
+  const { readFileSync } = await import("node:fs");
+  const images = readFileSync(new URL("./public/dominion-images.js", import.meta.url), "utf8");
+  // The panels may still hide each other; what must not survive is the claim that this is a
+  // lifecycle event. Nothing stops when a reveal closes.
+  assert.ok(!/one reveal at a time[\s\S]{0,80}including Dominion Works/.test(images),
+    "the old comment implied opening Images cancelled a build, which was never true");
+});
+
 for (const d of dirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
