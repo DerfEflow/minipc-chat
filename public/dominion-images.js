@@ -467,8 +467,36 @@
     return "$" + (n >= 0.01 ? n.toFixed(3) : n.toFixed(4));
   };
   const pad4 = (n) => String(n).padStart(4, "0");
-  async function apiJson(url, opts) {
-    const r = await fetch(url, opts);
+  /*
+   * EVERY REQUEST GETS A DEADLINE (Fred, 2026-08-08: "it would hang and all other images after did
+   * not generate").
+   *
+   * This used to be a bare `await fetch(url, opts)`. A fetch with no signal waits essentially
+   * forever on a stalled connection: it neither resolves nor rejects. That single omission is what
+   * bricked the panel, and the mechanism is worth spelling out because the symptom looks like a
+   * lock bug and is not one. onIgnite sets state.generating = true, awaits this, and clears the
+   * flag in a `finally`. If the await never settles, the finally never runs, the flag stays true
+   * forever, and every later click hits `if (state.generating) return` and vanishes silently. One
+   * stalled request disabled image generation for the rest of the session, with no error anywhere.
+   *
+   * A deadline turns that into an ordinary rejection, which the finally already handles correctly.
+   * Generous on purpose: a high-quality paid generation genuinely can take minutes, and a timeout
+   * that fires on slow-but-working is its own bug.
+   */
+  async function apiJson(url, opts, { timeoutMs = 300000 } = {}) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    let r;
+    try {
+      r = await fetch(url, { ...opts, signal: ac.signal });
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        const err = new Error("The engine did not answer within " + Math.round(timeoutMs / 1000) + " seconds. Nothing was lost: if it was charged, the picture is held for you and will appear in the gallery. Try again.");
+        err.code = "timeout";
+        throw err;
+      }
+      throw e;
+    } finally { clearTimeout(timer); }
     let j = null;
     try { j = await r.json(); } catch {}
     if (!r.ok) {
@@ -979,12 +1007,24 @@
     setDeckWorking(true);      // "it is working" says so where the button is, not below the fold
     flashArrow();              // and points at where the picture will land
     renderGallery();           // puts the waiting tile in the gallery immediately
-    // Ask for folder permission NOW, on the warm click, not after the image lands (see armFolder).
     const wantFolder = !!(autoSave && folderHandle);
-    const folderArmed = await armFolder();
-    stripBusy("MAKING YOUR PICTURE", "Sending your description to the engine…");
-    startProgress();
+    /*
+     * THE TRY STARTS HERE, NOT AFTER armFolder (2026-08-08).
+     *
+     * `await armFolder()` used to sit out here, above the try, with state.generating already true
+     * and the button already disabled. armFolder awaits a browser permission prompt; a prompt the
+     * user ignores, or a handle the browser never answers for, hangs that await. Because it was
+     * outside the try, the `finally` that clears the lock could never run, and the panel was dead
+     * for the rest of the session with no error shown. Same permanent-lock failure as the
+     * un-deadlined fetch, from a completely different await, which is why the fix is structural:
+     * NOTHING between raising the flag and the finally may sit outside the guard.
+     */
+    let folderArmed = false;
     try {
+      // Ask for folder permission NOW, on the warm click, not after the image lands (see armFolder).
+      folderArmed = await armFolder();
+      stripBusy("MAKING YOUR PICTURE", "Sending your description to the engine…");
+      startProgress();
       const r = await apiJson(API.generate, {
         method: "POST",
         headers: { "content-type": "application/json" },
