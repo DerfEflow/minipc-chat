@@ -108,6 +108,38 @@ self.addEventListener("fetch", (e) => {
  */
 self.addEventListener("push", (e) => {
   e.waitUntil((async () => {
+    // Tell any open tab to refresh its cards first, so the in-app notice and the system
+    // notification can never disagree: both are written from the same server answer.
+    try {
+      const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const c of clients) { try { c.postMessage({ type: "tasks-changed" }); } catch {} }
+    } catch {}
+
+    /*
+     * The kernel's notices come first: they cover every surface (Simplify, images, video, and any
+     * kind added later) and each carries its own deep link, built server-side from the surface and
+     * anchor recorded when the task was created. The /ide/jobs branch below stays because builds
+     * have richer states than done/failed, notably a question waiting on an answer, which no
+     * generic notice can phrase as well.
+     */
+    try {
+      const r = await fetch("/tasks/notices", { headers: { accept: "application/json" }, credentials: "include" });
+      if (r.ok) {
+        const notices = (await r.json()).unseen || [];
+        const first = notices.find((n) => n.kind !== "build");
+        if (first) {
+          const bad = first.status !== "done";
+          await self.registration.showNotification(first.title || "Your work finished", {
+            body: notices.length > 1 ? `and ${notices.length - 1} other item${notices.length > 2 ? "s" : ""} waiting` : "Tap to see it.",
+            tag: "task-" + first.kind, renotify: false,
+            icon: "/icons/dominion-core-192-v1.png", badge: "/icons/dominion-core-192-v1.png",
+            data: { url: first.href || "/" }, requireInteraction: bad,
+          });
+          return;
+        }
+      }
+    } catch {}
+
     let jobs = [];
     try {
       const r = await fetch("/ide/jobs", { headers: { accept: "application/json" }, credentials: "include" });

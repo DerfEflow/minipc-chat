@@ -154,6 +154,7 @@ import { onboardingPayload } from "./onboarding.mjs";
 import { createForgeStore, buildInstallerZip } from "./forge.mjs";
 import { createSimplifyChatHandler } from "./simplify.mjs";
 import { createTaskKernel } from "./taskkernel.mjs";
+import { createTaskDriver } from "./taskdriver.mjs";
 import {
   createAltana, createAltanaStore, altanaChatTools, wrapToolResult,
   ALTANA_SETTABLE_SETTINGS, ALTANA_TOOLS, runAltanaTurn, confirmationToken, retrieve,
@@ -1699,6 +1700,50 @@ tasks.register("simplify", {
   href: () => "/?simplify=1",
   maxAgeMs: 20 * 60000,
 });
+
+/*
+ * The task notifier. Every terminal task, of every kind, comes through here exactly once: the
+ * driver hands it over and only marks it notified if this resolves, so a push endpoint being down
+ * costs a retry on the next tick rather than the only message the user was ever going to get.
+ *
+ * PAYLOAD-FREE, copied deliberately from the Crucible's design (see public/sw.js). The push body
+ * carries no text. It only wakes the device, and the service worker then asks the server what is
+ * actually outstanding and writes the notification from that answer. The property this buys: a
+ * result already read on the laptop cannot buzz the phone thirty seconds later, because by then
+ * the server no longer reports it as unseen. A notification with no news teaches people to ignore
+ * the ones that matter.
+ *
+ * A failure is logged before any early return, for the same reason ideEscalate does it: this
+ * function declines quietly for anyone with no subscribed device, and a diagnosis that only exists
+ * for people who own a phone is not a diagnosis.
+ */
+function taskEscalate(note, row) {
+  if (note.status === "failed" || note.status === "orphaned") {
+    console.log(`[tasks] ${note.kind} ${note.id} ${note.status} for ${row.uid || "?"}: ${String(note.title || "").slice(0, 200)}`);
+  }
+  const T = row.email && OWNER_T && lcEmail(row.email) === lcEmail(OWNER_T.email || "")
+    ? OWNER_T : { isOwner: false, uid: row.uid, role: "credit" };
+  let subs = [];
+  try { subs = ideStoreFor(T).push.list(); } catch { return; }
+  if (!subs.length) return;
+  const urgent = note.status !== "done";
+  return sendWakeups({
+    subs, publicKey: IDE_VAPID_PUBLIC, privateKey: IDE_VAPID_PRIVATE, subject: IDE_VAPID_SUBJECT,
+    urgency: urgent ? "high" : "normal", ttl: urgent ? 900 : 3600,
+    log: (m) => console.log(m),
+  }).then((r) => {
+    if (r.gone && r.gone.length) { try { ideStoreFor(T).push.prune(r.gone); } catch {} }
+    if (r.sent) console.log(`[dominion-ai] task push: ${note.kind}/${note.status} to ${r.sent} device(s)`);
+  });
+}
+const lcEmail = (e) => String(e || "").trim().toLowerCase();
+
+const taskDriver = createTaskDriver({
+  kernel: tasks,
+  onNotify: taskEscalate,
+  log: (m) => console.log("[dominion-ai] " + m),
+});
+taskDriver.start();
 
 const ideJobs = createIdeJobs({ dir: dataPath("ide"), log: (m) => console.log(m), onEvent: ideEscalate });
 // Restart recovery. Jobs whose journal has no terminal event were being driven by a process that
@@ -7660,6 +7705,53 @@ async function handleFireAlarm(req, res) {
 }
 
 /*
+ * GET /tasks/notices — everything the caller is owed, across every surface, in one answer.
+ *
+ * Kind-agnostic on purpose. This is the endpoint the service worker hits after a payload-free
+ * wakeup and the endpoint the in-app popup polls, and neither should need to learn a new shape
+ * every time a surface joins the kernel. Each notice already carries its own deep link, built by
+ * the kind's registered href() from the surface and anchor stored when the task was created.
+ *
+ * `unseen` is the actionable set: finished, failed or stopped, and never acknowledged. `live` is
+ * context, so the UI can say "two other things are still running" without implying they need
+ * attention.
+ */
+function handleTaskNotices(req, res) {
+  const T = resolveTenant(req);
+  if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
+  let unseen = [], live = [];
+  try {
+    unseen = tasks.unseenFor(T.uid, 20).map((r) => tasks.notificationFor(r));
+    live = tasks.liveFor(T.uid).map((r) => ({ id: r.id, kind: r.kind, surface: r.surface, status: r.status,
+                                              title: r.title, startedAt: r.startedAt }));
+  } catch {}
+  return sjson(res, 200, { unseen, live });
+}
+
+/*
+ * POST /tasks/seen {id} — acknowledge one notice, or all of them with {all:true}.
+ *
+ * Separate from the kernel's notifiedAt, which records that we TOLD them. This records that they
+ * LOOKED. Only the second one should silence a card, or a push delivered to a phone in a pocket
+ * would count as having been read.
+ */
+async function handleTaskSeen(req, res) {
+  const T = resolveTenant(req);
+  if (T.role === "anon") return sjson(res, 401, { error: "sign in" });
+  const body = await readJsonBody(req) || {};
+  let n = 0;
+  try {
+    if (body.all === true) { for (const r of tasks.unseenFor(T.uid, 100)) { tasks.markSeen(r.id); n++; } }
+    else {
+      const row = tasks.get(String(body.id || ""));
+      // Scoped: acknowledging is a write, and a write must never cross an account boundary.
+      if (row && (T.isOwner || row.uid === T.uid)) { tasks.markSeen(row.id); n++; }
+    }
+  } catch {}
+  return sjson(res, 200, { ok: true, seen: n });
+}
+
+/*
  * GET /api/simplify/attach?task=<id>&from=<n> — catch-up replay for a Simplify turn.
  *
  * Simpler than /chat/attach because the kernel has no RAM tail to reconcile: simplify.mjs flushes
@@ -10876,6 +10968,8 @@ const server = http.createServer(async (req, res) => {
       // caller, so a Simplify turn survives the panel closing and reattaches to the right person.
       return simplifyChat(req, res, { onTurnBilled: simplifyBilling(T), tasks, tenant: T });
     }
+    if (path === "/tasks/notices" && req.method === "GET") return handleTaskNotices(req, res);
+    if (path === "/tasks/seen" && req.method === "POST") return handleTaskSeen(req, res);
     if (path === "/api/simplify/attach" && req.method === "GET") return handleSimplifyAttach(req, res, u);
     if (path === "/api/simplify/tasks" && req.method === "GET") return handleSimplifyTasks(req, res);
     if (path === "/chat/stop" && req.method === "POST") return handleChatStop(req, res);
