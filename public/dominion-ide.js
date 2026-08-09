@@ -1047,6 +1047,18 @@
           '<button type="button" id="st-chat-more" data-lex="intake_more"></button>' +
         '</div>' +
         '<button type="button" id="st-chat-skip" class="st-link" data-lex="intake_skip"></button>' +
+        // 49 ready-made project shapes. Sits beside the skip link because it answers the same
+        // question that link does - "I do not want to be interviewed from nothing" - except this
+        // one hands the interview a starting point instead of throwing it away.
+        '<button type="button" id="st-bp-open" class="st-link" data-lex="bp_open"></button>' +
+        '<div class="st-bp" id="st-bp" hidden>' +
+          '<div class="st-bp-head">' +
+            '<h4 id="st-bp-title" data-lex="bp_title"></h4>' +
+            '<button type="button" id="st-bp-close" data-lex="bp_close"></button>' +
+          '</div>' +
+          '<p class="st-bp-sub" id="st-bp-sub" data-lex="bp_sub"></p>' +
+          '<div class="st-bp-body" id="st-bp-body"></div>' +
+        '</div>' +
       '</div>' +
       '<div class="st-row">' +
         '<button type="button" id="st-go" class="st-primary" data-lex="start_go"></button>' +
@@ -2214,6 +2226,176 @@
     }
   }
 
+  /* ---------- blueprints: 49 ready-made project shapes -------------------------------------
+   * The interview is good at turning a half-formed idea into a vision, and useless against a
+   * blank stare. This is the answer to "I do not know what to ask for": pick a shape that is
+   * close, then change it by talking. Two ways in, and the difference is deliberate:
+   *
+   *   TALK IT THROUGH pushes the blueprint's seed in as the opening user turn and runs the
+   *   interview normally, so the model translates catalog language into this person's register
+   *   (plain register forbids the words deploy, repo, framework, backend, API and schema, and
+   *   blueprint prose is written in exactly those) and every part stays negotiable.
+   *
+   *   USE AS IT IS takes the server's ready-made VISION READY block and jumps straight to the
+   *   approved state, for someone who wants none of that.
+   *
+   * The catalog is fetched once and kept; it is static reference data and refetching it on every
+   * open would put a network round trip in front of a button press for nothing.
+   */
+  const bp = { catalog: null, detail: new Map(), chosen: null };
+
+  function bpPanel() { return $("#st-bp"); }
+
+  async function bpOpen() {
+    const panel = bpPanel(), body = $("#st-bp-body");
+    panel.hidden = false;
+    if (bp.catalog) return bpRenderList();
+    body.textContent = L("bp_loading");
+    try {
+      const r = await fetch("/ide/blueprints");
+      if (!r.ok) throw new Error("http " + r.status);
+      bp.catalog = await r.json();
+      bpRenderList();
+    } catch {
+      body.textContent = L("bp_failed");
+    }
+  }
+
+  function bpRenderList() {
+    const body = $("#st-bp-body");
+    body.textContent = "";
+    for (const g of (bp.catalog.groups || [])) {
+      const sec = document.createElement("section");
+      sec.className = "st-bp-group";
+      const h = document.createElement("h5");
+      h.textContent = g.label;
+      sec.append(h);
+      for (const item of g.items) {
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = "st-bp-card";
+        const title = document.createElement("strong");
+        title.textContent = item.title;
+        const sum = document.createElement("span");
+        sum.className = "st-bp-sum";
+        sum.textContent = item.summary;
+        const meta = document.createElement("span");
+        meta.className = "st-bp-meta";
+        // The gate is stated on the CARD, not just in the detail: whether a thing will act on the
+        // outside world without asking is the sort of fact people should meet before they click.
+        meta.textContent = item.steps + " " + L("bp_steps") + " · " + item.complexity
+          + (item.gate === "in_flow" ? " · ✋" : "");
+        if (item.gate === "in_flow") meta.title = L("bp_gate");
+        card.append(title, sum, meta);
+        card.addEventListener("click", () => bpShow(item.id));
+        sec.append(card);
+      }
+      body.append(sec);
+    }
+  }
+
+  async function bpShow(id) {
+    const body = $("#st-bp-body");
+    body.textContent = L("bp_loading");
+    let d = bp.detail.get(id);
+    if (!d) {
+      try {
+        const r = await fetch("/ide/blueprints?id=" + encodeURIComponent(id));
+        if (!r.ok) throw new Error("http " + r.status);
+        d = await r.json();
+        bp.detail.set(id, d);
+      } catch { body.textContent = L("bp_failed"); return; }
+    }
+    const b = d.blueprint;
+    body.textContent = "";
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "st-link st-bp-back";
+    back.textContent = L("bp_back");
+    back.addEventListener("click", bpRenderList);
+
+    const head = document.createElement("div");
+    head.className = "st-bp-detail-head";
+    const h = document.createElement("h5"); h.textContent = b.title;
+    const s = document.createElement("p"); s.className = "st-bp-sum"; s.textContent = b.summary;
+    head.append(h, s);
+    if (b.gate === "in_flow") {
+      const g = document.createElement("p");
+      g.className = "st-bp-gate";
+      g.textContent = "✋ " + L("bp_gate");
+      head.append(g);
+    }
+
+    const ol = document.createElement("ol");
+    ol.className = "st-bp-steps";
+    for (const st of b.steps) {
+      const li = document.createElement("li");
+      // The approval step is the one the user most needs to see, so it is marked rather than
+      // rendered as one more indistinguishable line.
+      const isGate = /approv|human/i.test(st.name);
+      if (isGate) li.className = "is-gate";
+      li.textContent = st.name.replace(/_/g, " ") + " — " + st.goal;
+      ol.append(li);
+    }
+
+    const facts = document.createElement("div");
+    facts.className = "st-bp-facts";
+    const list = (label, items) => {
+      if (!items || !items.length) return;
+      const wrap = document.createElement("div");
+      const t = document.createElement("h6"); t.textContent = label;
+      const ul = document.createElement("ul");
+      for (const it of items) { const li = document.createElement("li"); li.textContent = it; ul.append(li); }
+      wrap.append(t, ul); facts.append(wrap);
+    };
+    list(L("bp_needs"), b.inputs);
+    list(L("bp_makes"), b.outputs);
+    list(L("bp_works"), b.success_metrics);
+
+    const actions = document.createElement("div");
+    actions.className = "st-bp-actions";
+    const talk = document.createElement("button");
+    talk.type = "button"; talk.className = "st-primary"; talk.textContent = L("bp_talk");
+    talk.addEventListener("click", () => bpApply(d, "seed"));
+    const asis = document.createElement("button");
+    asis.type = "button"; asis.textContent = L("bp_asis");
+    asis.addEventListener("click", () => bpApply(d, "vision"));
+    actions.append(talk, asis);
+
+    body.append(back, head, ol, facts, actions);
+    body.scrollTop = 0;
+  }
+
+  /*
+   * Applying a blueprint. The seed path is exactly the mockup-pick path above: push a user turn,
+   * show it, run the interview. The as-is path assembles the same state a finished interview
+   * produces, so BEGIN BUILDING behaves identically whichever route got there.
+   *
+   * bp.chosen is remembered so the build can name the blueprint it came from. A blueprint that
+   * declares a fan-out lets the swarm skip planning a split it already has.
+   */
+  function bpApply(d, how) {
+    bp.chosen = d.blueprint.id;
+    bpPanel().hidden = true;
+    if (how === "vision") {
+      intake.messages.push({ role: "user", content: d.seed });
+      intake.messages.push({ role: "assistant", content: "VISION READY\n" + d.vision.split("VISION READY\n")[1] });
+      chatBubble("user", L("bp_chose") + ": " + d.blueprint.title);
+      intake.vision = d.vision.split("VISION READY\n")[1] || d.vision;
+      visionCard(intake.vision);
+      setJourneyPhase("ready");
+      saveDraft();
+      $("#st-chat-actions").hidden = false;
+      document.dispatchEvent(new CustomEvent("dominion-ide-vision"));
+      return;
+    }
+    intake.messages.push({ role: "user", content: d.seed });
+    chatBubble("user", L("bp_chose") + ": " + d.blueprint.title);
+    $("#st-chat-actions").hidden = true;
+    saveDraft();
+    intakeTurn(() => {});
+  }
+
   /*
    * A MOCKUP directive becomes a real picture in the chat (the beginner aesthetics loop): the
    * Forge pipeline paints it, the user taps "That one", and the choice is spoken back into the
@@ -2485,6 +2667,8 @@
       const full = intake.vision ? goal + "\n\nAGREED VISION (approved by the user; build exactly this):\n" + intake.vision : goal;
       startBuild(withAdoptionReport(full), status);
     });
+    $("#st-bp-open").addEventListener("click", bpOpen);
+    $("#st-bp-close").addEventListener("click", () => { bpPanel().hidden = true; });
     $("#st-chat-skip").addEventListener("click", () => {
       const goal = intake.adopt ? "Assess and finish the adopted app for production using the report below."
         : (intake.messages[0] ? intake.messages[0].content : $("#st-prompt").value.trim());
