@@ -12,7 +12,7 @@
  * was not offered. The second is what makes a hallucinated forge_write harmless.
  */
 import assert from "node:assert/strict";
-import { createBattalion } from "./battalion.mjs";
+import { createBattalion, parseTextToolCalls } from "./battalion.mjs";
 import { toolDefs, toolMeta, WRITE_TOOLS } from "./tools.mjs";
 
 let passed = 0;
@@ -193,5 +193,3 @@ await t("the SINGLE seat gets tools, not just the parallel workers", async () =>
   assert.deepEqual(executed, ["forge_read"], "the single seat must be able to list a folder");
   assert.match(r.content, /Drive F contains/, "the answer must come from the tool result, not a guess");
 });
-
-console.log(`\nbattalion_tools: ${passed} passed, 0 failed`);

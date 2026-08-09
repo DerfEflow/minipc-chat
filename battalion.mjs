@@ -80,6 +80,47 @@ export function historyTail(history, capChars = HISTORY_TAIL_CHARS) {
 }
 
 const TOOL_ROUNDS = 4;   // per part; a worker that has not answered in four rounds is looping
+
+/*
+ * TOOL CALLS THAT ARRIVE AS PROSE (Fred, 2026-08-09, second real turn).
+ *
+ * Free-lane models are given the tool schema and know it: asked what was on two drives, one replied
+ * with forge_read, op "list", path "Z:\Apps" - the correct tool, the correct operation, the correct
+ * path. It just wrote the call in its own training format as TEXT instead of returning it through
+ * the structured channel, so r.toolCalls was empty, nothing ran, and the markup streamed to the user
+ * as the answer.
+ *
+ * This parses the one format actually observed, exactly. It is deliberately NOT a general
+ * "guess what the model meant": a parse only counts if it resolves to a tool that was genuinely
+ * offered this turn, so a model narrating <tool_call> in prose, or naming a write tool it was never
+ * given, produces nothing. The guard that refuses unoffered names is the same one the structured
+ * path uses; this feeds into it rather than around it.
+ *
+ * The first turn's failure looked similar and is deliberately NOT parsed: {"command":"ls"} names no
+ * tool in the catalog, so there is nothing to execute and inventing a mapping would be guessing.
+ */
+const TOOL_CALL_BLOCK = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
+const FN_NAME = /<function=([a-zA-Z0-9_]+)>/i;
+const FN_PARAM = /<parameter=([a-zA-Z0-9_]+)>([\s\S]*?)<\/parameter>/gi;
+
+export function parseTextToolCalls(content, offered) {
+  const text = String(content || "");
+  if (!text.includes("<tool_call>")) return { calls: [], stripped: text };
+  const calls = [];
+  let stripped = text;
+  for (const block of text.matchAll(TOOL_CALL_BLOCK)) {
+    const body = block[1] || "";
+    const nameMatch = FN_NAME.exec(body);
+    const name = nameMatch && nameMatch[1];
+    // Strip the markup whether or not it resolved: the user must never read it either way.
+    stripped = stripped.replace(block[0], "");
+    if (!name || (offered && !offered.has(name))) continue;
+    const args = {};
+    for (const p of body.matchAll(FN_PARAM)) args[p[1]] = String(p[2] || "").trim();
+    calls.push({ id: "text_" + calls.length + "_" + name, function: { name, arguments: JSON.stringify(args) } });
+  }
+  return { calls, stripped: stripped.trim() };
+}
 /*
  * SYNTH_TOKENS is a CHUNK, not a ceiling (Fred, 2026-08-09).
  *
@@ -160,13 +201,40 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
     const defs = toolDefs();
     const convo = messages.map((m) => ({ ...m }));
     let totalMs = 0, used = 0, refused = 0;
+    /*
+     * NOTHING STREAMS UNTIL IT HAS BEEN INSPECTED.
+     *
+     * onDelta is deliberately NOT passed to callSeat inside this loop. The second real turn streamed
+     * a raw <tool_call> block to the user as the answer, because the markup left the model, went
+     * through onDelta, and was on screen before any code could look at it. Buffering the rounds and
+     * emitting once at the end is what makes the guarantee absolute rather than best-effort: the
+     * user waits behind a working() line instead of reading XML.
+     */
+    const emit = (text) => { if (onDelta && text) onDelta(text); };
     for (let round = 0; round <= TOOL_ROUNDS; round++) {
       const t0 = Date.now();
       const r = await callSeat(catalogId, convo,
-        { num_predict: tokens, signal, tools: round < TOOL_ROUNDS ? defs : null }, onDelta);
+        { num_predict: tokens, signal, tools: round < TOOL_ROUNDS ? defs : null }, null);
       totalMs += Date.now() - t0;
-      const calls = Array.isArray(r.toolCalls) ? r.toolCalls : [];
-      if (!r.ok || !calls.length) return { ...r, ms: totalMs, toolsUsed: used, toolsRefused: refused };
+      let calls = Array.isArray(r.toolCalls) ? r.toolCalls : [];
+      /*
+       * The structured channel was empty, but the model may have written the call as prose. Parse it
+       * only while tools are still on offer; on the final round there is nothing left to call, so a
+       * stray block is stripped and the remaining text is the answer.
+       */
+      let content = String(r.content || "");
+      if (r.ok && !calls.length && content.includes("<tool_call>")) {
+        const parsed = parseTextToolCalls(content, offered);
+        content = parsed.stripped;
+        if (round < TOOL_ROUNDS && parsed.calls.length) {
+          calls = parsed.calls;
+          if (manifest) manifest.notes.push((label || "a seat") + " wrote its tool call as text instead of a tool call; it was parsed and run");
+        } else if (parsed.calls.length || !content.trim()) {
+          // Either the final round, or a block naming nothing we offered. Never show the markup.
+          if (manifest) manifest.notes.push((label || "a seat") + " emitted tool-call markup that could not be run; it was removed from the answer");
+        }
+      }
+      if (!r.ok || !calls.length) { emit(content); return { ...r, content, ms: totalMs, toolsUsed: used, toolsRefused: refused }; }
       convo.push(projectTurn ? projectTurn(r, calls)
         : { role: "assistant", content: r.content || "", tool_calls: calls });
       for (const c of calls) {
