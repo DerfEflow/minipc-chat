@@ -7877,8 +7877,42 @@ function dominionWorkOrderStatus(woId) {
 // BATTALION (ARSENAL Wave 6): the swarm orchestrator, wired to the same cloudChatStream every
 // chat turn rides — so the free-lane transports, the account-death fallback, and the transport-
 // aware $0 cost math all apply to every seat without a second code path.
+/*
+ * THE SWARM'S TOOLS ARE READ-ONLY, AND THAT IS THE WHOLE DESIGN (Fred, 2026-08-09).
+ *
+ * Every roster seat is tool-capable as a model, so the swarm can now look things up instead of
+ * writing prose about what it would find. What it must never get is the other 31. Workers run
+ * concurrently and are told their parts must not overlap, so nothing sequences them: two writes to
+ * one file is a race, and the confirm gate cannot arbitrate because it assumes a single agent and
+ * would raise four indistinguishable prompts at once.
+ *
+ * The filter is permissionClass === "read_only" - 29 of the 60 tools - computed from the same
+ * tools.mjs metadata the single-engine path uses rather than a hand-kept list that would drift as
+ * tools are added. Every other class is excluded on purpose, including two that look admissible:
+ *   safe_local_write (11) is safe for ONE agent, which is exactly the assumption a swarm breaks;
+ *   requires_confirmation (9) means "ask a human", which has no meaning inside a parallel part.
+ * draft_only (3) and dangerous (8) are never in question. A test asserts the chosen set and
+ * WRITE_TOOLS do not intersect, and battalion.mjs independently refuses any name it was not
+ * offered, so the guarantee survives even if this list is ever built wrong.
+ */
+const swarmToolDefs = () => toolDefs(flywheel.activeToolOverlays())
+  .filter((d) => {
+    const name = d && d.function && d.function.name;
+    return name && toolMeta(name).permissionClass === "read_only";
+  });
+
 const battalion = createBattalion({
   callSeat: (id, msgs, opts, onDelta) => cloudChatStream(id, msgs, opts, onDelta),
+  tools: swarmToolDefs,
+  // The swarm has no chat context, no workspace and no job: a worker gets the same base tool context
+  // every other unscoped call gets, and the carve-outs (customer DBs, backups) are enforced inside
+  // runTool regardless of who is asking.
+  runTool: (name, args, signal) => runTool(name, args, CTX, signal),
+  // Providers disagree about the shape of an assistant tool-call turn; battalion should not have to
+  // learn provider names to find that out, so the projection is injected.
+  projectTurn: (r, calls) => (r && r.assistantTurn)
+    ? projectAssistantToolTurn(r.assistantTurn)
+    : { role: "assistant", content: (r && r.content) || "", tool_calls: calls },
   roster: BATTALION_ROSTER,
   // isSmallAsk returns { small, why } — the battalion gate needs the verdict itself. (The Wave 6
   // e2e caught the truthy-object version of this line routing EVERY turn to the single seat.)
@@ -8169,14 +8203,22 @@ async function handleChat(req, res) {
      * the TruSignal test. Those turns are handed to a real tool-capable engine, out loud, and the
      * swarm keeps doing what it is actually good at: parallel text.
      */
+    /*
+     * NARROWED 2026-08-09, when the swarm got read-only tools. The audit clause used to detour any
+     * audit that named a real file or repo, because a text-only swarm could only write prose about
+     * code it had never opened. Workers can now read, so that case belongs in the swarm: four models
+     * reading different parts of a codebase at once is the thing it is best at.
+     *
+     * Build and long-run still leave, and must. Those ask for changes on disk, and a change is a
+     * write - the one thing four uncoordinated workers can never be trusted with at the same time.
+     */
     const swarmIntent = classifyTaskIntent(lastUserText || "");
-    const needsHands = swarmIntent.baseKind === "build" || swarmIntent.baseKind === "long-run" ||
-      (swarmIntent.baseKind === "audit" && /\b(?:repo(?:sitory)?|codebase|folder|file|drive\s+[a-z]\b|[a-z]:[\\/])/i.test(lastUserText));
+    const needsHands = swarmIntent.baseKind === "build" || swarmIntent.baseKind === "long-run";
     if (needsHands) {
       const engine = cloudModel || defaultModelFor(T.isOwner);
       sse({ type: "battalion_detour", model: engine,
-            text: "BATTALION is a text swarm and cannot touch files or machines. This request needs real work done, so it is running on " +
-                  ((modelById(engine) && modelById(engine).name) || engine) + " with full tools instead. The swarm remains available for research and writing." });
+            text: "BATTALION can read files and look things up, but it cannot change anything: its models work in parallel, and parallel writes collide. This request makes changes, so it is running on " +
+                  ((modelById(engine) && modelById(engine).name) || engine) + " with full tools instead. The swarm remains available for research, reading and writing prose." });
       console.log(`[dominion-ai] battalion detour: ${swarmIntent.baseKind} ask -> ${engine} with tools`);
       cloudModel = engine;
     } else {
@@ -10571,9 +10613,19 @@ const server = http.createServer(async (req, res) => {
       // rendering (provider nvidia = free lane, blocked outside Normal privacy like every free
       // seat), with Fred's line as the meta column. Free by construction, so no price.
       if (NVIDIA_KEY || OPENROUTER_KEY) {
+        /*
+         * toolCapable went true on 2026-08-09: the workers genuinely call tools now.
+         *
+         * params stays BATTALION_COPY EXACTLY. A caveat was appended here first - "reads and
+         * researches in parallel, never changes anything" - and battalion_test caught it, correctly:
+         * this module's own header records that line as "Fred's copy, verbatim, no quality
+         * qualifier", and appending to it is precisely what that pin exists to stop. The
+         * reads-but-never-writes half is carried by the detour message instead, which is where it
+         * matters, because that is the moment a user is told what the swarm will not do.
+         */
         payload.groups = [{ category: "BATTALION — the free swarm", models: [{
           id: "battalion", name: "BATTALION", provider: "nvidia", inCost: 0, outCost: 0,
-          ctx: 0, toolCapable: false, vision: false, params: BATTALION_COPY, orchestratorOk: false,
+          ctx: 0, toolCapable: true, vision: false, params: BATTALION_COPY, orchestratorOk: false,
         }] }, ...(payload.groups || [])];
       }
       // Phase 2: tell the UI the privacy modes + which providers each mode permits, so the picker can

@@ -79,13 +79,87 @@ export function historyTail(history, capChars = HISTORY_TAIL_CHARS) {
   return out;
 }
 
-export function createBattalion({ callSeat, roster, isSimple = () => false, log = () => {} }) {
+const TOOL_ROUNDS = 4;   // per part; a worker that has not answered in four rounds is looping
+
+export function createBattalion({ callSeat, roster, isSimple = () => false, log = () => {},
+                                  tools = null, runTool = null, projectTurn = null }) {
+  /*
+   * TOOLS IN A PARALLEL SWARM (Fred, 2026-08-09: "now that they have tools").
+   *
+   * Every seat in the roster is tool-capable as a model; the swarm simply never offered any, which
+   * is why the honesty gate in server.mjs hands build and audit asks to a single engine instead.
+   * Offering tools closes most of that gap. What it must not do is offer ALL of them.
+   *
+   * Workers run CONCURRENTLY and are told their parts "must not overlap", so nothing coordinates
+   * them. Concurrent reads cannot conflict. Concurrent writes will: two workers writing one file,
+   * two shell commands racing the same directory. The confirm gate is no help either, because it
+   * assumes one agent - four workers reaching it at once produce four prompts with no way to tell
+   * which belongs to which. So the caller passes read-only defs, and this module refuses to execute
+   * anything it was not offered, which makes a hallucinated `sandbox_write` a refusal rather than a
+   * write. That second guard needs no knowledge of permission classes, which keeps this module the
+   * pure orchestrator it says it is.
+   *
+   * projectTurn is injected for the same reason: providers disagree about the shape of an assistant
+   * tool-call turn, and battalion should not learn provider names to find that out.
+   */
+  const toolDefs = typeof tools === "function" ? tools : () => (Array.isArray(tools) ? tools : []);
+  const toolsReady = () => typeof runTool === "function" && toolDefs().length > 0;
+  const offeredNames = () => new Set(toolDefs().map((d) => d && d.function && d.function.name).filter(Boolean));
   const seatsUsed = (manifest) => [...new Set(manifest.stages.map((s) => s.seat))];
 
   async function seat(catalogId, messages, { tokens, onDelta = null, signal } = {}) {
     const t0 = Date.now();
     const r = await callSeat(catalogId, messages, { num_predict: tokens, signal }, onDelta);
     return { ...r, ms: Date.now() - t0 };
+  }
+
+  /*
+   * One worker seat, with a bounded read-only tool loop when the caller supplied tools.
+   *
+   * The last round deliberately offers NO tools, which forces an answer instead of a fifth request
+   * to look something up. A worker that has not written its part after four rounds of reading is
+   * not converging, and the swarm has three other parts waiting on it.
+   */
+  async function seatWithTools(catalogId, messages, { tokens, signal, manifest, label }) {
+    if (!toolsReady()) return seat(catalogId, messages, { tokens, signal });
+    const offered = offeredNames();
+    const defs = toolDefs();
+    const convo = messages.map((m) => ({ ...m }));
+    let totalMs = 0, used = 0, refused = 0;
+    for (let round = 0; round <= TOOL_ROUNDS; round++) {
+      const t0 = Date.now();
+      const r = await callSeat(catalogId, convo,
+        { num_predict: tokens, signal, tools: round < TOOL_ROUNDS ? defs : null }, null);
+      totalMs += Date.now() - t0;
+      const calls = Array.isArray(r.toolCalls) ? r.toolCalls : [];
+      if (!r.ok || !calls.length) return { ...r, ms: totalMs, toolsUsed: used, toolsRefused: refused };
+      convo.push(projectTurn ? projectTurn(r, calls)
+        : { role: "assistant", content: r.content || "", tool_calls: calls });
+      for (const c of calls) {
+        if (signal && signal.aborted) break;
+        const fn = c.function || {};
+        const name = fn.name || "";
+        let args = fn.arguments;
+        if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = {}; } }
+        let out;
+        if (!offered.has(name)) {
+          // The second guard. A worker that asks for a tool it was never given is refused HERE,
+          // before anything reaches the machine, and the refusal is named in the manifest rather
+          // than swallowed. This is what makes a hallucinated write harmless in a parallel swarm.
+          refused++;
+          out = "REFUSED: " + (name || "that tool") + " is not available to a swarm worker. "
+            + "Workers read; they never write. Answer from what you can read.";
+          if (manifest) manifest.notes.push((label || "a worker") + " asked for "
+            + (name || "an unnamed tool") + ", which the swarm does not offer");
+        } else {
+          used++;
+          try { out = String(await runTool(name, args, signal)); }
+          catch (e) { out = "that tool failed: " + String((e && e.message) || e).slice(0, 300); }
+        }
+        convo.push({ role: "tool", tool_call_id: c.id, content: String(out).slice(0, 64_000) });
+      }
+    }
+    return { ok: false, content: "", error: "worker did not finish within its tool rounds", ms: totalMs, toolsUsed: used, toolsRefused: refused };
   }
 
   // One part, with one announced replacement on failure: the roster IS the bench.
@@ -99,16 +173,17 @@ export function createBattalion({ callSeat, roster, isSimple = () => false, log 
       ...context,
       { role: "user", content: "THE ASSIGNED PART (" + (idx + 1) + "): " + part.title + "\n\n" + part.instructions },
     ];
-    let r = await seat(primary, msgs, { tokens: PART_TOKENS, signal });
+    const label = "part " + (idx + 1);
+    let r = await seatWithTools(primary, msgs, { tokens: PART_TOKENS, signal, manifest, label });
     if (r.ok && String(r.content || "").trim()) {
-      manifest.stages.push({ stage: "part " + (idx + 1), title: part.title, seat: primary, ms: r.ms, ok: true });
+      manifest.stages.push({ stage: label, title: part.title, seat: primary, ms: r.ms, ok: true, tools: r.toolsUsed || 0 });
       return { title: part.title, text: r.content };
     }
     const backup = workers[(idx + 1) % workers.length];
     log(`battalion: part ${idx + 1} failed on ${primary} (${String(r.error || "empty").slice(0, 80)}) — replacing with ${backup}`);
-    const r2 = await seat(backup, msgs, { tokens: PART_TOKENS, signal });
+    const r2 = await seatWithTools(backup, msgs, { tokens: PART_TOKENS, signal, manifest, label });
     if (r2.ok && String(r2.content || "").trim()) {
-      manifest.stages.push({ stage: "part " + (idx + 1), title: part.title, seat: backup, ms: r2.ms, ok: true, replaced: primary });
+      manifest.stages.push({ stage: label, title: part.title, seat: backup, ms: r2.ms, ok: true, replaced: primary, tools: r2.toolsUsed || 0 });
       manifest.notes.push("part " + (idx + 1) + " seat " + primary + " failed; " + backup + " took it over");
       return { title: part.title, text: r2.content };
     }
