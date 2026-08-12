@@ -31,7 +31,7 @@ import {
   ALTANA_PRIMARY, ALTANA_FALLBACK, assertToolsetSafe, exclusionFor, altanaChatTools,
   altanaSystemPrompt, screenToolCall, confirmationToken, wrapToolResult, looksLikeInjectedInstruction,
   buildChatPayload, isFailoverSignal, fallbackNotice, runAltanaTurn, chatSeatCall, responsesSeatCall, isToolResultMessage,
-  createAltana, createAltanaStore, splitKnowledge,
+  createAltana, createAltanaStore, splitKnowledge, carveOutFor, ALTANA_CARVE_OUT,
 } from "./altana.mjs";
 import { redact, redactDeep, assembleContext, CONTEXT_FIELDS } from "./altana-context.mjs";
 import { createGuideStore } from "./guide.mjs";
@@ -51,14 +51,55 @@ const KPATH = new URL("./docs/ALTANA-KNOWLEDGE.md", import.meta.url);
 
 console.log("\n=== THE FOUR EXCLUSIONS ===");
 
-t("the tool allowlist contains nothing in an excluded zone", () => {
+/*
+ * UPDATED 2026-08-12. This asserted that NO tool touched an excluded zone, which was the whole truth
+ * until Fred narrowed the billing boundary to let Altana add credits and switch automatic top-off.
+ * The assertion is not relaxed to accommodate that, it is made more specific: a tool may cross a zone
+ * only by being a documented carve-out that demands something the user physically types. That is a
+ * stronger property than the original, because the original had nothing to say about the day a money
+ * verb arrived, and this fails the build for a money verb that arrives without its wall.
+ */
+t("nothing reaches an excluded zone except a documented carve-out with a typed confirmation", () => {
   assertToolsetSafe();
   for (const tool of ALTANA_TOOLS) {
-    assert.equal(exclusionFor(tool.name), null, `tool "${tool.name}" landed in an excluded zone`);
+    const zone = exclusionFor(tool.name);
+    if (zone) {
+      const carve = carveOutFor(tool.name);
+      assert.ok(carve, `tool "${tool.name}" is in the ${zone.zone} zone with no carve-out`);
+      assert.ok(tool.typedConfirm && tool.typedConfirm !== "none",
+        `carved tool "${tool.name}" does not demand a typed value from the user`);
+      assert.ok((carve.zones || []).includes(zone.zone),
+        `carve-out for "${tool.name}" does not grant the ${zone.zone} zone it reaches`);
+      assert.ok(carve.why && carve.requires, `carve-out for "${tool.name}" records no reason`);
+    }
     for (const arg of Object.keys((tool.parameters && tool.parameters.properties) || {})) {
+      // Arguments get NO carve-out, ever. This is the property that keeps the model from naming a figure.
       assert.equal(exclusionFor(arg), null, `${tool.name}.${arg} landed in an excluded zone`);
     }
   }
+});
+
+t("the money verbs cannot be handed an amount by the model", () => {
+  for (const name of ["buy_credits", "set_top_off", "read_money_state"]) {
+    const tool = ALTANA_TOOLS.find((x) => x.name === name);
+    assert.ok(tool, name + " is missing from her toolset");
+    const props = Object.keys((tool.parameters && tool.parameters.properties) || {});
+    for (const p of props) {
+      assert.ok(!/^(?:usd|amount|value|total|sum|price|cost|credits?|cents|dollars?)$/i.test(p),
+        `${name} takes an amount-shaped argument "${p}"`);
+    }
+    assert.equal(tool.parameters.additionalProperties, false, name + " allows unnamed arguments");
+  }
+  assert.deepEqual(Object.keys(ALTANA_TOOLS.find((x) => x.name === "buy_credits").parameters.properties), [],
+    "buy_credits must take no arguments at all");
+});
+
+t("a money verb never resolves on a clicked confirmation, only on a typed one", () => {
+  // The Yes button produces a confirmation token. If that could satisfy a money verb, "shall I add
+  // credits?" plus one click would be a charge with no amount ever typed.
+  const v = screenToolCall({ name: "buy_credits", args: {} }, { confirmations: [confirmationToken("buy_credits", {})] });
+  assert.equal(v.verdict, "typed-confirm", "a clicked token satisfied a money verb");
+  assert.equal(v.kind, "amount");
 });
 
 t("every setting she may change is outside all four zones", () => {

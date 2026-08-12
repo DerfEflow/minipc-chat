@@ -633,12 +633,160 @@ function appendConfirm(doc, entry, originalBody) {
 }
 
 /*
+ * THE TYPED CONFIRMATION FIELD (Fred, 2026-08-12: "a 'please type the amount of credits you would
+ * like to purchase' field that it follows", and "a 'type #####' to confirm field").
+ *
+ * This is deliberately NOT the Yes/No row above, and the difference is the entire safety argument for
+ * letting an assistant near money. A Yes button authorises whatever sentence is next to it, so the
+ * number would still be the model's number and the click would only be agreement. A text box cannot
+ * be satisfied by agreement: the value has to come from the user's own hands, so the model never
+ * chooses the figure and no fetched page or uploaded document can supply it either.
+ *
+ * The server has already written a single-use row for this nonce. Nothing has been charged and
+ * nothing has been switched; all that exists at this moment is a question and an empty box.
+ */
+function appendTypedConfirm(doc, request, originalBody) {
+  const state = panels.get(doc);
+  if (!state || !request || !request.nonce) return;
+
+  const row = doc.createElement("div");
+  row.className = "altana-msg altana-msg-typed";
+
+  const q = doc.createElement("div");
+  q.className = "altana-typed-q";
+  q.textContent = String(request.prompt || "Type the value to confirm.");
+  row.append(q);
+
+  /*
+   * The five digit number, shown big enough to read and copy by eye. It is not a secret and does not
+   * need to be: it is proof that a human read this specific sentence on this specific screen.
+   */
+  if (request.kind === "code" && request.code) {
+    const code = doc.createElement("div");
+    code.className = "altana-typed-code";
+    code.textContent = String(request.code);
+    row.append(code);
+  }
+
+  // What this actually costs them, stated before they type rather than discovered afterwards.
+  if (request.context) {
+    const note = doc.createElement("div");
+    note.className = "altana-typed-note";
+    note.textContent = String(request.context);
+    row.append(note);
+  }
+  if (request.hint) {
+    const hint = doc.createElement("div");
+    hint.className = "altana-typed-hint";
+    hint.textContent = String(request.hint);
+    row.append(hint);
+  }
+
+  const form = doc.createElement("form");
+  form.className = "altana-typed-form";
+  const input = doc.createElement("input");
+  input.type = "text";
+  input.className = "altana-typed-input";
+  input.setAttribute("autocomplete", "off");
+  input.setAttribute("aria-label", String(request.prompt || "Type to confirm"));
+  input.placeholder = String(request.placeholder || "");
+  if (request.kind === "code") {
+    // A numeric keypad on a phone, and only digits, because the answer is only ever digits.
+    input.setAttribute("inputmode", "numeric");
+    input.setAttribute("maxlength", "5");
+  } else {
+    input.setAttribute("inputmode", "decimal");
+    input.setAttribute("maxlength", "12");
+  }
+  const go = doc.createElement("button");
+  go.type = "submit";
+  go.className = "altana-typed-go";
+  go.textContent = request.kind === "code" ? "Confirm" : "Add credits";
+  const no = doc.createElement("button");
+  no.type = "button";
+  no.className = "altana-typed-no";
+  no.textContent = "Cancel";
+
+  const done = (msg) => {
+    input.disabled = true; go.disabled = true; no.disabled = true;
+    row.className += " altana-typed-done";
+    if (msg) appendMessage(doc, "system", msg);
+  };
+
+  form.addEventListener("submit", (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    const value = String(input.value || "").trim();
+    if (!value) { input.focus(); return; }
+    /*
+     * The row is disabled the moment it is submitted. The server refuses a replay anyway, on a stored
+     * single-use flag stamped before the money moves, so this is politeness rather than protection:
+     * the user should not be able to sit there clicking a button that can only ever work once.
+     */
+    input.disabled = true; go.disabled = true; no.disabled = true;
+    row.className += " altana-typed-sent";
+    submitTyped(doc, request, value, originalBody, row);
+  });
+  no.addEventListener("click", () => done("Cancelled. Nothing was charged and nothing was changed."));
+
+  form.append(input, go, no);
+  row.append(form);
+  state.log.append(row);
+  scrollLogToEnd(state);
+  try { input.focus(); } catch {}
+}
+
+/*
+ * Send the typed value back. The nonce identifies the stored authorisation, so this carries no
+ * amount-bearing state of its own that could be edited on the way past: the server decides against
+ * its own row, and a value that fails validation leaves that row unspent so the user gets another go.
+ */
+async function submitTyped(doc, request, value, originalBody, row) {
+  const state = panels.get(doc);
+  if (!state) return;
+  state.sending = true;
+  altanaState("thinking", doc);
+  try {
+    const body = Object.assign({}, originalBody, { typed: { nonce: request.nonce, value } });
+    const data = await postAsk(body);
+    if (data && data.reply) appendMessage(doc, "altana", data.reply);
+    /*
+     * A RETRYABLE REFUSAL puts the field back rather than making them start the conversation over. A
+     * mistyped code and an amount under the floor are both ordinary human misses, and a dead end
+     * there is the difference between a helpful assistant and an obstacle.
+     */
+    if (data && data.retry) {
+      appendTypedConfirm(doc, request, originalBody);
+    } else if (data && data.checkoutUrl) {
+      // First purchase, no card on file. The card is entered on the app's own payment page, never here.
+      appendMessage(doc, "system", "Opening the secure payment page.");
+      try { window.location.href = data.checkoutUrl; } catch {}
+    }
+    for (const a of (Array.isArray(data && data.clientActions) ? data.clientActions : [])) dispatchAction(a, doc);
+  } catch {
+    appendMessage(doc, "error", "I could not finish that just now. Nothing was charged. Please try again.");
+  } finally {
+    state.sending = false;
+    altanaState("idle", doc);
+    if (row) row.className += " altana-typed-done";
+  }
+}
+
+/*
  * One place applies a server response, whether it came from the first ask or from a confirmed
  * resend, so the two paths cannot drift apart. `requestBody` is threaded through purely so a NEW
  * confirmation (rare, but the contract allows it) can still resend the right thing.
  */
 function handleAskResult(doc, data, requestBody) {
   if (data.reply) appendMessage(doc, "altana", data.reply);
+
+  /*
+   * A PROMISE BEING KEPT. Fred resolved a ticket, and the sentence written when it was filed is
+   * delivered here, on the user's next turn, which is the only moment we know they are present to
+   * read it. The server marked it sent before handing it over, so a reload cannot repeat it.
+   */
+  for (const f of (Array.isArray(data.followUps) ? data.followUps : [])) {
+    if (f && f.text) appendMessage(doc, "altana", f.text);
+  }
 
   /*
    * AN ACTION IS NOT A LOOKUP, AND THEY MUST NOT BE SHOWN THE SAME WAY.
@@ -671,6 +819,19 @@ function handleAskResult(doc, data, requestBody) {
     }
     else if (action.type === "work_list") appendWorkList(doc, action.items);
     else if (action.type === "echo_settings") appendMessage(doc, "system", "Checked your current settings.");
+    /*
+     * A REGISTRY TOOL'S RESULT GOES BACK TO HER, the same round trip a knowledge lookup already
+     * takes. She now holds the app's own verbs, and their results are raw data written for a machine,
+     * so printing one into the panel would be exactly the technical spill Fred asked her never to
+     * produce. Sending it back means she reads it and answers in her own words.
+     */
+    else if (action.type === "tool_result" && String(action.result || "").trim()) {
+      lookups.push({ name: String(action.name || "tool"), result: String(action.result) });
+    }
+    else if (action.type === "ticket_list") appendTicketList(doc, action.items);
+    else if (action.type === "open_url" && action.url) {
+      try { window.location.href = String(action.url); } catch {}
+    }
   }
   if (lookups.length && requestBody && !requestBody.toolResults) {
     // Guard on toolResults so a follow-up can never trigger another follow-up.
@@ -687,6 +848,37 @@ function handleAskResult(doc, data, requestBody) {
 
   const confirm = Array.isArray(data.confirm) ? data.confirm : [];
   for (const c of confirm) appendConfirm(doc, c, requestBody);
+
+  // A field for the user to type into. Drawn last so it is the thing under their cursor.
+  const typed = Array.isArray(data.typedConfirm) ? data.typedConfirm : [];
+  for (const tc of typed) appendTypedConfirm(doc, tc, requestBody);
+}
+
+/* The problems this user has reported, and where each one has got to. */
+function appendTicketList(doc, items) {
+  const state = panels.get(doc);
+  if (!state) return;
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return;
+  const wrap = doc.createElement("div");
+  wrap.className = "altana-msg altana-msg-tickets";
+  for (const t of list.slice(0, 10)) {
+    const row = doc.createElement("div");
+    row.className = "altana-ticket-row";
+    const what = doc.createElement("span");
+    what.className = "altana-ticket-what";
+    what.textContent = String((t && t.what) || "Something you reported");
+    const status = doc.createElement("span");
+    status.className = "altana-ticket-status altana-ticket-" + String((t && t.status) || "open");
+    // Plain words, never the internal state name. "escalated" means nothing to a customer.
+    status.textContent = t && t.status === "resolved" ? "Sorted"
+      : t && t.status === "escalated" ? "With Fred now"
+        : "Being looked at";
+    row.append(what, status);
+    wrap.append(row);
+  }
+  state.log.append(wrap);
+  scrollLogToEnd(state);
 }
 
 async function submitQuestion(doc, question) {

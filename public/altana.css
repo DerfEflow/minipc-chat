@@ -312,6 +312,55 @@
 .altana-confirm-no { border: 1px solid rgba(255, 140, 120, .5); background: rgba(255, 90, 80, .1); color: #ffb3a6; }
 .altana-confirm-done .altana-confirm-actions { display: none; }
 
+/*
+ * THE TYPED CONFIRMATION. Money, and the only control in this panel a stray click cannot operate.
+ *
+ * It is styled to look like a decision rather than a chat bubble, because it is one. The copper edge
+ * is the app's own "this matters" colour, and the row is deliberately wider and quieter than the
+ * Yes/No confirm above it so the two are never mistaken for each other at a glance.
+ */
+.altana-msg-typed {
+  border: 1px solid rgba(214, 158, 92, .5);
+  background: rgba(214, 158, 92, .08);
+  border-radius: 10px; padding: 11px 12px;
+}
+.altana-typed-q { margin-bottom: 8px; font-weight: 600; color: var(--altana-ink); }
+/*
+ * The five digit code. Large, letter-spaced and tabular so it is unmistakable and easy to copy by
+ * eye, which is the whole point of asking someone to retype it.
+ */
+.altana-typed-code {
+  margin: 4px 0 9px; padding: 7px 0;
+  font: 700 25px/1.1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: .22em; text-align: center; color: #f0c18a;
+  background: rgba(0, 0, 0, .28); border-radius: 8px;
+  font-variant-numeric: tabular-nums;
+  -webkit-user-select: all; user-select: all;
+}
+.altana-typed-note { margin-bottom: 8px; font-size: 12px; line-height: 1.45; color: var(--altana-ink-dim, #c9c2b8); }
+.altana-typed-hint { margin-bottom: 8px; font-size: 11px; line-height: 1.4; opacity: .75; }
+.altana-typed-form { display: flex; gap: 7px; flex-wrap: wrap; }
+.altana-typed-input {
+  flex: 1 1 96px; min-width: 0; padding: 8px 11px; border-radius: 8px;
+  border: 1px solid rgba(214, 158, 92, .55); background: rgba(0, 0, 0, .3); color: var(--altana-ink);
+  /* 16px minimum: anything smaller makes iOS zoom the whole panel on focus. */
+  font: 600 16px/1.2 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.altana-typed-input:focus { outline: none; border-color: rgba(240, 193, 138, .9); }
+.altana-typed-input:disabled { opacity: .55; }
+.altana-typed-form button { padding: 8px 13px; border-radius: 8px; font: 600 12px/1 system-ui, sans-serif; cursor: pointer; }
+.altana-typed-form button:disabled { opacity: .5; cursor: default; }
+.altana-typed-go { border: 1px solid rgba(150, 255, 140, .5); background: rgba(90, 255, 80, .12); color: #b7ffab; }
+.altana-typed-no { border: 1px solid rgba(255, 140, 120, .45); background: rgba(255, 90, 80, .08); color: #ffb3a6; }
+.altana-typed-done .altana-typed-form { display: none; }
+
+.altana-msg-tickets { display: flex; flex-direction: column; gap: 5px; }
+.altana-ticket-row { display: flex; gap: 9px; align-items: baseline; justify-content: space-between; }
+.altana-ticket-what { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.altana-ticket-status { flex: none; font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--altana-line); opacity: .9; }
+.altana-ticket-resolved { border-color: rgba(150, 255, 140, .45); color: #b7ffab; }
+.altana-ticket-escalated { border-color: rgba(214, 158, 92, .55); color: #f0c18a; }
+
 .altana-worklist-label { margin-bottom: 6px; font-weight: 600; color: var(--altana-ink); }
 .altana-worklist-items { margin: 0; padding-left: 18px; }
 .altana-worklist-items li { margin: 2px 0; }

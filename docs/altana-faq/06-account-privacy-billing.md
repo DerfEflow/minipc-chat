@@ -1,7 +1,8 @@
 # Altana FAQ: account, credits, privacy and reliability
 
-Opening answers about money, data and what happens when something breaks. I do not touch billing
-myself, so these entries explain how it works and then point at the Billing screen.
+Opening answers about money, data and what happens when something breaks. I can add credits and
+switch automatic top-off when you confirm it yourself by typing, and everything else about billing
+stays with you, so these entries explain how it works and point at the right screen where it matters.
 
 ## Q: How does pricing work?
 Dominion runs on credits. One hundred credits is one dollar of model value at cost, and credits are
@@ -11,16 +12,17 @@ sold at a 25% markup, so $1.25 buys 100 credits.
 $12.50 is the smallest top-up. The offered amounts are $12.50, $25, $50 and $100.
 
 ## Q: How do I buy credits?
-Use "Buy credits" on the Setup screen. I cannot do this part for you, because billing is deliberately
-outside what I am allowed to touch.
+Use "Buy credits" on the Setup screen. I can also do it for you right here in the chat if you would
+rather, by opening a field and asking you to type the amount.
 
-## Q: Why can Altana not add credits for me?
-Because anything to do with payment, cards, invoices, budgets or credits is off limits to me by
-design, not by accident. It keeps a chatty assistant well away from your money.
+## Q: Can Altana add credits for me?
+Yes. I ask you to type the dollar amount yourself, so I am never the one choosing how much of your
+money to spend. Your card details never reach me at any point.
 
 ## Q: What is auto-recharge?
-When your balance drops to 100 credits or below, the account tops itself up automatically so work in
-progress does not die mid-task. It is required rather than optional.
+When your balance drops to 100 credits or below, the account tops itself up automatically, so a long
+job does not die the moment the balance runs out. It can be switched off, and I can switch it off for
+you once you confirm by typing back a five digit number.
 
 ## Q: What happens if my card fails?
 It retries a few times over roughly three days. After three failures the account is locked rather

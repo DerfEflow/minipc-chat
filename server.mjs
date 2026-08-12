@@ -158,8 +158,15 @@ import { createSimplifyChatHandler } from "./simplify.mjs";
 import {
   createAltana, createAltanaStore, altanaChatTools, wrapToolResult,
   ALTANA_SETTABLE_SETTINGS, ALTANA_TOOLS, runAltanaTurn, confirmationToken, retrieve,
+  altanaToolsetFor,
 } from "./altana.mjs";
 import { assembleContext } from "./altana-context.mjs";
+import { supportPlanFor, escalationEmail, digestEmail, SEVERITY } from "./altana-support.mjs";
+import { plainEnglish } from "./altana-plain.mjs";
+import {
+  confirmRequestFor, decideTypedAnswer, purchaseOutcome, topOffOutcome,
+  creditsForUsd as altanaCreditsForUsd, typedConfirmCode, CONFIRM_TTL_MS,
+} from "./altana-money.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_PROMPT_MAX_CHARS, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs, ledgerFromEvents } from "./idejobs.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages } from "./ideengine.mjs";
@@ -5750,8 +5757,37 @@ async function handleAltana(req, res, u) {
     return sjson(res, 200, altanaStore.resolve(body.id));
   }
 
+  // The owner's ticket book. Same shape as the complaint book: guests file, only Fred reads.
+  if (req.method === "GET" && p === "/altana/tickets") {
+    if (!T.isOwner) return sjson(res, 403, { error: "owner only" });
+    return sjson(res, 200, { tickets: altanaStore.ticketsRecent(100), open: altanaStore.ticketsOpen() });
+  }
+  /*
+   * RESOLVING A TICKET IS WHAT SENDS THE FOLLOW-UP. Fred clicks resolve, the row arms, and the user
+   * is told the next time they open Altana. That is the whole of "follow up with the user after
+   * actions have taken place", and it is one click rather than a thing anyone has to remember to say.
+   */
+  if (req.method === "POST" && p === "/altana/ticket/resolve") {
+    if (!T.isOwner) return sjson(res, 403, { error: "owner only" });
+    const r = altanaStore.resolveTicket(body.id);
+    const tk = altanaStore.ticket(body.id);
+    return sjson(res, 200, { ...r, followUpQueued: !!(tk && tk.followUpState === "due") });
+  }
+
   if (req.method === "POST" && p === "/altana/ask") {
     const question = String(body.question || "").trim();
+    /*
+     * THE TYPED ANSWER ARRIVES ON THIS ROUTE, NOT ITS OWN.
+     *
+     * It rides the same request the confirmation was issued from, which is what lets the whole thing
+     * stay one conversation. It is handled BEFORE the question is required and before any model call,
+     * because a typed confirmation is not a question and must never reach a model: the model has no
+     * part in deciding whether five digits match, and a turn that asked one to would be a turn where
+     * a prompt injection could argue about it.
+     */
+    if (body.typed && body.typed.nonce) {
+      return handleAltanaTyped(res, T, body);
+    }
     if (!question) return sjson(res, 400, { error: "ask something" });
     if (!altana.ready()) return sjson(res, 200, { reply: "My notes are not loaded right now, so I would only be guessing. Try again in a moment." });
 
@@ -5759,12 +5795,38 @@ async function handleAltana(req, res, u) {
      * THE ONLY PLACE APP STATE ENTERS HER WORLD. Everything the client sent is filtered to a named
      * field list and then redacted. Do not add a second path that builds messages without this.
      */
+    /*
+     * HER TOOLSET FOR THIS TURN (Fred, 2026-08-12: "access to anything that is not strictly forbidden").
+     *
+     * The registry handed over is `filterToolDefs(..., T.role, null)`, which is EXACTLY the list this
+     * same signed-in user's own chat would receive. That bound is the whole security argument: nothing
+     * becomes reachable that the person at the keyboard could not already do by typing it into chat,
+     * so the app's attack surface is unchanged and only her share of it grew. altanaToolsetFor then
+     * removes anything in an excluded zone or on her deny-list.
+     *
+     * `forgeExtra` is deliberately null. Machine tools reach a user's own computer, and handing those
+     * to an assistant is a different product with a different consent conversation. Fred asked for an
+     * assistant that can work the app, so she gets the app.
+     */
+    let registryDefs = [];
+    try { registryDefs = filterToolDefs(toolDefs(flywheel.activeToolOverlays()), T.role, null) || []; }
+    catch (e) { console.warn("[altana] registry unavailable this turn: " + (e && e.message)); }
+    const { tools: altanaTools, refused } = altanaToolsetFor({ registryDefs, metaFor: toolMeta });
+    if (refused.length) console.log("[altana] withheld " + refused.length + " registry tools (" +
+      refused.slice(0, 6).map((r) => r.name).join(", ") + (refused.length > 6 ? ", ..." : "") + ")");
+
     const ctx = assembleContext({
       app: { name: "Dominion", version: BUILD_ID, interfaceMode: body.mode, privacyMode: body.privacyMode },
       screen: { id: body.surface, title: body.screenTitle },
       activity: Array.isArray(body.activity) ? body.activity : [],
       settings: body.settings || {},
       settableKeys: ALTANA_SETTABLE_SETTINGS,
+      /*
+       * Her OWN verbs are listed in the context block, not the whole registry. The block rides every
+       * turn and the registry is a hundred-plus tools, so listing all of them would be a bill and a
+       * latency cost paid per message forever, and the provider already sends her the full schemas
+       * separately. She needs the levers named here; she does not need them named twice.
+       */
       tools: ALTANA_TOOLS,
     });
     if (Object.keys(ctx.hits).length) console.log("[altana] context redactions: " + JSON.stringify(ctx.hits));
@@ -5778,7 +5840,10 @@ async function handleAltana(req, res, u) {
 
     const r = await runAltanaTurn({
       messages: altana.messagesFor(question, { history: body.history, context: ctx.text, toolMessages }),
-      tools: altanaChatTools(),
+      tools: altanaChatTools(altanaTools),
+      // The same list in the flat shape, so screening reads real write/irreversible/typedConfirm
+      // flags rather than re-deriving a tool's blast radius from its description.
+      toolset: altanaTools,
       keys: { NVIDIA_API_KEY: NVIDIA_KEY, OPENAI_API_KEY: OPENAI_KEY },
       confirmations: Array.isArray(body.confirm) ? body.confirm : (body.confirm ? [String(body.confirm)] : []),
       log: (m) => console.log(m),
@@ -5794,6 +5859,14 @@ async function handleAltana(req, res, u) {
     const { reply, complaint } = altana.extractComplaint(r.reply || "");
     const clientActions = [];
     let logged = null;
+    // The support workflow's state for this turn. `supportPlan` is threaded so a lookup followed by
+    // open_ticket in the SAME turn files under the classification she was actually given, rather than
+    // classifying the same sentence twice and possibly differently.
+    let supportPlan = null;
+    let ticket = null;
+    let escalateNow = null;
+    let moneyState = null;
+    const typedConfirms = [];
 
     for (const call of r.toolCalls) {
       switch (call.name) {
@@ -5849,9 +5922,144 @@ async function handleAltana(req, res, u) {
         case "delete_work_order":
           try { workOrders.remove(T.uid || "", String(call.args.id)); } catch (e) { console.warn("[altana] work-order delete failed: " + (e && e.message)); }
           break;
-        default:
-          console.warn("[altana] cleared a tool with no dispatch: " + call.name);
+
+        /* ---------- the support workflow ------------------------------------------------------ */
+
+        /*
+         * The playbook lookup. Returns to HER, as a tool result, so she says it in her own voice
+         * rather than reciting a canned line at somebody. The plan also rides back on the response so
+         * the client can show the severity and so a later open_ticket inherits the classification
+         * instead of guessing at it a second time.
+         */
+        case "support_lookup": {
+          const plan = supportPlanFor(String(call.args.problem || ""));
+          supportPlan = plan;
+          clientActions.push({ type: "support", plan: {
+            issueId: plan.issueId, type: plan.type, severity: plan.severity,
+            say: plan.say, ask: plan.ask, selfServe: plan.selfServe,
+            escalateNow: plan.escalateNow, willFollowUp: plan.promiseFollowUp,
+          } });
+          break;
+        }
+        case "open_ticket": {
+          const problem = String(call.args.problem || "").trim();
+          const plan = supportPlan && supportPlan.issueId ? supportPlan : supportPlanFor(problem);
+          // The complaint book FIRST, because it is the record that predates all of this and the one
+          // Fred already reads. The ticket references it rather than replacing it.
+          const saved = altanaStore.log({
+            uid: T.uid || "", userEmail: T.email || "", contactEmail: String(call.args.reply_to || ""),
+            summary: problem, surface: String(body.surface || "").slice(0, 60),
+          });
+          const tk = altanaStore.openTicket({
+            complaintId: saved.ok ? saved.id : 0,
+            uid: T.uid || "", userEmail: T.email || "", contactEmail: String(call.args.reply_to || ""),
+            plan, summary: problem, surface: String(body.surface || "").slice(0, 60),
+          });
+          if (tk.ok) {
+            ticket = { id: tk.id, plan, repeats: tk.repeats, contactEmail: String(call.args.reply_to || "") };
+            if (saved.ok) logged = { id: saved.id, contactEmail: String(call.args.reply_to || "") };
+            clientActions.push({ type: "ticket_opened", id: tk.id, severity: plan.severity, willFollowUp: plan.promiseFollowUp });
+          }
+          break;
+        }
+        case "escalate_to_owner": {
+          const id = Number(String(call.args.ticket || "").replace(/\D/g, "")) || (ticket && ticket.id) || 0;
+          const tk = id ? altanaStore.ticket(id) : null;
+          // Only ever the caller's own ticket. She cannot escalate a stranger's record by guessing a number.
+          if (!tk || (tk.uid && tk.uid !== (T.uid || ""))) { console.warn("[altana] escalate refused for ticket " + id); break; }
+          escalateNow = { ticket: tk, why: String(call.args.why || "") };
+          break;
+        }
+        case "check_my_tickets": {
+          const mine = altanaStore.ticketsFor(T.uid || "", 10).map((t) => ({
+            id: t.id, what: t.summary, status: t.status, opened: t.createdAt,
+            resolved: t.resolvedAt || "", willTellYou: t.followUpState === "promised" || t.followUpState === "due",
+          }));
+          clientActions.push({ type: "ticket_list", items: mine });
+          break;
+        }
+
+        /* ---------- money ---------------------------------------------------------------------- */
+
+        /*
+         * READ ONLY, and only ever this caller's own account. billing.mjs is the live ledger;
+         * credits.mjs is dead code with a conflicting model and must not be wired here.
+         */
+        case "read_money_state": {
+          try {
+            if (T.isOwner) {
+              clientActions.push({ type: "money_state", owner: true, note: "the owner account is never metered" });
+            } else if (T.role === "credit" && T.email) {
+              const acct = billing.account(T.email) || {};
+              moneyState = acct;
+              clientActions.push({ type: "money_state", balance: Math.round(Number(acct.balance) || 0),
+                topOff: !!acct.autorecharge, hasCard: !!acct.hasCard });
+            } else {
+              clientActions.push({ type: "money_state", role: T.role || "", note: "this account does not run on credits" });
+            }
+          } catch (e) { console.warn("[altana] money read failed: " + (e && e.message)); }
+          break;
+        }
+
+        default: {
+          /*
+           * A REGISTRY TOOL. Everything above is a verb Altana owns; this is one of the app's own,
+           * handed to her because the signed-in user could already call it themselves.
+           *
+           * The same two runtime walls the main chat path uses run here as well, and they are not
+           * optional: `assertNotProtected` is the ironclad carve-out that refuses the backup drive and
+           * the customer databases in every mode for every account, and `toolAllowedFor` is the role
+           * wall. Screening in altana.mjs decided she may HOLD this verb; these decide whether this
+           * call may run. Reusing them rather than reimplementing them is the point: a second opinion
+           * about which tools are dangerous is a second thing to keep correct.
+           */
+          const name = String(call.name || "");
+          const tool = altanaTools.find((t) => t.name === name);
+          if (!tool || !tool.fromRegistry) { console.warn("[altana] cleared a tool with no dispatch: " + name); break; }
+          const guard = assertNotProtected(name, call.args || {});
+          if (!guard.ok) { console.warn("[altana] protected-path refusal: " + name); break; }
+          if (!toolAllowedFor(name, T.role)) { console.warn("[altana] role wall refused: " + name); break; }
+          try {
+            const reqCtx = { ...(T.ctxBase || CTX), tenant: T };
+            const out = await runTool(name, call.args || {}, reqCtx, null);
+            // Back to HER as a tool result, fenced and redacted by wrapToolResult on the next round,
+            // so she answers in her own words instead of the panel printing a raw tool payload.
+            clientActions.push({ type: "tool_result", name, result: String(out == null ? "" : out).slice(0, 6000) });
+          } catch (e) {
+            console.warn("[altana] tool " + name + " failed: " + (e && e.message));
+            clientActions.push({ type: "tool_result", name, result: "That did not work just now." });
+          }
+          break;
+        }
       }
+    }
+
+    /*
+     * A TYPED CONFIRMATION IS ISSUED HERE, and this is the only place a nonce is minted.
+     *
+     * The row is written BEFORE the field reaches the screen, so the code the user is about to type
+     * is already committed and single use. Nothing has been charged and nothing has been switched:
+     * all that exists at this point is a question and a text box.
+     */
+    for (const tc of (r.typedConfirms || [])) {
+      const nonce = randomUUID();
+      let account = null;
+      try { if (!T.isOwner && T.role === "credit" && T.email) account = billing.account(T.email); } catch {}
+      const request = confirmRequestFor({ tool: tc.tool, args: tc.args || {}, uid: T.uid || "", nonce, account });
+      if (!request) continue;
+      /*
+       * A guest with no credit account cannot be charged and must not be shown a field implying they
+       * can. Said in words rather than by the button quietly doing nothing.
+       */
+      if (tc.tool !== "read_money_state" && !T.isOwner && T.role !== "credit") {
+        clientActions.push({ type: "money_unavailable", note: "this account does not run on credits" });
+        continue;
+      }
+      altanaStore.putConfirm({
+        nonce, uid: T.uid || "", tool: tc.tool, kind: request.kind,
+        args: tc.args || {}, expectedCode: request.code || "", at: Date.now(),
+      });
+      typedConfirms.push(request);
     }
 
     if (complaint && complaint.summary && !logged) {
@@ -5887,6 +6095,70 @@ async function handleAltana(req, res, u) {
     }
 
     /*
+     * THE ESCALATION (Fred, 2026-08-12: "including how to report an issue to me").
+     *
+     * Same four conventions as the complaint alert above, because they were learned rather than
+     * chosen: the row is written before the mail is attempted, the send is fire-and-forget so a mail
+     * failure can never cost the user their ticket or their reply, the recipient is the OWNER and is
+     * never a parameter, and the fact of the send is recorded on the row so it can be retried without
+     * double-sending.
+     *
+     * WHAT IS NEW is the body. The old alert sent a summary and a surface, and answering it meant
+     * going to look up who the person was, what they were doing, and whether it had happened before.
+     * escalationEmail puts everything a decision needs in the order a decision needs it, including
+     * the sentence Altana promised them, so Fred can see what resolving it will send.
+     */
+    const shouldEscalate = escalateNow
+      || (ticket && ticket.plan && ticket.plan.escalateNow);
+    if (shouldEscalate && ticket) {
+      const tk = altanaStore.ticket(ticket.id) || {};
+      (async () => {
+        try {
+          const mail = escalationEmail({
+            ticketId: ticket.id,
+            plan: ticket.plan || {},
+            complaint: ticket.plan && ticket.plan.issueId ? String(tk.summary || "") : String(tk.summary || ""),
+            user: {
+              email: T.email || "", uid: T.uid || "", isOwner: !!T.isOwner,
+              tier: T.role || "", contactEmail: ticket.contactEmail || "",
+            },
+            surface: String(body.surface || ""),
+            history: (Array.isArray(body.history) ? body.history : []).filter((m) => m && m.role === "user").map((m) => String(m.content || "")),
+            repeats: ticket.repeats || 0,
+          });
+          const prov = connectors.provider("google");
+          if (!prov || !prov.connected || !prov.connected(OWNER_T)) {
+            // Recorded as escalated regardless. The ticket is real and visible on the tickets screen
+            // whether or not the mail went, and a user must never be told "reported" on the strength
+            // of an email that could not be sent.
+            console.warn("[altana] ticket #" + ticket.id + " escalated but Google is not connected; it is on the tickets screen");
+            altanaStore.markTicketEscalated(ticket.id);
+            return;
+          }
+          await prov.call(OWNER_T, "gmail_send", { to: OWNER_EMAIL, subject: mail.subject, body: mail.body });
+          altanaStore.markTicketEscalated(ticket.id);
+          console.log("[altana] ticket #" + ticket.id + " (" + (ticket.plan || {}).severity + ") emailed to the owner");
+        } catch (e) { console.warn("[altana] escalation failed: " + (e && e.message)); }
+      })();
+    }
+
+    /*
+     * THE FOLLOW-UP, DELIVERED (Fred: "follow up with the user after actions have take place").
+     *
+     * A ticket Fred resolved is armed with the sentence written when it was filed. It is delivered on
+     * the user's next turn, which is the only moment we know they are present to read it. Marked sent
+     * BEFORE it is attached, and the mark is guarded on the row still being due, so two requests
+     * racing produce one delivery and a reload never repeats an apology.
+     */
+    const followUps = [];
+    try {
+      for (const tk of altanaStore.followUpsDueFor(T.uid || "", 3)) {
+        if (!altanaStore.markFollowUpSent(tk.id)) continue;
+        followUps.push({ id: tk.id, text: String(tk.followUpText || ""), about: String(tk.summary || "").slice(0, 160) });
+      }
+    } catch (e) { console.warn("[altana] follow-up sweep failed: " + (e && e.message)); }
+
+    /*
      * A TOOL TURN COMES BACK WITH NO WORDS, and silence is not an answer.
      *
      * Measured live: "What can you help me with?" returns good prose and no actions. "Please switch
@@ -5919,11 +6191,43 @@ async function handleAltana(req, res, u) {
           : "Good question. Let me check what I've got on that.";
       }
       if (a.type === "work_list") return "Let me pull up the work you've saved.";
+      /*
+       * The support line is HER line from the playbook, said as intent. It is the one case where the
+       * server has a real sentence to offer rather than a status label, because the playbook wrote it
+       * for exactly this moment.
+       */
+      if (a.type === "support") return String((a.plan && a.plan.say) || "");
+      if (a.type === "ticket_opened") return "I've written that up as ticket " + a.id + "." +
+        (a.willFollowUp ? " I'll come back to you here once it's sorted." : "");
+      if (a.type === "ticket_list") return a.items && a.items.length
+        ? "Here's what you've reported and where each one has got to."
+        : "You haven't reported anything to me yet.";
+      if (a.type === "money_state") return "Let me check where your account stands.";
+      if (a.type === "money_unavailable") return "Your account doesn't run on credits, so there's nothing for me to add to it.";
+      if (a.type === "tool_result") return "";
       return "";
     };
-    const spokenReply = String(reply || "").trim()
+    let spokenReply = String(reply || "").trim()
       || clientActions.map(spokenFor).filter(Boolean).join(" ")
       || "";
+
+    /*
+     * THE PLAIN ENGLISH WALL, and it is the LAST thing that touches her words (Fred, 2026-08-12: "it
+     * should not respond with it actual technical actions, code, etc. It should ALWAYS respond in
+     * plain english"). Structural rather than prompted, on the same principle that put redaction at
+     * the context assembler: a rule a model is asked to follow is a preference, and a rule it cannot
+     * break is a boundary. altana-plain_test.mjs proves it strips every class of technical content
+     * and proves the more dangerous half, that it leaves all 559 of her real answers untouched.
+     *
+     * The assurance is chosen by what the turn actually did, so a filed ticket promises a follow-up
+     * and a plain lookup does not promise anything it cannot keep.
+     */
+    const assurance = ticket ? "reported" : (r.blocked.length ? "cannot" : (clientActions.some((a) => a.type === "set_setting" || a.type === "open_screen") ? "acted" : "neutral"));
+    const cleaned = plainEnglish(spokenReply, { assurance });
+    if (cleaned.stripped) {
+      console.log("[altana] plain-english filter caught " + JSON.stringify(cleaned.hits) + (cleaned.gutted ? " (reply replaced)" : ""));
+    }
+    spokenReply = cleaned.text;
 
     return sjson(res, 200, {
       reply: spokenReply, logged, clientActions,
@@ -5935,9 +6239,129 @@ async function handleAltana(req, res, u) {
       confirm: r.confirmations.map((c) => ({ token: c.token, tool: c.tool, question: c.question })),
       // F3: what was refused and why. Surface it; a silent block teaches the user nothing.
       blocked: r.blocked.map((b) => ({ tool: b.name, reason: b.reason })),
+      /*
+       * A field for the user to type into. Nothing has happened yet: the answer comes back on the
+       * next request as { typed: { nonce, value } } and is decided against the stored single-use row.
+       */
+      typedConfirm: typedConfirms,
+      ticket: ticket ? { id: ticket.id, severity: (ticket.plan || {}).severity || "normal" } : null,
+      // Promises kept. Delivered once, marked before they are shown.
+      followUps,
     });
   }
   return sjson(res, 404, { error: "not found" });
+}
+
+/*
+ * THE TYPED ANSWER. Where a charge actually happens, and the only place it can.
+ *
+ * No model is involved and none can be: this function reads a stored row, compares it against what a
+ * human typed, and acts. That is deliberate and it is the reason the money verbs are safe at all. A
+ * prompt injection can persuade Altana to ASK for credits, which puts a text box on the user's screen
+ * and stops there.
+ *
+ * THE ORDER OF OPERATIONS IS THE REPLAY DEFENCE (wargame A3), so do not rearrange it:
+ *   1. look the nonce up, scoped to this caller's uid
+ *   2. decide, which refuses an already-spent or expired row
+ *   3. STAMP IT SPENT, and abort if the stamp finds it already spent
+ *   4. only then touch money
+ * A retry arriving mid-charge fails at 3 and charges nothing. Getting this backwards charges twice.
+ */
+async function handleAltanaTyped(res, T, body) {
+  const nonce = String((body.typed && body.typed.nonce) || "");
+  const typed = String((body.typed && body.typed.value) || "");
+  const pending = altanaStore.getConfirm(nonce, T.uid || "");
+
+  let account = null;
+  try { if (!T.isOwner && T.role === "credit" && T.email) account = billing.account(T.email); } catch {}
+
+  const decision = decideTypedAnswer({ pending, typed, uid: T.uid || "", account, now: Date.now() });
+  if (!decision.ok) {
+    // A retryable refusal (a mistyped code, an amount below the floor) leaves the row UNSPENT on
+    // purpose, so the user gets another go at the same field instead of having to start over.
+    return sjson(res, 200, { reply: decision.say, retry: !!decision.retryable, verdict: decision.verdict });
+  }
+
+  if (!altanaStore.spendConfirm(nonce)) {
+    return sjson(res, 200, { reply: "That one is already done, so I have not done it twice.", verdict: "already" });
+  }
+
+  /* ---------- switch automatic top-off ------------------------------------------------------- */
+  if (decision.verdict === "toggle") {
+    if (!T.email || T.role !== "credit") return sjson(res, 200, { reply: "Your account does not run on credits, so there is nothing to switch." });
+    let error = "";
+    try { billing.setAutorecharge(T.email, decision.on, (account && account.topupUsd) || undefined); }
+    catch (e) { error = String((e && e.message) || e); }
+    /*
+     * READ IT BACK. The report is built from the state the ledger now holds, never from the fact that
+     * a setter was called. If the two disagree the user is told they disagree, which is the whole
+     * lesson of this codebase in one line.
+     */
+    let actual = decision.on;
+    try { actual = !!(billing.account(T.email) || {}).autorecharge; } catch {}
+    const say = topOffOutcome({ asked: decision.on, actual, error });
+    return sjson(res, 200, {
+      reply: plainEnglish(say, { assurance: "acted" }).text,
+      verdict: "toggle", topOff: actual,
+      clientActions: [{ type: "money_state", topOff: actual }],
+    });
+  }
+
+  /* ---------- add credits -------------------------------------------------------------------- */
+  const usd = Number(decision.usd) || 0;
+  const credits = Number(decision.credits) || 0;
+  const begun = altanaStore.beginPurchase({ nonce, uid: T.uid || "", userEmail: T.email || "", usd, credits, status: "pending" });
+  if (!begun.ok && begun.duplicate) {
+    // The second replay wall. The primary key refused it, so a charge for this authorisation already exists.
+    return sjson(res, 200, { reply: "That one is already done, so I have not charged you twice.", verdict: "already" });
+  }
+
+  /*
+   * NO CARD ON FILE. A first purchase can only happen on the app's own secure payment page, which is
+   * where card details have always been entered and where they stay. She takes them there and says
+   * so. There is no field anywhere in this flow that accepts a card, by design.
+   */
+  if (decision.verdict === "checkout") {
+    try {
+      const r = await stripe.checkout({
+        email: T.email, usd, credits,
+        successUrl: APP_BASE_URL + "/?topup=done", cancelUrl: APP_BASE_URL + "/?topup=cancel",
+      });
+      if (r && r.url) {
+        altanaStore.settlePurchase(nonce, { status: "checkout", ref: String(r.id || "") });
+        return sjson(res, 200, {
+          reply: decision.say, verdict: "checkout", checkoutUrl: r.url,
+          clientActions: [{ type: "open_url", url: r.url }],
+        });
+      }
+      altanaStore.settlePurchase(nonce, { status: "failed", error: (r && r.error) || "no checkout url" });
+      return sjson(res, 200, { reply: purchaseOutcome({ ok: false, error: (r && r.error) || "not configured" }) });
+    } catch (e) {
+      altanaStore.settlePurchase(nonce, { status: "failed", error: String((e && e.message) || e) });
+      return sjson(res, 200, { reply: purchaseOutcome({ ok: false, error: String((e && e.message) || e) }) });
+    }
+  }
+
+  /* A saved card. Charged where they stand, off-session, exactly as auto top-off already does. */
+  try {
+    const acct = billing.account(T.email) || {};
+    const charged = await stripe.charge({ email: T.email, usd, customer: acct.stripeCustomer, pm: acct.defaultPm });
+    if (!charged || !charged.ok) {
+      altanaStore.settlePurchase(nonce, { status: "failed", error: (charged && charged.error) || "charge failed" });
+      return sjson(res, 200, { reply: purchaseOutcome({ ok: false, error: (charged && charged.error) || "" }), verdict: "declined" });
+    }
+    const balance = billing.grantUsd(T.email, usd, "altana top-up");
+    altanaStore.settlePurchase(nonce, { status: "charged", ref: String(charged.id || "") });
+    console.log("[altana] " + (T.email || T.uid) + " added $" + usd.toFixed(2) + " (" + credits + " credits) by typed confirmation");
+    return sjson(res, 200, {
+      reply: plainEnglish(purchaseOutcome({ ok: true, balance, credits, usd }), { assurance: "acted" }).text,
+      verdict: "charged", credits, usd, balance,
+      clientActions: [{ type: "money_state", balance: Math.round(Number(balance) || 0) }],
+    });
+  } catch (e) {
+    altanaStore.settlePurchase(nonce, { status: "failed", error: String((e && e.message) || e) });
+    return sjson(res, 200, { reply: purchaseOutcome({ ok: false, error: String((e && e.message) || e) }), verdict: "error" });
+  }
 }
 
 // Connectors: per-account outside-service tools (connectors.mjs). Every route acts on the CALLER's
@@ -10780,7 +11204,7 @@ const server = http.createServer(async (req, res) => {
      * The /guide/ aliases stay: a cached client or a bookmarked owner page must not 404 on a
      * support surface just because the feature was renamed.
      */
-    if (/^\/(?:altana|guide)\/(?:ask|complaints|complaint\/resolve)$/.test(path)) return handleAltana(req, res, u);
+    if (/^\/(?:altana|guide)\/(?:ask|complaints|complaint\/resolve|tickets|ticket\/resolve)$/.test(path)) return handleAltana(req, res, u);
     if (path === "/connectors" || path.startsWith("/connectors/")) return handleConnectors(req, res, u);
     if (path.startsWith("/feedback/")) return handleFeedback(req, res, u);
 
