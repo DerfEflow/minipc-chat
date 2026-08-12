@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v181-altana-types-the-amount";
+const CACHE = "dominion-ai-v182-plain-words-when-a-send-fails";
 const SHELL = [
   "/",
   "/index.html",
@@ -32,7 +32,7 @@ const SHELL = [
   "/dominion-ide.css?v=26",
   "/dominion-ide.js?v=43",
   "/dominion-tour.js?v=6",
-  "/app.js?v=74",
+  "/app.js?v=75",
   "/dominion-markdown.css?v=1",
   "/dominion-feedback.css?v=2",
   "/dominion-markdown.js?v=1",

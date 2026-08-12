@@ -1963,9 +1963,14 @@ function processEvent(st, ev) {
       fetchBudget(st.c.id);
       if (st.c.id === curId) openBudgetModal(ev.message || "This session's budget is spent.", { raise: true, credits: ev.balance !== undefined });
     }
+    /*
+     * `ev.message` is the server's own human sentence and always wins. The fallback used to append
+     * `ev.error`, which is the raw provider or internal error string, straight into the chat. Same
+     * defect as the HTTP code below: written for a developer, shown to a customer.
+     */
     st.errMsg = ev.message || (ev.code === "privacy_mode_block"
       ? "Blocked by privacy mode."
-      : "Chat failed: " + (ev.error || "server error") + " — tap send to retry.");
+      : "That answer stopped partway through. Nothing further was charged. Send it again and it should run.");
   }
 }
 
@@ -2075,6 +2080,7 @@ async function streamReply(c) {
   liveJobs[c.id] = liveJob = { jobId: "", eventIndex: 0, modelId: st.modelId }; persistLiveJobs();
   syncComposer(); aborter = new AbortController();
   let netErr = "";
+  let netStatus = 0;   // the HTTP status when there was one, so the failure can be named honestly
   readerActive = true;
   try {
     const res = await fetch("/chat", {
@@ -2123,12 +2129,14 @@ async function streamReply(c) {
     // Wildfire is a one-turn override. The ordinary toolbox now expands only as needed and closes
     // automatically; broad up-front authority must never leak into the next unrelated message.
     if (wildfireForTurn && window.setWildfire) window.setWildfire(false);
-    if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+    // The status rides on the error so the catch can tell "the app is mid-deploy" from "the app
+    // refused you", which are the same thing to a try/catch and completely different to a person.
+    if (!res.ok || !res.body) { const err = new Error("HTTP " + res.status); err.status = res.status; throw err; }
     await readSse(res, st);
   } catch (e) {
     if (st.detached) return;   // switched away mid-stream: the run lives on server-side, we just let go
     if (e.name === "AbortError") st.stopped = true;   // legacy local stop (no jobId had arrived yet)
-    else netErr = e.message || "network error";
+    else { netErr = e.message || "network error"; netStatus = e.status || 0; }
   } finally { readerActive = false; }
   if (st.detached) return;
   if (!st.done && !st.stopped && !st.gone && !st.errMsg && liveJob && liveJob.jobId) {
@@ -2141,9 +2149,55 @@ async function streamReply(c) {
     // No jobId ever arrived (the POST itself failed) — there is nothing to reattach to. Drop the
     // provisional busy entry so the chat isn't stuck showing Stop, and surface the retry.
     delete liveJobs[c.id]; persistLiveJobs();
-    st.errMsg = "Chat failed: " + (netErr || "connection lost") + " — tap send to retry.";
+    st.errMsg = chatFailureMessage(netStatus, netErr);
   }
   finalizeSession(st);
+}
+
+/*
+ * WHAT A CUSTOMER IS TOLD WHEN A TURN FAILS TO START (2026-08-12).
+ *
+ * Reported by a guest, verbatim: "http 530 chat failed - tap send to retry". Two things wrong with
+ * that sentence, and the second one matters more than the first.
+ *
+ * It shows an HTTP status code to a paying customer. Fred's rule is that the app never does this, and
+ * Altana was given a structural filter to enforce it; the main chat was still handing out raw status
+ * numbers from `throw new Error("HTTP " + res.status)`. A number like 530 tells the user nothing they
+ * can act on and reads as the product being broken.
+ *
+ * And it was WRONG about what happened. 530 is Cloudflare saying it could not reach the app at all,
+ * which on this deployment means the container was mid-swap during a release. The turn never started,
+ * nothing was charged, nothing was lost, and the honest instruction is to wait a moment rather than to
+ * tap send immediately, which just fails again. "Tap send to retry" invites a customer to hammer a
+ * door that is not there yet.
+ *
+ * So the shape of the failure is classified and named in plain words. The codes below are the ones
+ * that mean "the front door could not reach the app", as opposed to the app answering with a real
+ * refusal, which carries its own human message and is handled elsewhere.
+ */
+const UNREACHABLE_STATUS = new Set([502, 503, 504, 521, 522, 523, 524, 525, 526, 530]);
+
+function chatFailureMessage(status, netErr) {
+  const code = Number(status) || 0;
+  if (UNREACHABLE_STATUS.has(code)) {
+    return "Dominion is updating right now, so that message did not go through. Nothing was charged and nothing was lost. Give it a minute and send it again.";
+  }
+  if (code === 429) {
+    return "That came through faster than the service would take it. Wait a few seconds and send it again.";
+  }
+  if (code === 401 || code === 403) {
+    return "Your sign-in seems to have expired. Reload the page and you should be straight back in.";
+  }
+  /*
+   * Everything else, including a genuine network drop. Deliberately says nothing about causes it
+   * cannot know, and never repeats the underlying error text: that string is written for a developer
+   * and is exactly the technical spill this function exists to stop.
+   */
+  const offline = typeof navigator !== "undefined" && navigator && navigator.onLine === false;
+  if (offline || /network|failed to fetch|load failed|connection/i.test(String(netErr || ""))) {
+    return "That message did not send, and it looks like the connection dropped. Your text is still here, so try again when you are back online.";
+  }
+  return "That message did not send. Nothing was charged. Your text is still here, so give it another go in a moment.";
 }
 
 // ---- reattach: resume a live turn after suspend / reload / restart ----

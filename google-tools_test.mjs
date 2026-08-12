@@ -35,6 +35,32 @@ const t = async (name, fn) => { try { await fn(); passed++; console.log("  ok  "
   catch (e) { failed++; console.error("FAIL  " + name + "\n      " + (e && e.stack || e)); } };
 const skip = (name, why) => { skipped++; console.log("  --  " + name + "  (SKIPPED: " + why + ")"); };
 
+/*
+ * A LIVE check that could not REACH the network is unverified, not failed (2026-08-12).
+ *
+ * This file already draws that line for a missing key: no key means SKIPPED with "UNVERIFIED, not
+ * faked", which is exactly the right instinct. It did not draw the same line for the network itself,
+ * so a blip on the way to Google turned into a red suite, and `run-tests.mjs` is the gate that blocks
+ * a deploy. Observed: "maps_geocode ... Error: fetch failed" inside a full run, with the same suite
+ * passing 26/26 on its own a minute later. The code under test had not changed and was not wrong.
+ *
+ * The distinction is kept narrow on purpose. Only a failure to reach the host at all is downgraded.
+ * An API that answers with an error, or coordinates that come back wrong, is still a real failure and
+ * still fails the build, which is the entire point of testing against the live API.
+ */
+const UNREACHABLE = /fetch failed|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|network|socket hang up|getaddrinfo/i;
+const liveT = async (name, fn) => {
+  try { await fn(); passed++; console.log("  ok  " + name); }
+  catch (e) {
+    const msg = String((e && e.message) || e);
+    if (UNREACHABLE.test(msg) && !(e instanceof assert.AssertionError)) {
+      skip(name, "could not reach the live API (" + msg.slice(0, 60) + ") -- UNVERIFIED, not faked");
+      return;
+    }
+    failed++; console.error("FAIL  " + name + "\n      " + ((e && e.stack) || e));
+  }
+};
+
 const realFetch = globalThis.fetch;
 const stub = (handler) => { globalThis.fetch = handler; };
 const restore = () => { globalThis.fetch = realFetch; };
@@ -66,20 +92,20 @@ if (!mapsKey) {
   const maps = createMapsTools({ cfgGet: (k, d) => ({ GOOGLE_MAPS_API_KEY: mapsKey, GOOGLE_MAPS_PLACES_SEARCH_API_KEY: placesKey }[k] ?? d) });
   const byName = new Map(maps.TOOLS.map((x) => [x.name, x]));
 
-  await t("maps_geocode: real address -> real coordinates (LIVE)", async () => {
+  await liveT("maps_geocode: real address -> real coordinates (LIVE)", async () => {
     const out = await byName.get("maps_geocode").run({}, { address: "1600 Amphitheatre Parkway, Mountain View, CA" });
     assert.match(out, /Mountain View/i);
     assert.match(out, /lat 37\./);
     console.log("      -> " + out.split("\n")[0]);
   });
 
-  await t("maps_distance: SF -> Mountain View, real distance (LIVE)", async () => {
+  await liveT("maps_distance: SF -> Mountain View, real distance (LIVE)", async () => {
     const out = await byName.get("maps_distance").run({}, { origins: "San Francisco, CA", destinations: "Mountain View, CA" });
     assert.match(out, /km|mi/);
     console.log("      -> " + out);
   });
 
-  await t("maps_directions: real route (LIVE)", async () => {
+  await liveT("maps_directions: real route (LIVE)", async () => {
     const out = await byName.get("maps_directions").run({}, { origin: "San Francisco, CA", destination: "Mountain View, CA" });
     assert.match(out, /Route via/);
     console.log("      -> " + out);
@@ -90,7 +116,7 @@ if (!placesKey && !mapsKey) {
   skip("maps_place_search (live)", "no Places key available -- UNVERIFIED, not faked");
 } else {
   const maps = createMapsTools({ cfgGet: (k, d) => ({ GOOGLE_MAPS_API_KEY: mapsKey, GOOGLE_MAPS_PLACES_SEARCH_API_KEY: placesKey }[k] ?? d) });
-  await t("maps_place_search: real text search (LIVE)", async () => {
+  await liveT("maps_place_search: real text search (LIVE)", async () => {
     const out = await maps.TOOLS.find((x) => x.name === "maps_place_search").run({}, { query: "coffee near Mountain View CA", max: 5 });
     assert.match(out, /-/);
     console.log("      -> " + out.split("\n")[0]);
