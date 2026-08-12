@@ -17,6 +17,12 @@
  * a weekly audit checks it against the shipped interface.
  */
 
+/*
+ * The catalog, so counts in the copy below are read off the real roster instead of being retyped.
+ * models.catalog.mjs imports nothing from here, so this direction cannot cycle.
+ */
+import { MODELS } from "./models.catalog.mjs";
+
 export const FEATURES = [
   {
     id: "images",
@@ -138,7 +144,15 @@ export const FEATURES = [
     how: [
       "Model picks the engine. Operating Mode sets the discipline (Fast, Normal, Deep Think, Long Context, Draft, Tool, Mentor, As Fred).",
       "In the picker: 🔧 means the model can use tools, 💬 means it can only talk, 👁 means it can see pictures.",
-      "In the owner's interface only, a model whose name is RED AND BOLD holds the machine grant: full read and write on the laptop's C, F, G and Z drives through an elevated node, plus administrator PowerShell, Command Prompt and Terminal. A name in the normal colour cannot reach the machines at all. 30 of the 43 models carry the grant.",
+      /*
+       * COUNTED, NOT REMEMBERED (2026-08-12). This read "30 of the 43 models carry the grant" and
+       * the catalog has held 27 seats since the 2026-08-03 prune, of which 16 are broadCapable. A
+       * hardcoded tally in prose is a promise that somebody will edit two files in step forever, and
+       * nobody keeps it: this file's own header says accuracy is the whole value, and the number had
+       * been wrong in both halves for nine days. Derived from the catalog it describes, so the next
+       * prune corrects it without anyone noticing it needed correcting.
+       */
+      `In the owner's interface only, a model whose name is RED AND BOLD holds the machine grant: full read and write on the laptop's C, F, G and Z drives through an elevated node, plus administrator PowerShell, Command Prompt and Terminal. A name in the normal colour cannot reach the machines at all. ${MODELS.filter((m) => m.broadCapable).length} of the ${MODELS.length} models carry the grant.`,
       "Still owner-only, ★ marks the shorter Wildfire roster: models trusted to run broad multi-step work once the Wildfire switch on the Forge dial is armed. Red says CAN reach the machines; ★ says trusted to be turned loose on them.",
       "Privacy: Normal allows every provider, Trusted restricts to OpenAI and Anthropic direct, Private is the single-provider lane (Anthropic direct only).",
       "A privacy setting is never silently overridden. A disallowed choice is refused and explained.",

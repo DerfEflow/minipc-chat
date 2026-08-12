@@ -19,7 +19,14 @@ export const CRUCIBLE_GUIDE = [
   "  the navigation rail on the right side of the screen: a stack of labelled destinations, each",
   "  with its plain job under the name so nobody has to guess: The Foundry (Image Generator),",
   "  Forge Dial (Effort level and tool control), The Crucible (App Builder), and Video Generation",
-  "  (Coming Soon; it is a promise, not a wired feature yet). One tap goes there. On a phone the",
+  /*
+   * CORRECTED 2026-08-12. This said Video Generation was "Coming Soon; it is a promise, not a wired
+   * feature yet", and the Video Studio has been complete for some time: a four-model crew, a
+   * timeline, imports, and twenty-one export presets. This string rides in the builder AI's system
+   * prompt, so the app was telling paying customers that a feature they can open does not exist. The
+   * honest failure mode of a guide file is not silence, it is confident staleness.
+   */
+  "  (Video Studio: a full studio and editor, live and wired). One tap goes there. On a phone the",
   "  same four live in a bar along the bottom of the screen. The old compass handle is retired;",
   "  the rail replaced it everywhere.",
   "- THE CRUCIBLE WELCOME SCREEN comes first, once per session: a layer over the whole interface",
@@ -217,7 +224,14 @@ export function helpVoice() {
  * a feature's mention (or renaming it without updating the guide) fails the build's tests.
  */
 export const GUIDE_MUST_MENTION = [
-  "App Builder", "navigation rail", "bar along the bottom", "Video Generation", "Coming Soon", "Beginner", "Vibe", "engineer", "drawers",
+  /*
+   * "Coming Soon" was in this roll-call and it was enforcing a lie (2026-08-12). The guide said Video
+   * Generation was "a promise, not a wired feature yet" while the Video Studio shipped complete, and
+   * this list held that sentence in place: the keep-up rule with teeth had its teeth in the wrong
+   * ankle. Replaced with the claim that is now true, so the rule protects the corrected copy instead
+   * of the stale copy. A roll-call entry is only as good as the sentence it pins.
+   */
+  "App Builder", "navigation rail", "bar along the bottom", "Video Generation", "Video Studio", "Beginner", "Vibe", "engineer", "drawers",
   "conversation", "app.dominion.tools", "folder", "Browse", "snapshot", "intake", "build it",
   "mockup", "Blueprint", "Workshop", "preview", "Show-the-code", "Build log", "notification",
   "Budget", "put it online", "tour", "flame", "AF", "cookie rule", "referee",

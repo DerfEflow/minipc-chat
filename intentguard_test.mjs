@@ -133,7 +133,7 @@ const env = { ...process.env, PORT: String(PORT), OLLAMA_URL: "http://127.0.0.1:
   MEMORY_DIR: join(dir, "memory"), CHATLOG_DIR: join(dir, "chatlog"), ARTIFACT_DIR: join(dir, "artifacts"),
   PERSONA_DIR: join(dir, "corpus"), PERSONA_STAGING: join(dir, "staging"), FLYWHEEL_DIR: join(dir, "flywheel"),
   LOG_DIR: join(dir, "logs"), SANDBOX_DIR: join(dir, "sandbox"), DATA_DIR: dir,
-  AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0", CATALOG_AUDIT: "0",
+  AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0", BILLING_RETRY_ENABLED: "0", CATALOG_AUDIT: "0",
   MAIN_MODEL: "mock-main", LIGHT_MODEL: "mock-light", EMBED_MODEL: "mock-embed",
   OPEN_AI_DOMINION_UI_APIKEY: "test-key-not-real",
   OPENAI_URL: "http://127.0.0.1:" + MOCK_PROVIDER + "/v1/responses",

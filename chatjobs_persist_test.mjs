@@ -58,7 +58,7 @@ const baseEnv = {
   PERSONA_DIR: join(dir, "corpus"), PERSONA_STAGING: join(dir, "staging"), FLYWHEEL_DIR: join(dir, "flywheel"),
   LOG_DIR: join(dir, "logs"), SANDBOX_DIR: join(dir, "sandbox"),
   DATA_DIR: join(dir, "data"), CHATJOBS_DIR: join(dir, "chatjobs"),
-  AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0",
+  AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0", BILLING_RETRY_ENABLED: "0",
   MAIN_MODEL: "mock-main", LIGHT_MODEL: "mock-light", EMBED_MODEL: "mock-embed",
   SYNC_SECRET: "test", RUN_PASSWORD: "",
 };

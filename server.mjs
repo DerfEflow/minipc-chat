@@ -11644,6 +11644,36 @@ server.listen(PORT, HOST, () => {
     else console.log(`[dominion-ai] volume-backup: last success ${st.ageHours}h ago  ·  ${st.lastName}  ·  ${(st.lastBytes / 1e6).toFixed(1)}MB`);
   }
   /*
+   * THE AUTO-RECHARGE RETRY SWEEP (Fred, 2026-08-12: "yes, fix it").
+   *
+   * billing.mjs has promised since it was written that a failed recharge "retries every few days for
+   * about a week, then stops trying". The retry TIME was written on every failure and read by nothing
+   * anywhere in the app: no cron, no timer, no boot sweep. Recovery could only happen on the user's
+   * next metered turn, and after the third failure the account locks, and a locked account cannot
+   * chat, so the only path that would have retried was unreachable by construction. A customer whose
+   * card failed once stayed broken until they noticed and topped up by hand.
+   *
+   * ON IN THE CLOUD, OFF ON WINDOWS, the same shape as the two backup jobs above and for the same
+   * reason: the cloud instance is the one serving real customers, and a dev box should never charge
+   * anybody's card because someone left a server running. BILLING_RETRY_ENABLED overrides either way,
+   * and every e2e suite sets it to "0" alongside the other background workers.
+   *
+   * Hourly, which sounds eager for a schedule measured in days and is not: the sweep only acts on
+   * rows whose own retry time has passed, so the interval decides how PROMPTLY a due retry fires, not
+   * how often anyone is charged. An hour means a customer is recovered within an hour of becoming
+   * eligible instead of whenever they happen to return.
+   */
+  const billingRetryDefault = process.platform === "win32" ? "0" : "1";
+  if (MULTI_TENANT && String(cfgGet("BILLING_RETRY_ENABLED", billingRetryDefault)) !== "0") {
+    const rms = Math.max(300000, Number(cfgGet("BILLING_RETRY_INTERVAL_MS", "3600000")) || 3600000);
+    const sweep = () => billing.retryDueRecharges({ log: (m) => console.log(m) })
+      .catch((e) => console.log("[billing] retry sweep failed: " + (e && e.message)));
+    // Not at t=0: let the app settle, and never make a card charge part of a boot sequence.
+    setTimeout(sweep, 120000).unref?.();
+    setInterval(sweep, rms).unref?.();
+    console.log(`[dominion-ai] billing-retry: ON  ·  every ${Math.round(rms / 60000)}m  ·  acts only on accounts whose own retry time has passed`);
+  }
+  /*
    * The work-order ticker. Every minute, because the finest schedule anyone can set is a minute and
    * a job that runs at 3:00:40 instead of 3:00:00 is nobody's problem. Anything due whose machine
    * is asleep gets parked, not skipped; onConnect above releases it.

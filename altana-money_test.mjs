@@ -122,7 +122,7 @@ console.log("\n=== parsing a typed amount ===");
 for (const [input, expected] of [
   ["25", 25], ["$25", 25], ["25.00", 25], [" 50 ", 50], ["$12.50", 12.5],
   ["12.5", 12.5], ["$100", 100], ["1,000", null], ["$1,000", null],
-  ["25 dollars", 25], ["$25usd", 25], ["25.99", 25.99], ["$499.99", 499.99],
+  ["25 dollars", 25], ["$25usd", 25], ["25.99", 25.99], ["$199.99", 199.99],
 ]) {
   t(`accepts ${JSON.stringify(input)}`, () => {
     const r = parseTypedAmount(input);
@@ -161,10 +161,35 @@ t("the ceiling is enforced and offers a way round it", () => {
   assert.match(r.reason, /payment screen/i, "the refusal is a dead end");
 });
 
-t("a slipped zero is refused rather than charged", () => {
-  // The failure this ceiling exists for: 50 typed as 500 is fine, 500 typed as 5000 is not.
-  assert.equal(parseTypedAmount("500").ok, true);
-  assert.equal(parseTypedAmount("5000").ok, false);
+t("every real tier fits under the ceiling and the ceiling itself is reachable", () => {
+  // Fred set $200 on 2026-08-12, twice the largest tier the app sells.
+  for (const tier of TOPUP_TIERS) {
+    assert.equal(parseTypedAmount(String(tier)).ok, true, "a real tier ($" + tier + ") was refused");
+  }
+  assert.equal(parseTypedAmount("200").ok, true, "the ceiling itself must be reachable");
+  assert.equal(parseTypedAmount("201").ok, false, "one dollar over the ceiling must be refused");
+});
+
+t("a slipped zero is caught on every tier a ceiling can catch it on", () => {
+  /*
+   * WHAT A CEILING CAN AND CANNOT DO, stated honestly because the first version of this test asserted
+   * something false and failed. A ceiling only catches a slip that lands ABOVE it. $12.50 typed as
+   * $125 is a tenfold error and it is still a perfectly ordinary purchase, so nothing here can refuse
+   * it without also refusing a real customer buying $125 of credits. That case is caught by the user
+   * reading the confirmation, which states the dollars and the credits before anything is charged.
+   *
+   * What the ceiling does catch is the slip on every tier from $25 up, which is where the money that
+   * would actually hurt lives.
+   */
+  for (const tier of TOPUP_TIERS.filter((v) => v * 10 > MAX_PURCHASE_USD)) {
+    const slipped = parseTypedAmount(String(tier * 10));
+    assert.equal(slipped.ok, false, "a slipped zero on $" + tier + " was accepted as $" + (tier * 10));
+    assert.equal(slipped.tooLarge, true);
+  }
+  assert.ok(TOPUP_TIERS.filter((v) => v * 10 > MAX_PURCHASE_USD).length >= 3,
+    "the ceiling has drifted so high that it no longer catches a slipped zero on most tiers");
+  // And the one it honestly cannot catch, pinned so nobody later believes it does.
+  assert.equal(parseTypedAmount("125").ok, true, "$125 is a legitimate purchase and must not be refused");
 });
 
 t("cents never survive as a float artefact", () => {

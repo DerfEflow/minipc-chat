@@ -4,18 +4,56 @@ Placeholders, assumptions and things found on the way that are not mine to decid
 high-impact item left unexplained is fake completion, so everything below is either closed or
 addressed to Fred by name.
 
+## CLOSED BY FRED, 2026-08-12
+
+### L1. The purchase ceiling. [user-stated] RESOLVED at $200
+
+I proposed $500; Fred chose $200, which is the tighter and better answer. It is twice the largest
+tier the app sells, so every real purchase fits with room over, and a slipped zero on any tier from
+$25 up now lands outside and is refused in plain words.
+
+Stated honestly and pinned in a test so nobody later believes otherwise: a ceiling only catches a slip
+that lands ABOVE it. $12.50 typed as $125 is a tenfold error and still an ordinary purchase, so
+nothing can refuse it without also refusing a real customer buying $125 of credits. That case is
+caught by the user reading the confirmation, which states the dollars and the credits before anything
+is charged.
+
+### L3 (was open). The auto-recharge retry. RESOLVED, and it was worse than I reported
+
+Reading it properly before touching it turned up a second defect the first report missed, and the
+second one is the one that was hurting customers.
+
+**Reported:** `nextRetryAt` written on every failure and read by nothing, so nothing ever retried.
+
+**Also true, and worse:** `meterTurn` calls `autoRecharge` on EVERY low turn, and `autoRecharge` had
+no idea a retry was already scheduled. A customer whose card was declining was therefore charged three
+times inside a couple of minutes and locked almost immediately, instead of over the documented week.
+Three declines in quick succession is also exactly what card issuers penalise, so the app was hammering
+a card it had already been told no by, and burning the customer's whole retry allowance before they
+could react.
+
+Both halves landed together, because the backoff alone means nothing ever retries and the sweep alone
+leaves the hammering in place. `autoRecharge` now honours its own retry time, and an hourly sweep acts
+only on accounts whose retry time has passed. Bounded per run so a backlog cannot stampede the
+provider; off on Windows and in every e2e suite so no test or dev box can charge a card; and it
+refuses anyone who switched auto-recharge off, has no saved card, or is already locked.
+
+`billing_test.mjs` had a test pinning the old rapid-fire behaviour. Updated rather than deleted, with
+a new test asserting the burst cannot happen.
+
+### L5 (was open). The two stale strings. RESOLVED
+
+`idehelp.mjs` told the builder AI that Video Generation was "Coming Soon; a promise, not a wired
+feature yet" while the Video Studio shipped complete, so the app was telling paying customers that a
+feature they can open does not exist. Worth noting HOW it survived: `GUIDE_MUST_MENTION`, the keep-up
+rule that exists to stop the guide drifting, listed "Coming Soon" and was holding the stale sentence
+in place. The roll-call now pins "Video Studio" instead.
+
+`features.mjs` said "30 of the 43 models carry the grant" against a 27-seat catalog of which 16 are
+grant holders, wrong in both halves for nine days. It is now counted from the catalog it describes, so
+the next prune corrects it without anyone noticing it needed correcting.
+
 ## OPEN, needs Fred's decision
-
-### L1. The purchase ceiling is my number, not yours. [assumed]
-
-`MAX_PURCHASE_USD = 500` in `altana-money.mjs`. Nothing in the app had a ceiling before: the existing
-`POST /billing/topup` accepts any amount at all, which was defensible when the only way to reach it
-was a person clicking a tier on a page, and is not once a conversational assistant is near the path.
-The failure it guards is a slipped zero in a chat box, not a customer deliberately buying big.
-
-$500 is five times the largest tier you actually sell ($100). Above it she refuses in plain words and
-offers the payment screen, which still has no ceiling, so nothing becomes impossible. Say a number
-and I will move it.
 
 ### L2. Auto top-off is load-bearing for two features, and she can now switch it off.
 
@@ -42,30 +80,12 @@ than the arithmetic above. I have not measured the actual cached fraction on the
 
 ## FOUND, pre-existing, not fixed in this wave
 
-### L3. The auto-recharge retry schedule does not exist. [verified]
-
-`billing.mjs` documents "it retries every few days for about a week, then stops trying", and
-`nextRetryAt` is written and never read anywhere in the codebase. There is no cron, no boot sweep, no
-timer. Recovery only happens opportunistically on the user's next metered turn, and a locked account
-cannot chat, so after three failures the retry path is unreachable. The account stays locked until a
-manual top-up, which is the safe direction, and the documented behaviour is fiction.
-
-Worth its own small job. Not this one, because it is the money engine and unrelated to what you asked
-for.
-
 ### L4. `credits.mjs` is dead code that contradicts the live money engine. [verified]
 
 Imported by nothing but its own test. It keys accounts by uid where `billing.mjs` keys by email, uses
 integer balances where the live one uses reals, disagrees on the retry count, and still contains the
 `Math.ceil` minimum-spend rounding you explicitly overruled. Anyone reading it for the money model
 learns the wrong model. It should be deleted or clearly marked, and deleting a file is your call.
-
-### L5. Two shipped strings are stale and will make the app lie to a customer. [verified]
-
-`idehelp.mjs` tells the builder AI that Video Generation is "Coming Soon; it is a promise, not a wired
-feature yet", while the rail launches a complete Video Studio. Ask the builder about video and it will
-say the wrong thing. Separately `features.mjs` says "30 of the 43 models carry the grant" and the
-roster is 23 seats after the 2026-08-03 prune. Both are one-line fixes in someone else's file.
 
 ### L6. No bulk data export and no self-service account deletion. [verified]
 

@@ -112,6 +112,19 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
     setRecharge: db.prepare("UPDATE credits SET autorecharge=?, topupUsd=?, updatedAt=? WHERE email=?"),
     setStripe: db.prepare("UPDATE credits SET stripeCustomer=?, defaultPm=?, updatedAt=? WHERE email=?"),
     setFails: db.prepare("UPDATE credits SET rechargeFails=?, nextRetryAt=?, updatedAt=? WHERE email=?"),
+    /*
+     * The accounts a retry is actually DUE on. Every clause earns its place:
+     *   autorecharge=1        a user who switched it off is not chased
+     *   nextRetryAt <= now    the whole point; this column existed and nothing ever read it
+     *   rechargeFails < MAX   after the last failure nextRetryAt is null anyway, so this is belt and
+     *                         braces against a row written by an older version of the code
+     *   defaultPm NOT NULL    no saved card means there is nothing to charge and the account is
+     *                         already locked; retrying would only relock it every hour
+     */
+    dueForRetry: db.prepare(`SELECT email, rechargeFails, nextRetryAt FROM credits
+      WHERE autorecharge = 1 AND nextRetryAt IS NOT NULL AND nextRetryAt <= ?
+        AND rechargeFails > 0 AND rechargeFails < ? AND defaultPm IS NOT NULL
+      ORDER BY nextRetryAt ASC LIMIT ?`),
     ledgerIns: db.prepare("INSERT INTO ledger (email,delta,reason,balanceAfter,ts) VALUES (?,?,?,?,?)"),
     ledgerFor: db.prepare("SELECT * FROM ledger WHERE email=? ORDER BY id DESC LIMIT ?"),
     codeIns: db.prepare("INSERT INTO codes (code,type,status,capUsd,credits,note,createdAt) VALUES (?,?,?,?,?,?,?)"),
@@ -192,7 +205,7 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
   // Auto-recharge: called when a credit user is at/below the threshold. Uses the injected `charge`.
   // On success: grant credits, clear the fail counter, unlock. On failure: count it, schedule a retry,
   // and LOCK after MAX_RECHARGE_FAILS. Returns a small status object; never throws.
-  async function autoRecharge(email) {
+  async function autoRecharge(email, { force = false } = {}) {
     const e = lc(email); const row = ensure(e);
     if (!row.autorecharge) return { attempted: false, reason: "autorecharge_off" };
     if (!charge) return { attempted: false, reason: "no_charger" };
@@ -200,6 +213,28 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
       // No saved card: cannot recharge -> lock so the user tops off manually.
       if (users) users.setStatus(e, "locked");
       return { attempted: false, reason: "no_payment_method", locked: true };
+    }
+    /*
+     * HONOUR THE BACKOFF (2026-08-12). `nextRetryAt` has been written since this function was first
+     * written and read by nothing at all, which broke the documented behaviour in the more damaging
+     * direction rather than the harmless one.
+     *
+     * The header above promises "it retries every few days for about a week". What actually happened:
+     * meterTurn calls this on EVERY low turn, this function had no idea a retry was already scheduled,
+     * so a customer whose card was declining got all three attempts inside a couple of minutes and
+     * locked almost immediately. Three declines in quick succession is also precisely the pattern card
+     * networks and issuers penalise, so the app was hammering a card it had already been told no by,
+     * and spending the user's whole retry allowance before they could react.
+     *
+     * `force` exists for the video settlement path, which deliberately tops up repeatedly to fund one
+     * expensive job. A SUCCESSFUL charge clears nextRetryAt below, so that loop is unaffected in the
+     * normal case and now stops after the first decline instead of trying twenty-five times.
+     */
+    if (!force && row.nextRetryAt) {
+      const due = Date.parse(row.nextRetryAt);
+      if (Number.isFinite(due) && due > Date.now()) {
+        return { attempted: false, reason: "backoff", retryAt: row.nextRetryAt, fails: row.rechargeFails };
+      }
     }
     let res;
     try { res = await charge({ email: e, usd: row.topupUsd, customer: row.stripeCustomer, pm: row.defaultPm }); }
@@ -215,6 +250,44 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
     q.setFails.run(fails, fails >= MAX_RECHARGE_FAILS ? null : next, now(), e);
     if (fails >= MAX_RECHARGE_FAILS && users) users.setStatus(e, "locked");
     return { attempted: true, ok: false, fails, locked: fails >= MAX_RECHARGE_FAILS, error: res && res.error };
+  }
+
+  /*
+   * THE RETRY THAT THE HEADER HAS ALWAYS PROMISED, and which did not exist until 2026-08-12.
+   *
+   * "it retries every few days for about a week, then stops trying" was true of the DATA and false of
+   * the BEHAVIOUR: a retry time was written on every failure and read by nothing, there was no cron,
+   * no boot sweep and no timer anywhere in the app. Recovery could only happen opportunistically on
+   * the user's next metered turn, and after the third failure the account is locked and a locked
+   * account cannot chat, so the path that would have retried was unreachable by construction.
+   *
+   * Deliberately boring. It asks the database which accounts are due, charges each once, and stops.
+   * `limit` is a stampede guard: after an outage a hundred accounts can come due in the same minute
+   * and firing a hundred charges at once is how you get an issuer to start declining all of them.
+   *
+   * Every attempt goes through autoRecharge, so success, failure, counting, scheduling and locking
+   * all stay in the one place that has always owned them. This function decides WHO and WHEN, never
+   * what happens.
+   */
+  async function retryDueRecharges({ at = new Date().toISOString(), limit = 25, log = () => {} } = {}) {
+    let due = [];
+    try { due = q.dueForRetry.all(String(at), MAX_RECHARGE_FAILS, Math.max(1, Math.min(200, Number(limit) || 25))); }
+    catch (err) { log("[billing] retry sweep could not read due accounts: " + (err && err.message)); return { due: 0, ok: 0, failed: 0, locked: 0 }; }
+    if (!due.length) return { due: 0, ok: 0, failed: 0, locked: 0 };
+
+    let okCount = 0, failed = 0, locked = 0;
+    for (const row of due) {
+      // Sequential on purpose. These are card charges, not page loads.
+      const r = await autoRecharge(row.email, { force: true });
+      if (r && r.ok) { okCount++; log("[billing] retry succeeded for " + row.email + ", account unlocked"); }
+      else {
+        failed++;
+        if (r && r.locked) { locked++; log("[billing] retry failed for " + row.email + " (attempt " + r.fails + "), account locked, no further retries"); }
+        else log("[billing] retry failed for " + row.email + " (attempt " + ((r && r.fails) || "?") + "), next one scheduled");
+      }
+    }
+    log("[billing] retry sweep: " + due.length + " due, " + okCount + " recovered, " + failed + " failed, " + locked + " locked out");
+    return { due: due.length, ok: okCount, failed, locked };
   }
 
   // ----- codes (invite + free) -----
@@ -255,6 +328,10 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
   return {
     // ledger
     balance, canChat, hasPaid, grantUsd, grantSession, chargeTurn, autoRecharge, apply,
+    retryDueRecharges,
+    // Exposed so the sweep, the tests and any future dashboard all ask the same question.
+    dueForRetry: (at = new Date().toISOString(), limit = 25) =>
+      q.dueForRetry.all(String(at), MAX_RECHARGE_FAILS, Math.max(1, Math.min(200, Number(limit) || 25))),
     adminAdjust: (email, credits, reason) => apply(email, credits, reason || "admin adjust"),
     ledger: (email, limit = 50) => q.ledgerFor.all(lc(email), limit),
     account: (email) => { const r = ensure(email); return { balance: r.balance, usdValue: usdValueOfCredits(r.balance), autorecharge: !!r.autorecharge, topupUsd: r.topupUsd, hasCard: !!r.defaultPm, rechargeFails: r.rechargeFails, pendingPromo: r.pendingPromo || 0, hasPaid: hasPaid(email) }; },

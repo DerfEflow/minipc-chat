@@ -34,7 +34,7 @@ const env = {
   LOG_DIR: join(dir, "logs"), SANDBOX_DIR: join(dir, "sandbox"),
   MULTI_TENANT: "1", OWNER_EMAIL: OWNER,
   // Every background worker off, per the convention every other e2e suite follows.
-  AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0", CATALOG_AUDIT: "0",
+  AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0", BILLING_RETRY_ENABLED: "0", CATALOG_AUDIT: "0",
   // No provider keys. The point is to prove the non-model half is wired.
   OPENROUTER_API_KEY: "", ANTHROPIC_API_KEY: "", OPENAI_API_KEY: "", NVIDIA_API_KEY: "", STRIPE_SECRET_KEY: "",
 };

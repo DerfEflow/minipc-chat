@@ -152,14 +152,39 @@ await t("auto-recharge with a working card grants credits and stays active", asy
   assert.equal(b.balance("ok@x.com"), creditsForUsd(25));  // 2000
 });
 
+/*
+ * UPDATED 2026-08-12, and the update IS the fix rather than an accommodation of it.
+ *
+ * This called autoRecharge three times in a row and asserted the third one locked the account. That
+ * passed because autoRecharge ignored its own `nextRetryAt`, so a declining card could be charged
+ * three times inside one loop. The header of billing.mjs has always promised the opposite: retries
+ * "every few days for about a week". So the test was pinning the bug, and pinning it in the direction
+ * that hurt customers, because meterTurn runs that same loop on every low turn and a real declining
+ * card was hit three times in about two minutes before locking.
+ *
+ * Three failures still lock the account. They now have to be three ATTEMPTS ON DIFFERENT DAYS, which
+ * is what the documentation always said and what billing_retry_test.mjs walks day by day. `force`
+ * here stands in for the sweep arriving after the retry time has passed.
+ */
 await t("auto-recharge that keeps failing locks after the retry limit", async () => {
   const users = mockUsers();
   const b = createBilling({ dir: join(dir, "h"), users, charge: async () => ({ ok: false, error: "card_declined" }) });
   b.setStripe("bad@x.com", "cus_2", "pm_2");
   let last;
-  for (let i = 0; i < 3; i++) last = await b.autoRecharge("bad@x.com");
+  for (let i = 0; i < 3; i++) last = await b.autoRecharge("bad@x.com", { force: true });
   assert.equal(last.locked, true);
   assert.equal(users._state["bad@x.com"].status, "locked");
+});
+
+await t("a declining card is NOT charged three times in a row without the retry wait", async () => {
+  const users = mockUsers();
+  let charges = 0;
+  const b = createBilling({ dir: join(dir, "h2"), users, charge: async () => { charges++; return { ok: false, error: "card_declined" }; } });
+  b.setStripe("bad2@x.com", "cus_3", "pm_3");
+  for (let i = 0; i < 3; i++) await b.autoRecharge("bad2@x.com");
+  assert.equal(charges, 1, "the card was charged " + charges + " times in one burst; the retry wait is not being honoured");
+  assert.notEqual(users._state["bad2@x.com"] && users._state["bad2@x.com"].status, "locked",
+    "the account locked inside one burst instead of over the documented week");
 });
 
 await t("setAutorecharge enforces the minimum top-up", () => {

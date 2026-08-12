@@ -80,7 +80,15 @@ export function createVideoChargeSettler({
         }
 
         const before = Number(account.balance) || 0;
-        const recharge = await billing.autoRecharge(email);
+        /*
+         * `force` skips the retry backoff added to billing.mjs on 2026-08-12, and this is the one
+         * call site that should. The backoff exists to stop the low-balance path hammering a card
+         * that has already declined. This path is different in kind: the expensive work is FINISHED
+         * and has to be paid for, so refusing to try because of a scheduled retry would leave a real
+         * cost unsettled. It also cannot hammer anything, because the loop below throws on the first
+         * charge that does not increase the balance.
+         */
+        const recharge = await billing.autoRecharge(email, { force: true });
         recharges.push(recharge);
         account = billing.account(email);
         if (!recharge || recharge.ok !== true || Number(account.balance) <= before) {

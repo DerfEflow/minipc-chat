@@ -59,20 +59,20 @@ import { createHash } from "node:crypto";
 export const MIN_PURCHASE_USD = 12.5;
 
 /*
- * THE CEILING IS NEW, AND IT IS THE ONE NUMBER HERE FRED HAS NOT SET.
+ * THE CEILING. Set by Fred at $200 on 2026-08-12.
  *
  * `POST /billing/topup` has no upper bound today, which was defensible when the only way to reach it
  * was a person choosing a tier on a page. It is not defensible once a conversational assistant is
  * anywhere near the path, because the failure is no longer a user picking a big number on purpose, it
- * is a typo in a chat box: "500" meant as five dollars, or a stray zero on 50.
+ * is a typo in a chat box: "200" meant as twenty dollars, or a stray zero on 20.
  *
- * $500 is set as a working ceiling because the largest offered tier is $100, so this is five times
- * the biggest deliberate purchase the app has ever offered, which leaves real headroom while turning
- * a slipped zero into a plain refusal. It is in the FITS ledger for Fred to move. A refusal here is
- * cheap and reversible: she says the number is above what she can do in one go and offers to take
- * them to the payment screen, which has no ceiling.
+ * $200 is twice the largest tier the app offers ($100), so every deliberate purchase the app has ever
+ * sold still fits with room over, and a slipped zero on any of those tiers ($125, $250, $500, $1000)
+ * lands outside and is refused in plain words. A refusal here is cheap and reversible: she says the
+ * number is above what she can do in one go and offers the payment screen, which has no ceiling.
+ * I proposed $500; Fred chose $200, which is the tighter and better answer.
  */
-export const MAX_PURCHASE_USD = 500;
+export const MAX_PURCHASE_USD = 200;
 
 /*
  * How long a typed-confirmation request stays live. Long enough for someone to go and check their
