@@ -53,19 +53,34 @@ in place. The roll-call now pins "Video Studio" instead.
 grant holders, wrong in both halves for nine days. It is now counted from the catalog it describes, so
 the next prune corrects it without anyone noticing it needed correcting.
 
-## OPEN, needs Fred's decision
+### L2 (was open). A deliberate switch-off now sticks. RESOLVED
 
-### L2. Auto top-off is load-bearing for two features, and she can now switch it off.
+Fred: "yes it should". `billing.grantSession` used to re-arm auto top-off on every paid session,
+unconditionally, and the comment called it mandatory. So a user could ask Altana to switch it off, be
+told plainly it was off, buy credits an hour later, and have it silently back on with nothing said.
+The app reported one state and held another, which is the shape of defect this whole project keeps
+finding.
 
-Turning it off is real and it breaks things: video generation refuses to run without it
-(`video-http.mjs`, 402 `Enable auto top-up before generating video`) and Engineer mode is gated on it
-(`ide.mjs` `engineerGate`). She states both consequences in the confirmation, before the user types,
-and repeats them in the result. `billing.grantSession` also force-enables it on every paid session,
-so a user who switches it off and then buys credits will find it back on. That is existing behaviour
-and I have not touched it, but it means "off" is not permanent and she does not currently say so.
+A purchase still ARMS it for anyone who has never touched the switch, because a long job dying at the
+balance floor is a worse experience than a top-up nobody minded. It no longer overrides an explicit
+no. The opt-out is a separate column from `autorecharge` on purpose: "not running right now" is also
+true of an account that has never bought anything, and only "a human turned this off deliberately"
+should outrank a purchase. It defaults to off, so no existing account changes behaviour until its
+owner next uses the switch.
 
-Decide which you want: leave it (a purchase re-arms top-off), or make a deliberate switch-off stick.
-The second is a change to `billing.mjs` and I would want your word before touching the money engine.
+Turning it off still costs the user video generation and the full Engineer view, because both gate on
+it, and she states that before they type and again in the result. She now also says "and it stays
+off", which is a promise the app can finally keep. A test in `billing_test.mjs` was pinning the old
+contract and is updated rather than deleted.
+
+### L4 (was open). `credits.mjs` is deleted. RESOLVED
+
+Fred: "delete it". Removed along with `credits_test.mjs`, its only importer anywhere in the codebase.
+It disagreed with the live ledger about the account key, the balance type and the retry count, and
+still carried the `Math.ceil` minimum-spend rounding Fred had explicitly overruled. Anyone reading it
+for the money model learned the wrong one. `billing.mjs` is now the only money engine in the app.
+
+## MEASURED, no decision needed
 
 ### L2b. What the breadth costs, measured. [verified]
 
@@ -79,13 +94,6 @@ than the arithmetic above. I have not measured the actual cached fraction on the
 `cacheprobe.mjs` is the tool that would settle it if you want the true number.
 
 ## FOUND, pre-existing, not fixed in this wave
-
-### L4. `credits.mjs` is dead code that contradicts the live money engine. [verified]
-
-Imported by nothing but its own test. It keys accounts by uid where `billing.mjs` keys by email, uses
-integer balances where the live one uses reals, disagrees on the retry count, and still contains the
-`Math.ceil` minimum-spend rounding you explicitly overruled. Anyone reading it for the money model
-learns the wrong model. It should be deleted or clearly marked, and deleting a file is your call.
 
 ### L6. No bulk data export and no self-service account deletion. [verified]
 

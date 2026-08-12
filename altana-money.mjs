@@ -41,8 +41,10 @@
  * details have always been entered and where they stay. Altana's part ends at "type the amount".
  *
  * It also holds no money logic of its own. Rates, markup, balances and the ledger belong to
- * billing.mjs, which is the live money engine. (credits.mjs is dead code with a conflicting model and
- * a rejected rounding rule; it is imported by nothing but its own test. Do not wire it here.)
+ * billing.mjs, which is the only money engine in this app. There was briefly a second one, credits.mjs,
+ * imported by nothing but its own test and disagreeing with the live one about the key, the balance
+ * type and the rounding rule Fred had already overruled. It was deleted on 2026-08-12 rather than left
+ * to teach the wrong model to whoever read it next.
  */
 
 import { createHash } from "node:crypto";
@@ -348,9 +350,10 @@ export function topOffConsequence(turningOn) {
   return turningOn
     ? "With this on, your balance tops itself up when it runs low, so a long job will not die halfway " +
       "through. It also means credits can be bought without asking you each time."
-    : "Worth knowing before you do: with this off, nothing is ever charged without you asking, and " +
-      "two things stop working. Video making needs it on, and so does the full Engineer view of the " +
-      "app builder. Everything else carries on as normal, and a long job can run out of credits and stop.";
+    : "Worth knowing before you do: with this off, nothing is ever charged without you asking, and it " +
+      "stays off even if you buy credits later. Two things stop working. Video making needs it on, and " +
+      "so does the full Engineer view of the app builder. Everything else carries on as normal, and a " +
+      "long job can run out of credits and stop.";
 }
 
 /**
@@ -519,8 +522,14 @@ export function topOffOutcome({ asked, actual, error = "" } = {}) {
   if (actual === asked) {
     return asked
       ? "Automatic top-off is on. Your balance will keep itself topped up so a long job does not stop halfway."
-      : "Automatic top-off is off. Nothing will be charged to you without you asking for it. " +
-        "Remember that video making and the full Engineer view both need it on, so tell me if you want it back.";
+      /*
+       * "and it stays off" is a promise the app can now actually keep (Fred, 2026-08-12). Until that
+       * change, buying credits silently re-armed this, so she had been telling people it was off and
+       * the app was quietly turning it back on behind her. Saying so plainly is the point of the fix.
+       */
+      : "Automatic top-off is off, and it stays off. Buying credits later will not switch it back on. " +
+        "Nothing will be charged to you without you asking for it. Remember that video making and the " +
+        "full Engineer view both need it on, so tell me if you want it back.";
   }
   return "I asked for that to be turned " + (asked ? "on" : "off") + " and it has come back " +
     (actual ? "on" : "off") + ", so I am not going to tell you it worked. I have recorded it and I will chase it.";

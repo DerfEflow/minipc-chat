@@ -92,12 +92,24 @@ await t("invite code: redeem activates a CREDIT user but HOLDS promo as a welcom
   assert.equal(b.account("friend@x.com").pendingPromo, 500);
 });
 
-await t("first purchase releases the welcome bonus and turns auto-recharge on", () => {
+/*
+ * UPDATED 2026-08-12 on Fred's instruction ("yes it should", about a deliberate switch-off sticking).
+ *
+ * This used to turn auto-recharge OFF before the purchase, with the comment "even if they opted out
+ * pre-purchase", and assert the purchase turned it back on as mandatory. That was the real behaviour
+ * and it was the defect: a user could ask Altana to switch off automatic top-off, be told plainly it
+ * was off, buy credits an hour later, and have it silently back on with nothing said. The app was
+ * reporting one state and holding another, which is the shape of bug this whole project keeps finding.
+ *
+ * The purchase still ARMS it for anyone who has not touched the switch, because a long job dying at
+ * the balance floor is a worse experience than a top-up nobody minded. It no longer overrides an
+ * explicit no. Both halves are asserted below, and billing_retry_test.mjs walks the full opt-out story.
+ */
+await t("first purchase releases the welcome bonus and arms auto-recharge by default", () => {
   const users = mockUsers();
   const b = createBilling({ dir: join(dir, "c2"), users });
   const code = b.mintCode({ type: "invite", credits: 500 });
   b.redeem(code.code, "payer@x.com");
-  b.setAutorecharge("payer@x.com", false);                // even if they opted out pre-purchase
   const g = b.grantSession("cs_test_1", "payer@x.com", 1000);   // $12.50 purchase
   assert.equal(g.ok, true);
   assert.equal(b.balance("payer@x.com"), 1500);           // purchase + released bonus
@@ -105,10 +117,25 @@ await t("first purchase releases the welcome bonus and turns auto-recharge on", 
   assert.equal(b.canChat("payer@x.com"), true);
   const a = b.account("payer@x.com");
   assert.equal(a.pendingPromo, 0);
-  assert.equal(a.autorecharge, true);                     // mandatory after first purchase
+  assert.equal(a.autorecharge, true);                     // armed for a user who never touched it
+  assert.equal(a.topOffOptOut, false);
   const again = b.grantSession("cs_test_1", "payer@x.com", 1000);   // idempotent replay
   assert.equal(again.already, true);
   assert.equal(b.balance("payer@x.com"), 1500);           // bonus NOT double-released
+});
+
+await t("a deliberate switch-off survives a later purchase", () => {
+  const users = mockUsers();
+  const b = createBilling({ dir: join(dir, "c3"), users });
+  const code = b.mintCode({ type: "invite", credits: 500 });
+  b.redeem(code.code, "nope@x.com");
+  b.setAutorecharge("nope@x.com", false);                 // the user says no, on purpose
+  const g = b.grantSession("cs_test_2", "nope@x.com", 1000);
+  assert.equal(g.ok, true, "the purchase itself must still work");
+  assert.equal(b.balance("nope@x.com"), 1500, "the welcome bonus must still be released");
+  const a = b.account("nope@x.com");
+  assert.equal(a.autorecharge, false, "buying credits silently overrode a setting the user was told was off");
+  assert.equal(a.topOffOptOut, true);
 });
 
 await t("free code: redeem activates a SPONSORED user with the cap", () => {

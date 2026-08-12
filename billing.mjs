@@ -104,12 +104,32 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
   // Additive migration: pay-before-access. Promo credits on an invite code are held here and released
   // by the FIRST purchase, so handing out codes costs nothing until the guest actually subscribes.
   try { db.exec("ALTER TABLE credits ADD COLUMN pendingPromo INTEGER NOT NULL DEFAULT 0"); } catch {}
+  /*
+   * Additive migration, 2026-08-12: a deliberate switch-off of auto top-off STICKS (Fred: "yes it
+   * should").
+   *
+   * Until now grantSession re-armed auto-recharge on every paid session, unconditionally, and the
+   * comment called it mandatory. That made "off" a setting the app quietly undid: a user could ask
+   * Altana to turn it off, be told plainly that it was off, buy credits an hour later, and have it
+   * silently back on with nothing said. The whole point of giving her that switch was that a customer
+   * who does not want to be charged without asking should not be charged without asking.
+   *
+   * A SEPARATE COLUMN, rather than reading `autorecharge` itself, because the two facts are genuinely
+   * different and conflating them is what caused the bug. `autorecharge = 0` means it is not running
+   * right now, which is also true of an account that has never bought anything. `topOffOptOut = 1`
+   * means A HUMAN TURNED IT OFF ON PURPOSE, which is the only thing that should outrank a purchase.
+   * Defaulting to 0 means every existing row keeps today's behaviour, so this migration changes
+   * nothing for anyone until they next use the switch.
+   */
+  try { db.exec("ALTER TABLE credits ADD COLUMN topOffOptOut INTEGER NOT NULL DEFAULT 0"); } catch {}
 
   const q = {
     get: db.prepare("SELECT * FROM credits WHERE email=?"),
     ins: db.prepare(`INSERT INTO credits (email,balance,createdAt,updatedAt) VALUES (?,?,?,?)`),
     setBal: db.prepare("UPDATE credits SET balance=?, updatedAt=? WHERE email=?"),
-    setRecharge: db.prepare("UPDATE credits SET autorecharge=?, topupUsd=?, updatedAt=? WHERE email=?"),
+    // autorecharge and the opt-out move together, always, so the two can never disagree about
+    // whether a human turned this off on purpose.
+    setRecharge: db.prepare("UPDATE credits SET autorecharge=?, topupUsd=?, topOffOptOut=?, updatedAt=? WHERE email=?"),
     setStripe: db.prepare("UPDATE credits SET stripeCustomer=?, defaultPm=?, updatedAt=? WHERE email=?"),
     setFails: db.prepare("UPDATE credits SET rechargeFails=?, nextRetryAt=?, updatedAt=? WHERE email=?"),
     /*
@@ -181,8 +201,20 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
       bal = apply(email, row.pendingPromo, "welcome bonus (released by first purchase)");
       q.setPending.run(0, now(), lc(email));
     }
-    q.setRecharge.run(1, Math.max(MIN_TOPUP_USD, row.topupUsd || MIN_TOPUP_USD), now(), lc(email));
-    return { ok: true, credited: Math.trunc(credits) || 0, balance: bal };
+    /*
+     * A PURCHASE ARMS AUTO TOP-OFF, UNLESS THE USER TURNED IT OFF ON PURPOSE (Fred, 2026-08-12).
+     *
+     * This used to run unconditionally, so buying credits silently undid a setting the user had
+     * deliberately changed and had been told plainly was off. That is the shape of defect this whole
+     * project keeps finding: the app reporting one state and holding another.
+     *
+     * Arming it by default on a first purchase is still right, because a long job dying at the floor
+     * is a worse experience than a top-up nobody minded. Overriding an explicit "no" is not.
+     */
+    if (!row.topOffOptOut) {
+      q.setRecharge.run(1, Math.max(MIN_TOPUP_USD, row.topupUsd || MIN_TOPUP_USD), 0, now(), lc(email));
+    }
+    return { ok: true, credited: Math.trunc(credits) || 0, balance: bal, topOffOptOut: !!row.topOffOptOut };
   }
   // Deduct a turn's token cost (USD) in credits. Returns { balance, deducted, low }.
   function chargeTurn(email, costUsd) {
@@ -195,11 +227,16 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
   const canChat = (email) => balance(email) > 0;
 
   function setStripe(email, customer, pm) { ensure(email); q.setStripe.run(customer || null, pm || null, now(), lc(email)); return { ok: true }; }
+  /*
+   * The ONLY door to this setting, and therefore the only place the opt-out is written. Every caller
+   * is a deliberate human act: the Setup toggle, Altana's typed confirmation, and the one-click arm
+   * inside Engineer. So switching it off records an opt-out, and switching it back on clears one.
+   */
   function setAutorecharge(email, on, topupUsd) {
     ensure(email);
     const usd = Math.max(MIN_TOPUP_USD, Number(topupUsd) || MIN_TOPUP_USD);
-    q.setRecharge.run(on ? 1 : 0, usd, now(), lc(email));
-    return { ok: true, topupUsd: usd };
+    q.setRecharge.run(on ? 1 : 0, usd, on ? 0 : 1, now(), lc(email));
+    return { ok: true, topupUsd: usd, optedOut: !on };
   }
 
   // Auto-recharge: called when a credit user is at/below the threshold. Uses the injected `charge`.
@@ -334,7 +371,7 @@ export function createBilling({ dir, users, charge = null, now = () => new Date(
       q.dueForRetry.all(String(at), MAX_RECHARGE_FAILS, Math.max(1, Math.min(200, Number(limit) || 25))),
     adminAdjust: (email, credits, reason) => apply(email, credits, reason || "admin adjust"),
     ledger: (email, limit = 50) => q.ledgerFor.all(lc(email), limit),
-    account: (email) => { const r = ensure(email); return { balance: r.balance, usdValue: usdValueOfCredits(r.balance), autorecharge: !!r.autorecharge, topupUsd: r.topupUsd, hasCard: !!r.defaultPm, rechargeFails: r.rechargeFails, pendingPromo: r.pendingPromo || 0, hasPaid: hasPaid(email) }; },
+    account: (email) => { const r = ensure(email); return { balance: r.balance, usdValue: usdValueOfCredits(r.balance), autorecharge: !!r.autorecharge, topupUsd: r.topupUsd, hasCard: !!r.defaultPm, rechargeFails: r.rechargeFails, pendingPromo: r.pendingPromo || 0, hasPaid: hasPaid(email), topOffOptOut: !!r.topOffOptOut }; },
     // payment wiring
     setStripe, setAutorecharge,
     // codes

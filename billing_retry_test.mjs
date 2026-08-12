@@ -191,6 +191,65 @@ await t("the whole documented schedule is about a week, and no longer", async ()
   assert.equal(attempts, 3, "the card was tried " + attempts + " times, not the documented three");
 });
 
+console.log("\n=== a deliberate switch-off survives a purchase ===");
+
+await t("buying credits arms auto top-off for someone who never touched the setting", async () => {
+  const { billing } = rig();
+  const email = "fresh@b.c";
+  const r = billing.grantSession("sess_1", email, 1000);
+  assert.equal(r.ok, true);
+  assert.equal(billing.account(email).autorecharge, true,
+    "a first purchase should arm top-off, so a long job does not die at the floor");
+  assert.equal(billing.account(email).topOffOptOut, false);
+});
+
+await t("THE FIX: a purchase does NOT undo a deliberate switch-off", async () => {
+  const { billing } = rig();
+  const email = "optout@b.c";
+  billing.grantSession("sess_2", email, 1000);          // first purchase arms it
+  billing.setAutorecharge(email, false, 25);             // the user deliberately turns it off
+  assert.equal(billing.account(email).autorecharge, false);
+  assert.equal(billing.account(email).topOffOptOut, true, "the opt-out was not recorded");
+
+  const r = billing.grantSession("sess_3", email, 1000); // ...and buys credits an hour later
+  assert.equal(r.ok, true, "the purchase itself must still work");
+  assert.equal(billing.account(email).autorecharge, false,
+    "buying credits silently switched top-off back on, which is exactly what the user was told would not happen");
+  assert.equal(r.topOffOptOut, true, "the grant did not report that it respected the opt-out");
+  assert.ok(billing.balance(email) > 1000, "the credits were not actually granted");
+});
+
+await t("turning it back on clears the opt-out, so it behaves normally again", async () => {
+  const { billing } = rig();
+  const email = "backon@b.c";
+  billing.setAutorecharge(email, false, 25);
+  assert.equal(billing.account(email).topOffOptOut, true);
+  billing.setAutorecharge(email, true, 25);
+  assert.equal(billing.account(email).topOffOptOut, false, "the opt-out outlived the user turning it back on");
+  assert.equal(billing.account(email).autorecharge, true);
+  // And a later purchase is free to re-arm it, because there is no standing "no" any more.
+  billing.grantSession("sess_4", email, 1000);
+  assert.equal(billing.account(email).autorecharge, true);
+});
+
+await t("an opted-out account is never chased by the retry sweep either", async () => {
+  const { billing } = rig();
+  const email = readyCustomer(billing, "optout2@b.c");
+  await billing.autoRecharge(email);                     // fails, schedules a retry
+  billing.setAutorecharge(email, false, 25);             // then the user opts out
+  const later = new Date(Date.now() + 4 * 86400000).toISOString();
+  assert.equal(billing.dueForRetry(later).length, 0,
+    "a user who opted out is still in the retry queue and would be charged");
+});
+
+await t("the opt-out defaults to off, so every existing account keeps today's behaviour", async () => {
+  const { billing } = rig();
+  const email = "legacy@b.c";
+  billing.grantUsd(email, 12.5, "seed");
+  assert.equal(billing.account(email).topOffOptOut, false,
+    "the migration changed behaviour for accounts that never used the switch");
+});
+
 console.log("\n=== who the sweep refuses to touch ===");
 
 await t("an account that switched auto-recharge off is never chased", async () => {

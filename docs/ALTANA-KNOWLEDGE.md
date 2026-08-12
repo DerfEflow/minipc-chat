@@ -68,6 +68,9 @@ never the one who decides how much of your money to spend.
   changes until you type it back. Turning it off is worth understanding first, and she says so before
   you type: with it off nothing is ever charged without you asking, and video making and the full
   Engineer view both stop working, because both require it.
+  **Off stays off.** Buying credits later will not quietly switch it back on. That was true until
+  2026-08-12 and it was wrong: a purchase used to re-arm it, so the app could tell you it was off and
+  hold the opposite. Turning it back on is yours to do, and nothing else does it for you.
 
 She can also read your own balance, so she answers a question about it with the real number rather
 than a guess.

@@ -5981,10 +5981,7 @@ async function handleAltana(req, res, u) {
 
         /* ---------- money ---------------------------------------------------------------------- */
 
-        /*
-         * READ ONLY, and only ever this caller's own account. billing.mjs is the live ledger;
-         * credits.mjs is dead code with a conflicting model and must not be wired here.
-         */
+        // READ ONLY, and only ever this caller's own account. billing.mjs is the one ledger.
         case "read_money_state": {
           try {
             if (T.isOwner) {
