@@ -185,8 +185,28 @@ try {
     assert.ok(r.json.tickets.some((x) => x.summary === "build failed"), "the filed ticket is not on the owner's screen");
   });
 } finally {
-  try { child.kill(); } catch {}
-  await new Promise((r) => setTimeout(r, 400));
+  /*
+   * WAIT FOR THE CHILD TO ACTUALLY DIE, and kill it hard if it will not.
+   *
+   * The first version sent SIGTERM and slept 400ms. That is not enough and the reason is in
+   * server.mjs: the SIGTERM handler is a deliberate drain that checkpoints every running job and then
+   * waits for HTTP to close with a deadline measured in minutes. So the test exited while the server
+   * was still alive, leaving an orphan holding a port and burning CPU into whatever suite ran next.
+   *
+   * Observed exactly once: google-tools_test failed inside the full sequential run and passed 26/26
+   * on its own, immediately afterwards. A suite that makes an unrelated suite flaky is worse than a
+   * suite that fails, because the failure lands on someone else's name.
+   */
+  await new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    child.once("exit", finish);
+    try { child.kill("SIGTERM"); } catch { finish(); }
+    // The drain is welcome to be graceful for two seconds. After that this is a test fixture, not a
+    // production shutdown, and the correct thing is for it to be gone.
+    setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
+    setTimeout(finish, 6000).unref?.();
+  });
   try { rmSync(dir, { recursive: true, force: true }); } catch {}
 }
 

@@ -572,6 +572,52 @@ function collectText(node) {
   ok("she is switched ON and the full loop is wired: module, stylesheet, listener, context hook");
 }
 
+/* ---- the cache-bust trio agrees with itself -------------------------------------------------- */
+/*
+ * CAUGHT LIVE, 2026-08-12. Her panel and stylesheet were rewritten and shipped, and the manual
+ * `?v=` token on both was left at the old value. index.html would have kept asking for the version
+ * every returning browser already held, and the service worker precaches the same URLs by hand, so an
+ * installed phone would have pinned the stale copy indefinitely. The code was deployed, correct, and
+ * invisible: the exact failure this codebase keeps producing, arriving through the front door.
+ *
+ * This does not assert that anyone REMEMBERED to bump (nothing can). It asserts the two lists agree,
+ * which catches the more insidious half of the mistake: bumping index.html and forgetting the service
+ * worker leaves the shell asking for v3 while the cache confidently answers with v2.
+ */
+{
+  const html = readFileSync(new URL("./public/index.html", import.meta.url), "utf8");
+  const sw = readFileSync(new URL("./public/sw.js", import.meta.url), "utf8");
+
+  const versionsIn = (text, file) => {
+    const found = new Map();
+    for (const m of text.matchAll(/\/(altana\.(?:js|css))(\?v=\d+)?/g)) {
+      const seen = found.get(m[1]);
+      const ver = m[2] || "";
+      // Every reference to one asset in one file must carry the same token, or a single page loads
+      // two different builds of the same module and only one of them wins.
+      if (seen !== undefined) {
+        assert.equal(ver, seen, `${file} asks for ${m[1]} at both "${seen}" and "${ver}"`);
+      }
+      found.set(m[1], ver);
+    }
+    return found;
+  };
+
+  const inHtml = versionsIn(html, "index.html");
+  const inSw = versionsIn(sw, "sw.js");
+
+  for (const [asset, ver] of inHtml) {
+    assert.ok(ver, `index.html loads ${asset} with no cache-bust token, so a change to it may never reach a returning browser`);
+    if (inSw.has(asset)) {
+      assert.equal(inSw.get(asset), ver,
+        `sw.js precaches ${asset}${inSw.get(asset)} while index.html asks for ${asset}${ver}. ` +
+        "An installed phone would serve the stale copy for ever.");
+    }
+  }
+  assert.ok(inHtml.size >= 2, "neither of her two assets is cache-busted in index.html");
+  ok("index.html and the service worker agree on the version of every Altana asset");
+}
+
 
 /* ---- 16. her API route must not swallow her own face images -------------------------------- */
 {
@@ -643,6 +689,176 @@ function collectText(node) {
   assert.ok(dot < 340, `the dot (${dot}) must stay below transients (IDE popovers start at 340)`);
   assert.equal(panel, dot + 1, "the panel rides exactly one layer above the dot");
   ok("the stacking contract holds: above every surface, below every transient, measured from the real CSS");
+}
+
+/* ---- the typed confirmation field: the control that authorises money ------------------------- */
+/*
+ * Fred, 2026-08-12: "a 'please type the amount of credits you would like to purchase' field that it
+ * follows", and "a 'type #####' to confirm field". The server half is proved by altana-money_test and
+ * altana_support_e2e_test. This is the half a user actually touches, and it had no coverage at all
+ * until these checks, which is the wrong place to have a blind spot when the control spends money.
+ */
+{
+  const d = stubDoc();
+  const el = altanaMount({ doc: d, enabled: true, signins: 0 });
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push(JSON.parse(opts.body));
+    return fakeRes({
+      reply: "Sure, how much would you like to add?",
+      typedConfirm: [{
+        kind: "amount", tool: "buy_credits", nonce: "nonce-abc",
+        prompt: "Please type the amount of credits you would like to purchase.",
+        hint: "In dollars, between $12.50 and $500.", context: "You have 40 credits right now.",
+        min: 12.5, max: 500, placeholder: "25",
+      }],
+    });
+  };
+  fireClick(el);
+  const panel = d.body.children.find((c) => c.id === "altana-panel");
+  await submit(panel, "add some credits please");
+
+  const row = findByClass(panel, "altana-msg-typed");
+  assert.ok(row, "no typed-confirmation field was drawn, so the user cannot authorise anything");
+  const text = collectText(row);
+  assert.match(text, /type the amount of credits you would like to purchase/i, "Fred's own wording is missing");
+  assert.match(text, /12\.50/, "the floor is not stated to the user");
+  assert.match(text, /40 credits/, "the balance they are deciding from is not shown");
+  const input = findByClass(row, "altana-typed-input");
+  assert.ok(input, "there is no box to type into");
+  assert.equal(input.getAttribute("inputmode"), "decimal", "a phone gets the wrong keyboard for an amount");
+  assert.ok(!findByClass(row, "altana-typed-code"), "a purchase must not show a code to type instead of an amount");
+  ok("asking for credits draws a field asking the user to type the amount, never a button that agrees for them");
+}
+{
+  const d = stubDoc();
+  const el = altanaMount({ doc: d, enabled: true, signins: 0 });
+  const sent = [];
+  globalThis.fetch = async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    sent.push(body);
+    if (body.typed) return fakeRes({ reply: "Done. 2000 credits added for $25.00.", verdict: "charged" });
+    return fakeRes({
+      reply: "How much?",
+      typedConfirm: [{ kind: "amount", tool: "buy_credits", nonce: "n1", prompt: "Please type the amount.", min: 12.5, max: 500 }],
+    });
+  };
+  fireClick(el);
+  const panel = d.body.children.find((c) => c.id === "altana-panel");
+  await submit(panel, "buy credits");
+
+  const row = findByClass(panel, "altana-msg-typed");
+  const input = findByClass(row, "altana-typed-input");
+  const form = findByClass(row, "altana-typed-form");
+  input.value = "25";
+  form.dispatchEvent(new Event("submit", { cancelable: true }));
+  await flush();
+
+  const typedCall = sent.find((b) => b.typed);
+  assert.ok(typedCall, "the typed value was never sent");
+  assert.equal(typedCall.typed.nonce, "n1", "the answer was not bound to the authorisation it answers");
+  assert.equal(typedCall.typed.value, "25", "the user's own figure did not travel");
+  assert.match(collectText(panel), /2000 credits added/, "the real outcome was not shown");
+  /*
+   * The field is disabled after one submit. The server refuses a replay anyway, on a flag stamped
+   * before the money moves, so this is politeness rather than protection: nobody should be able to
+   * sit there clicking a button that can only ever work once.
+   */
+  assert.equal(input.disabled, true, "the box stayed live after being spent");
+  ok("the typed amount travels bound to its authorisation, the outcome is shown, and the field closes");
+}
+{
+  const d = stubDoc();
+  const el = altanaMount({ doc: d, enabled: true, signins: 0 });
+  globalThis.fetch = async () => fakeRes({
+    reply: "I can switch that off for you.",
+    typedConfirm: [{
+      kind: "code", tool: "set_top_off", nonce: "n2", code: "40317",
+      prompt: "Type the number above to switch automatic top-off off.",
+      context: "Worth knowing before you do: video making needs it on, and so does the full Engineer view.",
+      placeholder: "#####",
+    }],
+  });
+  fireClick(el);
+  const panel = d.body.children.find((c) => c.id === "altana-panel");
+  await submit(panel, "turn off automatic top-off");
+
+  const row = findByClass(panel, "altana-msg-typed");
+  const code = findByClass(row, "altana-typed-code");
+  assert.ok(code, "no code was shown, so there is nothing for the user to type back");
+  assert.equal(code.textContent, "40317");
+  const input = findByClass(row, "altana-typed-input");
+  assert.equal(input.getAttribute("inputmode"), "numeric", "a phone gets the wrong keyboard for a code");
+  assert.equal(input.getAttribute("maxlength"), "5", "the box does not match the five digits asked for");
+  // The consequence has to be readable BEFORE they type, not discovered when video stops working.
+  assert.match(collectText(row), /video/i, "the user is not warned that turning it off breaks video");
+  ok("switching top-off shows a five digit code, a numeric keypad, and the consequence before they commit");
+}
+{
+  const d = stubDoc();
+  const el = altanaMount({ doc: d, enabled: true, signins: 0 });
+  let asks = 0;
+  globalThis.fetch = async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    if (body.typed) return fakeRes({ reply: "That number does not match. Have another look.", retry: true });
+    asks++;
+    return fakeRes({ reply: "ok", typedConfirm: [{ kind: "code", tool: "set_top_off", nonce: "n3", code: "11111", prompt: "Type it." }] });
+  };
+  fireClick(el);
+  const panel = d.body.children.find((c) => c.id === "altana-panel");
+  await submit(panel, "turn top off on");
+
+  const row = findByClass(panel, "altana-msg-typed");
+  const input = findByClass(row, "altana-typed-input");
+  input.value = "99999";
+  findByClass(row, "altana-typed-form").dispatchEvent(new Event("submit", { cancelable: true }));
+  await flush();
+
+  // A mistyped code is an ordinary human miss. It must put the field back rather than dead-end them.
+  const rows = [];
+  (function walk(n) { if (String(n.className || "").includes("altana-msg-typed")) rows.push(n); for (const c of n.children || []) walk(c); })(panel);
+  assert.equal(rows.length, 2, "a wrong code left the user with no way to try again");
+  assert.equal(asks, 1, "the retry re-asked the model instead of redrawing the field");
+  ok("a mistyped code redraws the field instead of dead-ending the user");
+}
+{
+  const d = stubDoc();
+  const el = altanaMount({ doc: d, enabled: true, signins: 0 });
+  globalThis.fetch = async () => fakeRes({
+    reply: "Hello.",
+    followUps: [{ id: 7, text: "About the build problem you reported: it has been fixed. Your project is ready to run again." }],
+  });
+  fireClick(el);
+  const panel = d.body.children.find((c) => c.id === "altana-panel");
+  await submit(panel, "hi");
+  assert.match(collectText(panel), /it has been fixed/, "a resolved ticket's follow-up never reached the user");
+  ok("a promise kept: the follow-up for a resolved ticket is delivered on the next turn");
+}
+{
+  const d = stubDoc();
+  const el = altanaMount({ doc: d, enabled: true, signins: 0 });
+  let rounds = 0;
+  globalThis.fetch = async (url, opts) => {
+    rounds++;
+    const body = JSON.parse(opts.body);
+    if (body.toolResults) return fakeRes({ reply: "There are three results, and the first one covers it." });
+    return fakeRes({ reply: "", clientActions: [{ type: "tool_result", name: "web_search", result: "1. Some Page - https://example.com/x - snippet text" }] });
+  };
+  fireClick(el);
+  const panel = d.body.children.find((c) => c.id === "altana-panel");
+  await submit(panel, "search the web for something");
+  await flush();
+
+  const shown = collectText(panel);
+  /*
+   * A registry tool's result is raw data written for a machine. Printing it into the panel would be
+   * exactly the technical spill Fred asked her never to produce, so it goes back to HER and what the
+   * user reads is her sentence about it.
+   */
+  assert.ok(!/https:\/\/example\.com/.test(shown), "a raw tool result was printed at the user");
+  assert.match(shown, /first one covers it/, "her answer about the result never arrived");
+  assert.equal(rounds, 2, "the result was not sent back to her for an answer");
+  ok("a tool result goes back to her for an answer and is never printed at the user");
 }
 
 /* ---- the rescue hatch: double-click sends her home ------------------------------------------- */
@@ -755,4 +971,4 @@ function collectText(node) {
   ok(`the ${CORPUS.length}-entry FAQ answers real questions and still declines the ones it cannot`);
 }
 
-console.log(`\n${passed}/31 checks passed - Altana mounts on body, floats above every surface and below every transient, rotates every ten sign-ins, guards her own anchoring, can always be sent home, opens into a conversation she is actually SENT and can therefore remember, never claims more than clientActions actually dispatched, can file a complaint even without tool calls, and is switched ON.`);
+console.log(`\n${passed}/38 checks passed - Altana mounts on body, floats above every surface and below every transient, rotates every ten sign-ins, guards her own anchoring, can always be sent home, opens into a conversation she is actually SENT and can therefore remember, never claims more than clientActions actually dispatched, can file a complaint even without tool calls, asks the user to TYPE the amount before any money moves, keeps her follow-up promises, never prints a raw tool result at anyone, and is switched ON.`);

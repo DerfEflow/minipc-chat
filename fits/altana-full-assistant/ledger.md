@@ -29,6 +29,17 @@ and I have not touched it, but it means "off" is not permanent and she does not 
 Decide which you want: leave it (a purchase re-arms top-off), or make a deliberate switch-off stick.
 The second is a change to `billing.mjs` and I would want your word before touching the money engine.
 
+### L2b. What the breadth costs, measured. [verified]
+
+Her fixed input per turn is now about 6,500 tokens: roughly 1,470 for the system prompt and 5,040 for
+43 tool schemas, up from about 810 when she held eight verbs. On Luna at $0.20 per million that is
+$1.30 per thousand turns, and the widening itself accounts for $0.85 of it.
+
+Worth knowing rather than worth acting on. It is also now a stable prefix well over the 1,024-token
+threshold where OpenAI's automatic prompt caching applies, so the real billed figure should be lower
+than the arithmetic above. I have not measured the actual cached fraction on the live seat, and
+`cacheprobe.mjs` is the tool that would settle it if you want the true number.
+
 ## FOUND, pre-existing, not fixed in this wave
 
 ### L3. The auto-recharge retry schedule does not exist. [verified]
