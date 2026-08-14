@@ -11559,6 +11559,37 @@ server.listen(PORT, HOST, () => {
   console.log(`[dominion-ai] chatlog: ${chatlog.stats().chats} conversation(s) indexed  ·  episodic summaries via /memory/summarize-session`);
   const js = jobStore.stats();
   console.log(`[dominion-ai] chatjobs: durable (${JSON.stringify(js.byStatus)})  ·  ${js.uncollected} uncollected result(s) waiting  ·  ${jobStore.orphanedAtBoot} orphaned this boot  ·  max-running/user=${CHATJOBS_MAX_RUNNING}  ·  survives restart+redeploy`);
+  /*
+   * The build runner's state, said out loud at boot (Fred, 2026-08-04: "this is a feature I thought
+   * was working"). Dark and armed looked identical from outside, and the token is read ONCE at
+   * startup, so a value typed into the Railway dashboard afterwards changes nothing until the next
+   * deploy. This line is the running process reporting on itself. It names the app, never the token.
+   */
+  console.log(`[dominion-ai] build runner: ${flyRunner.available()
+    ? `ARMED (app=${flyRunner.app} region=${flyRunner.region} ${flyRunner.cpus}cpu/${flyRunner.memoryMb}MB)  ·  workshop shell runs in a throwaway machine per command`
+    : "dark (FLY_API_TOKEN/FLY_APP unset — the workshop refuses shell)"}`);
+  /*
+   * Orphan sweep. run() destroys its own machine in a finally-block, but a SIGTERM cutover mid-build
+   * kills this process before that block runs, and Railway cuts over constantly — nineteen deploys
+   * in one day, per the drain comment below. A machine that outlives every legitimate run bills by
+   * the second for nothing, which is the ONLY failure here that costs real money.
+   *
+   * Once at boot, because the boot right after a cutover is exactly when a stranded machine exists,
+   * and hourly after that. A dark runner makes both a no-op, so this stays silent until provisioned.
+   */
+  if (flyRunner.available()) {
+    const sweepRunnerMachines = async (when) => {
+      try {
+        const r = await flyRunner.reap();
+        if (r.destroyed || r.skipped) {
+          console.log(`[dominion-ai] runner sweep (${when}): ${r.destroyed} orphan(s) destroyed of ${r.checked} machine(s)${r.skipped ? `, ${r.skipped} left alone (unreadable age)` : ""}`);
+        }
+      } catch (e) { console.log(`[dominion-ai] runner sweep (${when}) failed: ${e && e.message}`); }
+    };
+    sweepRunnerMachines("boot");
+    const runnerReapTimer = setInterval(() => sweepRunnerMachines("hourly"), 60 * 60 * 1000);
+    runnerReapTimer.unref?.();
+  }
   // Retention sweep: running jobs are never touched; collected results shed events after
   // CHATJOBS_COLLECTED_TTL_MS, uncollected after CHATJOBS_UNCOLLECTED_TTL_MS (0 = keep forever).
   setInterval(() => { try { jobStore.gcRetention({ collectedTtlMs: CHATJOBS_COLLECTED_TTL_MS, uncollectedTtlMs: CHATJOBS_UNCOLLECTED_TTL_MS }); } catch {} }, 3600000).unref?.();
