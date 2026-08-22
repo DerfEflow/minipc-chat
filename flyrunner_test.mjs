@@ -30,7 +30,7 @@ const t = async (name, fn) => { await fn(); console.log("  PASS  " + name); pass
  * A mock Fly. Records every call so the test can assert on the LIFECYCLE, not just the answer:
  * what was created, what was read, and — the important one — what was destroyed.
  */
-function mockFly({ resultTar = null, stdout = "", stderr = "", exitCode = 0, failCreate = false, neverFinishes = false, stopsEarly = false } = {}) {
+function mockFly({ resultTar = null, stdout = "", stderr = "", exitCode = 0, failCreate = false, neverFinishes = false, stopsEarly = false, machines = null } = {}) {
   const calls = [];
   /*
    * This mock enforces the rule that broke the first design in production-shaped reality: Fly's exec
@@ -53,7 +53,7 @@ function mockFly({ resultTar = null, stdout = "", stderr = "", exitCode = 0, fai
       return reply({ id: "m_test1", state, config: body && body.config });
     }
     if (method === "GET" && /\/machines\/m_test1$/.test(url)) return reply({ id: "m_test1", state });
-    if (method === "GET" && /\/machines$/.test(url)) return reply([]);
+    if (method === "GET" && /\/machines$/.test(url)) return reply(machines || []);
     if (method === "POST" && /\/exec$/.test(url)) {
       if (state !== "started") return reply({ error: "failed_precondition: machine not running" }, 412);
       const cmd = String((body && body.command && body.command[2]) || "");
@@ -66,7 +66,8 @@ function mockFly({ resultTar = null, stdout = "", stderr = "", exitCode = 0, fai
     if (method === "DELETE") return reply({ ok: true });
     return reply({}, 404);
   };
-  return { fetchImpl, calls, destroyed: () => calls.some((c) => c.method === "DELETE") };
+  const deletedIds = () => calls.filter((c) => c.method === "DELETE").map((c) => (String(c.url).match(/\/machines\/([^?]+)/) || [])[1]).filter(Boolean);
+  return { fetchImpl, calls, deletedIds, destroyed: () => calls.some((c) => c.method === "DELETE") };
 }
 
 const runnerWith = (mock, extra = {}) =>
@@ -204,4 +205,60 @@ await t("with a runner configured, node_info reports a Linux shell", async () =>
   rmSync(WORK, { recursive: true, force: true });
 });
 
-console.log(`\n${passed}/12 checks passed - the build runner keeps its lifecycle and its walls`);
+/*
+ * THE ORPHAN SWEEP (wired into the server at boot + hourly, 2026-08-04). run() destroys its own
+ * machine in a finally-block; this is the net for the case that block cannot cover, which is this
+ * process being killed mid-build by a Railway cutover. The sweep is the only piece of the runner
+ * that destroys a machine it did not create, so the tests that matter are the ones proving it does
+ * NOT destroy a machine somebody is still using.
+ */
+const agedMachine = (id, minutesOld) => ({ id, created_at: new Date(Date.now() - minutesOld * 60_000).toISOString() });
+
+await t("the sweep destroys a machine that outlived every legitimate run", async () => {
+  const mock = mockFly({ machines: [agedMachine("m_orphan", 45)] });
+  const r = await runnerWith(mock).reap();
+  assert.equal(r.checked, 1);
+  assert.equal(r.destroyed, 1, "a 45-minute-old machine cannot be a live build and must be collected");
+  assert.deepEqual(mock.deletedIds(), ["m_orphan"]);
+});
+
+/*
+ * THE REGRESSION THIS WIRING WOULD HAVE INTRODUCED. reap()'s first default was HARD_TIMEOUT_MS
+ * (30 minutes), but a machine legitimately lives for the build PLUS its 120s read window — up to 32.
+ * Put that on an hourly timer and the sweep meant to save a fraction of a cent would have destroyed
+ * the machine of a full-length build two minutes before its results were read.
+ */
+await t("the sweep leaves a live build's machine alone, even at the very end of its life", async () => {
+  const mock = mockFly({ machines: [agedMachine("m_young", 4), agedMachine("m_nearly_done", 33)] });
+  const r = await runnerWith(mock).reap();
+  assert.equal(r.checked, 2);
+  assert.equal(r.destroyed, 0, "nothing inside the legitimate lifetime may ever be swept");
+  assert.deepEqual(mock.deletedIds(), [], "a running build must not have its machine pulled out from under it");
+});
+
+await t("a machine with no readable age is left alone rather than destroyed", async () => {
+  const mock = mockFly({ machines: [{ id: "m_ageless" }, { id: "m_garbled", created_at: "not a date" }] });
+  const r = await runnerWith(mock).reap();
+  assert.equal(r.destroyed, 0, "unknown age must never be read as 'old enough to kill'");
+  assert.equal(r.skipped, 2, "and the sweep must say it skipped them rather than stay quiet");
+  assert.deepEqual(mock.deletedIds(), []);
+});
+
+/*
+ * reap() used to call `this.listMachines()`, which throws the moment it is detached from its object
+ * — precisely what `setInterval(runner.reap, ...)` does, i.e. the one use it was written for.
+ */
+await t("the sweep still works when detached from its object, as a timer would detach it", async () => {
+  const mock = mockFly({ machines: [agedMachine("m_orphan", 45)] });
+  const { reap } = runnerWith(mock);
+  const r = await reap();
+  assert.equal(r.destroyed, 1, "a bare function reference must sweep exactly like a method call");
+});
+
+await t("a dark runner sweeps nothing and calls no API", async () => {
+  const r = createFlyRunner({ token: "", app: "" });
+  const out = await r.reap();
+  assert.deepEqual(out, { checked: 0, destroyed: 0, skipped: 0 }, "an unprovisioned runner must be a silent no-op");
+});
+
+console.log(`\n${passed}/17 checks passed - the build runner keeps its lifecycle and its walls`);

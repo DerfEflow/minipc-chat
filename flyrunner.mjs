@@ -35,6 +35,22 @@ const DEFAULT_CPUS = 1;
 const DEFAULT_MEMORY_MB = 1024;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const HARD_TIMEOUT_MS = 30 * 60 * 1000;     // nothing runs longer than this, ever
+/*
+ * How long the machine idles AFTER the build so the caller can read its files (see bootScript).
+ * It is named rather than inlined because the reap threshold below is derived from it: the two
+ * numbers are one decision, and drifting them apart is how a sweep starts eating live builds.
+ */
+const KEEPALIVE_PAD_MS = 120 * 1000;
+// The longest a machine can legitimately be alive: a full-length build, then its read window.
+const MAX_MACHINE_LIFE_MS = HARD_TIMEOUT_MS + KEEPALIVE_PAD_MS;
+/*
+ * The sweep's default threshold, deliberately ABOVE that ceiling. Reaping at HARD_TIMEOUT_MS (the
+ * first draft's default) would have destroyed the machine of a legitimate 30-minute build two
+ * minutes before it finished being read — the sweep meant to save a fraction of a cent would have
+ * killed someone's half-hour build. A leaked machine already dies twice over (its sleep ends,
+ * auto_destroy collects it); this is the third net, so it can afford to be the patient one.
+ */
+const REAP_AFTER_MS = MAX_MACHINE_LIFE_MS + 5 * 60 * 1000;
 const MAX_IN_BYTES = 64 * 1024 * 1024;      // project shipped in
 const MAX_OUT_BYTES = 64 * 1024 * 1024;     // results shipped back
 const POLL_MS = 700;
@@ -148,7 +164,7 @@ export function createFlyRunner({
             // No env: the machine gets no secret of ours, on purpose.
             env: { DOMINION_SANDBOX: "1" },
             files: projectBase64 ? [{ guest_path: "/project.tar.gz", raw_value: projectBase64 }] : [],
-            init: { cmd: ["/bin/sh", "-lc", bootScript({ command: cmd, workdir, keepAliveSec: Math.ceil(cap / 1000) + 120 })] },
+            init: { cmd: ["/bin/sh", "-lc", bootScript({ command: cmd, workdir, keepAliveSec: Math.ceil((cap + KEEPALIVE_PAD_MS) / 1000) })] },
           },
         },
       });
@@ -231,24 +247,46 @@ export function createFlyRunner({
     }
   }
 
+  // Exposed for the health sweep: a leaked machine is the one failure that bills by the second.
+  async function listMachines() {
+    if (!enabled) return [];
+    try { return (await api(`/apps/${app}/machines`, { timeoutMs: 20_000 })) || []; } catch { return []; }
+  }
+
+  /*
+   * Destroy machines that outlived any possible legitimate run. This is the net for the one case
+   * the run()'s own finally-block cannot cover: the Dominion process dying mid-build. Railway swaps
+   * containers with SIGTERM on every deploy, so that is not a hypothetical — it is Tuesday.
+   *
+   * A machine whose age cannot be read is LEFT ALONE rather than destroyed. The first draft treated
+   * a missing created_at as age-since-epoch and killed it, which inverts the risk: an orphan already
+   * dies on its own twice over, while a wrongly-reaped machine takes a running build down with it.
+   *
+   * These are plain closures rather than methods because reap() used to call `this.listMachines()`,
+   * which is exactly the shape that breaks the moment someone writes `setInterval(runner.reap, ...)`
+   * — the wiring this function exists for.
+   */
+  async function reap(olderThanMs = REAP_AFTER_MS) {
+    if (!enabled) return { checked: 0, destroyed: 0, skipped: 0 };
+    const list = await listMachines();
+    let destroyed = 0, skipped = 0;
+    for (const m of list) {
+      const born = new Date(m.created_at || m.createdAt || NaN).getTime();
+      if (!Number.isFinite(born)) { skipped++; log(`[runner] machine ${m.id} has no readable age; leaving it alone`); continue; }
+      if (Date.now() - born > olderThanMs) {
+        log(`[runner] reaping orphaned machine ${m.id} (alive ${Math.round((Date.now() - born) / 60000)}m)`);
+        await destroy(m.id);
+        destroyed++;
+      }
+    }
+    return { checked: list.length, destroyed, skipped };
+  }
+
   return {
     available: () => enabled,
     app, region, image, cpus, memoryMb,
     run,
-    // Exposed for the health sweep: a leaked machine is the one failure that bills by the second.
-    async listMachines() {
-      if (!enabled) return [];
-      try { return (await api(`/apps/${app}/machines`, { timeoutMs: 20_000 })) || []; } catch { return []; }
-    },
-    async reap(olderThanMs = HARD_TIMEOUT_MS) {
-      if (!enabled) return { checked: 0, destroyed: 0 };
-      const list = await this.listMachines();
-      let destroyed = 0;
-      for (const m of list) {
-        const age = Date.now() - new Date(m.created_at || m.createdAt || 0).getTime();
-        if (age > olderThanMs) { await destroy(m.id); destroyed++; }
-      }
-      return { checked: list.length, destroyed };
-    },
+    listMachines,
+    reap,
   };
 }
