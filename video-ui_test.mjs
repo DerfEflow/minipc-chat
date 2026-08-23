@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 const read = name => readFileSync(new URL(name, import.meta.url), "utf8");
 const html = read("./public/index.html");
 const js = read("./public/dominion-video.js");
-const css = read("./public/dominion-video.css");
+// The public stylesheet is intentionally split: the base file owns the full studio layout and
+// the wrapper imports it before applying small, removable hotfixes.  Test the effective stylesheet
+// instead of treating the wrapper as though it still contained every base declaration inline.
+const css = `${read("./public/dominion-video-base.css")}\n${read("./public/dominion-video.css")}`;
 const sw = read("./public/sw.js");
 let passed = 0;
 
