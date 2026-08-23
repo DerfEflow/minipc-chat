@@ -64,8 +64,32 @@ const server = spawn(process.execPath, [join(HERE, "server.mjs")], { env, cwd: H
 let log = "";
 server.stdout.on("data", (d) => (log += d));
 server.stderr.on("data", (d) => (log += d));
-const cleanup = () => { try { server.kill(); } catch {}; try { capture.close(); } catch {}; try { mockOllama.close(); } catch {}; try { rmSync(dataDir, { recursive: true, force: true }); } catch {} };
-process.on("exit", cleanup);
+let cleanupPromise;
+const closeHttpServer = (httpServer) => new Promise((resolve) => {
+  if (!httpServer.listening) return resolve();
+  httpServer.close(() => resolve());
+  httpServer.closeIdleConnections?.();
+});
+const stopChild = (child) => new Promise((resolve) => {
+  if (child.exitCode !== null || child.signalCode !== null) return resolve();
+  let settled = false;
+  const done = () => { if (!settled) { settled = true; resolve(); } };
+  child.once("exit", done);
+  try { child.kill(); } catch { done(); }
+  const timer = setTimeout(() => {
+    try { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); } catch {}
+    done();
+  }, 3000);
+  timer.unref();
+});
+const cleanup = () => cleanupPromise ||= (async () => {
+  // Wait for libuv to finish closing each handle before the process exits. Node 24 on Windows can
+  // assert when `process.exit()` begins teardown while an HTTP server's async close is still live.
+  await Promise.allSettled([closeHttpServer(capture), closeHttpServer(mockOllama)]);
+  await stopChild(server);
+  try { rmSync(dataDir, { recursive: true, force: true }); } catch {}
+})();
+process.on("exit", () => { try { server.kill(); } catch {} });
 
 let up = false;
 for (let i = 0; i < 90 && !up; i++) {
@@ -225,5 +249,5 @@ for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
   console.log("  " + k.padEnd(20) + (x === y ? "same  " + String(x).slice(0, 60) : "DIFFERS  " + String(x).slice(0, 40) + "  ->  " + String(y).slice(0, 40)));
 }
 
-cleanup();
-process.exit(broken ? 1 : 0);
+await cleanup();
+process.exitCode = broken ? 1 : 0;
