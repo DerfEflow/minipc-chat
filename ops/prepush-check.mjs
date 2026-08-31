@@ -2,11 +2,14 @@
 /*
  * Pre-push guard (Fred, 2026-07-30): a push is a deploy, and a deploy executes every running
  * turn on the old container. Nineteen same-day deploys killed two of Fred's live builds today.
- * This script asks production how many chat jobs are running RIGHT NOW and exits nonzero when a
- * push would interrupt someone, so "check before you push" is one command instead of a promise:
+ * This script asks production how many chat jobs, Crucible builds, and Mobile Game Factory tasks
+ * are running RIGHT NOW and exits nonzero when a push would interrupt work, so "check before you
+ * push" is one command instead of a promise:
  *
  *   node ops/prepush-check.mjs            # human-readable verdict, exit 0 = safe to push
  *   node ops/prepush-check.mjs --wait     # poll every 20s until the coast is clear (max 30 min)
+ *   node ops/prepush-check.mjs --bootstrap-factory-from=<build>
+ *                                          # one-time rollout from an exact legacy build
  *
  * Auth: the public /api/version needs nothing; the running-jobs probe rides the boot banner's
  * counters exposed on /api/version (added 2026-07-30) so NO owner cookie is required and nothing
@@ -14,7 +17,14 @@
  */
 const BASE = process.env.DOMINION_BASE_URL || "https://app.dominion.tools";
 const WAIT = process.argv.includes("--wait");
+const BOOTSTRAP_ARG = process.argv.find((arg) => arg.startsWith("--bootstrap-factory-from="));
+const BOOTSTRAP_BUILD = BOOTSTRAP_ARG ? BOOTSTRAP_ARG.slice("--bootstrap-factory-from=".length).trim() : "";
 const DEADLINE = Date.now() + 30 * 60 * 1000;
+
+if (BOOTSTRAP_ARG && !BOOTSTRAP_BUILD) {
+  console.error("prepush-check: --bootstrap-factory-from requires the exact currently deployed build or commit.");
+  process.exitCode = 2;
+}
 
 async function probe() {
   const r = await fetch(BASE + "/api/version", { headers: { "cache-control": "no-store" } });
@@ -28,6 +38,7 @@ async function probe() {
  * exit status is garbage is worse than no guard at all (caught on its first real use).
  */
 async function verdict() {
+  if (process.exitCode) return process.exitCode;
   for (;;) {
     let v;
     try { v = await probe(); }
@@ -52,13 +63,35 @@ async function verdict() {
       console.error("prepush-check: production does not report runningBuilds yet (build " + (v.build || v.sha || "unknown") + "). It cannot see Crucible builds, and a push would seal any live build as interrupted. Treat as UNKNOWN.");
       return 3;
     }
-    if (running === 0 && builds === 0) {
-      console.log("prepush-check: 0 running chat jobs and 0 running builds on " + BASE + " — safe to push.");
+    let factory = Number(v.runningFactoryTasks);
+    if (!Number.isFinite(factory)) {
+      const deployedIdentity = String(v.build || v.sha || "").trim();
+      if (BOOTSTRAP_BUILD && deployedIdentity === BOOTSTRAP_BUILD) {
+        // This exact legacy build predates the factory, so its missing factory count is provably
+        // zero. Existing chat/build counters remain authoritative and can still refuse rollout.
+        factory = 0;
+        if (running === 0 && builds === 0) {
+          console.log("prepush-check: exact legacy build " + deployedIdentity + " has 0 running chat jobs and 0 running Crucible builds. Factory tasks cannot exist before this feature; one-time factory bootstrap is safe.");
+          return 0;
+        }
+      }
+      else if (BOOTSTRAP_BUILD && deployedIdentity !== BOOTSTRAP_BUILD) {
+        console.error("prepush-check: bootstrap build mismatch (expected " + BOOTSTRAP_BUILD + ", production reports " + (deployedIdentity || "unknown") + "). Treat as UNSAFE.");
+        return 3;
+      }
+      else {
+        console.error("prepush-check: production does not report runningFactoryTasks yet (build " + (v.build || v.sha || "unknown") + "). It cannot see Mobile Game Factory tasks. Treat as UNKNOWN.");
+        return 3;
+      }
+    }
+    if (running === 0 && builds === 0 && factory === 0) {
+      console.log("prepush-check: 0 running chat jobs, 0 running builds, and 0 running factory tasks on " + BASE + " — safe to push.");
       return 0;
     }
     const parts = [];
     if (running) parts.push(running + " running chat job(s)");
     if (builds) parts.push(builds + " running Crucible build(s)");
+    if (factory) parts.push(factory + " running Mobile Game Factory task(s)");
     console.log("prepush-check: " + parts.join(" and ") + " on " + BASE + " — a push now would interrupt them.");
     if (!WAIT || Date.now() > DEADLINE) return 1;
     await new Promise((res) => setTimeout(res, 20000));

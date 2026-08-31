@@ -16,6 +16,7 @@
   color:#e8f6ff;font:inherit;border-radius:10px;border:1px solid rgba(185,107,50,.34);
   background:linear-gradient(180deg,rgba(26,18,9,.86),rgba(8,6,3,.92));
   box-shadow:inset 0 1px 0 rgba(255,220,170,.14),0 6px 14px rgba(0,0,0,.42)}
+.rail-dest[hidden]{display:none!important}
 .rail-dest:hover{border-color:#d4823c;box-shadow:inset 0 0 14px rgba(212,130,60,.16),0 6px 14px rgba(0,0,0,.5)}
 .rail-dest:active{transform:translateY(1px)}
 .rail-dest .glyph{width:20px;height:20px;flex:0 0 auto;fill:none;stroke:#d4823c;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
@@ -40,6 +41,7 @@
     padding:5px 6px calc(5px + env(safe-area-inset-bottom));
     background:linear-gradient(180deg,rgba(10,7,3,.94),rgba(3,2,1,.98));border-top:1px solid rgba(185,107,50,.4);
     backdrop-filter:blur(9px)}
+  #dock-nav.dgf-enabled{grid-template-columns:repeat(5,1fr)}
   #dock-nav .rail-dest{flex-direction:column;gap:3px;padding:6px 2px;text-align:center;border:0;background:none;box-shadow:none;border-radius:8px}
   #dock-nav .rail-dest span{align-items:center}
   #dock-nav .rail-dest b{font-size:8.5px;letter-spacing:.08em}

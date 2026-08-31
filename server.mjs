@@ -197,6 +197,14 @@ import { createChatJobs, coalesceEvents } from "./chatjobs.mjs";
 import { createLongRun } from "./longrun.mjs";
 import { createJobBudget, canApprove, tranchePolicy, makeRunDeps } from "./longrunbilling.mjs";
 import { makeCallUnit, sealInterrupted } from "./longrunglue.mjs";
+import { createGameFactoryGate } from "./gamefactory.mjs";
+import { createGameFactoryStore } from "./gamefactorystore.mjs";
+import { createGameFactoryHttp } from "./gamefactoryhttp.mjs";
+import { createGameFactoryArtifactMirror, gameFactoryArtifactFlags } from "./gamefactoryartifacts.mjs";
+import { createGameFactoryReleaseReadiness, gameFactoryReleaseFlags } from "./gamefactoryrelease.mjs";
+import { createGameFactoryWorkerAdapter } from "./gamefactoryworker.mjs";
+import { createGameFactoryOrchestrator } from "./gamefactoryorchestrator.mjs";
+import { createGameFactoryPlanner } from "./gamefactoryplanner.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -1786,6 +1794,109 @@ const feedback = createFeedback({
 const cxCrypto = connectorCrypto({ dir: DATA_DIR, cfgGet });
 const googleProvider = createGoogleProvider({ dir: DATA_DIR, cfgGet, baseUrl: () => APP_BASE_URL, enc: cxCrypto.enc, dec: cxCrypto.dec });
 const connectors = createConnectors({ dir: DATA_DIR, cfgGet, providers: { google: googleProvider } });
+
+/*
+ * ---- SD TECH MOBILE GAME FACTORY.
+ *
+ * The control plane is durable even while the feature is dark, but no account can enter it unless
+ * GAME_FACTORY_MODE is explicitly "owner" or "all"/"1". More importantly, merely exposing the UI
+ * does not start background work: GAME_FACTORY_RECONCILER=1 and an exact GAME_FACTORY_NODE are two
+ * independent, fail-closed requirements. The worker adapter never falls back to the freshest Hands
+ * node, so a build cannot silently move to a different machine.
+ */
+const gameFactoryGate = createGameFactoryGate(cfgGet("GAME_FACTORY_MODE", "off"));
+const gameFactoryStore = createGameFactoryStore({
+  dir: dataPath("game-factory"),
+  log: (message) => console.log("[dominion-ai] game-factory store: " + String(message || "")),
+});
+const gameFactoryReconcilerRequested = String(cfgGet("GAME_FACTORY_RECONCILER", "0")) === "1";
+const gameFactoryExposed = gameFactoryGate.allowed(OWNER_T);
+const gameFactoryWorker = createGameFactoryWorkerAdapter({
+  dispatch: (node, tool, args, opts) => handsHub.dispatch(node, tool, args, opts),
+  node: cfgGet("GAME_FACTORY_NODE", ""),
+  enabled: gameFactoryReconcilerRequested && gameFactoryExposed,
+  log: (message) => console.log("[dominion-ai] " + String(message || "")),
+});
+const gameFactoryCapabilities = String(cfgGet("GAME_FACTORY_CAPABILITIES", ""))
+  .split(",").map((value) => value.trim()).filter(Boolean);
+const gameFactoryOrchestrator = createGameFactoryOrchestrator({
+  store: gameFactoryStore,
+  worker: gameFactoryWorker,
+  journalDir: dataPath("game-factory"),
+  workerId: cfgGet("GAME_FACTORY_WORKER_ID", ""),
+  capabilities: gameFactoryCapabilities.length ? gameFactoryCapabilities : undefined,
+  maxConcurrent: Number(cfgGet("GAME_FACTORY_MAX_CONCURRENT", "1")) || 1,
+  leaseMs: Number(cfgGet("GAME_FACTORY_LEASE_MS", "120000")) || 120000,
+  pollMs: Number(cfgGet("GAME_FACTORY_POLL_MS", "10000")) || 10000,
+  log: (message) => console.log("[dominion-ai] " + String(message || "")),
+});
+const gameFactoryOrchestratorEnabled = gameFactoryReconcilerRequested && gameFactoryExposed && gameFactoryWorker.enabled;
+let gameFactoryOrchestratorStarted = false;
+let gameFactoryOrchestratorStartError = "";
+let gameFactoryShutdownStarted = false;
+
+const gameFactoryArtifactConfig = gameFactoryArtifactFlags({
+  GAME_FACTORY_ARTIFACT_WRITES: cfgGet("GAME_FACTORY_ARTIFACT_WRITES", "0"),
+  GAME_FACTORY_MIRROR_WRITES: cfgGet("GAME_FACTORY_MIRROR_WRITES", "0"),
+});
+const gameFactoryArtifacts = createGameFactoryArtifactMirror({
+  store: gameFactoryStore,
+  rootDir: dataPath("game-factory/artifacts"),
+  ...gameFactoryArtifactConfig,
+  driveForTenant: ({ tenant }) => googleProvider.drive(tenant),
+  log: (event, detail) => console.log("[dominion-ai] game-factory artifacts: " + String(event || "") + (detail ? " " + JSON.stringify(detail) : "")),
+});
+const gameFactoryPlanner = createGameFactoryPlanner({
+  store: gameFactoryStore,
+  artifactMirror: gameFactoryArtifacts,
+  log: (event, detail) => console.log("[dominion-ai] game-factory planner: " + String(event || "") + (detail ? " " + JSON.stringify(detail) : "")),
+});
+
+const gameFactoryReleaseConfig = gameFactoryReleaseFlags({
+  GAME_FACTORY_RELEASE_WRITES: cfgGet("GAME_FACTORY_RELEASE_WRITES", "0"),
+});
+const gameFactoryRelease = createGameFactoryReleaseReadiness({
+  store: gameFactoryStore,
+  ...gameFactoryReleaseConfig,
+  // This is capability discovery only. Accounts, legal agreements, store access and signing stay
+  // false until a dedicated adapter can prove them; a connected build worker is not that proof.
+  capabilityProvider: async ({ platform }) => {
+    const probe = await gameFactoryWorker.probe();
+    const required = platform === "ios" ? ["xcodebuild"] : ["gradle", "java"];
+    const detected = probe && probe.ok === true && probe.detected && typeof probe.detected === "object" ? probe.detected : {};
+    const missing = required.filter((program) => !detected[program]);
+    return {
+      account: { connected: false, apiAccess: false, legalStatus: "" },
+      signing: { available: false },
+      toolchain: { available: probe && probe.ok === true && missing.length === 0, nodeId: gameFactoryWorker.node, versions: {}, missing },
+      store: { reachable: false, apiAccess: false },
+    };
+  },
+  log: (event, detail) => console.log("[dominion-ai] game-factory release: " + String(event || "") + (detail ? " " + JSON.stringify(detail) : "")),
+});
+
+function gameFactoryWorkerHealth(T) {
+  const common = {
+    enabled: gameFactoryOrchestratorEnabled,
+    configured: gameFactoryWorker.enabled,
+    state: !gameFactoryOrchestratorEnabled ? "disabled" : gameFactoryOrchestratorStartError ? "degraded" : gameFactoryOrchestratorStarted ? "running" : "starting",
+  };
+  // Bootstrap is available to every entitled account if MODE is ever widened to "all". Machine
+  // names, instance ids and worker errors remain owner-only even in that configuration.
+  return T && T.isOwner ? { ...gameFactoryOrchestrator.health(), ...common } : common;
+}
+
+const gameFactoryHttp = createGameFactoryHttp({
+  store: gameFactoryStore,
+  gate: gameFactoryGate,
+  resolveTenant,
+  workerHealth: gameFactoryWorkerHealth,
+  mirrorHealth: () => gameFactoryArtifacts.health(),
+  releaseHealth: () => gameFactoryRelease.health(),
+  planner: gameFactoryPlanner,
+  readArtifactContent: (input) => gameFactoryArtifacts.readArtifactContent(input),
+  log: (message) => console.log("[dominion-ai] " + String(message || "")),
+});
 
 /*
  * ---- WHOLE-VOLUME backup to the owner's Google Drive (Fred, 2026-07-30).
@@ -5408,7 +5519,7 @@ async function handleAccount(req, res, u) {
   if (req.method === "GET" && p === "/account") {
     const out = { email: T.email, role: T.role, status: T.status, isOwner: T.isOwner, invited: !!T.invited,
       consented: !!T.consented, trainingOptOut: !!T.trainingOptOut, tutorialSeen: !!T.tutorialSeen, multiTenant: MULTI_TENANT,
-      ideMode: ideAllowed(T),
+      ideMode: ideAllowed(T), gameFactory: gameFactoryGate.allowed(T),
       pricing: billing.pricing, stripeConfigured: stripe.enabled, publishableKey: stripe.publishableKey };
     if (!T.isOwner && T.role === "credit") out.credits = billing.account(T.email);
     if (!T.isOwner && T.role === "sponsored") out.sponsored = { capUsd: T.sponsoredCapUsd, spentUsd: T.sponsoredSpentUsd || 0 };
@@ -11033,8 +11144,19 @@ const server = http.createServer(async (req, res) => {
        */
       let runningBuilds = 0;
       try { runningBuilds = ideJobs.runningCount(); } catch {}
+      // Game Factory tasks have their own durable SQLite ledger. A deploy can safely leave the
+      // detached worker running, but it still changes the coordinating process, so the pre-push
+      // guard treats an active factory task as live work just like chat and Crucible builds.
+      let runningFactoryTasks = 0;
+      try { runningFactoryTasks = gameFactoryStore.stats().runningTasks; } catch {}
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ build: BUILD_ID, commit: COMMIT_SHA, runner, runnerApp, runningChatJobs, runningBuilds }));
+      return res.end(JSON.stringify({ build: BUILD_ID, commit: COMMIT_SHA, runner, runnerApp, runningChatJobs, runningBuilds, runningFactoryTasks }));
+    }
+
+    // The handler owns the authenticated tenant/entitlement wall and the protected POST header.
+    // Mount only this exact namespace; static assets and unrelated /api routes still fall through.
+    if (path === "/api/game-factory" || path.startsWith("/api/game-factory/")) {
+      return await gameFactoryHttp.handle(req, res, u);
     }
 
     // The live cloud-model catalog (single source of truth). The picker fetches this and renders the
@@ -11530,7 +11652,9 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(302, { location: "/setup" }); return res.end();
       }
     }
-    let rel = path === "/" ? "/index.html" : path;
+    // /games is a first-class SPA deep link. Exact GET only: a similarly prefixed asset or an
+    // unexpected method must never be rewritten into executable HTML.
+    let rel = path === "/" || (path === "/games" && req.method === "GET") ? "/index.html" : path;
     const safe = normalize(rel).replace(/\\/g, "/");
     const file = join(PUBLIC, safe);
     if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end("forbidden"); }
@@ -11550,6 +11674,20 @@ server.listen(PORT, HOST, () => {
   console.log(`[dominion-ai] listening ${HOST}:${PORT}  ->  Ollama light=${OLLAMA_LIGHT_URL}${SPLIT_TIERS ? "  heavy=" + OLLAMA_HEAVY_URL : ""}${OLLAMA_KEY ? "  (bearer)" : ""}  ·  data=${DATA_DIR}`);
   console.log(`[dominion-ai] tools: deck/forge/sandbox  ·  sync=${CTX.syncKey ? "set" : "MISSING"}  ·  run-password=${CTX.runPassword ? "set" : "unset"}  ·  sandbox=${CTX.sandboxDir}`);
   console.log(`[dominion-ai] hands: ${handsHub.enabled ? "ENABLED (dial-out hub at /hands/*, bearer-authed)" : "disabled (HANDS_TOKEN unset — /hands/* answers 503)"}`);
+  console.log(`[dominion-ai] game-factory: mode=${gameFactoryGate.mode}  ·  reconciler=${gameFactoryOrchestratorEnabled ? "starting on explicit node" : "disabled"}  ·  artifact-writes=${gameFactoryArtifactConfig.localWritesEnabled ? "on" : "off"}  ·  drive-mirror-writes=${gameFactoryArtifactConfig.driveWritesEnabled ? "on" : "off"}  ·  release-assessment-writes=${gameFactoryReleaseConfig.assessmentWritesEnabled ? "on" : "off"}`);
+  if (gameFactoryOrchestratorEnabled) {
+    gameFactoryOrchestrator.start().then(async (report) => {
+      // SIGTERM can arrive while the first reconciliation tick is awaiting the worker. stop() waits
+      // for that tick, but start() would otherwise install its interval immediately afterward.
+      if (gameFactoryShutdownStarted) { await gameFactoryOrchestrator.stop(); return; }
+      gameFactoryOrchestratorStarted = true;
+      gameFactoryOrchestratorStartError = report && report.ok === false ? String(report.error || "initial reconciliation failed").slice(0, 500) : "";
+      console.log(`[dominion-ai] game-factory reconciler: ${gameFactoryOrchestratorStartError ? "DEGRADED" : "running"}`);
+    }).catch((error) => {
+      gameFactoryOrchestratorStartError = String(error && error.message || error || "start failed").slice(0, 500);
+      console.log("[dominion-ai] game-factory reconciler failed to start: " + gameFactoryOrchestratorStartError);
+    });
+  }
   // runware joined this line 2026-08-05: it was the one keyed provider the banner never named,
   // so a missing video key was invisible until a user pressed Generate and got a five-second toast.
   console.log(`[dominion-ai] privacy: modes ${PRIVACY_MODES.join("/")} (default ${DEFAULT_PRIVACY_MODE})  ·  trusted providers: local+${[...TRUSTED_PROVIDERS].join("+")}  ·  refuse-not-substitute  ·  providers keyed: openrouter=${!!OPENROUTER_KEY} openai=${!!OPENAI_KEY} deepseek=${!!DEEPSEEK_KEY} anthropic=${!!ANTHROPIC_KEY} moonshot=${!!MOONSHOT_KEY} nvidia=${!!NVIDIA_KEY} runware=${!!cfgGet("RUNWARE_VIDEO_GEN_DOMINION_API_KEY", "")}`);
@@ -11604,11 +11742,18 @@ server.listen(PORT, HOST, () => {
   process.on("SIGTERM", async () => {
     if (drainStarted) return;
     drainStarted = true;
+    gameFactoryShutdownStarted = true;
     const shutdownDeadline = Date.now() + 325_000;
     const serverClosed = new Promise((resolveClose) => {
       try { server.close((error) => resolveClose({ closed: !error, error: error ? String(error.message || error).slice(0, 200) : null })); }
       catch (error) { resolveClose({ closed: false, error: String(error?.message || error).slice(0, 200) }); }
     });
+    try {
+      // Stop claiming work before draining HTTP. Detached jobs keep their deterministic run ids and
+      // the next container reconciles them from the dispatch journal; no success is guessed here.
+      await gameFactoryOrchestrator.stop();
+      console.log(`[dominion-ai] SIGTERM: game-factory reconciler stopped with ${gameFactoryStore.stats().runningTasks} running task(s) preserved for recovery`);
+    } catch (e) { console.log("[dominion-ai] SIGTERM game-factory stop failed: " + String(e && e.message || e).slice(0, 200)); }
     let running = 0;
     try {
       for (const j of CHAT_JOBS.values()) {
@@ -11636,6 +11781,10 @@ server.listen(PORT, HOST, () => {
       new Promise((resolveClose) => setTimeout(() => resolveClose({ closed: false, timedOut: true }), closeWaitMs)),
     ]);
     console.log(`[dominion-ai] SIGTERM: HTTP response drain ${JSON.stringify(closeResult)}`);
+    try { await gameFactoryOrchestrator.close(); }
+    catch (e) { console.log("[dominion-ai] SIGTERM game-factory journal close failed: " + String(e && e.message || e).slice(0, 200)); }
+    try { gameFactoryStore.close(); }
+    catch (e) { console.log("[dominion-ai] SIGTERM game-factory store close failed: " + String(e && e.message || e).slice(0, 200)); }
     process.exit(0);
   });
   console.log(`[dominion-ai] tools: ${TOOL_DEFS.length} typed (incl. 6 formatting on the light model)  ·  confirm-risky=${CONFIRM_TOOLS_ENV ? "ON (interactive)" : "auto-approve (LAX, recorded)"}  ·  9-state lifecycle persisted  ·  ${flywheel.stats().activeToolOverlays} active description overlay(s)  ·  carve-outs: customer-DBs+backups hard-denied  ·  run log=toolruns.jsonl (${toolRunTail.length} reloaded)`);
