@@ -169,13 +169,13 @@ import {
 } from "./altana-money.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_PROMPT_MAX_CHARS, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs, ledgerFromEvents } from "./idejobs.mjs";
-import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages, fitManifestToBudget, manifestBudgetBytes } from "./ideengine.mjs";
+import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, PLANNER_FORMAT_REMINDER, plannerRepairMessages, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages, fitManifestToBudget, manifestBudgetBytes } from "./ideengine.mjs";
 import { ollamaPayloadFromOpenAI, openAIResultFromOllama, gx10Failure } from "./gx10.mjs";
 import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor, adequacyWarning, chunksForPart } from "./ideaf.mjs";
 import { isRepoCmd, startBranchPlan, salvageCommitPlan, githubPushPlan, mergePlan, buildBranch } from "./idegit.mjs";
 import { ensureRepo, repoNameFrom, shipSummary } from "./idegithub.mjs";
 import { createTelemetry, estimatePartTokens } from "./idetelemetry.mjs";
-import { taskRoadmapMessages, parseTaskRoadmap, topoOrder, readyTasks, filesCollide, resolveTaskAssignments, reduceTaskGoal, classifyReduction, validateStoredSplit, fitPartsToAgents } from "./idetasks.mjs";
+import { taskRoadmapMessages, parseTaskRoadmap, roadmapRepairMessages, topoOrder, readyTasks, filesCollide, resolveTaskAssignments, reduceTaskGoal, classifyReduction, validateStoredSplit, fitPartsToAgents } from "./idetasks.mjs";
 import { runTaskPool, createGate } from "./idepool.mjs";
 import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } from "./ideafrun.mjs";
 import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderouter.mjs";
@@ -3927,9 +3927,22 @@ async function handleIdeTasks(req, res, T, body) {
     const r = await ideChatOnce(model, messages, {});
     if (r.costUsd) { try { await meterTurn(T, r.costUsd, prompt, ""); } catch {} }
     if (!r.ok) return { ok: false, why: r.error || "unreachable", costUsd: r.costUsd || 0 };
-    const parsed = parseTaskRoadmap(r.content, maxTasks);
-    if (!parsed.ok) return { ok: false, why: "unusable roadmap: " + parsed.error, raw: String(r.content || "").slice(0, 2000), costUsd: r.costUsd || 0 };
-    return { ok: true, tasks: parsed.tasks, costUsd: r.costUsd || 0 };
+    let parsed = parseTaskRoadmap(r.content, maxTasks);
+    let costUsd = r.costUsd || 0;
+    if (!parsed.ok) {
+      /*
+       * Same repair discipline as the build planner: a prose reply gets ONE second ask carrying
+       * its own words plus the format demand as the last word, before the seat is declared failed.
+       * Without this, a model that narrates instead of listing burns the seat AND its substitute
+       * for the same cosmetic reason.
+       */
+      const r2 = await ideChatOnce(model, roadmapRepairMessages({ goal: prompt, maxTasks, badReply: r.content }), {});
+      costUsd += r2.costUsd || 0;
+      if (r2.costUsd) { try { await meterTurn(T, r2.costUsd, prompt, ""); } catch {} }
+      if (r2.ok) parsed = parseTaskRoadmap(r2.content, maxTasks);
+      if (!parsed.ok) return { ok: false, why: "unusable roadmap: " + parsed.error, raw: String((r2.ok ? r2.content : r.content) || "").slice(0, 2000), costUsd };
+    }
+    return { ok: true, tasks: parsed.tasks, costUsd };
   };
   try {
     let usedModel = first;
@@ -4453,11 +4466,41 @@ async function runIdeBuild(job, {
      * build forever (the bug this replaced: answers only ever resumed probes, so a paused BUILD
      * was unreleasable by anyone).
      */
-    const ask = async (id, question, options) => {
+    /*
+     * A question with an `auto` policy answers ITSELF after auto.afterMs of silence, in the open:
+     * the journal records the auto-continue line and the answer event, so the UI unfreezes and an
+     * attended user still wins the race by answering first. Without this, a failed move at 2 AM
+     * froze the whole build until morning (Fred: "constantly having to reset it or start over").
+     * Money questions never carry an auto policy: a budget is answered by a human or not at all.
+     */
+    const ask = async (id, question, options, auto = null) => {
       const from = (ideJobs.get(job.id) || { events: [] }).events.length;
-      ideJobs.emit(job.id, { type: "need_input", id, question, options });
+      ideJobs.emit(job.id, { type: "need_input", id, question, options,
+        ...(auto && auto.answer ? { default: auto.answer } : {}) });
+      let timer = null;
+      if (auto && auto.answer && Number(auto.afterMs) > 0) {
+        timer = setTimeout(() => {
+          try {
+            ideJobs.emit(job.id, { type: "run", command: "auto-continue", ok: true,
+              output: "No one answered within " + Math.max(1, Math.round(auto.afterMs / 60000))
+                + " minute(s), so the build chose “" + auto.answer + "” and kept going. Answer a question to choose differently next time." });
+            ideJobs.emit(job.id, { type: "answer", id, answer: auto.answer, auto: true });
+          } catch {}
+        }, auto.afterMs);
+        if (timer.unref) timer.unref();
+      }
       const ans = await ideJobs.waitForAnswer(job.id, from);
+      if (timer) clearTimeout(timer);
       return ans ? String(ans.answer || "") : null;    // null = the job was sealed while waiting
+    };
+    // Unattended builds keep moving: a failed move auto-retries once, then auto-skips, never
+    // auto-stops. The map remembers which moves already burned their auto-retry.
+    const IDE_ASK_AUTO_MS = Math.max(30_000, Number(process.env.IDE_ASK_AUTO_MS) || 180_000);
+    const autoRetried = new Set();
+    const moveFailAuto = (moveId) => {
+      const first = !autoRetried.has(moveId);
+      autoRetried.add(moveId);
+      return { afterMs: IDE_ASK_AUTO_MS, answer: first ? phrase("move_retry", reg) : phrase("move_skip", reg) };
     };
     const capOriginal = budget.capUsd;
     // Money for humans. toFixed(2) turned a deliberately tiny test cap into "limit of $0.00,
@@ -4949,7 +4992,10 @@ async function runIdeBuild(job, {
             return n + " (" + ((failedTask && failedTask.title) || "task") + (reason ? " - " + reason : "") + ")";
           }).join("; ").slice(0, 900);
           const answer = await ask("tasks-failed", phrase("tasks_failed_question", reg, failedList.length, list),
-            [phrase("tasks_retry", reg), phrase("tasks_skip", reg), phrase("move_stop", reg)]);
+            [phrase("tasks_retry", reg), phrase("tasks_skip", reg), phrase("move_stop", reg)],
+            { afterMs: IDE_ASK_AUTO_MS,
+              answer: autoRetried.has("tg:" + failedList.map((f) => f.n).join(",")) ? phrase("tasks_skip", reg) : phrase("tasks_retry", reg) });
+          autoRetried.add("tg:" + failedList.map((f) => f.n).join(","));
           if (answer === null) return null;
           if (ANSWER.stop.test(answer)) return "stop";
           if (ANSWER.retry.test(answer)) return "retry";
@@ -5022,6 +5068,24 @@ async function runIdeBuild(job, {
       if (divided.costUsd) { await meterTurn(T, divided.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: divided.costUsd, move: "af-divide" }); }
       if (!divided.ok) { ideJobs.finish(job.id, { type: "error", message: divided.error || "The divider could not be reached." }); return false; }
       let plan = parseDividerPlan(divided.content, maxParts);
+      if (!plan.ok) {
+        /*
+         * Same repair discipline as the build planner and the roadmap: a divider that narrates
+         * instead of listing gets ONE second ask carrying its own reply and the format demand as
+         * the last word, before the whole relay is refused. The overlap redo below already
+         * existed; this covers the other, more common death.
+         */
+        ideJobs.emit(job.id, { type: "run", command: "af referee", ok: false,
+          output: "The divider answered in prose instead of a division, so it is being asked once more for the division itself." });
+        const reask = await chat({ model: divModel, messages: [
+          ...divMessages,
+          { role: "assistant", content: String(divided.content || "").slice(0, 8000) },
+          { role: "user", content: "That answer was not a usable division. Answer NOW with ONLY the plan in EXACTLY the demanded format, nothing before it and nothing after it." },
+        ] });
+        spend(reask.costUsd);
+        if (reask.costUsd) { await meterTurn(T, reask.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: reask.costUsd, move: "af-divide" }); }
+        if (reask.ok) { plan = parseDividerPlan(reask.content, maxParts); divided = reask; }
+      }
       let dj = plan.ok ? verifyDisjoint(plan.parts) : { ok: false, overlaps: [] };
       if (plan.ok && !dj.ok) {
         const named = dj.overlaps.map((o) => o.file + " (parts " + o.a + " and " + o.b + ")").join(", ");
@@ -5036,7 +5100,12 @@ async function runIdeBuild(job, {
         if (redo.costUsd) { await meterTurn(T, redo.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: redo.costUsd, move: "af-divide" }); }
         if (redo.ok) { plan = parseDividerPlan(redo.content, maxParts); dj = plan.ok ? verifyDisjoint(plan.parts) : { ok: false, overlaps: [] }; }
       }
-      if (!plan.ok || !dj.ok) { ideJobs.finish(job.id, { type: "error", message: phrase("af_refused", reg) }); return false; }
+      if (!plan.ok || !dj.ok) {
+        const said = String(divided.content || "").replace(/\s+/g, " ").slice(0, 220);
+        ideJobs.finish(job.id, { type: "error", message: phrase("af_refused", reg)
+          + (said ? " The divider said: “" + said + "…”" : "") });
+        return false;
+      }
       // The manifest reader's atomic ceiling is also the maximum ownership grant. A divider may
       // legally return up to 40 files, so split oversized parts deterministically instead of
       // hiding files 25+ from the worker or falsely completing only the visible prefix.
@@ -5104,7 +5173,8 @@ async function runIdeBuild(job, {
       // verify are safe one at a time).
       for (const failed of workerStage.failures) {
         const answer = await ask("move-" + failed.id, phrase("move_failed_question", reg, failed.title),
-          [phrase("move_retry", reg), phrase("move_skip", reg), phrase("move_stop", reg)]);
+          [phrase("move_retry", reg), phrase("move_skip", reg), phrase("move_stop", reg)],
+          moveFailAuto("af-" + failed.id));
         if (answer === null) return false;
         if (ANSWER.skip.test(answer)) {
           knownIncomplete.push("AF worker part \"" + failed.title + "\" was explicitly skipped after failing.");
@@ -5169,9 +5239,19 @@ async function runIdeBuild(job, {
       moves = [{ id: "m1", title: prompt.slice(0, 140), why: small.why, files: [], verify: "" }];
       ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, single: true });
     } else {
+      /*
+       * The format demand travels twice: once inside PLANNER_SYSTEM, and once as the FINAL user
+       * turn. The chat() wrapper appends the execution manager, the forge framework, and the
+       * observed-workspace evidence around this call, and a format rule that far from the end of
+       * the request is a rule models skip (watched live with qwen3-coder, 2026-09-01: prose
+       * narration instead of the array). The trailing turn stays separate because grounding is
+       * appended to the FIRST user message.
+       */
+      const plannerAsk = "PROJECT: " + (workspace.name || workspace.root) + "\n\nBUILD THIS:\n" + prompt;
       const planned = await chat({ model: planModel, messages: [
         { role: "system", content: PLANNER_SYSTEM + "\n\n" + plannerVoice(reg) + "\n" + persona },
-        { role: "user", content: "PROJECT: " + (workspace.name || workspace.root) + "\n\nBUILD THIS:\n" + prompt },
+        { role: "user", content: plannerAsk },
+        { role: "user", content: PLANNER_FORMAT_REMINDER },
       ] });
       spend(planned.costUsd);
       await meterTurn(T, planned.costUsd, prompt, "");
@@ -5179,8 +5259,31 @@ async function runIdeBuild(job, {
       if (!planned.ok) {
         return ideJobs.finish(job.id, { type: "error", message: planned.error || "The planner could not be reached." });
       }
-      const parsed = parseBlueprint(planned.content);
-      if (!parsed.ok) return ideJobs.finish(job.id, { type: "error", message: parsed.error });
+      let parsed = parseBlueprint(planned.content);
+      if (!parsed.ok) {
+        /*
+         * The plan is in there, in words. One repair call sends the model its OWN prose back with
+         * the format demand as the last word — a minimal bare call through ideChatOnce, deliberately
+         * outside the chat() wrapper whose added prompts caused the prose in the first place. Only
+         * when the second answer also parses to nothing does the job die, and then it quotes what
+         * the model actually said, because "did not return a usable plan" with the reply thrown
+         * away cost a day of guessing.
+         */
+        ideJobs.emit(job.id, { type: "run", command: "plan", ok: false,
+          output: "The planner answered in prose instead of a move list, so it is being asked once more for the list itself." });
+        const repair = await ideChatOnce(planModel,
+          plannerRepairMessages({ userPrompt: plannerAsk, badReply: planned.content }),
+          { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
+        spend(repair.costUsd);
+        await meterTurn(T, repair.costUsd, prompt, "");
+        if (repair.costUsd) ideJobs.emit(job.id, { type: "cost", usd: repair.costUsd, move: "plan" });
+        if (repair.ok) parsed = parseBlueprint(repair.content);
+        if (!parsed.ok) {
+          const said = String((repair.ok ? repair.content : planned.content) || "").replace(/\s+/g, " ").slice(0, 220);
+          return ideJobs.finish(job.id, { type: "error",
+            message: parsed.error + (said ? " The model said: “" + said + "…”" : "") });
+        }
+      }
       moves = parsed.moves;
       for (const move of moves) for (const file of move.files || []) expectedFiles.add(file);
       /*
@@ -5228,7 +5331,8 @@ async function runIdeBuild(job, {
          */
         const answer = await ask("move-" + move.id,
           phrase("move_failed_question", reg, move.title),
-          [phrase("move_retry", reg), phrase("move_skip", reg), phrase("move_stop", reg)]);
+          [phrase("move_retry", reg), phrase("move_skip", reg), phrase("move_stop", reg)],
+          moveFailAuto(move.id));
         if (answer === null) return;
         if (ANSWER.skip.test(answer)) {
           knownIncomplete.push("Build step \"" + move.title + "\" was explicitly skipped after failing.");

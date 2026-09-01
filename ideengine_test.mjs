@@ -12,7 +12,8 @@
 import assert from "node:assert/strict";
 import {
   isSmallAsk, parseBlueprint, parseFileBlocks, fileCoverage, carveOutReport, budgetCheck, estimateMove,
-  verifyCommandFor, verificationPlanFor, buildMoveMessages, createIdeEngine, SYSTEM_PREFIX, lineDiff, cleanShellOutput, isMissingToolFailure
+  verifyCommandFor, verificationPlanFor, buildMoveMessages, createIdeEngine, SYSTEM_PREFIX, lineDiff, cleanShellOutput, isMissingToolFailure,
+  PLANNER_SYSTEM, PLANNER_FORMAT_REMINDER, plannerRepairMessages
 } from "./ideengine.mjs";
 
 let passed = 0, failed = 0;
@@ -44,6 +45,51 @@ await t("a blueprint is dug out of prose and fences, and normalized", () => {
   assert.equal(parseBlueprint('{"moves":[{"title":"A"}]}').moves.length, 1);
   assert.equal(parseBlueprint("here is no json at all").ok, false, "refuses honestly rather than inventing a plan");
   assert.equal(parseBlueprint("[]").ok, false);
+});
+
+await t("a prose planning reply earns one repair call with the format demand as the last word", () => {
+  const prose = "I understand you want me to build an Express todo API. Let's begin by creating package.json.";
+  const msgs = plannerRepairMessages({ userPrompt: "PROJECT: X\n\nBUILD THIS:\ntodo api", badReply: prose });
+  assert.equal(msgs.length, 4);
+  assert.equal(msgs[0].role, "system");
+  assert.equal(msgs[0].content, PLANNER_SYSTEM, "the repair call is BARE: no manager, forge, or persona wrapping");
+  assert.equal(msgs[1].role, "user");
+  assert.match(msgs[1].content, /todo api/);
+  assert.equal(msgs[2].role, "assistant");
+  assert.match(msgs[2].content, /Let's begin/, "the model is shown its OWN failed reply to convert");
+  assert.equal(msgs[3].role, "user", "the format demand is the LAST message");
+  assert.match(msgs[3].content, /ONLY the JSON array/);
+  // A pathological giant reply is clipped so the repair call cannot itself overflow the window.
+  const huge = plannerRepairMessages({ userPrompt: "x", badReply: "y".repeat(50_000) });
+  assert.ok(huge[2].content.length <= 8000);
+});
+
+await t("the format reminder is a standalone final turn demanding pure JSON", () => {
+  assert.match(PLANNER_FORMAT_REMINDER, /ONLY the JSON array/);
+  assert.match(PLANNER_FORMAT_REMINDER, /parse as JSON/);
+  assert.ok(!/```/.test(PLANNER_FORMAT_REMINDER), "the reminder must not itself teach a fenced answer");
+});
+
+await t("NO-CHANGE declarations are parsed outside fences and count as coverage", () => {
+  const reply = [
+    "NO-CHANGE: package.json",
+    "```path=server.mjs",
+    "console.log('hi');",
+    "```",
+    "NO-CHANGE: \"docs/readme.md\"",
+  ].join("\n");
+  const p = parseFileBlocks(reply);
+  assert.equal(p.files.length, 1);
+  assert.deepEqual(p.unchanged, ["package.json", "docs/readme.md"]);
+  const cov = fileCoverage(["package.json", "server.mjs", "docs/readme.md"], p.files, p.unchanged);
+  assert.equal(cov.complete, true, "declared files are covered without being rewritten");
+  // Escapes are refused in declarations exactly as in blocks.
+  const evil = parseFileBlocks("NO-CHANGE: ../secrets.txt\nNO-CHANGE: C:/windows/hosts");
+  assert.deepEqual(evil.unchanged, [], "traversal and absolute declarations are dropped");
+  // A NO-CHANGE line INSIDE a file body is content, not a declaration.
+  const inner = parseFileBlocks("```path=a.md\nNO-CHANGE: b.txt\n```");
+  assert.deepEqual(inner.unchanged, []);
+  assert.match(inner.files[0].content, /NO-CHANGE: b.txt/);
 });
 
 /* ---- file blocks ------------------------------------------------------------------------- */

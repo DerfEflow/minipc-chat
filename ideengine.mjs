@@ -64,6 +64,8 @@ export const SYSTEM_PREFIX = [
   "4. Only touch files listed in the move's manifest. If you need another file, say so in a block",
   "   with the path `NEED:` followed by the path, and write nothing else.",
   "5. Match the surrounding code's style, naming, and comment density.",
+  "6. If a listed file ALREADY satisfies this move exactly as it is, do not reproduce it: write",
+  "   the single line `NO-CHANGE: <path>` (outside any fence) for that file instead.",
 ].join("\n");
 
 /* ---------------------------------------------------------------------------------------------
@@ -123,7 +125,7 @@ export function parseBlueprint(text) {
  * anything that tries to escape the workspace.
  * ------------------------------------------------------------------------------------------- */
 export function parseFileBlocks(text) {
-  const out = [], needs = [], issues = [];
+  const out = [], needs = [], issues = [], unchanged = [];
   /*
    * A line walker with fence-DEPTH tracking (Kimi #5, verified). The old regex ended a file at the
    * first ``` anywhere, so a generated README or doc containing its own fenced code example was
@@ -155,6 +157,21 @@ export function parseFileBlocks(text) {
   for (const line of lines) {
     const info = fence(line);
     if (path === null) {
+      /*
+       * A declared no-change: `NO-CHANGE: path` on its own line outside any fence. Demanding a
+       * byte-identical reproduction of an already-correct file was both the hardest possible ask
+       * (models paraphrase; watched live 2026-09-01 when "Add Express" found express already
+       * present and the move died twice over a file that needed nothing) and the riskiest: a
+       * full-file re-emission that drifts one byte ships the drift. A declaration writes nothing.
+       */
+      const noChange = line.match(/^\s*NO-CHANGE:\s*(.+?)\s*$/i);
+      if (noChange) {
+        const p = noChange[1].replace(/^["'`]|["'`]$/g, "").trim();
+        if (p && !p.includes("..") && !/^[a-zA-Z]:[\\/]/.test(p) && !p.startsWith("/") && !p.startsWith("\\")) {
+          unchanged.push(p.replace(/\\/g, "/"));
+        }
+        continue;
+      }
       // Outside any file: only an INFO fence that looks like a path opens a file block.
       if (info) {
         const stripped = info.replace(/^(path=|file=)/i, "").trim().replace(/^["']|["']$/g, "");
@@ -177,9 +194,9 @@ export function parseFileBlocks(text) {
       path: unfinished || "(unknown file)",
       reason: "response ended before the closing fence; no files from this truncated response were accepted",
     });
-    return { files: [], needs: [], issues, truncated: true };
+    return { files: [], needs: [], issues, unchanged: [], truncated: true };
   }
-  return { files: out, needs, issues, truncated: false };
+  return { files: out, needs, issues, unchanged, truncated: false };
 }
 
 function normalizedMovePath(value) {
@@ -192,10 +209,12 @@ function normalizedMovePath(value) {
  * move used to look successful. Keep this pure so the standard, relay, and task-graph runners can
  * all enforce the same contract.
  */
-export function fileCoverage(expected, returned) {
+export function fileCoverage(expected, returned, declaredUnchanged = []) {
   const wanted = [...new Set((expected || []).map(normalizedMovePath).filter(Boolean))];
   const got = new Set((returned || []).map((entry) =>
     normalizedMovePath(typeof entry === "string" ? entry : entry && entry.path)).filter(Boolean));
+  // A declared NO-CHANGE covers its file: the model inspected it and vouched for it as-is.
+  for (const p of declaredUnchanged || []) { const n = normalizedMovePath(p); if (n) got.add(n); }
   const original = new Map((expected || []).map((entry) => [normalizedMovePath(entry), String(entry)]));
   const missing = wanted.filter((path) => !got.has(path)).map((path) => original.get(path) || path);
   return { complete: missing.length === 0, missing, covered: wanted.filter((path) => got.has(path)) };
@@ -405,7 +424,7 @@ export function buildMoveMessages({ move, manifest = [], workspaceName = "", goa
     parts.push("This move creates new files. None exist yet.");
   }
   parts.push("");
-  parts.push("Return one complete path block for EVERY file listed in this move, including a byte-identical block when inspection proves that file needs no change. Omitting a listed file leaves the move incomplete.");
+  parts.push("Account for EVERY file listed in this move: a complete path block for each file you change or create, and the single line NO-CHANGE: <path> for any file that inspection proves already satisfies the move. Omitting a listed file leaves the move incomplete.");
   return [
     { role: "system", content: SYSTEM_PREFIX },
     { role: "user", content: parts.join("\n") },
@@ -463,6 +482,38 @@ export const PLANNER_SYSTEM = [
   "3. `title` and `why` are read by a non-programmer. Plain English, no jargon.",
   "4. Prefer fewer, meaningful moves over many trivial ones.",
 ].join("\n");
+
+/*
+ * The last word of every planning call. The planner's system block travels wrapped in the
+ * execution manager prompt, the forge framework, a persona, and (via the grounding step) a large
+ * block of observed workspace evidence appended to the first user turn. Measured live 2026-09-01
+ * with qwen3-coder on the GX10: the same model that answers the bare PLANNER_SYSTEM with a clean
+ * JSON array answers the wrapped call with conversational prose ("Let's begin by creating
+ * package.json..."), because rule 1 sits thousands of tokens above the end of the request.
+ * Instruction recency wins with every model family, so the format demand is restated as the FINAL
+ * user turn, after everything else, and it must stay a SEPARATE message: the grounding step
+ * appends evidence to the FIRST user turn, and folding this line into that turn would bury it
+ * all over again.
+ */
+export const PLANNER_FORMAT_REMINDER =
+  "Answer NOW with ONLY the JSON array of moves, nothing before it and nothing after it. " +
+  "No prose, no explanation, no markdown heading. Your entire reply must parse as JSON.";
+
+/*
+ * One honest second ask instead of a dead job. A prose planning reply nearly always contains the
+ * plan in words, and every model converts its OWN words to the demanded array far more reliably
+ * than it follows a format rule buried in a long first request. This builds that repair call:
+ * bare planner system, the original ask, the model's own failed reply, and the format demand as
+ * the last word. Pure so the shape is testable without a server.
+ */
+export function plannerRepairMessages({ userPrompt, badReply }) {
+  return [
+    { role: "system", content: PLANNER_SYSTEM },
+    { role: "user", content: String(userPrompt || "") },
+    { role: "assistant", content: String(badReply || "").slice(0, 8000) },
+    { role: "user", content: "That answer was not a usable plan. " + PLANNER_FORMAT_REMINDER },
+  ];
+}
 
 /*
  * The orchestrator. Dependencies are injected so this file needs no server, provider, or fs:
@@ -687,10 +738,26 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
      */
     const dep = await installDeps(job, workspace.root.replace(/[\\/]+$/, ""), pkg);
     if (!dep.ok) {
+      /*
+       * Two very different install failures. npm itself missing is tooling, and no file edit can
+       * fix it — that stays the honest "checks could not run" with ran:false. But an install that
+       * npm REFUSED because of what package.json says (EINVALIDPACKAGENAME for a hallucinated
+       * "node:test" dependency — watched live 2026-09-01 — EJSONPARSE, E404, ETARGET...) is a CODE
+       * defect in a file the build just wrote, and ran:false routed it AROUND the repair loop: the
+       * move was marked done, the broken manifest shipped, and every later move inherited a
+       * project that cannot install. A refused install is a red check like any other.
+       */
+      if (isMissingToolFailure(dep.output)) {
+        jobs.emit(job.id, { type: "run", ok: false, command: "npm install",
+          output: "The project's dependencies did not install, so its checks could not run." });
+        return { ran: false, ok: false, toolingBroken: true, output: dep.output || "npm install failed",
+                 cmd: "npm install", commands: [], failed: [{ name: "install", cmd: "npm install", ok: false, output: dep.output || "" }] };
+      }
       jobs.emit(job.id, { type: "run", ok: false, command: "npm install",
-        output: "The project's dependencies did not install, so its checks could not run." });
-      return { ran: false, ok: false, toolingBroken: true, output: dep.output || "npm install failed",
-               cmd: "npm install", commands: [], failed: [{ name: "install", cmd: "npm install", ok: false, output: dep.output || "" }] };
+        output: "npm refused the install, which usually means package.json itself is wrong. The repair loop gets the evidence." });
+      return { ran: true, ok: false, output: dep.output || "npm install failed",
+               cmd: "npm install", commands: [{ name: "install", cmd: "npm install", why: "dependencies must install before any check can run" }],
+               failed: [{ name: "install", cmd: "npm install", ok: false, output: dep.output || "" }] };
     }
 
     const results = [];
@@ -815,7 +882,7 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       // file-block format, and a beginner cannot tell "the model was sloppy" from "the product is
       // broken". Show it its own output and ask again, ONCE. A second empty answer is a real
       // failure and surfaces with a next action below.
-      if (!parsed.files.length && !parsed.needs.length) {
+      if (!parsed.files.length && !parsed.needs.length && !(parsed.unchanged || []).length) {
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
           message: "The response was not in the file format; asking once more." });
         const retry = await chat({ model: decision.model, messages: [
@@ -826,8 +893,8 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         costUsd += Number(retry && retry.costUsd) || 0;
         if (retry && retry.ok) { const rp = parseFileBlocks(retry.content); if (rp.files.length) { res = retry; parsed = rp; } }
       }
-      let coverage = fileCoverage(move.files || [], parsed.files);
-      if (parsed.files.length && !parsed.truncated && !coverage.complete) {
+      let coverage = fileCoverage(move.files || [], parsed.files, parsed.unchanged);
+      if ((parsed.files.length || (parsed.unchanged || []).length) && !parsed.truncated && !coverage.complete) {
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
           message: "The response omitted " + coverage.missing.length + " planned file(s); asking once for an atomic result." });
         const retry = await chat({ model: decision.model, messages: [
@@ -835,17 +902,17 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
           { role: "assistant", content: String(res.content || "").slice(0, 12000) },
           { role: "user", content:
             "The move is atomic, but your response omitted these planned files: " + coverage.missing.join(", ") + ". " +
-            "Return ONLY complete fenced path blocks for EVERY file in the move. Include a byte-identical complete block if inspection proves one needs no edit." },
+            "Return ONLY complete fenced path blocks for every file that needs edits, and for any listed file that inspection proves already satisfies this move, the single line NO-CHANGE: <path> instead of reproducing it." },
         ] });
         costUsd += Number(retry && retry.costUsd) || 0;
         if (retry && retry.ok) {
           res = retry;
           parsed = parseFileBlocks(retry.content);
-          coverage = fileCoverage(move.files || [], parsed.files);
+          coverage = fileCoverage(move.files || [], parsed.files, parsed.unchanged);
         }
       }
       for (const bad of parsed.issues) jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "warned", message: bad.path + ": " + bad.reason });
-      if (!parsed.files.length) {
+      if (!parsed.files.length && !(parsed.unchanged || []).length) {
         // A surfaced error carries a NEXT ACTION, never just a verdict (Kimi: flawless fails with
         // instructions). nextAction rides the event so the surface can offer the button.
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
@@ -895,6 +962,27 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         return { ok: false, costUsd, missing: coverage.missing };
       }
 
+      /*
+       * Every planned file declared NO-CHANGE: nothing to write, and the project check is the
+       * referee on whether the declaration was honest. Without this lane, a move whose work
+       * already exists (a planner that split "add express" from "write package.json") could not
+       * succeed AT ALL: the model either omitted the file (coverage failure) or re-emitted it
+       * byte-identical (the "changed no bytes" failure below). Watched live 2026-09-01.
+       */
+      if (!parsed.files.length) {
+        const v0 = await verify(job, workspace);
+        if (!v0.ran || v0.ok) {
+          jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: 0,
+            message: "The model inspected the planned files and declared them already correct"
+              + (v0.ran ? ", and the project check agrees." : ". No project check exists yet to dispute it.") });
+          return { ok: true, costUsd, covered: coverage.covered };
+        }
+        jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
+          message: "The model declared every planned file already correct, but the project check disagrees: "
+            + String(v0.output || "").slice(-600), nextAction: "retry" });
+        return { ok: false, costUsd };
+      }
+
       // Carve-out BEFORE the snapshot and before any write, so a refusal costs nothing.
       const carve = carveOutReport(parsed.files);
       if (carve) {
@@ -920,8 +1008,24 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         return { ok: false, costUsd, wroteAnyway: written.length > 0, failed };
       }
       if (!written.length && !failed.length) {
+        /*
+         * Every write was byte-identical. Two readings: the model is stalling, or the project
+         * genuinely already satisfies the move (the instructions DEMAND a byte-identical block for
+         * an already-correct file, so obeying them must not be a failure). The project check
+         * settles it: green means the state is right, and only a red or absent check keeps this a
+         * failure. Live case 2026-09-01: "Add Express as a dependency" when express was already in
+         * package.json could not pass this path in any way.
+         */
+        const vSame = await verify(job, workspace);
+        if (vSame.ran && vSame.ok) {
+          jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: 0,
+            message: "Every planned file already matched the intended result byte for byte, and the project check passes." });
+          return { ok: true, costUsd, covered: coverage.covered };
+        }
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
-          message: "The model returned files, but every write was byte-for-byte unchanged. Nothing was implemented. Reread the current files and retry with a specific change.",
+          message: "The model returned files, but every write was byte-for-byte unchanged"
+            + (vSame.ran ? " and the project check still fails" : " and no project check exists to vouch for the current state")
+            + ". Nothing was implemented. Reread the current files and retry with a specific change.",
           unchanged, nextAction: "retry_or_simplify" });
         return { ok: false, costUsd, unchanged };
       }

@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import {
-  taskRoadmapMessages, parseTaskRoadmap, collisionPairs, filesCollide, readyTasks, topoOrder,
+  taskRoadmapMessages, parseTaskRoadmap, roadmapRepairMessages, collisionPairs, filesCollide, readyTasks, topoOrder,
   resolveTaskAssignments, reduceTaskGoal, classifyReduction, validateStoredSplit, fitPartsToAgents,
 } from "./idetasks.mjs";
 
@@ -219,6 +219,18 @@ t("fitPartsToAgents is deterministic: same input, same output, twice", () => {
 t("fitPartsToAgents leaves parts alone when agents >= parts", () => {
   const parts = [{ title: "a", files: ["x"], contract: "" }, { title: "b", files: ["y"], contract: "" }];
   assert.equal(fitPartsToAgents(parts, 5).length, 2);
+});
+
+t("a prose roadmap reply earns one repair call carrying its own words, format demand last", () => {
+  const msgs = roadmapRepairMessages({ goal: "todo api", maxTasks: 8, badReply: "Sure! First I would create the store, then the API." });
+  assert.equal(msgs[0].role, "system");
+  assert.match(msgs[0].content, /NUMBERED TASK ROADMAP/);
+  assert.equal(msgs[msgs.length - 2].role, "assistant");
+  assert.match(msgs[msgs.length - 2].content, /create the store/, "the model is shown its OWN failed reply");
+  assert.equal(msgs[msgs.length - 1].role, "user", "the format demand is the LAST message");
+  assert.match(msgs[msgs.length - 1].content, /FILES:/);
+  const huge = roadmapRepairMessages({ goal: "x", badReply: "y".repeat(50_000) });
+  assert.ok(huge[huge.length - 2].content.length <= 8000, "a giant reply is clipped");
 });
 
 console.log("\nidetasks: " + passed + " passed, " + failed + " failed");

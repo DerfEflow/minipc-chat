@@ -61,6 +61,20 @@ export function taskRoadmapMessages({ goal = "", maxTasks = 12, register = "plai
   return msgs;
 }
 
+/*
+ * One second ask when the roadmap reply parses to nothing. The reply nearly always contains the
+ * roadmap in words; the model converts its OWN words to the demanded numbered format far more
+ * reliably than it follows a format block buried under evidence appended after it. Pure and
+ * server-free, mirror of plannerRepairMessages in ideengine.mjs.
+ */
+export function roadmapRepairMessages({ goal = "", maxTasks = 12, badReply = "" } = {}) {
+  return [
+    ...taskRoadmapMessages({ goal, maxTasks }),
+    { role: "assistant", content: String(badReply || "").slice(0, 8000) },
+    { role: "user", content: "That answer was not a usable roadmap. Answer NOW with ONLY the numbered task list in EXACTLY the demanded format (<n>. title / FILES: / NEEDS:), nothing before it and nothing after it." },
+  ];
+}
+
 /* ---- parse the roadmap (tolerant: markdown emphasis, any casing) ---------------------------- */
 export function parseTaskRoadmap(text, maxTasks = 12) {
   const clean = (line) => String(line).replace(/^[\s>#*_]+/, "").replace(/\*+\s*$/, "").trimEnd();
