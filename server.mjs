@@ -4169,7 +4169,19 @@ async function runIdeBuild(job, {
   // Every Crucible role gets the same durable contract and provider-native policy. Planning,
   // review, and audit turns can inspect the live workspace; file-writing remains centralized in
   // the engine so custom crews keep their ownership boundaries and no model writes concurrently.
-  const chat = async ({ model, messages, forceInspection = false, resumeState = null }) => {
+  const chat = async ({ model, messages, forceInspection = false, resumeState = null, bare = false }) => {
+    /*
+     * BARE mode: no execution-manager wrap, no forge framework, no research tools. Format-repair
+     * calls use it deliberately. Measured 2026-09-01: the same model that ships perfect
+     * ```path= blocks on a bare request loses the format under the wrapped call's added prompts
+     * and tool epochs, so re-asking through the same wrapping repeated the same failure. A repair
+     * call is a closed-world transformation of evidence already in the messages; it needs the
+     * model's full attention on the format contract, not more apparatus.
+     */
+    if (bare) {
+      return ideChatOnce(model, (Array.isArray(messages) ? messages : []).map((m) => ({ ...m })),
+        { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
+    }
     const policy = executionPolicyFor(model);
     const managed = (Array.isArray(messages) ? messages : []).map((m) => ({ ...m }));
     const manager = executionManagerPrompt(taskContract, policy) + "\n\n" + forgeFrameworkPrompt(selectedForgeTier);
@@ -5183,7 +5195,7 @@ async function runIdeBuild(job, {
         if (ANSWER.stop.test(answer)) { ideJobs.finish(job.id, { type: "stopped", message: phrase("move_stopped", reg) }); return false; }
         const guided = !ANSWER.retry.test(answer)
           ? { ...failed, why: failed.why + " The user says: " + answer.slice(0, 500) } : failed;
-        const r2 = await engine.runMove(job, { move: guided, workspace, assignments: workerAssign, goal: prompt });
+        const r2 = await engine.runMove(job, { move: guided, workspace, assignments: workerAssign, goal: prompt, plannedFiles: [...expectedFiles] });
         spend(r2 && r2.costUsd);
         if (r2 && r2.blocked) { ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) }); return false; }
         if (!r2 || !r2.ok) knownIncomplete.push("AF worker part \"" + failed.title + "\" remained incomplete after guided recovery.");
@@ -5319,7 +5331,7 @@ async function runIdeBuild(job, {
         budget.capUsd += Math.max(capOriginal, 0.5);
       }
 
-      const res = await engine.runMove(job, { move, workspace, assignments: resolved, goal: prompt });
+      const res = await engine.runMove(job, { move, workspace, assignments: resolved, goal: prompt, plannedFiles: [...expectedFiles] });
       spend(res && res.costUsd);
       if (res && res.blocked) return ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) });
 
@@ -5364,7 +5376,7 @@ async function runIdeBuild(job, {
         applyFixes: async (critique) => {
           const fixMove = { id: "polish", title: reg === "technical" ? "Apply visual review findings" : "Make it look right",
             why: "The screenshot review found: " + critique.slice(0, 700), files: writtenFiles.slice(0, 12) };
-          const r = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt });
+          const r = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt, plannedFiles: [...expectedFiles] });
           spend(r && r.costUsd);
           if (r && r.ok) markCovered(r.covered);
           return { costUsd: (r && r.costUsd) || 0 };
@@ -5467,7 +5479,7 @@ async function runIdeBuild(job, {
                 title: (reg === "technical" ? "Close the audit findings" : "Finish the unfinished pieces")
                   + (capped.length > 1 ? " (batch " + (bi + 1) + " of " + capped.length + ")" : ""),
                 why, files: capped[bi] };
-              const fixed = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt });
+              const fixed = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt, plannedFiles: [...expectedFiles] });
               spend(fixed && fixed.costUsd);
               if (fixed && fixed.ok) markCovered(fixed.covered);
               else allFixed = false;

@@ -70,6 +70,20 @@ await t("the format reminder is a standalone final turn demanding pure JSON", ()
   assert.ok(!/```/.test(PLANNER_FORMAT_REMINDER), "the reminder must not itself teach a fenced answer");
 });
 
+await t("a check blocked only by later planned files is recognised, and real failures are not", async () => {
+  const { checkBlockedByPlannedFiles } = await import("./ideengine.mjs");
+  const out = "> node --test\nCould not find 'test.mjs'\n";
+  assert.deepEqual(checkBlockedByPlannedFiles(out, ["server.mjs", "test.mjs"], ["server.mjs"]), ["test.mjs"],
+    "a missing later-move file is recognised");
+  assert.equal(checkBlockedByPlannedFiles(out, ["server.mjs", "test.mjs"], ["test.mjs"]), null,
+    "a move that OWNS the missing file gets no forgiveness");
+  assert.equal(checkBlockedByPlannedFiles("SyntaxError: unexpected token in server.mjs", ["server.mjs", "test.mjs"], ["server.mjs"]), null,
+    "a real code failure mentioning a planned file is NOT excused");
+  assert.equal(checkBlockedByPlannedFiles("Cannot find module './db.mjs'", ["a.mjs"], []), null,
+    "a missing file nobody plans to build is a real failure");
+  assert.deepEqual(checkBlockedByPlannedFiles("Error: Cannot find module 'src/routes.mjs'", ["src/routes.mjs"], []), ["src/routes.mjs"]);
+});
+
 await t("NO-CHANGE declarations are parsed outside fences and count as coverage", () => {
   const reply = [
     "NO-CHANGE: package.json",

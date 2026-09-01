@@ -320,6 +320,35 @@ export function isMissingToolFailure(output) {
   return MISSING_BINARY_RX.test(String(output || ""));
 }
 
+/*
+ * A check that failed only because a file from a LATER planned move does not exist yet is not a
+ * defect in THIS move. Watched live 2026-09-01: move 3 wrote its files correctly, `npm test` ran
+ * and reported "Could not find 'test.mjs'" — a file the plan builds in move 6 — and the red check
+ * failed a perfectly good move, over and over, for every move until the last one. The check is
+ * still run and still honest; this only recognises "the project is not assembled yet" and lets
+ * the build keep assembling it. Error shapes measured live (node --test "Could not find") or
+ * standard Node ("Cannot find module", ENOENT "no such file or directory").
+ */
+export function checkBlockedByPlannedFiles(output, plannedFiles, ownFiles = []) {
+  const text = String(output || "");
+  if (!text) return null;
+  const own = new Set((ownFiles || []).map(normalizedMovePath));
+  const pending = [...new Set((plannedFiles || []).map((p) => String(p || "")).filter(Boolean))]
+    .filter((p) => !own.has(normalizedMovePath(p)));
+  if (!pending.length) return null;
+  const lines = text.split(/\r?\n/).filter((l) =>
+    /could not find|cannot find module|no such file or directory|does not exist/i.test(l));
+  if (!lines.length) return null;
+  const blamed = [];
+  for (const p of pending) {
+    const base = p.split("/").pop();
+    if (!base) continue;
+    const rx = new RegExp(base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    if (lines.some((l) => rx.test(l))) blamed.push(p);
+  }
+  return blamed.length ? blamed : null;
+}
+
 export function verificationPlanFor(packageJsonText) {
   let scripts = null;
   try { scripts = (JSON.parse(String(packageJsonText || "{}")) || {}).scripts || null; } catch {}
@@ -692,7 +721,34 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
     try {
       const ls = await hands("fs_list", { path: root });
       const names = ((ls && ls.entries) || []).map((e) => (typeof e === "string" ? e : e.name));
-      if (names.includes("node_modules")) return { ok: true, skipped: "already installed" };
+      if (names.includes("node_modules")) {
+        /*
+         * "node_modules exists" is not "the DECLARED dependencies are installed". A repair that
+         * adds a dependency to package.json mid-build used to be skipped here forever: the check
+         * kept failing with ERR_MODULE_NOT_FOUND for the very package the repair had just declared
+         * (watched live 2026-09-01 with 'uuid'). Compare the declared names against what is
+         * actually on disk and reinstall the moment one is absent.
+         */
+        let missing = false;
+        try {
+          const nm = await hands("fs_list", { path: root + "/node_modules" });
+          const present = new Set(((nm && nm.entries) || []).map((e) => (typeof e === "string" ? e : e.name)));
+          const scopes = new Map();   // "@scope" -> Set of names under it, listed lazily
+          for (const name of Object.keys(deps)) {
+            if (name.startsWith("@")) {
+              const [scope, rest] = name.split("/", 2);
+              if (!rest) continue;
+              if (!scopes.has(scope)) {
+                if (!present.has(scope)) { missing = true; break; }
+                const sub = await hands("fs_list", { path: root + "/node_modules/" + scope });
+                scopes.set(scope, new Set(((sub && sub.entries) || []).map((e) => (typeof e === "string" ? e : e.name))));
+              }
+              if (!scopes.get(scope).has(rest)) { missing = true; break; }
+            } else if (!present.has(name)) { missing = true; break; }
+          }
+        } catch { missing = true; /* cannot prove they are installed, so install */ }
+        if (!missing) return { ok: true, skipped: "already installed" };
+      }
     } catch { /* if the listing fails, attempt the install rather than skip it */ }
     jobs.emit(job.id, { type: "run", command: "npm install", ok: true,
       output: "Installing what the project needs before checking it. This can take a few minutes the first time." });
@@ -830,7 +886,7 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
   // `depth` is the split recursion guard: a move that cannot be answered atomically is halved and
   // re-run through this same path, and three levels turns a 24-file move into 3-file moves, which
   // is far past the point where the size was the problem.
-  async function runMove(job, { move, workspace, assignments, goal }, depth = 0) {
+  async function runMove(job, { move, workspace, assignments, goal, plannedFiles = [] }, depth = 0) {
     let costUsd = 0;
     try {
       let decision = router({ title: move.title, description: move.why, files: move.files }, assignments);
@@ -885,7 +941,8 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       if (!parsed.files.length && !parsed.needs.length && !(parsed.unchanged || []).length) {
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
           message: "The response was not in the file format; asking once more." });
-        const retry = await chat({ model: decision.model, messages: [
+        // bare: the wrapped call's added prompts are what broke the format in the first place.
+        const retry = await chat({ model: decision.model, bare: true, messages: [
           ...messages,
           { role: "assistant", content: String(res.content || "").slice(0, 4000) },
           { role: "user", content: "That reply contained no file blocks, so nothing could be written. Respond ONLY with fenced file blocks, each opening ```<path> on its own line and closing ``` at the start of a line. No prose outside the blocks." },
@@ -897,7 +954,8 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       if ((parsed.files.length || (parsed.unchanged || []).length) && !parsed.truncated && !coverage.complete) {
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
           message: "The response omitted " + coverage.missing.length + " planned file(s); asking once for an atomic result." });
-        const retry = await chat({ model: decision.model, messages: [
+        // bare, for the same measured reason as the format retry above.
+        const retry = await chat({ model: decision.model, bare: true, messages: [
           ...messages,
           { role: "assistant", content: String(res.content || "").slice(0, 12000) },
           { role: "user", content:
@@ -947,7 +1005,7 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
             const sub = await runMove(job, {
               move: { ...move, id: move.id + "-part" + (h + 1), files: halves[h],
                       title: move.title + " (part " + (h + 1) + " of " + halves.length + ")" },
-              workspace, assignments, goal,
+              workspace, assignments, goal, plannedFiles,
             }, depth + 1);
             splitCost += Number(sub && sub.costUsd) || 0;
             if (!sub || !sub.ok) return { ok: false, costUsd: splitCost, missing: (sub && sub.missing) || halves[h] };
@@ -971,11 +1029,58 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
        */
       if (!parsed.files.length) {
         const v0 = await verify(job, workspace);
+        const blocked0 = v0.ran && !v0.ok ? checkBlockedByPlannedFiles(v0.output, plannedFiles, move.files) : null;
+        if (blocked0) {
+          jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: 0,
+            message: "Declared already correct; the project check cannot pass yet because later planned moves still build " + blocked0.join(", ") + "." });
+          return { ok: true, costUsd, covered: coverage.covered, checkPendingOn: blocked0 };
+        }
         if (!v0.ran || v0.ok) {
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: 0,
             message: "The model inspected the planned files and declared them already correct"
               + (v0.ran ? ", and the project check agrees." : ". No project check exists yet to dispute it.") });
           return { ok: true, costUsd, covered: coverage.covered };
+        }
+        /*
+         * The declaration was wrong: the check is red. Before failing the move, ONE bare repair
+         * call carries the disagreement and the check evidence — a model that lazily vouched for a
+         * broken file almost always fixes it when shown the refusal (live case: NO-CHANGE on a
+         * package.json npm refused with EINVALIDPACKAGENAME).
+         */
+        jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "repairing",
+          message: "The model declared the planned files already correct, but the project check disagrees. Asking it to fix what the check found." });
+        const contest = await chat({ model: decision.model, bare: true, messages: [
+          ...messages,
+          { role: "assistant", content: String(res.content || "").slice(0, 8000) },
+          { role: "user", content:
+            "You declared these files NO-CHANGE, but the project check FAILS with the output below, so at least one of them is wrong. " +
+            "Diagnose it and return the complete corrected file(s) as fenced path blocks. Do not declare NO-CHANGE again.\n\nCHECK OUTPUT:\n"
+            + String(v0.output || "").slice(-8000) },
+        ] });
+        costUsd += Number(contest && contest.costUsd) || 0;
+        if (contest && contest.ok) {
+          const cp = parseFileBlocks(contest.content);
+          const carveC = carveOutReport(cp.files);
+          if (carveC) {
+            jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "blocked", message: carveC.message });
+            return { ok: false, costUsd, blocked: true };
+          }
+          if (cp.files.length && !cp.truncated) {
+            const snapC = await snapshot(job, workspace);
+            if (snapC.ok) {
+              const wr = await writeFiles(job, workspace, cp.files);
+              emitDiffs(job, manifest, cp.files, new Set(wr.written));
+              if (wr.written.length && !wr.failed.length) {
+                const v1 = await verify(job, workspace);
+                if (!v1.ran || v1.ok
+                    || checkBlockedByPlannedFiles(v1.output, plannedFiles, move.files)) {
+                  jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: wr.written.length,
+                    message: "The check evidence overruled the NO-CHANGE declaration; the corrected files pass." });
+                  return { ok: true, costUsd, covered: coverage.covered };
+                }
+              }
+            }
+          }
         }
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
           message: "The model declared every planned file already correct, but the project check disagrees: "
@@ -1017,6 +1122,12 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
          * package.json could not pass this path in any way.
          */
         const vSame = await verify(job, workspace);
+        const blockedSame = vSame.ran && !vSame.ok ? checkBlockedByPlannedFiles(vSame.output, plannedFiles, move.files) : null;
+        if (blockedSame) {
+          jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: 0,
+            message: "Every planned file already matched byte for byte; the project check waits only on " + blockedSame.join(", ") + " from later moves." });
+          return { ok: true, costUsd, covered: coverage.covered, checkPendingOn: blockedSame };
+        }
         if (vSame.ran && vSame.ok) {
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: 0,
             message: "Every planned file already matched the intended result byte for byte, and the project check passes." });
@@ -1032,6 +1143,17 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
 
       const v = await verify(job, workspace);
       if (v.ran && !v.ok) {
+        // The check failed only because files from LATER planned moves do not exist yet: this
+        // move's own work landed, and the missing pieces are exactly what the rest of the plan
+        // builds. Say so and keep building instead of failing every early move against the
+        // finished project's checks.
+        const laterBlocked = checkBlockedByPlannedFiles(v.output, plannedFiles, move.files);
+        if (laterBlocked) {
+          jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: written.length,
+            message: "The project check cannot pass yet: it needs " + laterBlocked.join(", ")
+              + ", which later planned moves build. This move's own files are in place; the full check runs again as the plan completes." });
+          return { ok: true, costUsd, covered: coverage.covered, checkPendingOn: laterBlocked };
+        }
         // Diagnose and retry several times before asking a human. Each attempt receives the newest
         // check evidence and must regenerate complete atomic files; repeated identical/no-file
         // replies are failures, never a route to "done".
@@ -1041,11 +1163,15 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         for (let attempt = 1; attempt <= 3; attempt++) {
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "repairing",
             message: "Verification failed; repair attempt " + attempt + " of 3." });
-          const repair = await chat({ model: decision.model, messages: [
+          // bare: the repair already holds the manifest, the failed attempt, and the check
+          // evidence. Format compliance is the bottleneck here, not more research apparatus.
+          const repair = await chat({ model: decision.model, bare: true, messages: [
             ...messages,
             { role: "assistant", content: String(priorContent || "") },
             { role: "user", content:
               "Verification failed. Diagnose the actual error, change approach if the last attempt did not help, and return the complete corrected files. " +
+              "If the check output blames a file OUTSIDE this move's list (package.json, a config, a sibling module), return that file corrected as well: " +
+              "during repair the check evidence overrides the manifest boundary. " +
               "Do not merely explain the failure.\n\nLATEST CHECK OUTPUT:\n" + String(check.output || "").slice(-12000) },
           ] });
           costUsd += Number(repair && repair.costUsd) || 0;
@@ -1062,7 +1188,7 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
           emitDiffs(job, manifest, again.files, new Set(repairWrite.written));
           if (repairWrite.failed.length || !repairWrite.written.length) continue;
           check = await verify(job, workspace);
-          if (check.ok) { repaired = true; break; }
+          if (check.ok || checkBlockedByPlannedFiles(check.output, plannedFiles, move.files)) { repaired = true; break; }
         }
         if (!repaired) {
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
