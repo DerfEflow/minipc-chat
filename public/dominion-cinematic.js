@@ -51,6 +51,12 @@
        * fetch app.js already makes to strip the Private option from a guest's privacy picker.
        */
       fetch("/account").then((r) => r.json()).then((a) => {
+        // The factory is an owner operations surface. Its two navigation projections stay hidden
+        // until this server-verified account response exposes the capability; client storage and
+        // URL shape can never reveal it.
+        const factoryAllowed = a?.gameFactory === true;
+        document.querySelectorAll('[data-account-capability="gameFactory"]').forEach((button) => { button.hidden = !factoryAllowed; });
+        document.getElementById("dock-nav")?.classList.toggle("dgf-enabled", factoryAllowed);
         const vault = sidebar.querySelector(".vault-module");
         if (!vault) return;
         const btn = document.createElement("button");
@@ -139,11 +145,14 @@
         window.openIdeMode && window.openIdeMode(); } },
     { id: "video", label: "Video Generation", sub: "Studio and editor", subShort: "Video", icon: "M5 6h9v12H5zM14 10l5-3v10l-5-3z",
       go: () => { if (window.DominionVideo?.open) window.DominionVideo.open(); else document.getElementById("dv-launch")?.click(); } },
+    { id: "games", label: "Game Factory", sub: "Mobile release portfolio", subShort: "Games", icon: "M7 9h10l3 7-3 2-2-3H9l-2 3-3-2zM9 12h3M10.5 10.5v3M15.5 12h.01M17.5 14h.01",
+      accountCapability: "gameFactory", go: () => { if (window.DominionGameFactory?.open) window.DominionGameFactory.open(); else location.assign("/games"); } },
   ];
   function railButton(d, compact) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "rail-dest rail-dest-" + d.id + (d.soon ? " rail-soon" : "");
+    if (d.accountCapability) { b.hidden = true; b.dataset.accountCapability = d.accountCapability; }
     b.innerHTML = '<svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="' + d.icon + '"/></svg>'
       + '<span><b></b><small></small></span>';
     b.querySelector("b").textContent = d.label;

@@ -45,7 +45,7 @@ const IS_WIN = process.platform === "win32";
 const HANDS_URL = String(process.env.HANDS_URL || "").replace(/\/$/, "");
 const HANDS_TOKEN = process.env.HANDS_TOKEN || "";
 const NODE_NAME = (process.env.HANDS_NODE || hostname() || "unnamed").toLowerCase();
-const VERSION = "hands/3";   // hands/3: byte-aware writes, CRLF-safe fs_edit, mutation progress
+const VERSION = "hands/4";   // hands/4: durable, checkpointed game-factory worker protocol
 // Optional Cloudflare Access service token — when the orchestrator sits behind Access, the node
 // presents these so its dial-out passes the Access layer; HANDS_TOKEN still authorizes at the app.
 const CF_ID = process.env.HANDS_CF_CLIENT_ID || "";
@@ -178,6 +178,80 @@ export function withinRoots(p) {
 }
 const refuse = (reason) => ({ ok: false, refused: true, reason });
 
+// ---- durable mobile-game factory worker ------------------------------------------------------
+// Deliberately disabled until this exact Hands node receives a dedicated state directory. There
+// is no "pick the freshest machine" fallback: the server adapter dispatches to its configured node
+// name, and this node persists every run independently of the SSE request that started it.
+const GAME_FACTORY_WORKER_DIR_RAW = String(process.env.GAME_FACTORY_WORKER_DIR || "").trim();
+const GAME_FACTORY_WORKER_RUNTIME_DIR_RAW = String(process.env.GAME_FACTORY_WORKER_RUNTIME_DIR || "").trim();
+const GAME_FACTORY_WORKER_ISOLATION_ATTESTED = /^(?:1|true|yes)$/i.test(String(process.env.GAME_FACTORY_WORKER_ISOLATION_ATTESTED || "").trim());
+const GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED = /^(?:1|true|yes)$/i.test(String(process.env.GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED || "").trim());
+const GAME_FACTORY_WORKER_PROGRAMS = String(process.env.GAME_FACTORY_WORKER_PROGRAMS || "")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+const GAME_FACTORY_WORKER_CONCURRENCY = Math.min(Math.max(Number(process.env.GAME_FACTORY_WORKER_CONCURRENCY) || 1, 1), 4);
+function redactGameFactoryError(value, max = 1000) {
+  return String(value == null ? "" : value).slice(0, max)
+    .replace(/-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-\r\n]*PRIVATE KEY-----|$)/gi, "[redacted-private-key]")
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g, "[redacted-jwt]")
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/gi, "[redacted-token]")
+    .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[redacted-access-key]")
+    .replace(/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}\b/g, "[redacted-token]")
+    .replace(/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g, "[redacted-token]")
+    .replace(/\bAIza[A-Za-z0-9_-]{30,}\b/g, "[redacted-token]")
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi, "[redacted-token]")
+    .replace(/\b((?:proxy-)?authorization\s*:\s*)[^\r\n]+/gi, "$1[redacted]")
+    .replace(/\b((?:set-)?cookie\s*:\s*)[^\r\n]+/gi, "$1[redacted]")
+    .replace(/("(?:authorization|cookie|credential|password|passwd|private.?key|secret|signature|token|keystore|api.?key|database.?url|connection.?string|access.?key|client.?secret|webhook.?secret)"\s*:\s*)"(?:\\.|[^"\\])*"/gi, '$1"[redacted]"')
+    .replace(/('(?:authorization|cookie|credential|password|passwd|private.?key|secret|signature|token|keystore|api.?key|database.?url|connection.?string|access.?key|client.?secret|webhook.?secret)'\s*:\s*)'(?:\\.|[^'\\])*'/gi, "$1'[redacted]'")
+    .replace(/\b((?:database|redis|postgres|mysql|mongo(?:db)?|amqp)_?url|connection_?string|aws_access_key_id|aws_secret_access_key|gh_pat|client_?secret)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^@\s/]+@/gi, "$1[redacted]@")
+    .replace(/([?&](?:access_?token|api_?key|key|password|secret|signature)=)[^&#\s]*/gi, "$1[redacted]")
+    .replace(/\b(access_?token|api_?key|password|passwd|private_?key|secret|signature)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]");
+}
+const GAME_FACTORY_WORKER_DIR_GUARD = !GAME_FACTORY_WORKER_DIR_RAW
+  ? { ok: true }
+  : assertNotProtected({ path: GAME_FACTORY_WORKER_DIR_RAW }).ok && !underAny(GAME_FACTORY_WORKER_DIR_RAW, SELF_PROTECT)
+    ? { ok: true }
+    : { ok: false, reason: "GAME_FACTORY_WORKER_DIR points at a protected or self-protected location" };
+let gameFactoryWorkerPromise = null;
+async function getGameFactoryWorker() {
+  if (!gameFactoryWorkerPromise) {
+    gameFactoryWorkerPromise = import("./gamefactory-worker.mjs").then(({ createGameFactoryWorker }) => createGameFactoryWorker({
+      stateDir: GAME_FACTORY_WORKER_DIR_GUARD.ok ? GAME_FACTORY_WORKER_DIR_RAW : "",
+      runtimeDir: GAME_FACTORY_WORKER_RUNTIME_DIR_RAW,
+      isolationAttested: GAME_FACTORY_WORKER_ISOLATION_ATTESTED,
+      toolchainAttested: GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED,
+      node: NODE_NAME,
+      roots: () => ROOTS,
+      stateGuard: (path) => {
+        const protectedPath = assertNotProtected({ path });
+        if (!protectedPath.ok) return protectedPath;
+        if (underAny(path, SELF_PROTECT)) return { ok: false, reason: "worker state is under a self-protected Hands directory" };
+        return { ok: true };
+      },
+      pathGuard: (path) => {
+        const root = withinRoots(path);
+        if (!root.ok) return root;
+        if (underAny(path, SELF_PROTECT)) return { ok: false, reason: "workspace is under a self-protected Hands directory" };
+        return { ok: true };
+      },
+      ...(GAME_FACTORY_WORKER_PROGRAMS.length ? { allowedPrograms: GAME_FACTORY_WORKER_PROGRAMS } : {}),
+      maxConcurrent: GAME_FACTORY_WORKER_CONCURRENCY,
+      log: (message) => console.log(`[hands:${NODE_NAME}:game-factory] ${message}`),
+    }));
+  }
+  return gameFactoryWorkerPromise;
+}
+async function gameFactoryWorkerDescription() {
+  // Older guest Forge bundles contain only hands.mjs + snapshot.mjs. Keep those nodes bootable:
+  // the optional worker module is loaded only when this exact node has been configured for factory
+  // duty, while a configured node reports a loud module-load error rather than feigning support.
+  if (!GAME_FACTORY_WORKER_DIR_RAW) return { protocol: "game-factory-worker/1", configured: false, node: NODE_NAME, programs: GAME_FACTORY_WORKER_PROGRAMS, state: "disabled" };
+  try { return (await getGameFactoryWorker()).describe(); }
+  catch (error) { return { protocol: "game-factory-worker/1", configured: false, node: NODE_NAME, state: "error", error: redactGameFactoryError(error && error.message || error, 500) }; }
+}
+
 // ---- cancellation: Stop must cut the legs off, not wait politely ------------------------------
 // Every running shell is tracked by job id so a cancel event can reach it. Killing the immediate
 // child is not enough on Windows: PowerShell spawns its own children (npm, git, node), and killing
@@ -238,7 +312,22 @@ export async function executeJob(tool, args = {}, meta = {}) {
   try {
     switch (tool) {
       case "node_info":
-        return { ok: true, node: NODE_NAME, host: hostname(), platform: process.platform, roots: ROOTS, protectedDirs: SELF_PROTECT.length, pid: process.pid, uptimeSec: Math.round(process.uptime()), version: VERSION };
+        return { ok: true, node: NODE_NAME, host: hostname(), platform: process.platform, roots: ROOTS, protectedDirs: SELF_PROTECT.length, pid: process.pid, uptimeSec: Math.round(process.uptime()), version: VERSION, gameFactoryWorker: await gameFactoryWorkerDescription() };
+      case "game_factory_probe":
+        if (!GAME_FACTORY_WORKER_DIR_GUARD.ok) return refuse(GAME_FACTORY_WORKER_DIR_GUARD.reason);
+        return (await getGameFactoryWorker()).probe();
+      case "game_factory_start":
+        if (!GAME_FACTORY_WORKER_DIR_GUARD.ok) return refuse(GAME_FACTORY_WORKER_DIR_GUARD.reason);
+        return (await getGameFactoryWorker()).start(args);
+      case "game_factory_status":
+        if (!GAME_FACTORY_WORKER_DIR_GUARD.ok) return refuse(GAME_FACTORY_WORKER_DIR_GUARD.reason);
+        return (await getGameFactoryWorker()).status(args.runId);
+      case "game_factory_cancel":
+        if (!GAME_FACTORY_WORKER_DIR_GUARD.ok) return refuse(GAME_FACTORY_WORKER_DIR_GUARD.reason);
+        return (await getGameFactoryWorker()).cancel(args.runId, { mode: args.mode, reason: args.reason });
+      case "game_factory_collect":
+        if (!GAME_FACTORY_WORKER_DIR_GUARD.ok) return refuse(GAME_FACTORY_WORKER_DIR_GUARD.reason);
+        return (await getGameFactoryWorker()).collect(args.runId);
       case "set_roots": {
         // The folder picker sets which folders this node may touch. Carve-outs and self-protect are
         // never overridable: a protected or self-protected path is dropped, not honored.
@@ -527,7 +616,10 @@ export async function executeJob(tool, args = {}, meta = {}) {
       default: return { ok: false, error: "unknown tool: " + tool };
     }
   } catch (e) {
-    return { ok: false, error: `hands ${tool} failed: ` + (e && e.message || e) };
+    const detail = String(tool || "").startsWith("game_factory_")
+      ? redactGameFactoryError(e && e.message || e, 1200)
+      : (e && e.message || e);
+    return { ok: false, error: `hands ${tool} failed: ` + detail };
   }
 }
 
