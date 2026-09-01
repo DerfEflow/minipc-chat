@@ -1899,6 +1899,30 @@ const gameFactoryHttp = createGameFactoryHttp({
 });
 
 /*
+ * Owner-mapped service tokens are intentionally promoted for existing non-factory automation, but
+ * they are not a human approval identity. Keep that promotion intact everywhere else while making
+ * the factory namespace require a verified human Access JWT whenever it is in owner mode. This is
+ * checked after the request-level Access verifier has run and after any service-owner promotion, so
+ * neither a forged header nor an allow-listed service common_name can cross this boundary.
+ */
+function gameFactoryPrincipalDenial(req) {
+  const identity = req && req.dominionIdentity && typeof req.dominionIdentity === "object"
+    ? req.dominionIdentity : {};
+  const source = String(identity.source || "").trim().toLowerCase();
+  if (source === "service" || source === "service-owner") {
+    return { error: "The Mobile Game Factory requires a verified human owner session.", code: "human_owner_required" };
+  }
+  // Preserve the handler's existing 401 response for a genuinely anonymous/rejected request. Any
+  // identity that could resolve to an account in owner mode must, however, come from the verified
+  // human-JWT path.
+  if (gameFactoryGate.mode === "owner" && String(identity.email || "").trim()
+      && !(source === "jwt" && identity.verified === true)) {
+    return { error: "The Mobile Game Factory requires a verified human owner session.", code: "human_owner_required" };
+  }
+  return null;
+}
+
+/*
  * ---- WHOLE-VOLUME backup to the owner's Google Drive (Fred, 2026-07-30).
  *
  * cloudBackup above covers the persona corpus and nothing else: 93MB of a 1.03GB volume, pushed to
@@ -11156,6 +11180,8 @@ const server = http.createServer(async (req, res) => {
     // The handler owns the authenticated tenant/entitlement wall and the protected POST header.
     // Mount only this exact namespace; static assets and unrelated /api routes still fall through.
     if (path === "/api/game-factory" || path.startsWith("/api/game-factory/")) {
+      const principalDenial = gameFactoryPrincipalDenial(req);
+      if (principalDenial) return sjson(res, 403, principalDenial);
       return await gameFactoryHttp.handle(req, res, u);
     }
 
