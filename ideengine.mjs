@@ -22,7 +22,25 @@
  *
  * The pure helpers below carry the logic worth testing; the orchestrator wires them to injected
  * dependencies so none of this needs a server or a provider to exercise.
+ *
+ * THE COUNSEL LADDER (2026-09-01). Before this change a failed move retried the SAME model with no
+ * diagnosis and no memory: whatever went wrong was forgotten the moment the build ended. The live
+ * case that forced this: a 30B coder model left a test-isolation bug in place that a 120B seat
+ * fixed on its first try, and the pipeline never escalated to a stronger seat and never wrote down
+ * what had gone wrong, so the next build hit the same wall cold. `runMoveOnce` below is the
+ * unchanged once-through attempt (still named `runMove` in every caller's head, hence the public
+ * `runMove` wrapper keeps that name). `runMove` adds one thing on top: when the once-path fails, it
+ * asks a cheap brain model for a diagnosis, retries once with that fix; if the brain was unsure or
+ * still wrong, asks a frontier model for a correction and retries once with that; if that still
+ * fails, gives the strongest available seat one guided attempt; only after all of that does it
+ * return the honest failure. Every rung is optional (advisors/lessons/escalate all default to null)
+ * so a caller that wires none of it in gets exactly the old one-shot behavior back.
  */
+import {
+  failureDossier, brainReportMessages, parseBrainReport,
+  frontierCorrectionMessages, parseFrontierCorrection,
+  guidanceTurn, reportLine,
+} from "./idelessons.mjs";
 
 export const MAX_FILES_PER_MOVE = 24;
 /*
@@ -433,7 +451,17 @@ export function fitManifestToBudget(manifest, budgetBytes) {
  * variable goes in the user turn, which is what keeps the cacheable prefix identical across every
  * move of every build.
  */
-export function buildMoveMessages({ move, manifest = [], workspaceName = "", goal = "" }) {
+/*
+ * `policies` (a string from lessons.policiesBlock) rides its own section, and it goes BEFORE the
+ * final accounting line on purpose: that line is the last word the model reads before answering,
+ * the same instruction-recency reasoning PLANNER_FORMAT_REMINDER documents below, and a policy
+ * line buried above it would lose to the accounting line the way rule 1 lost to a wrapped prompt.
+ * `guidance` (message turns from a brain/frontier report, built by idelessons.guidanceTurn) rides
+ * AFTER the user turn instead, because guidance is a REPLY to what the model already tried, not
+ * background for the first attempt, and it must still exist as separate turns so the model sees
+ * "here is what you tried, here is the correction" rather than one merged wall of text.
+ */
+export function buildMoveMessages({ move, manifest = [], workspaceName = "", goal = "", policies = "", guidance = [] }) {
   const parts = [];
   parts.push("PROJECT: " + (workspaceName || "(unnamed)"));
   if (goal) parts.push("OVERALL GOAL: " + goal);
@@ -453,10 +481,12 @@ export function buildMoveMessages({ move, manifest = [], workspaceName = "", goa
     parts.push("This move creates new files. None exist yet.");
   }
   parts.push("");
+  if (policies) { parts.push(policies); parts.push(""); }
   parts.push("Account for EVERY file listed in this move: a complete path block for each file you change or create, and the single line NO-CHANGE: <path> for any file that inspection proves already satisfies the move. Omitting a listed file leaves the move incomplete.");
   return [
     { role: "system", content: SYSTEM_PREFIX },
     { role: "user", content: parts.join("\n") },
+    ...(Array.isArray(guidance) ? guidance : []),
   ];
 }
 
@@ -544,15 +574,45 @@ export function plannerRepairMessages({ userPrompt, badReply }) {
   ];
 }
 
+// Small head/tail clips for the fields a failure return now carries. idelessons.mjs has its own
+// private clipHead/clipTail (not exported: they are internal to how a dossier is built), so these
+// exist here rather than reaching into that module's insides. The caps mirror failureDossier's own
+// (reply from the head, check output from the tail) so a failure result looks the same whether or
+// not the caller ever turns it into a dossier.
+function headClip(s, n) { const str = String(s == null ? "" : s); return str.length > n ? str.slice(0, n) : str; }
+function tailClip(s, n) { const str = String(s == null ? "" : s); return str.length > n ? str.slice(-n) : str; }
+
+/*
+ * Which lesson-store scope a failed stage's report belongs under. Pure and exported so tests (and
+ * anything auditing the lesson store) can check the mapping without spinning up the engine.
+ * "verify" maps to the "repair" scope, not a "verify" scope, because the policies that help a
+ * verification failure are the same ones that help the bounded repair loop that chases it: both
+ * are "the check is red, fix the code", and splitting them would just halve each pool's evidence.
+ */
+export function counselScopeFor(stage) {
+  if (stage === "format" || stage === "coverage") return "move";
+  if (stage === "verify") return "repair";
+  if (stage === "install") return "install";
+  if (stage === "no_change_contested") return "repair";
+  return "move";
+}
+
 /*
  * The orchestrator. Dependencies are injected so this file needs no server, provider, or fs:
- *   jobs    the durable spine (emit/finish)
- *   chat    async ({model, messages}) -> {ok, content, usage, costUsd}
- *   hands   async (tool, args) -> node result   (fs_read / fs_write / shell_run / fs_list)
- *   router  ({title, files}) -> {taskClass, model, why}
- *   meter   async (usd) -> void                 (called ONCE per move, on a finally path)
+ *   jobs      the durable spine (emit/finish)
+ *   chat      async ({model, messages}) -> {ok, content, usage, costUsd}
+ *   hands     async (tool, args) -> node result   (fs_read / fs_write / shell_run / fs_list)
+ *   router    ({title, files}) -> {taskClass, model, why}
+ *   meter     async (usd) -> void                 (called ONCE per move, on a finally path)
+ *   lessons   a store from idelessons.createLessonStore, or null to disable policies/recording
+ *   advisors  { brainModel, frontierModel, minBrainConfidence = 0.6, frontierCallsLeft, noteFrontierCall } or null
+ *   escalate  (model, taskClass) => string|null    the server wires idelessons.strongerModelFor
+ *   report    async (job, {source, model, stage, dossier, report}) => void   persists a brain/frontier report, or null
  */
-export function createIdeEngine({ jobs, chat, hands, router, meter = async () => {}, log = () => {}, modelInfo = null } = {}) {
+export function createIdeEngine({
+  jobs, chat, hands, router, meter = async () => {}, log = () => {}, modelInfo = null,
+  lessons = null, advisors = null, escalate = null, report = null,
+} = {}) {
   if (!jobs || !chat || !hands || !router) throw new Error("createIdeEngine needs jobs, chat, hands, router");
   // modelInfo(id) -> catalog record (or null). Injected so the engine can bound a move's manifest
   // to the routed model's real context window without importing the catalog.
@@ -880,14 +940,28 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
   }
 
   /*
-   * Run one move. Returns { ok, costUsd, blocked }. Metering happens in `finally`, so a move that
-   * throws, is stopped, or fails verification still charges for the tokens it actually burned.
+   * Run one move ONCE, with no counsel on failure. Returns { ok, costUsd, blocked, model, ...and,
+   * on failure, stage/lastReply/checkOutput/pipelineNotes }. Metering happens in `finally`, so a
+   * move that throws, is stopped, or fails verification still charges for the tokens it actually
+   * burned. This is the function every caller used to reach as `runMove`; the public `runMove`
+   * below wraps it with the counsel ladder, but the once-through attempt itself is unchanged.
+   *
+   * `guidance` is extra message turns appended after the user turn (brain/frontier corrections, or
+   * accumulated guidance on an escalation attempt). `forceModel`, when set, pins the model for this
+   * attempt instead of letting the router choose, which is how the escalation rung runs the SAME
+   * move on a stronger seat without re-deriving a route.
    */
   // `depth` is the split recursion guard: a move that cannot be answered atomically is halved and
   // re-run through this same path, and three levels turns a 24-file move into 3-file moves, which
-  // is far past the point where the size was the problem.
-  async function runMove(job, { move, workspace, assignments, goal, plannedFiles = [] }, depth = 0) {
+  // is far past the point where the size was the problem. It is also the counsel guard: only the
+  // top-level call (depth 0) gets counseled on failure; a split half runs its own once-path.
+  async function runMoveOnce(job, { move, workspace, assignments, goal, plannedFiles = [], guidance = [], forceModel = "" }, depth = 0) {
     let costUsd = 0;
+    // What this once-path already tried, for the pipelineNotes field on a failure return. A plain
+    // sentence, not a log: the brain/frontier reading it needs "format retry, coverage retry", not
+    // a transcript.
+    const notes = [];
+    const pipelineNotes = () => (notes.length ? notes.join(", ") : "no repair attempted before this failure");
     try {
       let decision = router({ title: move.title, description: move.why, files: move.files }, assignments);
       if (decision.isImage || decision.model === "dominion-forge") {
@@ -904,6 +978,9 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         move = { ...move, why: (move.why ? move.why + " " : "")
           + "NOTE: do not reference image files that do not exist. Build the visual with CSS gradients or inline SVG placeholder art." };
       }
+      // The escalation rung pins the model for this one attempt; taskClass/why still come from the
+      // router (or the image fallback above), only the model changes.
+      if (forceModel) decision = { ...decision, model: forceModel };
       // `why` belongs to the PLAN (what this move is for, in plain English). The router's reason
       // travels as routeWhy so the two never overwrite each other on the card.
       jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
@@ -917,7 +994,11 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
           message: "Trimmed " + fitted.trimmed.length + " large file(s) to fit " +
             (decision.model || "the model") + "'s context window; the model can page the rest on demand." });
       }
-      const messages = buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal });
+      // Move-scope policies: lessons learned from past builds' failures at this stage class,
+      // folded into the first attempt so a known trap does not have to be rediscovered by failing.
+      const policies = lessons ? lessons.policiesBlock({ scope: "move", model: decision.model }) : "";
+      const policiesRepair = lessons ? lessons.policiesBlock({ scope: "repair", model: decision.model }) : "";
+      const messages = buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal, policies, guidance });
       let res = null, resumeState = null;
       for (let inspectionWindow = 0; inspectionWindow < 3; inspectionWindow++) {
         res = await chat({ model: decision.model, messages, resumeState });
@@ -930,7 +1011,8 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       if (!res || !res.ok) {
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
           message: (res && res.error) || "The model call failed." });
-        return { ok: false, costUsd };
+        return { ok: false, costUsd, model: decision.model, stage: "format",
+          lastReply: headClip(res && res.content, 6000), checkOutput: "", pipelineNotes: pipelineNotes() };
       }
 
       let parsed = parseFileBlocks(res.content);
@@ -948,6 +1030,7 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
           { role: "user", content: "That reply contained no file blocks, so nothing could be written. Respond ONLY with fenced file blocks, each opening ```<path> on its own line and closing ``` at the start of a line. No prose outside the blocks." },
         ] });
         costUsd += Number(retry && retry.costUsd) || 0;
+        notes.push("format retry");
         if (retry && retry.ok) { const rp = parseFileBlocks(retry.content); if (rp.files.length) { res = retry; parsed = rp; } }
       }
       let coverage = fileCoverage(move.files || [], parsed.files, parsed.unchanged);
@@ -963,6 +1046,7 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
             "Return ONLY complete fenced path blocks for every file that needs edits, and for any listed file that inspection proves already satisfies this move, the single line NO-CHANGE: <path> instead of reproducing it." },
         ] });
         costUsd += Number(retry && retry.costUsd) || 0;
+        notes.push("coverage retry");
         if (retry && retry.ok) {
           res = retry;
           parsed = parseFileBlocks(retry.content);
@@ -978,7 +1062,8 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
             ? "It needs a file that was not in this move's list: " + parsed.needs.join(", ") + ". Try again, or simplify this step."
             : "The model did not return any files to write, even after a retry. Try again, or simplify the ask.",
           nextAction: parsed.needs.length ? "retry" : "retry_or_simplify" });
-        return { ok: false, costUsd };
+        return { ok: false, costUsd, model: decision.model, stage: "format",
+          lastReply: headClip(res.content, 6000), checkOutput: "", pipelineNotes: pipelineNotes() };
       }
       if (!coverage.complete) {
         /*
@@ -1008,16 +1093,20 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
               workspace, assignments, goal, plannedFiles,
             }, depth + 1);
             splitCost += Number(sub && sub.costUsd) || 0;
-            if (!sub || !sub.ok) return { ok: false, costUsd: splitCost, missing: (sub && sub.missing) || halves[h] };
+            // Forward the sub-call's own failure detail (it already carries stage/lastReply/
+            // checkOutput/pipelineNotes, having gone through this same annotation): a split half's
+            // diagnosis is more specific than anything this coordinator could invent about it.
+            if (!sub || !sub.ok) return { ...(sub || {}), ok: false, costUsd: splitCost, missing: (sub && sub.missing) || halves[h] };
             allCovered = allCovered.concat(sub.covered || []);
           }
-          return { ok: true, costUsd: splitCost, covered: allCovered };
+          return { ok: true, costUsd: splitCost, covered: allCovered, model: decision.model };
         }
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
           message: "The model still omitted planned files: " + coverage.missing.join(", ") +
             ". Nothing was written because a partial move could leave the project inconsistent.",
           nextAction: "retry" });
-        return { ok: false, costUsd, missing: coverage.missing };
+        return { ok: false, costUsd, missing: coverage.missing, model: decision.model, stage: "coverage",
+          lastReply: headClip(res.content, 6000), checkOutput: "", pipelineNotes: pipelineNotes() };
       }
 
       /*
@@ -1033,13 +1122,13 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         if (blocked0) {
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: 0,
             message: "Declared already correct; the project check cannot pass yet because later planned moves still build " + blocked0.join(", ") + "." });
-          return { ok: true, costUsd, covered: coverage.covered, checkPendingOn: blocked0 };
+          return { ok: true, costUsd, covered: coverage.covered, checkPendingOn: blocked0, model: decision.model };
         }
         if (!v0.ran || v0.ok) {
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: 0,
             message: "The model inspected the planned files and declared them already correct"
               + (v0.ran ? ", and the project check agrees." : ". No project check exists yet to dispute it.") });
-          return { ok: true, costUsd, covered: coverage.covered };
+          return { ok: true, costUsd, covered: coverage.covered, model: decision.model };
         }
         /*
          * The declaration was wrong: the check is red. Before failing the move, ONE bare repair
@@ -1055,15 +1144,23 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
           { role: "user", content:
             "You declared these files NO-CHANGE, but the project check FAILS with the output below, so at least one of them is wrong. " +
             "Diagnose it and return the complete corrected file(s) as fenced path blocks. Do not declare NO-CHANGE again.\n\nCHECK OUTPUT:\n"
-            + String(v0.output || "").slice(-8000) },
+            + String(v0.output || "").slice(-8000)
+            + (policiesRepair ? "\n\n" + policiesRepair : "") },
         ] });
         costUsd += Number(contest && contest.costUsd) || 0;
+        notes.push("NO-CHANGE contested");
+        // The latest reply and check output available at whatever exit follows, updated as the
+        // contest actually progresses so a counsel dossier sees the real last state, not the
+        // original (already-wrong) declaration.
+        let contestReply = res.content, contestCheckOutput = v0.output;
         if (contest && contest.ok) {
+          contestReply = contest.content;
           const cp = parseFileBlocks(contest.content);
           const carveC = carveOutReport(cp.files);
           if (carveC) {
             jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "blocked", message: carveC.message });
-            return { ok: false, costUsd, blocked: true };
+            return { ok: false, costUsd, blocked: true, model: decision.model, stage: "blocked",
+              lastReply: headClip(contestReply, 6000), checkOutput: tailClip(contestCheckOutput, 8000), pipelineNotes: pipelineNotes() };
           }
           if (cp.files.length && !cp.truncated) {
             const snapC = await snapshot(job, workspace);
@@ -1072,11 +1169,12 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
               emitDiffs(job, manifest, cp.files, new Set(wr.written));
               if (wr.written.length && !wr.failed.length) {
                 const v1 = await verify(job, workspace);
+                contestCheckOutput = v1.output;
                 if (!v1.ran || v1.ok
                     || checkBlockedByPlannedFiles(v1.output, plannedFiles, move.files)) {
                   jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: wr.written.length,
                     message: "The check evidence overruled the NO-CHANGE declaration; the corrected files pass." });
-                  return { ok: true, costUsd, covered: coverage.covered };
+                  return { ok: true, costUsd, covered: coverage.covered, model: decision.model };
                 }
               }
             }
@@ -1085,21 +1183,24 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
           message: "The model declared every planned file already correct, but the project check disagrees: "
             + String(v0.output || "").slice(-600), nextAction: "retry" });
-        return { ok: false, costUsd };
+        return { ok: false, costUsd, model: decision.model, stage: "no_change_contested",
+          lastReply: headClip(contestReply, 6000), checkOutput: tailClip(contestCheckOutput, 8000), pipelineNotes: pipelineNotes() };
       }
 
       // Carve-out BEFORE the snapshot and before any write, so a refusal costs nothing.
       const carve = carveOutReport(parsed.files);
       if (carve) {
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "blocked", message: carve.message });
-        return { ok: false, costUsd, blocked: true };
+        return { ok: false, costUsd, blocked: true, model: decision.model, stage: "blocked",
+          lastReply: headClip(res.content, 6000), checkOutput: "", pipelineNotes: pipelineNotes() };
       }
 
       const snap = await snapshot(job, workspace);
       if (!snap.ok) {
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
           message: "No restore point could be made, so nothing was written. " + (snap.error || "") });
-        return { ok: false, costUsd };
+        return { ok: false, costUsd, model: decision.model, stage: "snapshot",
+          lastReply: headClip(res.content, 6000), checkOutput: "", pipelineNotes: pipelineNotes() };
       }
 
       const { written, unchanged, failed } = await writeFiles(job, workspace, parsed.files);
@@ -1110,7 +1211,12 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
           message: failed.length + " file write" + (failed.length === 1 ? "" : "s") +
             " failed. The move remains incomplete; successful sibling writes are preserved in the restore point.",
           nextAction: "retry" });
-        return { ok: false, costUsd, wroteAnyway: written.length > 0, failed };
+        // A write refusal from the node is not the snapshot/carve-out kind of terminal wall (it is
+        // often a path or naming problem a re-run CAN dodge), so it stays "format" rather than a
+        // stage that would skip counsel. No formal stage in the dossier vocabulary names "the hands
+        // node refused a write"; this is the nearest fit, documented rather than invented silently.
+        return { ok: false, costUsd, wroteAnyway: written.length > 0, failed, model: decision.model, stage: "format",
+          lastReply: headClip(res.content, 6000), checkOutput: "", pipelineNotes: pipelineNotes() };
       }
       if (!written.length && !failed.length) {
         /*
@@ -1126,19 +1232,20 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         if (blockedSame) {
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: 0,
             message: "Every planned file already matched byte for byte; the project check waits only on " + blockedSame.join(", ") + " from later moves." });
-          return { ok: true, costUsd, covered: coverage.covered, checkPendingOn: blockedSame };
+          return { ok: true, costUsd, covered: coverage.covered, checkPendingOn: blockedSame, model: decision.model };
         }
         if (vSame.ran && vSame.ok) {
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: 0,
             message: "Every planned file already matched the intended result byte for byte, and the project check passes." });
-          return { ok: true, costUsd, covered: coverage.covered };
+          return { ok: true, costUsd, covered: coverage.covered, model: decision.model };
         }
         jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
           message: "The model returned files, but every write was byte-for-byte unchanged"
             + (vSame.ran ? " and the project check still fails" : " and no project check exists to vouch for the current state")
             + ". Nothing was implemented. Reread the current files and retry with a specific change.",
           unchanged, nextAction: "retry_or_simplify" });
-        return { ok: false, costUsd, unchanged };
+        return { ok: false, costUsd, unchanged, model: decision.model, stage: "verify",
+          lastReply: headClip(res.content, 6000), checkOutput: tailClip(vSame.output, 8000), pipelineNotes: pipelineNotes() };
       }
 
       const v = await verify(job, workspace);
@@ -1152,7 +1259,7 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: written.length,
             message: "The project check cannot pass yet: it needs " + laterBlocked.join(", ")
               + ", which later planned moves build. This move's own files are in place; the full check runs again as the plan completes." });
-          return { ok: true, costUsd, covered: coverage.covered, checkPendingOn: laterBlocked };
+          return { ok: true, costUsd, covered: coverage.covered, checkPendingOn: laterBlocked, model: decision.model };
         }
         // Diagnose and retry several times before asking a human. Each attempt receives the newest
         // check evidence and must regenerate complete atomic files; repeated identical/no-file
@@ -1160,7 +1267,9 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
         let check = v;
         let priorContent = res.content;
         let repaired = false;
+        let repairAttempts = 0;
         for (let attempt = 1; attempt <= 3; attempt++) {
+          repairAttempts = attempt;
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "repairing",
             message: "Verification failed; repair attempt " + attempt + " of 3." });
           // bare: the repair already holds the manifest, the failed attempt, and the check
@@ -1172,7 +1281,8 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
               "Verification failed. Diagnose the actual error, change approach if the last attempt did not help, and return the complete corrected files. " +
               "If the check output blames a file OUTSIDE this move's list (package.json, a config, a sibling module), return that file corrected as well: " +
               "during repair the check evidence overrides the manifest boundary. " +
-              "Do not merely explain the failure.\n\nLATEST CHECK OUTPUT:\n" + String(check.output || "").slice(-12000) },
+              "Do not merely explain the failure.\n\nLATEST CHECK OUTPUT:\n" + String(check.output || "").slice(-12000)
+              + (policiesRepair ? "\n\n" + policiesRepair : "") },
           ] });
           costUsd += Number(repair && repair.costUsd) || 0;
           if (!repair || !repair.ok) continue;
@@ -1181,7 +1291,9 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
           const carve2 = carveOutReport(again.files);
           if (carve2) {
             jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "blocked", message: carve2.message });
-            return { ok: false, costUsd, blocked: true };
+            notes.push(repairAttempts + " verification repair" + (repairAttempts === 1 ? "" : "s") + " before a carve-out hit");
+            return { ok: false, costUsd, blocked: true, model: decision.model, stage: "blocked",
+              lastReply: headClip(priorContent, 6000), checkOutput: tailClip(check.output, 8000), pipelineNotes: pipelineNotes() };
           }
           if (!again.files.length || again.truncated) continue;
           const repairWrite = await writeFiles(job, workspace, again.files);
@@ -1194,12 +1306,18 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
           jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "failed",
             message: "Verification still fails after three adaptive repair attempts. The latest raw check output is above; the build remains incomplete.",
             nextAction: "retry_with_guidance" });
-          return { ok: false, costUsd, wroteAnyway: true, verification: check };
+          notes.push(repairAttempts + " verification repair" + (repairAttempts === 1 ? "" : "s"));
+          // "install" only when the LATEST check is the verify() install-refusal shape (cmd is
+          // exactly "npm install"); every other red check, including the identical-looking
+          // "npm itself is missing" tooling case, never reaches this loop at all (see verify()).
+          const stage = check && check.cmd === "npm install" ? "install" : "verify";
+          return { ok: false, costUsd, wroteAnyway: true, verification: check, model: decision.model, stage,
+            lastReply: headClip(priorContent, 6000), checkOutput: tailClip(check.output, 8000), pipelineNotes: pipelineNotes() };
         }
       }
 
       jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "done", files: written.length });
-      return { ok: true, costUsd, written, covered: parsed.files.map((file) => file.path) };
+      return { ok: true, costUsd, written, covered: parsed.files.map((file) => file.path), model: decision.model };
     } finally {
       // FINALLY, always. Aborted and failed moves still burned tokens, and pretending otherwise is
       // the exact leak the chat path has (its early returns skip metering entirely).
@@ -1208,5 +1326,212 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
     }
   }
 
-  return { runMove, readManifest, snapshot, verify, writeFiles, ensureRoot };
+  /*
+   * The counsel ladder. Every caller (server.mjs included) reaches the engine through THIS name,
+   * exactly as it always has; the difference is what happens when the once-through attempt fails.
+   *
+   * Each rung is bounded to ONE guided re-run and is skipped outright when its dependency was not
+   * injected, so a caller that wires in none of lessons/advisors/escalate gets back exactly what
+   * `runMoveOnce` would have returned, plus the new stage/lastReply/checkOutput/pipelineNotes
+   * fields runMoveOnce now always carries on a failure. Nothing here throws: every rung's own
+   * chat/parse work is wrapped so a bad reply from the brain or the frontier degrades to an ok:false
+   * journal line and the ladder moving on, never a crashed build.
+   */
+  async function runMove(job, args, depth = 0) {
+    const first = await runMoveOnce(job, args, depth);
+    if (first.ok) {
+      if (lessons) { try { lessons.noteWinFor({ scope: "move", model: first.model || "" }); } catch {} }
+      return first;
+    }
+    /*
+     * Blocked (a carve-out refusal) and snapshot failures are terminal: nothing about the coding
+     * model's OWN attempt caused either one, so no amount of diagnosis or a stronger seat changes
+     * the outcome, and asking would just spend a brain/frontier call on a wall that was never going
+     * to move. A split half (depth > 0) already ran its own once-path via this same function; only
+     * the top-level move gets counseled, or a split move would counsel once per half and again at
+     * the coordinator that combines them.
+     */
+    if (first.blocked || first.stage === "blocked" || first.stage === "snapshot" || depth > 0) return first;
+    // Nothing is wired in to counsel with: return the once-path result completely unchanged rather
+    // than decorating it with an empty counsel{} and a "nothing to try" journal line nobody asked
+    // for. This is what keeps a caller that injects none of lessons/advisors/escalate identical to
+    // calling runMoveOnce directly, existing callers and existing tests included.
+    if (!lessons && !advisors && !escalate) return first;
+
+    let lastFailure = first;
+    let totalCost = Number(first.costUsd) || 0;
+    let brainReport = null;
+    let frontierCorrection = null;
+    let strongerModel = "";
+    const guidanceSoFar = [];
+    // An approximation of the route for dossier/escalation context: the real per-attempt decision
+    // lives inside runMoveOnce and stays there. The router is a pure, cheap function of the move's
+    // own title/files, so recomputing it here costs nothing and is accurate
+    // for everything except the rare image-move reroute (informational field only, not load-bearing).
+    const taskClassGuess = (router({ title: args.move.title, description: args.move.why, files: args.move.files }, args.assignments) || {}).taskClass || "";
+
+    const finish = () => ({
+      ...lastFailure,
+      costUsd: totalCost,
+      counsel: { brain: !!brainReport, frontier: !!frontierCorrection, escalatedTo: strongerModel || "" },
+    });
+
+    /* ---- RUNG 1: BRAIN ------------------------------------------------------------------- */
+    if (advisors && advisors.brainModel) {
+      try {
+        const dossier = failureDossier({
+          move: args.move, model: lastFailure.model, taskClass: taskClassGuess, stage: lastFailure.stage,
+          attempt: 1, reply: lastFailure.lastReply, checkOutput: lastFailure.checkOutput,
+          pipelineNotes: lastFailure.pipelineNotes, goal: args.goal,
+        });
+        const brainPolicies = lessons ? lessons.policiesBlock({ scope: counselScopeFor(lastFailure.stage), model: advisors.brainModel }) : "";
+        const r = await chat({ model: advisors.brainModel, bare: true, messages: brainReportMessages(dossier, { policies: brainPolicies }) });
+        totalCost += Number(r && r.costUsd) || 0;
+        if (r && r.aborted) return finish();
+        if (r && r.ok) {
+          const parsed = parseBrainReport(r.content);
+          if (parsed.ok) {
+            brainReport = parsed.report;
+            jobs.emit(job.id, { type: "run", command: "brain", ok: true, output: reportLine(brainReport, { source: "brain", model: advisors.brainModel }) });
+            if (brainReport.lesson && lessons) {
+              try { lessons.record({ text: brainReport.lesson, scope: counselScopeFor(lastFailure.stage), source: "brain", model: lastFailure.model, tags: [brainReport.rootCause] }); } catch {}
+            }
+            if (lessons) { try { lessons.bumpReports(); } catch {} }
+            if (report) { try { await report(job, { source: "brain", model: lastFailure.model, stage: lastFailure.stage, dossier, report: brainReport }); } catch {} }
+            const brainTurn = guidanceTurn({ source: "brain", text: brainReport.fix });
+            guidanceSoFar.push(brainTurn);
+            /*
+             * A guided retry costs a full coder attempt, up to five model calls between the format
+             * and coverage reprompts, so a brain that admits it is guessing should not spend one: it
+             * is cheaper and more honest to hand a low-confidence diagnosis straight to the frontier
+             * reviewer than to burn a retry on a fix the brain itself does not trust. The brain turn
+             * still rides in guidanceSoFar, so the frontier rung's own retry carries both the brain's
+             * fix and the frontier's correction. An operator can set the bar above 1.0 to demand a
+             * frontier second opinion on every failure, which doubles as the way to prove the paid
+             * rung is actually live.
+             */
+            const threshold = Number(advisors.minBrainConfidence);
+            const unsure = Number.isFinite(threshold) && brainReport.confidence < threshold;
+            if (unsure) {
+              jobs.emit(job.id, { type: "run", command: "brain", ok: true,
+                output: "The brain rated its own confidence at " + brainReport.confidence.toFixed(2) + ", below the "
+                  + threshold.toFixed(2) + " bar, so the frontier reviewer is asked before any retry is spent on that fix." });
+            } else {
+              jobs.emit(job.id, { type: "move", id: args.move.id, title: args.move.title, state: "running",
+                message: "Retrying with the brain's fix applied." });
+              const second = await runMoveOnce(job, { ...args, guidance: [brainTurn] }, depth);
+              totalCost += Number(second.costUsd) || 0;
+              if (second.ok) {
+                if (lessons) { try { lessons.noteWinFor({ scope: "move", model: second.model || "" }); } catch {} }
+                return { ...second, costUsd: totalCost };
+              }
+              lastFailure = second;
+            }
+          } else {
+            jobs.emit(job.id, { type: "run", command: "brain", ok: false,
+              output: "The brain's reply could not be read as a diagnosis: " + parsed.error + ". Reply (head): " + headClip(r.content, 400) });
+          }
+        } else {
+          jobs.emit(job.id, { type: "run", command: "brain", ok: false, output: (r && r.error) || "The brain call failed." });
+        }
+      } catch (e) {
+        jobs.emit(job.id, { type: "run", command: "brain", ok: false, output: String((e && e.message) || e) });
+      }
+    }
+
+    /*
+     * ---- RUNG 2: FRONTIER ------------------------------------------------------------------
+     * Reaching this line already proves the brain could not close it out on its own: either it was
+     * never configured, or its guided retry (rung 1) just failed. Confidence still travels on the
+     * dossier for the frontier prompt to weigh (a brain that admitted low confidence gets less
+     * benefit of the doubt), but it is not a second gate here on top of an already-failed retry.
+     */
+    if (advisors && advisors.frontierModel && typeof advisors.frontierCallsLeft === "function" && advisors.frontierCallsLeft() > 0) {
+      try {
+        advisors.noteFrontierCall();
+        const latestDossier = failureDossier({
+          move: args.move, model: lastFailure.model, taskClass: taskClassGuess, stage: lastFailure.stage,
+          attempt: 2, reply: lastFailure.lastReply, checkOutput: lastFailure.checkOutput,
+          pipelineNotes: lastFailure.pipelineNotes, goal: args.goal,
+        });
+        const frontierPolicies = lessons ? lessons.policiesBlock({ scope: counselScopeFor(lastFailure.stage), model: advisors.frontierModel }) : "";
+        const fr = await chat({ model: advisors.frontierModel, bare: true,
+          messages: frontierCorrectionMessages(latestDossier, { brainReport, policies: frontierPolicies }) });
+        totalCost += Number(fr && fr.costUsd) || 0;
+        if (fr && fr.aborted) return finish();
+        if (fr && fr.ok) {
+          const parsedF = parseFrontierCorrection(fr.content);
+          if (parsedF.ok) {
+            frontierCorrection = parsedF.report;
+            jobs.emit(job.id, { type: "run", command: "frontier", ok: true, output: reportLine(frontierCorrection, { source: "frontier", model: advisors.frontierModel }) });
+            if (frontierCorrection.lesson && lessons) {
+              try { lessons.record({ text: frontierCorrection.lesson, scope: counselScopeFor(lastFailure.stage), source: "frontier", model: lastFailure.model, tags: [] }); } catch {}
+            }
+            if (lessons) { try { lessons.bumpReports(); } catch {} }
+            if (report) { try { await report(job, { source: "frontier", model: lastFailure.model, stage: lastFailure.stage, dossier: latestDossier, report: frontierCorrection }); } catch {} }
+            guidanceSoFar.push(guidanceTurn({ source: "frontier", text: frontierCorrection.correction }));
+            jobs.emit(job.id, { type: "move", id: args.move.id, title: args.move.title, state: "running",
+              message: "Retrying with the frontier reviewer's correction applied." });
+            const afterFrontier = await runMoveOnce(job, { ...args, guidance: [...guidanceSoFar] }, depth);
+            totalCost += Number(afterFrontier.costUsd) || 0;
+            if (afterFrontier.ok) {
+              if (lessons) { try { lessons.noteWinFor({ scope: "move", model: afterFrontier.model || "" }); } catch {} }
+              return { ...afterFrontier, costUsd: totalCost };
+            }
+            lastFailure = afterFrontier;
+          } else {
+            jobs.emit(job.id, { type: "run", command: "frontier", ok: false,
+              output: "The frontier reviewer's reply could not be read as a correction: " + parsedF.error + ". Reply (head): " + headClip(fr.content, 400) });
+          }
+        } else {
+          jobs.emit(job.id, { type: "run", command: "frontier", ok: false, output: (fr && fr.error) || "The frontier call failed." });
+        }
+      } catch (e) {
+        jobs.emit(job.id, { type: "run", command: "frontier", ok: false, output: String((e && e.message) || e) });
+      }
+    }
+
+    /* ---- RUNG 3: ESCALATION -------------------------------------------------------------- */
+    if (escalate) {
+      try {
+        const stronger = escalate(lastFailure.model, taskClassGuess);
+        if (stronger && stronger !== lastFailure.model) {
+          strongerModel = stronger;
+          jobs.emit(job.id, { type: "run", command: "escalation", ok: true,
+            output: (lastFailure.model || "The model") + " could not finish this step after guided retries, so it moves to "
+              + stronger + " for one attempt with the guidance attached." });
+          const afterEscalation = await runMoveOnce(job, { ...args, guidance: [...guidanceSoFar], forceModel: stronger }, depth);
+          totalCost += Number(afterEscalation.costUsd) || 0;
+          if (afterEscalation.ok) {
+            if (lessons) {
+              try { lessons.noteWinFor({ scope: "move", model: first.model || "" }); } catch {}
+              try { lessons.noteWinFor({ scope: "move", model: stronger }); } catch {}
+            }
+            return { ...afterEscalation, costUsd: totalCost };
+          }
+          lastFailure = afterEscalation;
+        }
+      } catch (e) {
+        jobs.emit(job.id, { type: "run", command: "escalation", ok: false, output: String((e && e.message) || e) });
+      }
+    }
+
+    /*
+     * ---- everything available was tried; return the honest, fully-annotated failure ----------
+     * The summary names only what actually ran, not the whole ladder unconditionally: a build with
+     * no advisors wired in tried nothing, and claiming otherwise would be exactly the kind of
+     * silent overstatement rule 8.3 exists to prevent.
+     */
+    const result = finish();
+    const tried = [];
+    if (result.counsel.brain) tried.push("brain guidance");
+    if (result.counsel.frontier) tried.push("frontier correction");
+    if (result.counsel.escalatedTo) tried.push("escalation to " + result.counsel.escalatedTo);
+    jobs.emit(job.id, { type: "run", command: "counsel", ok: false,
+      output: (tried.length ? "Every recourse was tried: " + tried.join(", ") + "." : "No counsel was available for this failure.")
+        + " The step stays failed; the detail is above." });
+    return result;
+  }
+
+  return { runMove, runMoveOnce, readManifest, snapshot, verify, writeFiles, ensureRoot };
 }

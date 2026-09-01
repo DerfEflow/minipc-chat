@@ -214,6 +214,14 @@ export const CRUCIBLE_GUIDE = [
   "  screen dims EXCEPT a lit spotlight around the exact control the card's arrow points at,",
   "  so the thing being described is always visible. Every page and drawer opens scrolled to",
   "  its top. The flame card with a timer means work is in flight.",
+  "- EVERY BUILD HAS A COUNSEL working behind the scenes. When a step fails, its own brain model",
+  "  reads what went wrong and hands back a diagnosis and a fix before the step ever surfaces as",
+  "  failed. If the brain is unsure or its fix does not land, a frontier reviewer of last resort",
+  "  looks at the same failure once for a stronger correction. A step that still cannot pass moves",
+  "  to a stronger engine for one guided attempt before the build gives up on it honestly. Whatever",
+  "  generalizes past this one project is kept as a lesson and quietly follows every future build,",
+  "  so the same mistake is never paid for twice. The owner can see, and prune, what it has learned",
+  "  at /ide/lessons.",
 ].join("\n");
 
 // The instruction that rides with the guide.

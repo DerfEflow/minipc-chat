@@ -170,6 +170,7 @@ import {
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_PROMPT_MAX_CHARS, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs, ledgerFromEvents } from "./idejobs.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, PLANNER_FORMAT_REMINDER, plannerRepairMessages, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages, fitManifestToBudget, manifestBudgetBytes } from "./ideengine.mjs";
+import { createLessonStore, strongerModelFor, failureDossier, brainReportMessages, parseBrainReport, reportLine } from "./idelessons.mjs";
 import { ollamaPayloadFromOpenAI, openAIResultFromOllama, gx10Failure } from "./gx10.mjs";
 import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor, adequacyWarning, chunksForPart } from "./ideaf.mjs";
 import { isRepoCmd, startBranchPlan, salvageCommitPlan, githubPushPlan, mergePlan, buildBranch } from "./idegit.mjs";
@@ -733,6 +734,20 @@ function resolveProviderCfg(provider) {
   }
   return { cfg, provider, fellBack: false };
 }
+/*
+ * Module-scope "does this model have a live provider key right now" check. Crucible's counsel
+ * choosers below (crucibleBrainModel / crucibleFrontierModel) and the boot log line that reports
+ * which counsel seats are live both need this, and it needs nothing but PROVIDER_CFG and the
+ * catalog, both already settled by this point in the file. Several route handlers further down
+ * build an identically-named `const keyForModel` of their own, scoped to that one request; those
+ * are unrelated shadows and this module-scope one is never what they call.
+ */
+function keyForModel(id) {
+  const rec = modelById(id);
+  const cfg = rec && PROVIDER_CFG[rec.provider || "openrouter"];
+  return !!(cfg && cfg.key());
+}
+
 // Allow-list = exactly the catalog ids (the single source of truth). A forced model is treated as
 // "cloud" ONLY if it's in the catalog — an unknown id can never silently egress.
 const isCloudModel = (m) => typeof m === "string" && CATALOG_IDS.has(m);
@@ -1746,6 +1761,62 @@ const ideJobs = createIdeJobs({ dir: dataPath("ide"), log: (m) => console.log(m)
   const rec = ideJobs.loadFromDisk();
   if (rec.recovered) console.log(`[dominion-ai] ide jobs: recovered ${rec.recovered}, sealed ${rec.interrupted} as interrupted`);
 }
+
+/*
+ * CRUCIBLE COUNSEL (2026-09-01 reliability overhaul, wiring half). ideengine.mjs's `runMove`
+ * already knows how to ask a brain model for a diagnosis, escalate to a frontier reviewer, and
+ * hand a failure to a stronger seat; this is the server side of that, wiring a real lessons store
+ * and two real model choices into every build. lessons.json sits beside the job journal at
+ * <DATA_DIR>/ide, the same directory ideJobs itself uses, so one backup sweep covers both.
+ */
+const ideLessons = createLessonStore({ dir: join(DATA_DIR, "ide") });
+// Env knobs: model ids go through cfgGet (the same accessor every other configurable model id in
+// this file uses); the numeric knobs read process.env directly since there is no catalog lookup
+// or provider-file fallback for a plain integer or float to route through.
+const CRUCIBLE_BRAIN_MODEL = cfgGet("CRUCIBLE_BRAIN_MODEL", "");
+const CRUCIBLE_FRONTIER_MODEL = cfgGet("CRUCIBLE_FRONTIER_MODEL", "");
+const CRUCIBLE_FRONTIER_MAX = (() => {
+  const raw = process.env.CRUCIBLE_FRONTIER_MAX;
+  if (raw === undefined || raw === "") return 3;
+  const n = Math.trunc(Number(raw));
+  return Number.isFinite(n) ? Math.max(0, n) : 3;
+})();
+const CRUCIBLE_MIN_BRAIN_CONFIDENCE = (() => {
+  const raw = process.env.CRUCIBLE_MIN_BRAIN_CONFIDENCE;
+  if (raw === undefined || raw === "") return 0.6;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0.6;
+})();
+
+/*
+ * Which model reads a failed step first (the "brain"), and which model is asked when the brain is
+ * unsure or its fix does not land (the "frontier" reviewer of last resort). An env override wins
+ * when it names a keyed model; absent one, the brain defaults to the GX10 box's own 120B seat
+ * (free, local, always warm when the box is up) and the frontier defaults to Sonnet 5 direct. Both
+ * fall back honestly when their preferred seat has no live key, and the frontier is never allowed
+ * to land on the same model as the brain, because a seat agreeing with itself in the same voice
+ * gives the build an echo where it needed a second opinion.
+ */
+function crucibleBrainModel(planModel) {
+  if (CRUCIBLE_BRAIN_MODEL && keyForModel(CRUCIBLE_BRAIN_MODEL)) return CRUCIBLE_BRAIN_MODEL;
+  if (keyForModel("gx10/gpt-oss-120b")) return "gx10/gpt-oss-120b";
+  return planModel || "";
+}
+function crucibleFrontierModel(brainModel) {
+  if (CRUCIBLE_FRONTIER_MODEL && CRUCIBLE_FRONTIER_MODEL !== brainModel && keyForModel(CRUCIBLE_FRONTIER_MODEL)) return CRUCIBLE_FRONTIER_MODEL;
+  if ("anthropic/claude-sonnet-5" !== brainModel && keyForModel("anthropic/claude-sonnet-5")) return "anthropic/claude-sonnet-5";
+  const fallback = ORCHESTRATOR_FALLBACKS.find((id) => id !== brainModel && keyForModel(id));
+  return fallback || "";
+}
+{
+  // Boot-time display only: no build has picked a plan model yet, so the owner's default stands
+  // in for one, purely to show which counsel seats would be live if a build started right now.
+  const bootBrain = crucibleBrainModel(defaultModelFor(true));
+  const bootFrontier = crucibleFrontierModel(bootBrain);
+  const ls = ideLessons.stats();
+  console.log(`[dominion-ai] crucible counsel: brain=${bootBrain || "off"}  ·  frontier=${bootFrontier || "off"} (cap ${CRUCIBLE_FRONTIER_MAX}/build)  ·  lessons: ${ls.active} active / ${ls.retired} retired`);
+}
+
 // `billing` is declared further down, so it is read through a thunk rather than captured here:
 // capturing it directly is a temporal-dead-zone crash at boot. The indirection is deliberate.
 const ideFeature = createIdeFeature({
@@ -2145,6 +2216,39 @@ async function handleIde(req, res, u) {
     let probe = null;
     try { probe = await ideHandsFor(T)("node_info", {}); } catch { probe = null; }
     return send({ status: 200, body: { online: !!(probe && probe.ok) } });
+  }
+
+  // Crucible counsel audit surface, owner only: which lessons are active, what they have earned,
+  // and which two models the choosers would pick right now. It sits outside ideFeature.wall on
+  // purpose: this is Fred inspecting the mechanism, and no build spend happens here.
+  if (req.method === "GET" && path === "/ide/lessons") {
+    if (!T.isOwner) return send({ status: 403, body: { error: "owner only" } });
+    const brain = crucibleBrainModel(defaultModelFor(!!T.isOwner));
+    const frontier = crucibleFrontierModel(brain);
+    return send({ status: 200, body: {
+      ok: true,
+      lessons: ideLessons.list({ status: "active" }),
+      stats: ideLessons.stats(),
+      counsel: { brain, frontier, frontierMax: CRUCIBLE_FRONTIER_MAX },
+    } });
+  }
+  // The brain/frontier journal for one build, owner only: what each verdict actually said, kept
+  // separately from lessons.json because a report carries this build's move titles and files while
+  // a lesson is stripped down to a policy any project can read.
+  if (req.method === "GET" && path === "/ide/reports") {
+    if (!T.isOwner) return send({ status: 403, body: { error: "owner only" } });
+    const safeId = String(u.searchParams.get("jobId") || "").replace(/[^A-Za-z0-9_-]/g, "");
+    if (!safeId) return send({ status: 200, body: { ok: true, reports: [] } });
+    let reports = [];
+    try {
+      const raw = readFileSync(join(DATA_DIR, "ide", "reports", safeId + ".jsonl"), "utf8");
+      reports = raw.trim().split("\n").filter(Boolean).slice(-200).map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      }).filter(Boolean);
+    } catch {
+      reports = [];   // no report file yet for this job is not an error, just nothing to show
+    }
+    return send({ status: 200, body: { ok: true, reports } });
   }
 
   const body = (await readJsonBody(req)) || {};
@@ -2756,6 +2860,23 @@ async function handleIde(req, res, u) {
         ? runIdeBuild(job, { T, ...extra })
         : runIdeProbe(job, { ask })),
     }));
+  }
+  // Prune a lesson that turned out wrong or stale. Owner only, same as the rest of the counsel
+  // audit surface: this store is shared across every tenant's builds, so nobody but Fred prunes it.
+  if (req.method === "POST" && path === "/ide/lessons/retire") {
+    if (!T.isOwner) return send({ status: 403, body: { error: "owner only" } });
+    const ok = ideLessons.retire(String(body.id || ""));
+    if (!ok) return send({ status: 404, body: { error: "No active lesson by that id." } });
+    return send({ status: 200, body: { ok: true } });
+  }
+  // Fred teaching the store a policy directly, no failed build required. Recorded with source
+  // "human" so it never gets overwritten by a later frontier correction the way a brain-sourced
+  // lesson can (idelessons.mjs record(): frontier only ever upgrades a "brain" source).
+  if (req.method === "POST" && path === "/ide/lessons/add") {
+    if (!T.isOwner) return send({ status: 403, body: { error: "owner only" } });
+    const { lesson } = ideLessons.record({ text: body.text, scope: body.scope, source: "human" });
+    if (!lesson) return send({ status: 200, body: { error: "That did not read as a usable policy line (too short, or it looked like it carried project data)." } });
+    return send({ status: 200, body: { ok: true, lesson } });
   }
   return sjson(res, 404, { error: "unknown ide route" });
 }
@@ -4263,6 +4384,50 @@ async function runIdeBuild(job, {
     return first;
   };
 
+  /*
+   * Crucible counsel wiring: give this build a brain, a frontier reviewer of last resort, one-shot
+   * escalation to a stronger seat, and the shared lessons store, per idelessons.mjs / ideengine.mjs
+   * runMove. planModel does not exist yet this early in the function (it is only computed once the
+   * standard-crew planner branch runs, well below), so the choice here falls back to the same
+   * default the planner itself falls back to: defaultModelFor(isOwner). The planner block further
+   * down re-derives its OWN policies string from ideLessons against the real planModel once that
+   * value exists; this pair only decides which two models runMove's brain/frontier rungs call for
+   * every move, repair, and verify failure in this build.
+   */
+  const brainModel = crucibleBrainModel(defaultModelFor(!!T.isOwner));
+  const frontierModel = crucibleFrontierModel(brainModel);
+  let frontierCalls = 0;
+  const advisors = {
+    brainModel,
+    frontierModel,
+    minBrainConfidence: CRUCIBLE_MIN_BRAIN_CONFIDENCE,
+    frontierCallsLeft: () => Math.max(0, CRUCIBLE_FRONTIER_MAX - frontierCalls),
+    noteFrontierCall: () => { frontierCalls++; },
+  };
+
+  // One journal line per brain/frontier verdict, kept on disk for the owner to audit at
+  // GET /ide/reports?jobId=... . dossier.reply and checkOutput can carry the user's own project
+  // source or test output, so only the fields below are persisted; a write failure here must
+  // never break the build, so it is swallowed rather than thrown.
+  async function reportCrucibleCounsel(reportJob, { source, model, stage, dossier, report: verdict }) {
+    try {
+      const dir = join(DATA_DIR, "ide", "reports");
+      await mkdir(dir, { recursive: true });
+      const safeId = String((reportJob && reportJob.id) || "").replace(/[^A-Za-z0-9_-]/g, "");
+      if (!safeId) return;
+      const line = JSON.stringify({
+        at: Date.now(),
+        jobId: safeId,
+        workspaceId: (reportJob && reportJob.workspaceId) || "",
+        source, model, stage,
+        moveTitle: (dossier && dossier.title) || "",
+        files: (dossier && dossier.files) || [],
+        report: verdict,
+      }) + "\n";
+      await appendFile(join(dir, safeId + ".jsonl"), line);
+    } catch {}
+  }
+
   const engine = createIdeEngine({
     jobs: ideJobs,
     chat,
@@ -4271,6 +4436,10 @@ async function runIdeBuild(job, {
     meter: async (usd) => { await meterTurn(T, usd, prompt, ""); },
     log: (m) => console.log(m),
     modelInfo: (id) => modelById(id),
+    lessons: ideLessons,
+    advisors,
+    escalate: (model) => strongerModelFor(model, { catalog: CATALOG_MODELS, keyed: keyForModel, fallbacks: ORCHESTRATOR_FALLBACKS }),
+    report: reportCrucibleCounsel,
   });
 
   // Model calls debit the guard as they settle, including retries and parallel AF calls. Callers
@@ -5260,11 +5429,18 @@ async function runIdeBuild(job, {
        * appended to the FIRST user message.
        */
       const plannerAsk = "PROJECT: " + (workspace.name || workspace.root) + "\n\nBUILD THIS:\n" + prompt;
-      const planned = await chat({ model: planModel, messages: [
+      // Policies earned from past builds' failures ride between the ask and the trailing format
+      // demand, never inside PLANNER_SYSTEM (that string is the byte-stable cache prefix; nothing
+      // per-build belongs in it) and never before plannerAsk (the format rule has to stay the LAST
+      // word the planner reads, per the comment above this block).
+      const plannerPolicies = ideLessons.policiesBlock({ scope: "planner", model: planModel });
+      const plannerMessages = [
         { role: "system", content: PLANNER_SYSTEM + "\n\n" + plannerVoice(reg) + "\n" + persona },
         { role: "user", content: plannerAsk },
-        { role: "user", content: PLANNER_FORMAT_REMINDER },
-      ] });
+      ];
+      if (plannerPolicies) plannerMessages.push({ role: "user", content: plannerPolicies });
+      plannerMessages.push({ role: "user", content: PLANNER_FORMAT_REMINDER });
+      const planned = await chat({ model: planModel, messages: plannerMessages });
       spend(planned.costUsd);
       await meterTurn(T, planned.costUsd, prompt, "");
       if (planned.costUsd) ideJobs.emit(job.id, { type: "cost", usd: planned.costUsd, move: "plan" });
@@ -5291,6 +5467,48 @@ async function runIdeBuild(job, {
         if (repair.costUsd) ideJobs.emit(job.id, { type: "cost", usd: repair.costUsd, move: "plan" });
         if (repair.ok) parsed = parseBlueprint(repair.content);
         if (!parsed.ok) {
+          /*
+           * The planner failed twice in a row, which is exactly the kind of failure the brain
+           * exists to look at. It gets a real dossier (stage "planner"), and whatever it learns
+           * becomes a policy line every future planner call reads. This is a diagnosis for the
+           * record and the lessons store only. The build is already ending honestly below, and
+           * nothing here may change that or delay it past one call.
+           */
+          try {
+            if (brainModel) {
+              const plannerDossier = failureDossier({
+                move: { title: "plan the build", files: [] },
+                model: planModel,
+                taskClass: "build_code",
+                stage: "planner",
+                attempt: 2,
+                reply: repair.ok ? repair.content : planned.content,
+                checkOutput: "",
+                pipelineNotes: "format reminder as last turn, one bare repair call",
+                goal: prompt,
+              });
+              const brainPolicies = ideLessons.policiesBlock({ scope: "planner", model: brainModel });
+              const br = await ideChatOnce(brainModel, brainReportMessages(plannerDossier, { policies: brainPolicies }),
+                { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
+              spend(br.costUsd);
+              await meterTurn(T, br.costUsd, prompt, "");
+              if (br.costUsd) ideJobs.emit(job.id, { type: "cost", usd: br.costUsd, move: "plan" });
+              if (br.ok) {
+                const parsedBrain = parseBrainReport(br.content);
+                ideJobs.emit(job.id, { type: "run", command: "brain", ok: parsedBrain.ok,
+                  output: parsedBrain.ok
+                    ? reportLine(parsedBrain.report, { source: "brain", model: brainModel })
+                    : "The brain's reply could not be read as a diagnosis: " + parsedBrain.error });
+                if (parsedBrain.ok) {
+                  if (parsedBrain.report.lesson) {
+                    try { ideLessons.record({ text: parsedBrain.report.lesson, scope: "planner", source: "brain", model: planModel, tags: [parsedBrain.report.rootCause] }); } catch {}
+                  }
+                  try { ideLessons.bumpReports(); } catch {}
+                  try { await reportCrucibleCounsel(job, { source: "brain", model: planModel, stage: "planner", dossier: plannerDossier, report: parsedBrain.report }); } catch {}
+                }
+              }
+            }
+          } catch {}
           const said = String((repair.ok ? repair.content : planned.content) || "").replace(/\s+/g, " ").slice(0, 220);
           return ideJobs.finish(job.id, { type: "error",
             message: parsed.error + (said ? " The model said: “" + said + "…”" : "") });
@@ -5661,6 +5879,10 @@ async function runIdeBuild(job, {
       ideJobs.emit(job.id, { type: "run", command: "github", ok: false,
         output: "The build finished, but shipping to GitHub failed: " + String((e && e.message) || e).slice(0, 200) });
     }
+    // A build that reached a genuine, verified completion is the strongest possible signal that
+    // whatever policies rode this planner call earned their keep; credit them the same way a
+    // passing move already credits move-scope lessons in the engine.
+    try { ideLessons.noteWinFor({ scope: "planner", model: planModel }); } catch {}
     ideJobs.finish(job.id, {
       type: "done",
       complete: true,
