@@ -325,6 +325,61 @@ export function verifyCommandFor(packageJsonText) {
   return first ? { cmd: first.cmd, why: first.why } : { cmd: "", why: plan.why };
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * Context-window fitting (Fred, 2026-09-01: "it needs to work within the context window of the
+ * model I choose"). The manifest is the only unbounded thing a move sends: per-file pages cap at
+ * 600KB and a 24-file move could carry 14MB — far past ANY model's window — and the old path
+ * shipped it anyway, so the provider refused the request and the move failed with an error the
+ * user could not act on. These helpers bound the manifest to the SELECTED model's real window
+ * BEFORE the call, trimming the largest files first and disclosing every cut in the same
+ * "manifest window" language the pager already uses, so the model knows to page rather than
+ * guess. Pure, so the standard, relay, and task-graph runners share one tested contract.
+ * ------------------------------------------------------------------------------------------- */
+// ~3.6 chars/token (the estimator used throughout this file), and the manifest may claim at most
+// 45% of the window: the rest belongs to the system prefix, the move text, the model's own
+// output, and the repair turns that replay prior content.
+export const MANIFEST_WINDOW_FRACTION = 0.45;
+export function manifestBudgetBytes(ctxTokens) {
+  const ctx = Math.max(8_000, Math.floor(Number(ctxTokens) || 128_000));
+  return Math.floor(ctx * MANIFEST_WINDOW_FRACTION * 3.6);
+}
+
+export function fitManifestToBudget(manifest, budgetBytes) {
+  const files = Array.isArray(manifest) ? manifest.map((f) => ({ ...f })) : [];
+  const budget = Math.max(20_000, Math.floor(Number(budgetBytes) || 0));
+  const size = (f) => (f.missing ? 0 : String(f.content || "").length);
+  let total = files.reduce((n, f) => n + size(f), 0);
+  if (total <= budget) return { manifest: files, trimmed: [], totalBytes: total };
+  /*
+   * Largest-first trimming: cutting the biggest file frees the most room while keeping every
+   * smaller file complete, and a model shown 40 whole small files plus a disclosed window into
+   * one huge one beats a model shown uniform fragments of everything. Every file keeps a floor
+   * so no listed file vanishes silently — an absent file reads as "does not exist", which is a
+   * lie the coverage check would then enforce.
+   */
+  const FLOOR = 2_000;
+  const NOTE_ALLOWANCE = 400;   // the disclosure line itself costs bytes; cut deep enough to cover it
+  const trimmed = [];
+  const order = files.map((f, i) => ({ i, bytes: size(f) })).sort((a, b) => b.bytes - a.bytes);
+  for (const { i } of order) {
+    if (total <= budget) break;
+    const f = files[i];
+    if (f.missing) continue;
+    const bytes = size(f);
+    const excess = total - budget;
+    const keep = Math.max(FLOOR, bytes - excess - NOTE_ALLOWANCE);
+    if (keep >= bytes) continue;
+    const kept = String(f.content || "").slice(0, keep);
+    f.content = kept + "\n\n[Dominion manifest window: showing the first " + keep + " of " + bytes +
+      " characters so this move fits the selected model's context window. The remainder was not " +
+      "silently discarded; use workspace_read with an offset before changing code that depends on it.]";
+    f.truncated = true;
+    trimmed.push({ path: f.path, keptBytes: keep, totalBytes: bytes });
+    total = files.reduce((n, x) => n + size(x), 0);
+  }
+  return { manifest: files, trimmed, totalBytes: total };
+}
+
 /*
  * Build the message pair for one move. The system string is the frozen constant; everything
  * variable goes in the user turn, which is what keeps the cacheable prefix identical across every
@@ -417,8 +472,14 @@ export const PLANNER_SYSTEM = [
  *   router  ({title, files}) -> {taskClass, model, why}
  *   meter   async (usd) -> void                 (called ONCE per move, on a finally path)
  */
-export function createIdeEngine({ jobs, chat, hands, router, meter = async () => {}, log = () => {} } = {}) {
+export function createIdeEngine({ jobs, chat, hands, router, meter = async () => {}, log = () => {}, modelInfo = null } = {}) {
   if (!jobs || !chat || !hands || !router) throw new Error("createIdeEngine needs jobs, chat, hands, router");
+  // modelInfo(id) -> catalog record (or null). Injected so the engine can bound a move's manifest
+  // to the routed model's real context window without importing the catalog.
+  const ctxOf = (id) => {
+    try { const rec = typeof modelInfo === "function" ? modelInfo(id) : null; return (rec && Number(rec.ctx)) || 128_000; }
+    catch { return 128_000; }
+  };
 
   // Read a move's manifest straight off the node. Deliberately NOT through the chat tool loop,
   // whose results are truncated to 8000 chars: a move that silently sees half of a file writes
@@ -725,7 +786,14 @@ export function createIdeEngine({ jobs, chat, hands, router, meter = async () =>
       jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
         why: move.why || "", taskClass: decision.taskClass, model: decision.model, routeWhy: decision.why });
 
-      const manifest = await readManifest(workspace.root, move.files || []);
+      const rawManifest = await readManifest(workspace.root, move.files || []);
+      const fitted = fitManifestToBudget(rawManifest, manifestBudgetBytes(ctxOf(decision.model)));
+      const manifest = fitted.manifest;
+      if (fitted.trimmed.length) {
+        jobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
+          message: "Trimmed " + fitted.trimmed.length + " large file(s) to fit " +
+            (decision.model || "the model") + "'s context window; the model can page the rest on demand." });
+      }
       const messages = buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal });
       let res = null, resumeState = null;
       for (let inspectionWindow = 0; inspectionWindow < 3; inspectionWindow++) {

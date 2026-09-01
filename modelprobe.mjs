@@ -58,6 +58,15 @@ export const ENDPOINTS = {
   // native generateContent shape is NOT probed here because Dominion doesn't speak it: the server
   // routes Gemini through this same compatible endpoint, so this is the representative wire.
   google:     { url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", family: "openai-chat", verified: "2026-08-03" },
+  /*
+   * GX10 (Fred's local box). Production traffic rides the hands relay, not this URL; the probe's
+   * representative wire is the box's own OpenAI-compatible lane, live-verified 2026-09-01
+   * (streaming, tool_calls, usage all answered on gpt-oss:20b). GX10_LLM_URL points at the
+   * bearer-gated public hostname when one exists; the LAN default below works only from inside
+   * the house, so an unreachable probe from the cloud records "unreachable", which is honest —
+   * it does NOT mean the seats are down for the app, whose relay lane needs no URL at all.
+   */
+  gx10:       { url: process.env.GX10_LLM_URL || "http://192.168.0.150:11434/v1/chat/completions", family: "openai-chat", verified: "2026-09-01", viaHandsInProduction: true },
 };
 
 /*

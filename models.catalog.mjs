@@ -49,6 +49,7 @@ export const CATEGORIES = [
   "Vision / Multimodal",
   "Web / Research",
   "Open & Trainable",
+  "Your GX10 (local)",
 ];
 
 // Per-model routing fields (optional; normalized by finalizeModels below):
@@ -316,6 +317,32 @@ export const MODELS = [
   { id: "nvidia/nemotron-3-nano-omni-30b-a3b", name: "Nemotron 3 Nano Omni", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     category: "Vision / Multimodal", vision: true, params: "30B (MoE·3B active)", paramsB: 30, inCost: 0, outCost: 0, ctx: 131072, reasoning: true,
     specialty: "Free reasoning model that can also look at images" },
+
+  // ---- Your GX10 (local) --------------------------------------------------------------------
+  /*
+   * FRED'S OWN HARDWARE (wired 2026-09-01). These run on the GX10 (DGX Spark) in his house, ride
+   * the dominion-hands-gx10 relay (or GX10_LLM_URL when the direct gate hostname exists), cost
+   * $0 per token, and never send a byte to a third-party provider — the most private lane in the
+   * catalog. Every figure below is MEASURED, not copied from a model card:
+   *   - ctx values are `ollama show` context length read off the box 2026-09-01 (gpt-oss 131072,
+   *     qwen3-coder 262144 native, seated at 131072 so its KV cache leaves room for the 120B
+   *     that stays resident — the gx10 lane passes num_ctx so the box allocates exactly this).
+   *   - tools: live-probed on Ollama 0.32's OpenAI lane the same day (streamed tool_calls with a
+   *     real function call and usage in the final chunk).
+   *   - toolCapable is explicit because the category is deliberately not in
+   *     TOOL_CAPABLE_CATEGORIES (a future GX10 seat must prove tools before claiming them).
+   * MoE only on this box (273GB/s memory bandwidth rule): dense 70B-class models are banned from
+   * these seats, they run at 3-6 tok/s and make the hardware look broken.
+   */
+  { id: "gx10/gpt-oss-120b", name: "GPT-OSS 120B (GX10)", origin: "Your GX10 (local)", provider: "gx10", directId: "gpt-oss:120b",
+    category: "Your GX10 (local)", params: "117B (MoE·5B active)", paramsB: 117, inCost: 0, outCost: 0, ctx: 131072, maxOut: 16384, reasoning: true, toolCapable: true,
+    specialty: "The house workhorse: strong reasoning on your own hardware, free" },
+  { id: "gx10/qwen3-coder-30b", name: "Qwen3 Coder 30B (GX10)", origin: "Your GX10 (local)", provider: "gx10", directId: "qwen3-coder:30b",
+    category: "Your GX10 (local)", params: "30B (MoE·3B active)", paramsB: 30, inCost: 0, outCost: 0, ctx: 131072, maxOut: 16384, toolCapable: true,
+    specialty: "Fast local coder for builds, free on your own machine" },
+  { id: "gx10/gpt-oss-20b", name: "GPT-OSS 20B (GX10)", origin: "Your GX10 (local)", provider: "gx10", directId: "gpt-oss:20b",
+    category: "Your GX10 (local)", params: "21B (MoE·3.6B active)", paramsB: 21, inCost: 0, outCost: 0, ctx: 131072, maxOut: 16384, reasoning: true, toolCapable: true,
+    specialty: "Quick local reasoner for small asks and utility work" },
 ];
 
 /*
@@ -506,6 +533,8 @@ export const REASONING_FLOOR = {
   "arcee-ai/trinity-large-thinking": 8192,  // worst observed floor 2048 = the fast cap exactly
   "moonshotai/kimi-k2.6": 4096,             // worst 1024
   "openai/gpt-oss-20b": 4096,               // worst 1024
+  "gx10/gpt-oss-20b": 4096,                 // same weights as the NVIDIA seat above
+  "gx10/gpt-oss-120b": 4096,                // same family; reasoning billed against output
   "minimax/minimax-m2.5": 4096,             // worst 1024
   "tencent/hy3-preview": 4096,              // worst 1024
   "moonshotai/kimi-k3": 2048,               // worst 512

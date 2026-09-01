@@ -25,12 +25,15 @@ export const DEFAULT_PRIVACY_MODE = "normal";
 
 // The providers that do NOT train on API data and retain briefly / offer ZDR (see
 // docs/ACCESS-AND-PRIVACY-DESIGN.md §4). These are the only cloud providers Trusted mode permits.
-export const TRUSTED_PROVIDERS = new Set(["openai", "anthropic"]);
+// "gx10" is Fred's own machine (2026-09-01): tokens never leave hardware he owns, so it belongs
+// in every mode by the same logic that admits the local class everywhere.
+export const TRUSTED_PROVIDERS = new Set(["openai", "anthropic", "gx10"]);
 
 // Private mode's whole allow-list: one direct no-train provider, so the exposure surface cannot
 // get smaller without going to zero. Anthropic because it is the house's deepest-integrated direct
-// lane; swapping the single provider is a one-word change here and nowhere else.
-export const PRIVATE_PROVIDERS = new Set(["anthropic"]);
+// lane; swapping the single provider is a one-word change here and nowhere else. The GX10 seats
+// join because their exposure surface is ZERO third parties, strictly smaller than the lane rule.
+export const PRIVATE_PROVIDERS = new Set(["anthropic", "gx10"]);
 
 // Normalize a client-supplied mode to one of the three; anything unrecognized falls back to the
 // documented default (Normal). The server is the enforcement point regardless of what the UI sends.

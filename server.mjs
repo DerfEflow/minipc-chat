@@ -41,7 +41,7 @@ import { createSeatFailover } from "./seatfailover.mjs";
 import { continuationContext, createLoopWatch, contextExceeded, emptyResponseInstruction, reasoningOnlyPause, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
 import { TOOLBOX_OPEN_NAME, withToolbox, openToolbox } from "./toolbox.mjs";
 import { modelToolResult, toolResultFailed, toolMutationSucceeded } from "./toolresult.mjs";
-import { approxMessageTokens, selectHistoryWindow, compactExecutionMessages } from "./contextwindow.mjs";
+import { approxMessageTokens, selectHistoryWindow, compactExecutionMessages, squeezeOversizeMessages, isContextOverflowError } from "./contextwindow.mjs";
 import { openAIResponsesStream } from "./openairesponses.mjs";
 import { anthropicMessagesStream } from "./anthropicmessages.mjs";
 import {
@@ -169,7 +169,8 @@ import {
 } from "./altana-money.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_PROMPT_MAX_CHARS, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs, ledgerFromEvents } from "./idejobs.mjs";
-import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages } from "./ideengine.mjs";
+import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages, fitManifestToBudget, manifestBudgetBytes } from "./ideengine.mjs";
+import { ollamaPayloadFromOpenAI, openAIResultFromOllama, gx10Failure } from "./gx10.mjs";
 import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor, adequacyWarning, chunksForPart } from "./ideaf.mjs";
 import { isRepoCmd, startBranchPlan, salvageCommitPlan, githubPushPlan, mergePlan, buildBranch } from "./idegit.mjs";
 import { ensureRepo, repoNameFrom, shipSummary } from "./idegithub.mjs";
@@ -682,6 +683,15 @@ const NVIDIA_KEY = cfgGet("NVIDIA_API_KEY", cfgGet("NVIDIA_KEY", ""));
  * so the same streamer serves it and no google-specific transport exists to rot.
  */
 const GOOGLE_AISTUDIO_KEY = cfgGet("GOOGLE_AI_STUDIO_API_KEY", "");
+/*
+ * GX10 local lane (Fred, 2026-09-01: "utilize the models sitting on the GX10"). Default transport
+ * is the dominion-hands-gx10 relay (GX10_NODE names the hands node), which needs no key and no
+ * public hostname. GX10_LLM_URL flips the lane to a direct OpenAI-dialect endpoint (the
+ * ollama-gate bearer proxy on the box, once its hostname exists) with GX10_LLM_KEY as the bearer.
+ */
+const GX10_NODE = cfgGet("GX10_NODE", "gx10");
+const GX10_LLM_URL = cfgGet("GX10_LLM_URL", "");
+const GX10_LLM_KEY = cfgGet("GX10_LLM_KEY", "");
 // One endpoint config per provider. All of these speak the OpenAI-compatible chat-completions
 // format, so a single streamer serves them — only base URL, key, and a couple of headers differ.
 const PROVIDER_CFG = {
@@ -693,6 +703,9 @@ const PROVIDER_CFG = {
   moonshot:   { url: cfgGet("MOONSHOT_URL", "https://api.moonshot.ai/v1/chat/completions"), key: () => MOONSHOT_KEY, label: "Moonshot (direct)", extraHeaders: {}, wantUsage: false },
   nvidia:     { url: cfgGet("NVIDIA_URL", "https://integrate.api.nvidia.com/v1/chat/completions"), key: () => NVIDIA_KEY, label: "NVIDIA (direct)", extraHeaders: {}, wantUsage: false },
   google:     { url: cfgGet("GOOGLE_AISTUDIO_URL", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"), key: () => GOOGLE_AISTUDIO_KEY, label: "Google AI Studio (direct)", extraHeaders: {}, wantUsage: false },
+  // key() truthiness is the "is this lane usable" signal everywhere (altKeyedModelFor, the picker
+  // grey-out): the hands relay needs no secret, so the node name stands in when no URL is set.
+  gx10:       { url: GX10_LLM_URL, key: () => (GX10_LLM_URL ? (GX10_LLM_KEY || "hands") : (GX10_NODE ? "hands" : "")), label: "GX10 (local)", extraHeaders: {}, wantUsage: false },
 };
 /*
  * Resolve-at-call-time provider routing (SOW docs/PROVIDER-CACHING-SOW.md, W1). A model may
@@ -772,6 +785,16 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
       const rest = messages.filter((m) => m && m.role !== "system" && m.role !== "developer");
       messages = [{ role: "system", content: sys.map((m) => String(m.content || "")).join("\n\n") }, ...rest];
     }
+  }
+  /*
+   * GX10 local lane. With no direct URL configured, the call rides the hands relay: the
+   * dominion-hands-gx10 container's ollama_chat op runs the model on the box and streams tokens
+   * back through the hub. With GX10_LLM_URL set, control falls through to the generic
+   * OpenAI-dialect streamer below (live-probed 2026-09-01: Ollama 0.32's /v1/chat/completions
+   * streams SSE, emits tool_call deltas, and honors stream_options.include_usage).
+   */
+  if (earlyProvider === "gx10" && !GX10_LLM_URL) {
+    return gx10HandsChatStream(earlyRec, catalogId, messages, opts, onDelta);
   }
   if (earlyProvider === "openai") {
     const cfg = PROVIDER_CFG.openai;
@@ -3238,12 +3261,34 @@ function ideSettingsFromBody(raw) {
 // retry the same model; they never trigger a cheaper or different model behind the user's back.
 async function ideChatOnce(model, messages, { signal, executionPolicy, maxContinuations, sessionId, budgetGuard = null } = {}) {
   const startedAt = Date.now();
-  const convo = (Array.isArray(messages) ? messages : []).map((m) => ({ ...m }));
+  let convo = (Array.isArray(messages) ? messages : []).map((m) => ({ ...m }));
   const checkpointed = !!(executionPolicy && executionPolicy.persistence && executionPolicy.persistence.checkpoint);
   const continuationCap = Math.max(2, Math.min(Number(maxContinuations) || (checkpointed ? 12 : 6), 20));
   let content = "", costUsd = 0, usage = null, finishReason = "", lastError = "";
+  /*
+   * WORK WITHIN THE SELECTED MODEL'S WINDOW (Fred, 2026-09-01). This path had no compaction at
+   * all: an over-window conversation (or one over-window message) went to the provider verbatim,
+   * came back as a 400, burned all three retries on the identical payload, and surfaced as a
+   * failed move. Now the conversation is squeezed and compacted BEFORE the call whenever the
+   * estimate crosses 72% of the model's real window, and a provider overflow refusal triggers one
+   * harder compaction and a retry instead of an instant failure.
+   */
+  const ctxTokens = Math.max(16_000, Number((modelById(model) || {}).ctx) || 128_000);
+  const goalText = String((convo.find((m) => m && m.role === "user") || {}).content || "").slice(0, 2_000);
+  const fitConvo = (aggressive = false) => {
+    const squeezed = squeezeOversizeMessages(convo, { contextTokens: ctxTokens, maxShare: aggressive ? 0.3 : 0.45 });
+    convo = squeezed.messages;
+    const estimate = convo.reduce((n, m) => n + approxMessageTokens(m), 0);
+    if (aggressive || estimate > ctxTokens * 0.72) {
+      convo = compactExecutionMessages(convo, { contextTokens: ctxTokens, goal: goalText });
+    }
+    return squeezed.squeezed;
+  };
+  fitConvo(false);
+  let overflowCompactions = 0;
 
   for (let part = 0; part <= continuationCap; part++) {
+    if (part > 0) fitConvo(false);   // continuations append turns; keep the window honest each round
     let r = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       const requestedOutputTokens = outLimitFor(model);
@@ -3267,6 +3312,13 @@ async function ideChatOnce(model, messages, { signal, executionPolicy, maxContin
       }
       if (r && r.ok) break;
       lastError = String(r && r.error || "model unreachable");
+      // An over-window refusal never recovers by resending the same bytes. Compact harder once
+      // (twice at most across the whole turn) and retry with the smaller conversation.
+      if (isContextOverflowError(lastError) && overflowCompactions < 2) {
+        overflowCompactions++;
+        fitConvo(true);
+        continue;
+      }
       if (signal && signal.aborted || !ideRetryableFailure(r) || attempt === 2) break;
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
     }
@@ -3492,6 +3544,17 @@ async function ideChatWithWorkspaceTools(model, messages, {
         }
       }
       if (r && r.ok) break;
+      // Same rule as ideChatOnce: an over-window refusal is fixed by shrinking, not resending —
+      // compact and spend the next attempt on the smaller conversation instead of breaking out.
+      if (isContextOverflowError(r && r.error) && attempt < 2 && !(signal && signal.aborted)) {
+        convo = squeezeOversizeMessages(convo, { contextTokens, maxShare: 0.3 }).messages;
+        convo = compactExecutionMessages(convo, {
+          contextTokens,
+          goal: String((messages || []).find((m) => m && m.role === "user")?.content || ""),
+          evidence,
+        });
+        continue;
+      }
       if (signal && signal.aborted || !ideRetryableFailure(r) || attempt === 2) break;
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
     }
@@ -4182,6 +4245,7 @@ async function runIdeBuild(job, {
     router: (move, assign) => routeMove(move, assign),
     meter: async (usd) => { await meterTurn(T, usd, prompt, ""); },
     log: (m) => console.log(m),
+    modelInfo: (id) => modelById(id),
   });
 
   // Model calls debit the guard as they settle, including retries and parallel AF calls. Callers
@@ -4451,7 +4515,9 @@ async function runIdeBuild(job, {
         ideJobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
           why: move.why, taskClass: decision.taskClass, model: decision.model, routeWhy: decision.why });
         try {
-          const manifest = await engine.readManifest(workspace.root, move.files || []);
+          const rawManifest = await engine.readManifest(workspace.root, move.files || []);
+          const modelCtx = (modelById(decision.model) || {}).ctx || 128_000;
+          const manifest = fitManifestToBudget(rawManifest, manifestBudgetBytes(modelCtx)).manifest;
           const baseMessages = buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal: prompt });
           let res = null, parsed = null, own = null, totalCost = 0, resumeState = null;
           for (let attempt = 1; attempt <= 3; attempt++) {
@@ -4660,7 +4726,8 @@ async function runIdeBuild(job, {
         ideJobs.emit(job.id, { type: "move", id, title, state: "running", model });
         await gate.enter();
         try {
-          const manifest = await engine.readManifest(workspace.root, files || []);
+          const rawManifest = await engine.readManifest(workspace.root, files || []);
+          const manifest = fitManifestToBudget(rawManifest, manifestBudgetBytes((modelById(model) || {}).ctx || 128_000)).manifest;
           const move = { title, files, why: "Own these files only. " + (contract || "") };
           const baseMessages = buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal: prompt });
           let totalCost = 0, last = null, parsed = null, own = null, resumeState = null;
@@ -6839,6 +6906,48 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", {
   if (modeFrag) s += "\n\n" + modeFrag;
   if (persona) s += "\n\nFor this conversation, adopt this style/role: " + persona;
   return s;
+}
+
+/*
+ * The GX10 hands-relay chat lane (see gx10.mjs for the pure shape translation). Returns the
+ * cloudChatStream result contract so every caller — ideChatOnce, the tool loop, chat — treats a
+ * GX10 seat exactly like any cloud model. Failures come back retryable, which is what lets the
+ * existing retry ladder and altKeyedModelFor reroute a build step when the box is off.
+ */
+async function gx10HandsChatStream(rec, catalogId, messages, opts = {}, onDelta) {
+  if (!handsHub || !handsHub.enabled) return gx10Failure("the hands hub is not enabled on this server", { retryable: false });
+  if (opts.signal && opts.signal.aborted) return { ok: false, aborted: true, error: "stopped" };
+  const directId = (rec && rec.directId) || catalogId;
+  const shaped = shapeCloudParams({ provider: "gx10", directId, temperature: opts.temperature, tools: Array.isArray(opts.tools) && opts.tools.length ? opts.tools : null });
+  const tools = shaped.tools ? sanitizeToolList(shaped.tools, { log: (m) => console.log("[dominion-ai] " + m) }).tools : null;
+  // Text attachments inline as fenced blocks exactly like the generic lane; images flatten to
+  // honest markers because no GX10 seat is vision-flagged.
+  const flattened = (Array.isArray(messages) ? messages : []).map((m) => {
+    const hasAtt = m && m.role === "user" && Array.isArray(m.attachments) && m.attachments.length;
+    if (!hasAtt) return m;
+    return { ...m, content: String(m.content ?? "") + attachmentTextBlocks(m) + attachmentImageMarkers(m) };
+  });
+  const payload = ollamaPayloadFromOpenAI({
+    model: directId,
+    messages: flattened,
+    tools,
+    num_predict: typeof opts.num_predict === "number" ? opts.num_predict : 0,
+    num_ctx: (rec && rec.ctx) || 0,
+    temperature: shaped.temperature,
+  });
+  let r;
+  try {
+    r = await handsHub.dispatchStream(GX10_NODE, "ollama_chat", { payload }, {
+      timeoutMs: 590000,
+      signal: opts.signal,
+      onChunk: (c) => { try { if (onDelta && c && c.delta) onDelta(c.delta); } catch { /* UI sink throws must not kill the stream */ } },
+    });
+  } catch (e) {
+    return gx10Failure(String((e && e.message) || e));
+  }
+  if (opts.signal && opts.signal.aborted) return { ok: false, aborted: true, error: "stopped" };
+  if (!r || r.ok === false || !r.response) return gx10Failure((r && r.error) || "the GX10 node did not answer");
+  return openAIResultFromOllama(r.response, { transport: "gx10" });
 }
 
 function buildOllamaPayload(model, messages, opts, stream) {
