@@ -59,6 +59,42 @@ function stable(value) {
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
 }
 const requestHash = (value) => createHash("sha256").update(JSON.stringify(stable(value))).digest("hex");
+export const SYNTHETIC_CANARY_SCHEMA = "game-factory.synthetic-worker-canary.v1";
+const SYNTHETIC_CANARY_TITLE = "Trusted synthetic worker canary";
+const SYNTHETIC_CANARY_CAPABILITY = "quality_assurance";
+const SYNTHETIC_CANARY_MAX_ATTEMPTS = 2;
+function syntheticCanaryRecipe() {
+  return {
+    payload: {
+      syntheticCanary: { schema: SYNTHETIC_CANARY_SCHEMA, evidenceEffects: "none" },
+      workerPlan: {
+        // The canary is a server-owned container health probe. It receives one fixed, dedicated
+        // subtree so the broker's Landlock/project-quota proof never has to grant workspace-root or
+        // sibling access. This is not a host path or a value accepted from the browser.
+        workspaceRoot: "/workspace/system-canary",
+        steps: [{
+          label: "Report the Node.js runtime version",
+          program: "node",
+          args: ["--version"],
+          cwd: ".",
+          timeoutMs: 30_000,
+        }],
+        collect: [],
+      },
+    },
+    acceptance: ["The fixed Node.js version probe exits successfully without collecting artifacts."],
+  };
+}
+const SYNTHETIC_CANARY_SIGNATURE = requestHash(syntheticCanaryRecipe());
+function isSyntheticCanaryTask(row) {
+  // The exact primary-key namespace is the immutable origin marker. Generic queueTask callers do
+  // not choose IDs and can only create gft_<uuid>, so matching the public recipe cannot acquire
+  // the canary's lifecycle exemptions.
+  if (!row || !/^gft_canary_[a-f0-9]{32}$/.test(String(row.id || ""))
+      || row.capability !== SYNTHETIC_CANARY_CAPABILITY || row.title !== SYNTHETIC_CANARY_TITLE
+      || String(row.buildId || "") || !row.safeToRetry || Number(row.maxAttempts) !== SYNTHETIC_CANARY_MAX_ATTEMPTS) return false;
+  return requestHash({ payload: parse(row.payload, {}), acceptance: parse(row.acceptance, []) }) === SYNTHETIC_CANARY_SIGNATURE;
+}
 const SCHEMA_VERSION = 1;
 const SCHEMA_CHECKSUM = createHash("sha256").update([
   "game_projects:v1", "game_builds:v1", "game_tasks:v1", "game_checkpoints:v1",
@@ -914,6 +950,78 @@ export function createGameFactoryStore({
     });
   }
 
+  /*
+   * This is deliberately not a configurable queueTask wrapper. The only caller-controlled values
+   * are tenant/project identity and a replay key; executable, argv, cwd, capability, build binding,
+   * artifact collection and retry policy are immutable server code. The command-idempotency row and
+   * task/event inserts share one SQLite transaction, so a retry cannot create a second execution.
+   */
+  function queueSyntheticCanary({ uid, projectId, key, actor = "owner" } = {}) {
+    const who = cleanUid(uid);
+    if (!who) return result(401, { error: "sign in", code: "no_identity" });
+    const rawProjectId = String(projectId == null ? "" : projectId);
+    const exactProjectId = rawProjectId.trim();
+    if (rawProjectId !== exactProjectId || !/^gf_[a-z0-9_-]{3,160}$/.test(exactProjectId)) {
+      return result(400, { error: "A valid existing factory project is required.", code: "bad_project_id" });
+    }
+    const rawKey = String(key == null ? "" : key);
+    const commandKeyPart = rawKey.trim();
+    if (rawKey !== commandKeyPart || commandKeyPart.length < 16 || commandKeyPart.length > 128
+        || !/^[A-Za-z0-9._:-]+$/.test(commandKeyPart) || normalizeIdempotencyKey(commandKeyPart) !== commandKeyPart) {
+      return result(400, { error: "A 16-128 character canary idempotency key is required.", code: "bad_idempotency_key" });
+    }
+    const commandKey = `synthetic-canary:${commandKeyPart}`;
+    const hash = requestHash({ schema: SYNTHETIC_CANARY_SCHEMA, projectId: exactProjectId });
+    const fingerprint = createHash("sha256").update(commandKeyPart).digest("hex");
+    const prior = q.command.get(who, commandKey);
+    if (prior) {
+      if (prior.requestHash !== hash) return result(409, { error: "That canary idempotency key was already used for a different project.", code: "idempotency_conflict" });
+      return result(prior.status, { ...parse(prior.response, {}), replayed: true });
+    }
+
+    return tx(() => {
+      const raced = q.command.get(who, commandKey);
+      if (raced) {
+        if (raced.requestHash !== hash) return result(409, { error: "That canary idempotency key was already used for a different project.", code: "idempotency_conflict" });
+        return result(raced.status, { ...parse(raced.response, {}), replayed: true });
+      }
+      const project = q.project.get(exactProjectId, who);
+      if (!project) return saveCommand(who, commandKey, hash, result(404, { error: "No such game.", code: "not_found" }));
+      if (HOLD_STATES.has(project.state) || project.state === "DEPLOYED" || project.operation) {
+        return saveCommand(who, commandKey, hash, result(409, { error: "This game is not accepting a synthetic canary.", code: "project_not_runnable" }));
+      }
+      const activeCanary = db.prepare(`SELECT * FROM game_tasks
+        WHERE uid=? AND status IN ('QUEUED','RUNNING') AND capability=? AND title=? AND buildId=''`).all(
+        who, SYNTHETIC_CANARY_CAPABILITY, SYNTHETIC_CANARY_TITLE,
+      ).find(isSyntheticCanaryTask);
+      if (activeCanary) {
+        return saveCommand(who, commandKey, hash, result(409, {
+          error: "A synthetic canary is already queued or running for this tenant.",
+          code: "synthetic_canary_in_progress", taskId: activeCanary.id,
+        }));
+      }
+      const recipe = syntheticCanaryRecipe();
+      const id = `gft_canary_${requestHash({ who, commandKey, projectId: project.id }).slice(0, 32)}`;
+      const at = timestamp();
+      db.prepare(`INSERT INTO game_tasks
+        (id,projectId,buildId,uid,capability,title,payload,acceptance,status,priority,maxAttempts,safeToRetry,createdAt)
+        VALUES (?,?, '',?,?,?,?,?, 'QUEUED',1000,?,1,?)`).run(id, project.id, who,
+        SYNTHETIC_CANARY_CAPABILITY, SYNTHETIC_CANARY_TITLE, json(recipe.payload), json(recipe.acceptance),
+        SYNTHETIC_CANARY_MAX_ATTEMPTS, at);
+      const eventId = emit(project, "synthetic_canary.queued", {
+        schema: SYNTHETIC_CANARY_SCHEMA, taskId: id, capability: SYNTHETIC_CANARY_CAPABILITY,
+        idempotencyFingerprint: fingerprint,
+        effects: { qaEvidence: false, artifacts: false, mirrors: false, storeSubmission: false, release: false },
+      }, { actor: safeText(actor, 160) || "owner", causationId: `canary:${fingerprint}`, correlationId: `canary:${fingerprint}` });
+      return saveCommand(who, commandKey, hash, result(201, {
+        ok: true, schema: SYNTHETIC_CANARY_SCHEMA, projectId: project.id, taskId: id,
+        capability: SYNTHETIC_CANARY_CAPABILITY,
+        audit: { eventId, idempotencyFingerprint: fingerprint },
+        effects: { qaEvidence: false, artifacts: false, mirrors: false, storeSubmission: false, release: false },
+      }));
+    });
+  }
+
   function claimNextTask({ workerId, capability = "", leaseMs = 120000 } = {}) {
     const worker = safeText(workerId, 160);
     if (!worker) return null;
@@ -954,6 +1062,7 @@ export function createGameFactoryStore({
       if (task.status !== "RUNNING" || task.workerId !== worker) return result(409, { error: "This worker no longer owns the task lease.", code: "lease_lost" });
       const project = q.project.get(task.projectId, who);
       const at = timestamp();
+      const syntheticCanary = isSyntheticCanaryTask(task);
       // A pause request may race with a worker that already crossed its final boundary. Preserve
       // that terminal success instead of re-queuing completed work on resume (which would execute
       // the same effect twice). PAUSED/CANCELLED remote truth still checkpoints and resumes safely.
@@ -962,12 +1071,18 @@ export function createGameFactoryStore({
       const ownerStopped = stopped && project.operation === "STOP_REQUESTED";
       db.prepare("UPDATE game_tasks SET status=?, result=?, endedAt=?, workerId='', leaseUntil=0, heartbeatAt=0 WHERE id=? AND uid=?")
         .run(ownerStopped ? "CANCELLED" : stopped ? "PAUSED" : "COMPLETED", json(taskResult), at, task.id, who);
-      if (checkpoint || stopped || (task.cancelRequested && terminalSuccess)) createCheckpoint(project, {
+      // A successful canary is observability, not resumable game progress. Ignore its ordinary
+      // worker checkpoint so it cannot replace the project's latest compatible build checkpoint.
+      // A concurrent owner pause/stop still needs a real safe-boundary checkpoint.
+      if ((!syntheticCanary && checkpoint) || stopped || (task.cancelRequested && terminalSuccess)) createCheckpoint(project, {
         taskId: task.id,
         reason: stopped ? "worker reached a requested safe boundary" : task.cancelRequested ? "worker completed before the owner operation took effect" : "task checkpoint",
         payload: checkpoint || taskResult,
       });
-      emit(project, ownerStopped ? "task.cancelled" : stopped ? "task.paused" : "task.completed", { taskId: task.id, result: taskResult });
+      emit(project, ownerStopped ? "task.cancelled" : stopped ? "task.paused" : syntheticCanary ? "synthetic_canary.completed" : "task.completed", {
+        taskId: task.id, result: taskResult,
+        ...(syntheticCanary ? { schema: SYNTHETIC_CANARY_SCHEMA, evidenceEffects: "none" } : {}),
+      });
       let finalized = false;
       const current = q.project.get(project.id, who);
       if (current.operation === "PAUSE_REQUESTED") finalized = finalizePause(current, "worker reached a safe boundary");
@@ -998,15 +1113,101 @@ export function createGameFactoryStore({
         return result(200, { ok: true, requeued: false, blocked: true });
       }
       const mayRetry = retryable && !!task.safeToRetry && task.attempt < task.maxAttempts;
+      const syntheticCanary = isSyntheticCanaryTask(task);
       db.prepare("UPDATE game_tasks SET status=?, result=?, endedAt=?, workerId='', leaseUntil=0, heartbeatAt=0 WHERE id=? AND uid=?")
         .run(mayRetry ? "QUEUED" : "FAILED", json({ error: safeText(error, 3000) }), mayRetry ? 0 : timestamp(), task.id, who);
-      emit(project, mayRetry ? "task.requeued" : "task.failed", { taskId: task.id, error: safeText(error, 3000), retryable: mayRetry });
-      if (!mayRetry) {
+      emit(project, syntheticCanary ? (mayRetry ? "synthetic_canary.requeued" : "synthetic_canary.failed")
+        : (mayRetry ? "task.requeued" : "task.failed"), {
+        taskId: task.id, error: safeText(error, 3000), retryable: mayRetry,
+        ...(syntheticCanary ? { schema: SYNTHETIC_CANARY_SCHEMA, projectLifecycleUnaffected: !mayRetry } : {}),
+      });
+      if (!mayRetry && !syntheticCanary) {
         const resumeState = HOLD_STATES.has(project.state) ? project.resumeState : project.state;
         db.prepare("UPDATE game_projects SET state='FAILED', resumeState=?, operation='', blocker=?, version=version+1, updatedAt=? WHERE id=? AND uid=?")
           .run(resumeState, safeText(error, 1000), timestamp(), project.id, who);
       }
-      return result(200, { ok: true, requeued: mayRetry });
+      return result(200, { ok: true, requeued: mayRetry, ...(syntheticCanary ? { syntheticCanary: true, projectLifecycleUnaffected: !mayRetry } : {}) });
+    });
+  }
+
+  /*
+   * Isolation-proof loss is stronger than an ordinary worker failure. It is an absorbing stop for
+   * the exact task attempt and is allowed to correct a stale completion that raced the security
+   * latch. SQLite serializes this transaction with completeTask(): if the security stop wins first,
+   * completion loses its RUNNING lease; if completion wins first, this method marks it FAILED and
+   * invalidates every checkpoint that completion could have created.
+   */
+  function securityStopTask({ uid, taskId, attempt = 0, error = "worker isolation proof was lost" } = {}) {
+    const who = cleanUid(uid);
+    const reason = safeText(error, 3000) || "worker isolation proof was lost";
+    return tx(() => {
+      const task = q.task.get(taskId, who);
+      if (!task) return result(404, { error: "No such task.", code: "not_found" });
+      if (Number(attempt) !== task.attempt) {
+        return result(409, { error: "This task attempt is no longer current.", code: "attempt_lost" });
+      }
+      const priorResult = parse(task.result, {});
+      if (priorResult?.securityStopped === true) {
+        return result(200, {
+          ok: true, securityStopped: true, replayed: true,
+          invalidatedCheckpoints: Number(priorResult.invalidatedCheckpoints) || 0,
+          syntheticCanary: priorResult.syntheticCanary === true,
+          projectLifecycleUnaffected: priorResult.projectLifecycleUnaffected === true,
+        });
+      }
+
+      const project = q.project.get(task.projectId, who);
+      if (!project) return result(404, { error: "No such game.", code: "not_found" });
+      const syntheticCanary = isSyntheticCanaryTask(task);
+      const at = timestamp();
+      // A stale completeTask writes task.endedAt before its task-specific and owner-operation
+      // checkpoints. Invalidating from that timestamp also removes the generic PAUSED checkpoint
+      // that finalizePause may have appended after the unsafe completion.
+      const staleCompletionAt = Number(task.endedAt) || 0;
+      const invalidated = db.prepare(`UPDATE game_checkpoints SET compatible=0
+        WHERE projectId=? AND uid=? AND compatible=1
+          AND (taskId=? OR (? > 0 AND createdAt>=?))`)
+        .run(project.id, who, task.id, staleCompletionAt, staleCompletionAt).changes;
+      const pauseUnconfirmed = task.cancelRequested
+        && (project.operation === "PAUSE_REQUESTED" || project.operation === "PAUSED" || project.state === "PAUSED");
+      const stopUnconfirmed = task.cancelRequested
+        && (project.operation === "STOP_REQUESTED" || project.operation === "STOPPED");
+      const ownerOperationUnconfirmed = pauseUnconfirmed || stopUnconfirmed;
+      const projectLifecycleUnaffected = syntheticCanary && !ownerOperationUnconfirmed;
+      const securityResult = {
+        error: reason,
+        securityStopped: true,
+        invalidatedCheckpoints: Number(invalidated) || 0,
+        syntheticCanary,
+        projectLifecycleUnaffected,
+      };
+      db.prepare(`UPDATE game_tasks SET status='FAILED',result=?,endedAt=?,workerId='',leaseUntil=0,
+        heartbeatAt=0,cancelRequested=0 WHERE id=? AND uid=? AND attempt=?`)
+        .run(json(securityResult), at, task.id, who, task.attempt);
+      emit(project, syntheticCanary ? "synthetic_canary.security_stopped" : "task.security_stopped", {
+        taskId: task.id, attempt: task.attempt, reason,
+        invalidatedCheckpoints: Number(invalidated) || 0,
+        projectLifecycleUnaffected,
+        ...(syntheticCanary ? { schema: SYNTHETIC_CANARY_SCHEMA } : {}),
+      });
+
+      if (ownerOperationUnconfirmed) {
+        const requested = pauseUnconfirmed ? "pause" : "stop";
+        const blocker = `The worker lost its isolation proof before the requested ${requested} reached a confirmed safe boundary.`;
+        const resumeState = HOLD_STATES.has(project.state) ? project.resumeState : project.state;
+        db.prepare("UPDATE game_projects SET state='BLOCKED',resumeState=?,operation='',blocker=?,version=version+1,updatedAt=? WHERE id=? AND uid=?")
+          .run(resumeState, blocker, at, project.id, who);
+        emit(project, `project.${requested}_unconfirmed`, { taskId: task.id, reason: blocker, securityStop: true });
+      } else if (!syntheticCanary) {
+        const resumeState = HOLD_STATES.has(project.state) ? project.resumeState : project.state;
+        db.prepare("UPDATE game_projects SET state='FAILED',resumeState=?,operation='',blocker=?,version=version+1,updatedAt=? WHERE id=? AND uid=?")
+          .run(resumeState, reason, at, project.id, who);
+        emit(project, "project.security_stopped", { taskId: task.id, reason });
+      }
+      return result(200, {
+        ok: true, securityStopped: true, invalidatedCheckpoints: Number(invalidated) || 0,
+        syntheticCanary, projectLifecycleUnaffected,
+      });
     });
   }
 
@@ -1188,6 +1389,7 @@ export function createGameFactoryStore({
         const shouldStop = project.operation === "STOP_REQUESTED";
         const ownerOperationUnconfirmed = shouldPause || shouldStop;
         const mayRetry = !ownerOperationUnconfirmed && !!task.safeToRetry && task.attempt < task.maxAttempts;
+        const syntheticCanary = isSyntheticCanaryTask(task);
         const status = mayRetry ? "QUEUED" : "FAILED";
         db.prepare("UPDATE game_tasks SET status=?, workerId='', leaseUntil=0, heartbeatAt=0, endedAt=?, result=? WHERE id=? AND status='RUNNING'")
           .run(status, status === "QUEUED" ? 0 : at, json({ error: "worker lease expired", recoveredAt: nowIso(at), ownerOperationUnconfirmed }), task.id);
@@ -1203,11 +1405,17 @@ export function createGameFactoryStore({
           emit(project, `project.${requested}_unconfirmed`, { taskId: task.id, reason: blocker });
           report.blocked++;
         }
-        else if (!shouldPause && !shouldStop) {
+        else if (!shouldPause && !shouldStop && !syntheticCanary) {
           const resumeState = HOLD_STATES.has(project.state) ? project.resumeState : project.state;
           db.prepare("UPDATE game_projects SET state='FAILED', resumeState=?, operation='', blocker='A worker lease expired during a non-retryable task.', version=version+1, updatedAt=? WHERE id=? AND uid=?")
             .run(resumeState, at, project.id, project.uid);
           report.failed++;
+        }
+        else if (syntheticCanary) {
+          emit(project, "synthetic_canary.failed", {
+            schema: SYNTHETIC_CANARY_SCHEMA, taskId: task.id, error: "worker lease expired",
+            projectLifecycleUnaffected: true,
+          });
         }
       }
       const pending = db.prepare("SELECT * FROM game_projects WHERE operation IN ('PAUSE_REQUESTED','STOP_REQUESTED')").all();
@@ -1250,7 +1458,7 @@ export function createGameFactoryStore({
   return {
     file,
     seedPortfolio, listProjects, getProject, executeCommand,
-    createBuild, queueTask, claimNextTask, heartbeatTask, completeTask, failTask,
+    createBuild, queueTask, queueSyntheticCanary, claimNextTask, heartbeatTask, completeTask, failTask, securityStopTask,
     recordArtifact, recordArtifactCopy, recordTestRun, recordRelease,
     events, getApprovalSubject, reconcile, health, stats,
     close() { try { db.close(); } catch {} },

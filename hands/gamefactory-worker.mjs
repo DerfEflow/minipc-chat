@@ -15,8 +15,8 @@
  *   - request identity is immutable and start is idempotent by runId + request hash.
  */
 import {
-  chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,
-  readdirSync, realpathSync, statSync, unlinkSync, writeFileSync,
+  chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync,
+  readSync, readdirSync, readlinkSync, realpathSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RUNNER = join(HERE, "gamefactory-runner.mjs");
 const IS_WIN = process.platform === "win32";
+const IS_LINUX = process.platform === "linux";
 const MAX_STEPS = 24;
 const MAX_ARGS = 160;
 const MAX_ARG_CHARS = 16_000;
@@ -183,6 +184,64 @@ function existingRealpath(path) {
   try { return realpathSync(path); } catch { return ""; }
 }
 
+function mountPath(value) {
+  return String(value || "").replace(/\\(040|011|012|134)/g, (_, code) => ({
+    "040": " ", "011": "\t", "012": "\n", "134": "\\",
+  })[code]);
+}
+
+function mountTargets() {
+  try {
+    return readFileSync("/proc/self/mountinfo", "utf8").split(/\r?\n/).filter(Boolean)
+      .map((line) => mountPath(line.split(" ")[4])).filter(Boolean);
+  } catch { return []; }
+}
+
+export function workerPathIdentity(path) {
+  const metadata = statSync(path, { bigint: true });
+  if (!metadata.isDirectory()) throw new Error("worker path identity requires a directory");
+  return { dev: String(metadata.dev), ino: String(metadata.ino) };
+}
+
+function samePathIdentity(left, right) {
+  return !!left && !!right && String(left.dev) === String(right.dev) && String(left.ino) === String(right.ino);
+}
+
+export function assertWorkerPathBoundary(path, { maxEntries = 200_000 } = {}) {
+  const root = existingRealpath(path);
+  if (!root || !statSync(root).isDirectory()) throw new Error("worker boundary path must be an existing directory");
+  if (IS_LINUX) {
+    const nested = mountTargets().find((target) => target !== root && isUnder(target, root));
+    if (nested) throw new Error(`worker boundary contains a descendant mount: ${nested}`);
+  }
+  const stack = [root];
+  let seen = 0;
+  while (stack.length) {
+    const dir = stack.pop();
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (++seen > maxEntries) throw new Error("worker boundary exceeds the safe filesystem-entry scan limit");
+      const child = join(dir, entry.name);
+      const metadata = lstatSync(child);
+      if (metadata.isSocket() || metadata.isFIFO() || metadata.isBlockDevice() || metadata.isCharacterDevice()) {
+        throw new Error(`worker boundary contains a forbidden special filesystem node: ${child}`);
+      }
+      if (metadata.isDirectory()) stack.push(child);
+    }
+  }
+  return { root, identity: workerPathIdentity(root), entries: seen };
+}
+
+function pathOnReadOnlyMount(path) {
+  try {
+    const mounts = readFileSync("/proc/self/mountinfo", "utf8").split(/\r?\n/).filter(Boolean).map((line) => {
+      const fields = line.split(" ");
+      return { target: mountPath(fields[4]), options: new Set(String(fields[5] || "").split(",")) };
+    }).filter((mount) => mount.target && isUnder(path, mount.target))
+      .sort((left, right) => right.target.length - left.target.length);
+    return mounts[0]?.options.has("ro") === true;
+  } catch { return false; }
+}
+
 function nearestExistingRealpath(path) {
   let cursor = resolve(path);
   while (true) {
@@ -288,7 +347,7 @@ export function sanitizeWorkerEnvironment(source = process.env, { homeDir = "" }
   const out = {};
   // This is deliberately an allowlist. A blacklist missed common secret containers such as
   // DATABASE_URL, AWS_ACCESS_KEY_ID and vendor-specific short names (for example GH_PAT).
-  const allowed = /^(?:PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP|TMPDIR|LANG|LC_ALL|LC_CTYPE|TZ|NUMBER_OF_PROCESSORS|PROCESSOR_ARCHITECTURE|PROCESSOR_IDENTIFIER|PROGRAMFILES|PROGRAMFILES\(X86\)|PROGRAMW6432|JAVA_HOME|JDK_HOME|ANDROID_HOME|ANDROID_SDK_ROOT|DEVELOPER_DIR|SDKROOT)$/i;
+  const allowed = /^(?:PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP|TMPDIR|LANG|LC_ALL|LC_CTYPE|TZ|XDG_DATA_HOME|NUMBER_OF_PROCESSORS|PROCESSOR_ARCHITECTURE|PROCESSOR_IDENTIFIER|PROGRAMFILES|PROGRAMFILES\(X86\)|PROGRAMW6432|JAVA_HOME|JDK_HOME|ANDROID_HOME|ANDROID_SDK_ROOT|DEVELOPER_DIR|SDKROOT)$/i;
   for (const [key, value] of Object.entries(source || {})) {
     if (allowed.test(key) && typeof value === "string") out[key] = value;
   }
@@ -308,6 +367,223 @@ export function sanitizeWorkerEnvironment(source = process.env, { homeDir = "" }
   return out;
 }
 
+const FD_LAUNCHER_PATH = "/opt/dominion-sandbox/fd-launcher";
+const NODE_FILTER_PATH = "/opt/dominion-sandbox/node-seccomp.bpf";
+const GODOT_FILTER_PATH = "/opt/dominion-sandbox/godot-seccomp.bpf";
+const APPARMOR_COMPONENTS = Object.freeze({
+  launcher: Object.freeze(["dominion-gx10-gamefactory-executor", "dominion-gx10-fd-launcher"]),
+  node: Object.freeze(["dominion-gx10-gamefactory-executor", "dominion-gx10-fd-launcher", "dominion-gx10-payload-node"]),
+  godot: Object.freeze(["dominion-gx10-gamefactory-executor", "dominion-gx10-fd-launcher", "dominion-gx10-payload-godot"]),
+});
+
+function exactImmutableArtifact(path, expectedPath, expectedSha256, expectedMode) {
+  const digest = String(expectedSha256 || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error(`immutable artifact ${expectedPath} lacks a pinned SHA-256`);
+  const real = existingRealpath(path);
+  const metadata = real ? statSync(real) : null;
+  if (real !== expectedPath || !metadata?.isFile() || metadata.uid !== 0 || metadata.gid !== 0
+      || metadata.nlink !== 1 || (metadata.mode & 0o7777) !== expectedMode || !pathOnReadOnlyMount(real)) {
+    throw new Error(`immutable artifact ${expectedPath} has an invalid path, owner, mode, link count, or mount`);
+  }
+  const actual = createHash("sha256").update(readFileSync(real)).digest("hex");
+  if (actual !== digest) throw new Error(`immutable artifact ${expectedPath} differs from its pinned SHA-256`);
+  return { path: real, sha256: actual };
+}
+
+function appArmorComponentSet(value) {
+  const label = String(value || "").trim();
+  if (!label.endsWith(" (enforce)")) return null;
+  const components = label.slice(0, -10).split("//&").filter(Boolean).sort();
+  return components.length === new Set(components).size ? components : null;
+}
+
+export function buildWorkerSandboxCommand(step, {
+  program = "", workspaceRoot = "", runtimeHome = "", environment = {},
+  workspaceFd = -1, runtimeFd = -1, cwdFd = -1, nodeSeccompFd = -1, godotSeccompFd = -1,
+} = {}) {
+  if (!IS_LINUX) throw new Error("fd-launcher worker isolation is available only on Linux");
+  const launcher = existingRealpath(program);
+  if (launcher !== FD_LAUNCHER_PATH) throw new Error("configured worker sandbox is not the exact immutable fd-launcher");
+  const workspace = existingRealpath(workspaceRoot), runtime = existingRealpath(runtimeHome);
+  if (!workspace || !runtime) throw new Error("launcher workspace and fixed runtime must already exist");
+  if (isUnder(workspace, runtime) || isUnder(runtime, workspace)) throw new Error("launcher workspace and runtime must not overlap");
+  const cwd = existingRealpath(step?.cwd);
+  if (!cwd || !isUnder(cwd, workspace)) throw new Error("launcher cwd is outside the exact workspace");
+  const programId = programName(step?.program);
+  if (!['node', 'godot'].includes(programId)) throw new Error("launcher payload program is not node or godot");
+  const descriptorNumbers = [workspaceFd, runtimeFd, cwdFd, nodeSeccompFd, godotSeccompFd];
+  if (descriptorNumbers.some((fd) => !Number.isInteger(fd) || fd < 3)
+      || new Set(descriptorNumbers).size !== descriptorNumbers.length) {
+    throw new Error("launcher requires five distinct inherited directory/filter descriptors");
+  }
+  const relativeCwd = relative(workspace, cwd).split(sep).join("/") || ".";
+  if (relativeCwd === ".." || relativeCwd.startsWith("../") || isAbsolute(relativeCwd)) throw new Error("launcher relative cwd escaped its workspace");
+  return {
+    program: launcher,
+    args: [
+      "--program", programId,
+      "--workspace-fd", String(workspaceFd),
+      "--runtime-fd", String(runtimeFd),
+      "--cwd-fd", String(cwdFd),
+      "--node-seccomp-fd", String(nodeSeccompFd),
+      "--godot-seccomp-fd", String(godotSeccompFd),
+      "--cwd-relative", relativeCwd,
+      "--", ...(step?.args || []).map(String),
+    ],
+    env: sanitizeWorkerEnvironment(environment),
+  };
+}
+
+export async function probeWorkerSandbox({
+  program = "", sha256 = "", protectedRoots = [], workspaceRoot = "", runtimeHome = "",
+  nodeSeccompPath = "", nodeSeccompSha256 = "", godotSeccompPath = "", godotSeccompSha256 = "",
+} = {}) {
+  if (!program) return { ok: false, configured: false, error: "worker fd-launcher is not configured" };
+  if (!IS_LINUX) return { ok: false, configured: true, error: "fd-launcher worker isolation is available only on Linux" };
+  const probeArtifacts = [];
+  try {
+    const launcher = exactImmutableArtifact(program, FD_LAUNCHER_PATH, sha256, 0o555);
+    const nodeFilter = exactImmutableArtifact(nodeSeccompPath, NODE_FILTER_PATH, nodeSeccompSha256, 0o444);
+    const godotFilter = exactImmutableArtifact(godotSeccompPath, GODOT_FILTER_PATH, godotSeccompSha256, 0o444);
+    if ((protectedRoots || []).map(existingRealpath).filter(Boolean).some((root) => isUnder(launcher.path, root))) {
+      throw new Error("fd-launcher resolves inside a protected worker root");
+    }
+    const workspace = existingRealpath(workspaceRoot), runtime = existingRealpath(runtimeHome);
+    if (!workspace || !runtime || isUnder(workspace, runtime) || isUnder(runtime, workspace)) {
+      throw new Error("sandbox probe requires exact non-overlapping workspace and runtime roots");
+    }
+    const probeNonce = randomUUID().replace(/-/g, "");
+    const probePrefix = `.dominion-probe-${probeNonce}`;
+    const peerFile = `${probePrefix}-peers`;
+    const nodeWorkspaceFile = `${probePrefix}-node-workspace`;
+    const nodeRuntimeFile = `${probePrefix}-node-runtime`;
+    const nodeReadyFile = `${probePrefix}-node-ready`;
+    const godotWorkspaceFile = `${probePrefix}-godot-workspace`;
+    const godotRuntimeFile = `${probePrefix}-godot-runtime`;
+    const godotReadyFile = `${probePrefix}-godot-ready`;
+    probeArtifacts.push(
+      join(workspace, peerFile), join(workspace, nodeWorkspaceFile), join(workspace, godotWorkspaceFile),
+      join(runtime, nodeRuntimeFile), join(runtime, nodeReadyFile), join(runtime, godotRuntimeFile), join(runtime, godotReadyFile),
+    );
+    const peerPids = readdirSync("/proc").filter((name) => /^\d+$/.test(name) && Number(name) !== process.pid).map(Number);
+    if (!peerPids.includes(1)) throw new Error("sandbox probe could not capture the container init peer");
+    writeFileSync(join(workspace, peerFile), JSON.stringify(peerPids) + "\n", { mode: 0o600, flag: "wx" });
+    const nodeCode = [
+      `const fs=require("node:fs"),net=require("node:net"),{Worker}=require("node:worker_threads");`,
+      `for(const path of ["/commands","/replies","/app","/proc/self/status","/proc/self/attr/current","/proc/self/maps"]){try{fs.openSync(path,"r");process.exit(65)}catch(error){if(!["EACCES","EPERM"].includes(error.code))process.exit(66)}}`,
+      `const expectedEnv=["CI","GAME_FACTORY_WORKER","HOME","LANG","LC_ALL","PATH","TEMP","TMP","TMPDIR","XDG_CACHE_HOME","XDG_CONFIG_HOME","XDG_DATA_HOME"].sort();if(JSON.stringify(Object.keys(process.env).sort())!==JSON.stringify(expectedEnv))process.exit(64);`,
+      `const peers=JSON.parse(fs.readFileSync(${JSON.stringify(peerFile)},"utf8"));if(!peers.includes(process.ppid)||!peers.includes(1))process.exit(69);for(const pid of peers){for(const suffix of ["environ","cmdline","root","cwd","fd","mem","maps"]){try{fs.openSync("/proc/"+pid+"/"+suffix,"r");process.exit(70)}catch(error){if(pid===process.ppid&&!["EACCES","EPERM"].includes(error.code))process.exit(71)}}}try{process.kill(process.ppid,0);process.exit(72)}catch(error){if(error.code!=="EPERM")process.exit(73)}`,
+      `fs.writeFileSync(${JSON.stringify(nodeWorkspaceFile)},"workspace-write-ok\\n");fs.writeFileSync(${JSON.stringify(`/runtime/payload/${nodeRuntimeFile}`)},"runtime-write-ok\\n");fs.writeFileSync(${JSON.stringify(`/runtime/payload/${nodeReadyFile}`)},"ready\\n");`,
+      `const done=()=>setTimeout(()=>{process.stdout.write(JSON.stringify({ok:true})+"\\n");process.exit(0)},500);const network=()=>{try{const socket=net.createConnection({host:"198.51.100.1",port:9});socket.once("connect",()=>process.exit(67));socket.once("error",done);setTimeout(()=>process.exit(68),1000)}catch{done()}};const thread=new Worker('require("node:worker_threads").parentPort.postMessage("ok")',{eval:true});thread.once("message",network);thread.once("error",()=>process.exit(74));`,
+    ].join("");
+    const run = async (step, expectedComponents, lifecycleSignal = "") => {
+      const fds = []; let child;
+      try {
+        fds.push(openSync(workspace, constants.O_RDONLY | (constants.O_DIRECTORY || 0) | (constants.O_NOFOLLOW || 0)));
+        fds.push(openSync(runtime, constants.O_RDONLY | (constants.O_DIRECTORY || 0) | (constants.O_NOFOLLOW || 0)));
+        fds.push(openSync(workspace, constants.O_RDONLY | (constants.O_DIRECTORY || 0) | (constants.O_NOFOLLOW || 0)));
+        fds.push(openSync(nodeFilter.path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0)));
+        fds.push(openSync(godotFilter.path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0)));
+        const launch = buildWorkerSandboxCommand(step, { program: launcher.path, workspaceRoot: workspace,
+          runtimeHome: runtime, environment: process.env, workspaceFd: 3, runtimeFd: 4, cwdFd: 5,
+          nodeSeccompFd: 6, godotSeccompFd: 7 });
+        child = spawn(launch.program, launch.args, { cwd: workspace, env: launch.env, detached: false,
+          stdio: ["ignore", "pipe", "pipe", ...fds] });
+      } finally { for (const fd of fds) try { closeSync(fd); } catch {} }
+      let stdout = "", stderr = "", exited = null, starttime = "", observations = 0, spawnError = null;
+      let firstObservedAt = 0, lastObservedAt = 0, measurementError = null, result = null;
+      child.stdout.on("data", (chunk) => { stdout = (stdout + chunk).slice(-16_000); });
+      child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-16_000); });
+      child.on("error", (error) => { spawnError = error; });
+      const exit = new Promise((done) => child.once("close", (status, signal) => { exited = { status, signal }; done(exited); }));
+      const boundedExit = (milliseconds) => Promise.race([
+        exit, new Promise((done) => setTimeout(() => done(null), milliseconds)),
+      ]);
+      try {
+      const expected = [...expectedComponents].sort(); const deadline = Date.now() + 30_000;
+      while (!exited && Date.now() < deadline) {
+        try {
+          const label = readFileSync(`/proc/${child.pid}/attr/current`, "utf8");
+          const status = readFileSync(`/proc/${child.pid}/status`, "utf8");
+          const stat = readFileSync(`/proc/${child.pid}/stat`, "utf8");
+          const current = appArmorComponentSet(label), currentStart = stat.slice(stat.lastIndexOf(") ") + 2).split(" ")[19];
+          const filters = /^Seccomp_filters:\s*(\d+)$/m.exec(status);
+          if (JSON.stringify(current) === JSON.stringify(expected)) {
+            if (!currentStart || (starttime && starttime !== currentStart)) throw new Error("payload PID starttime changed during readiness measurement");
+            starttime ||= currentStart;
+            const observedAt = Date.now();
+            firstObservedAt ||= observedAt; lastObservedAt = observedAt; observations++;
+            if (!/^NoNewPrivs:\s*1$/m.test(status) || !/^Seccomp:\s*2$/m.test(status) || !filters || Number(filters[1]) < 2) {
+              throw new Error("payload did not retain NNP plus both outer and raw seccomp filters");
+            }
+            for (const field of ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]) {
+              if (!new RegExp(`^${field}:\\s*0+\\s*$`, "mi").test(status)) throw new Error("payload retained Linux capabilities");
+            }
+            if (lifecycleSignal && !lifecycleSignal.startsWith("sent:") && observations >= 2
+                && lastObservedAt - firstObservedAt >= 200) {
+              child.kill(lifecycleSignal); lifecycleSignal = `sent:${lifecycleSignal}`;
+            }
+          }
+        } catch (error) {
+          if (!["ENOENT", "ESRCH"].includes(error?.code)) throw error;
+        }
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      if (!exited) throw new Error("long-running payload readiness canary exceeded its 30 second deadline");
+      await exit;
+      if (spawnError) throw spawnError;
+      if (observations < 2 || !starttime || lastObservedAt - firstObservedAt < 200) {
+        throw new Error("scheduler never measured a stable long-running payload AppArmor/PID/seccomp identity");
+      }
+      if (lifecycleSignal.startsWith("sent:") && exited.signal !== lifecycleSignal.slice(5)) {
+        throw new Error("scheduler lifecycle signal did not terminate and reap the payload as measured");
+      }
+      result = { status: exited.status, signal: exited.signal, stdout, stderr, observed: true };
+      } catch (error) {
+        measurementError = error;
+      } finally {
+        if (!exited && child?.pid) {
+          try { killWorkerTree(child.pid); } catch {}
+          await boundedExit(2_000);
+        }
+        if (!exited && child?.pid) {
+          try { child.kill("SIGKILL"); } catch {}
+          await boundedExit(2_000);
+        }
+        if (!exited && !measurementError) measurementError = new Error("payload readiness process could not be reaped");
+      }
+      if (measurementError) throw measurementError;
+      return result;
+    };
+    const expectedNode = [...APPARMOR_COMPONENTS.node].sort();
+    const node = await run({ program: "node", cwd: workspace, args: ["-e", nodeCode] }, expectedNode);
+    if (node.status !== 0) throw new Error(`Node payload isolation canary failed${safeError(node.stderr || node.error, 400) ? `: ${safeError(node.stderr || node.error, 400)}` : ` with exit ${node.status}`}`);
+    const parsedNode = JSON.parse(String(node.stdout || "").trim());
+    if (!parsedNode.ok || !node.observed || readFileSync(join(runtime, nodeReadyFile), "utf8").trim() !== "ready") {
+      throw new Error("Node payload canary did not complete after external identity measurement");
+    }
+    const nodeLifecycle = await run({ program: "node", cwd: workspace,
+      args: ["-e", "setInterval(()=>{},1000)"] }, expectedNode, "SIGTERM");
+    if (nodeLifecycle.signal !== "SIGTERM") throw new Error("Node payload TERM lifecycle canary failed");
+    const expectedGodot = [...APPARMOR_COMPONENTS.godot].sort();
+    const godot = await run({ program: "godot", cwd: workspace,
+      args: ["--headless", "--script", "/opt/dominion-canary/godot-profile-probe.gd", "--", probeNonce] }, expectedGodot);
+    if (godot.status !== 0) throw new Error(`Godot payload isolation canary failed${safeError(godot.stderr || godot.error, 400) ? `: ${safeError(godot.stderr || godot.error, 400)}` : ` with exit ${godot.status}`}`);
+    if (!godot.observed || readFileSync(join(runtime, godotReadyFile), "utf8").trim() !== "ready") throw new Error("Godot payload canary did not complete after external identity measurement");
+    const godotLifecycle = await run({ program: "godot", cwd: workspace,
+      args: ["--headless", "--script", "/opt/dominion-canary/godot-profile-probe.gd", "--", probeNonce] }, expectedGodot, "SIGKILL");
+    if (godotLifecycle.signal !== "SIGKILL") throw new Error("Godot payload KILL lifecycle canary failed");
+    return { ok: true, configured: true, kind: "fd-launcher", version: "dominion-fd-launcher/1",
+      program: launcher.path, sha256: launcher.sha256,
+      appArmorComponents: Object.fromEntries(Object.entries(APPARMOR_COMPONENTS).map(([key, value]) => [key, [...value].sort()])),
+      seccomp: { node: nodeFilter, godot: godotFilter } };
+  } catch (error) {
+    return { ok: false, configured: true, error: safeError(error, 1200) || "fd-launcher isolation probe failed" };
+  } finally {
+    for (const path of probeArtifacts) try { unlinkSync(path); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+}
+
 function credentialLikeArgument(value) {
   const text = String(value || "");
   return redactWorkerText(text, Math.max(text.length, 1)) !== text
@@ -323,8 +599,20 @@ function credentialLikeArgument(value) {
 
 function trustedProgram(program, normalizedProgram, workspace) {
   const real = existingRealpath(program);
+  if (IS_LINUX && normalizedProgram === "node") {
+    const node = existingRealpath("/opt/dominion-payload/node");
+    if (!node || isUnder(node, workspace)) throw new Error("allowed payload Node binary is unavailable or resolves inside the workspace");
+    if ((/[\\/]/.test(program) || isAbsolute(program)) && real !== node) throw new Error("absolute Node path does not match the immutable payload binary");
+    return node;
+  }
   if (normalizedProgram === "node" && real && real === existingRealpath(process.execPath)) return real;
   if (normalizedProgram === "node" && !/[\\/]/.test(program) && !isAbsolute(program)) return existingRealpath(process.execPath) || process.execPath;
+  if (IS_LINUX && normalizedProgram === "godot") {
+    const godot = existingRealpath("/opt/dominion-payload/godot");
+    if (!godot || isUnder(godot, workspace)) throw new Error("allowed Godot binary is unavailable or resolves inside the workspace");
+    if ((/[\\/]/.test(program) || isAbsolute(program)) && real !== godot) throw new Error("absolute Godot path does not match the immutable executor binary");
+    return godot;
+  }
   const qualified = /[\\/]/.test(program) || isAbsolute(program);
   const finder = IS_WIN ? "where.exe" : "which";
   const found = spawnSync(finder, [normalizedProgram], {
@@ -403,7 +691,8 @@ function validateNodeStep(step, workspace, allowedPrograms, index) {
   const timeoutMs = Math.min(Math.max(Number(step.timeoutMs) || 10 * 60_000, 1_000), 30 * 60_000);
   return {
     label: redactWorkerText(step.label, 160).trim() || `step ${index + 1}`,
-    program: trustedProgram(program, normalizedProgram, workspace), programName: normalizedProgram, args, cwd, timeoutMs,
+    program: trustedProgram(program, normalizedProgram, workspace), programName: normalizedProgram, args, cwd,
+    cwdIdentity: workerPathIdentity(cwd), timeoutMs,
   };
 }
 
@@ -468,7 +757,7 @@ export function normalizeWorkerRequest(input, { roots = [], pathGuard = null, al
   const normalized = {
     protocol: GAME_FACTORY_WORKER_PROTOCOL,
     runId, taskId, projectId, buildId, capability,
-    attempt, workspaceRoot: workspace,
+    attempt, workspaceRoot: workspace, workspaceIdentity: workerPathIdentity(workspace),
     plan: { steps, collect },
     resumeFrom,
     policy: { allowedPrograms: programs, maxLogBytes: MAX_LOG_BYTES },
@@ -483,15 +772,28 @@ export function collectRunArtifacts(request) {
   for (const rel of request?.plan?.collect || []) {
     const path = resolve(request.workspaceRoot, rel);
     if (!isUnder(path, request.workspaceRoot)) continue;
-    let real, st;
-    try { real = realpathSync(path); st = statSync(real); } catch { continue; }
-    if (!isUnder(real, request.workspaceRoot) || !st.isFile()) continue;
-    if (st.size > 100_000_000) {
-      out.push({ path: rel, size: st.size, skipped: "file exceeds 100 MB manifest hashing limit" });
-      continue;
-    }
-    const bytes = readFileSync(real);
-    out.push({ path: rel, size: bytes.length, sha256: sha256(bytes) });
+    let fd = -1;
+    try {
+      fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+      const st = fstatSync(fd);
+      const fdPath = IS_LINUX ? existingRealpath(`/proc/self/fd/${fd}`) : existingRealpath(path);
+      if (!fdPath || !isUnder(fdPath, request.workspaceRoot) || !st.isFile() || st.nlink !== 1) continue;
+      if (st.size > 100_000_000) {
+        out.push({ path: rel, size: st.size, skipped: "file exceeds 100 MB manifest hashing limit" });
+        continue;
+      }
+      const bytes = Buffer.alloc(Number(st.size));
+      let offset = 0;
+      while (offset < bytes.length) {
+        const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+        if (!count) break;
+        offset += count;
+      }
+      const after = fstatSync(fd);
+      if (offset !== bytes.length || after.size !== st.size || after.ino !== st.ino || after.dev !== st.dev || after.nlink !== 1) continue;
+      out.push({ path: rel, size: bytes.length, sha256: sha256(bytes) });
+    } catch { continue; }
+    finally { if (fd >= 0) try { closeSync(fd); } catch {} }
   }
   return out;
 }
@@ -501,12 +803,12 @@ function publicState(state) {
   const {
     runId, taskId, projectId, capability, status, revision, createdAt, startedAt, endedAt,
     updatedAt, runnerPid, childPid, currentStep, checkpoint, result, error, exitCode,
-    cancelMode, artifacts,
+    cancelMode, artifacts, sandbox,
   } = state;
   return sanitizeWorkerValue({
     runId, taskId, projectId, capability, status, revision, createdAt, startedAt, endedAt,
     updatedAt, runnerPid, childPid, currentStep, checkpoint, result, error, exitCode,
-    cancelMode, artifacts,
+    cancelMode, artifacts, sandbox,
   });
 }
 
@@ -519,7 +821,9 @@ function tail(path, maxBytes = 64_000) {
 
 export function createGameFactoryWorker({
   stateDir = "", runtimeDir = "", isolationAttested = false, toolchainAttested = false, node = "", roots = [], pathGuard = null, stateGuard = null,
-  allowedPrograms = DEFAULT_PROGRAMS, maxConcurrent = 1, log = () => {},
+  allowedPrograms = DEFAULT_PROGRAMS, maxConcurrent = 1, sandboxProgram = "", sandboxSha256 = "",
+  nodeSeccompPath = "", nodeSeccompSha256 = "", godotSeccompPath = "", godotSeccompSha256 = "",
+  sandboxRequired = false, externalExecutor = false, log = () => {},
 } = {}) {
   const configuredDir = clean(stateDir, 2000);
   const configuredRuntimeDir = clean(runtimeDir, 2000);
@@ -528,6 +832,43 @@ export function createGameFactoryWorker({
   const nodeName = clean(node, 160).toLowerCase();
   const programs = [...new Set((Array.isArray(allowedPrograms) ? allowedPrograms : DEFAULT_PROGRAMS).map(programName).filter(Boolean))];
   const concurrency = Math.min(Math.max(Number(maxConcurrent) || 1, 1), 4);
+  const configuredSandboxProgram = clean(sandboxProgram, 2000);
+  const configuredSandboxSha256 = clean(sandboxSha256, 64).toLowerCase();
+  const configuredNodeSeccompPath = clean(nodeSeccompPath, 2000);
+  const configuredNodeSeccompSha256 = clean(nodeSeccompSha256, 64).toLowerCase();
+  const configuredGodotSeccompPath = clean(godotSeccompPath, 2000);
+  const configuredGodotSeccompSha256 = clean(godotSeccompSha256, 64).toLowerCase();
+  const requireSandbox = IS_LINUX || sandboxRequired === true;
+  const useExternalExecutor = externalExecutor === true;
+  const requireExternalExecutor = IS_LINUX;
+  let measuredSandbox = { ok: false, configured: !!configuredSandboxProgram, error: "worker sandbox has not been measured" };
+
+  function sandboxIdentity(value) {
+    if (!value) return null;
+    return {
+      kind: "fd-launcher", version: clean(value.version, 160), sha256: clean(value.sha256, 64).toLowerCase(),
+      appArmorComponents: value.appArmorComponents,
+      seccomp: { node: { sha256: clean(value.seccomp?.node?.sha256, 64).toLowerCase() },
+        godot: { sha256: clean(value.seccomp?.godot?.sha256, 64).toLowerCase() } },
+    };
+  }
+
+  function readExecutorReadiness(stateRoot) {
+    const ready = parseJsonFile(join(stateRoot, "executor-ready.json"));
+    if (!ready || ready.protocol !== "game-factory-executor/1" || !ready.executorId) {
+      throw new Error("external game-factory executor has not published a valid readiness record");
+    }
+    if (Date.now() - Date.parse(ready.updatedAt || 0) > 10_000) {
+      throw new Error("external game-factory executor readiness heartbeat is stale");
+    }
+    const identity = sandboxIdentity(ready.sandbox);
+    if (!identity || identity.sha256 !== configuredSandboxSha256
+        || identity.seccomp.node.sha256 !== configuredNodeSeccompSha256
+        || identity.seccomp.godot.sha256 !== configuredGodotSeccompSha256) {
+      throw new Error("external executor sandbox identity does not match the controller's pinned policy");
+    }
+    return { ...identity, ok: true, configured: true, program: configuredSandboxProgram, executorId: clean(ready.executorId, 160) };
+  }
 
   function configured() {
     return !!configuredDir;
@@ -549,6 +890,9 @@ export function createGameFactoryWorker({
     if (!attested) throw new Error("game factory execution requires an explicit external isolation attestation");
     if (!configuredRuntimeDir) throw new Error("game factory execution requires a separate GAME_FACTORY_WORKER_RUNTIME_DIR");
     if (!attestedToolchain) throw new Error("game factory execution requires an explicit toolchain attestation");
+    if (requireExternalExecutor && !useExternalExecutor) {
+      throw new Error("Linux game factory execution requires the static external executor cgroup");
+    }
     mkdirSync(configuredRuntimeDir, { recursive: true, mode: 0o700 });
     try { chmodSync(configuredRuntimeDir, 0o700); } catch {}
     const stateRoot = existingRealpath(configuredDir) || resolve(configuredDir);
@@ -560,7 +904,22 @@ export function createGameFactoryWorker({
       const guard = stateGuard(runtimeRoot);
       if (!guard || guard.ok === false) throw new Error(safeError(guard && (guard.reason || guard.error), 1000) || "worker runtime directory was refused by the Hands policy");
     }
-    return { stateRoot, runtimeRoot };
+    const dynamicRoots = typeof roots === "function" ? roots() : roots;
+    const protectedRoots = [stateRoot, runtimeRoot, HERE, ...(Array.isArray(dynamicRoots) ? dynamicRoots : [])];
+    if (requireSandbox && !configuredSandboxProgram) {
+      measuredSandbox = { ok: false, configured: false, error: "worker sandbox is required but GAME_FACTORY_WORKER_SANDBOX_PROGRAM is not configured" };
+      throw new Error(measuredSandbox.error);
+    }
+    if (useExternalExecutor) {
+      measuredSandbox = readExecutorReadiness(stateRoot);
+    } else if (configuredSandboxProgram) {
+      measuredSandbox = { ok: false, configured: true,
+        error: "direct in-process sandbox execution is retired; Linux requires the static tokenless external executor" };
+      throw new Error(measuredSandbox.error);
+    } else {
+      measuredSandbox = { ok: false, configured: false, error: "worker sandbox is not configured" };
+    }
+    return { stateRoot, runtimeRoot, sandbox: measuredSandbox.ok ? measuredSandbox : null };
   }
 
   function find(runId) {
@@ -600,12 +959,14 @@ export function createGameFactoryWorker({
     const priorPlan = {
       taskId: prior.request.taskId, projectId: prior.request.projectId,
       buildId: prior.request.buildId || "", capability: prior.request.capability,
-      workspaceRoot: prior.request.workspaceRoot, plan: prior.request.plan,
+      workspaceRoot: prior.request.workspaceRoot, workspaceIdentity: prior.request.workspaceIdentity,
+      plan: prior.request.plan, sandbox: prior.request.policy?.sandbox,
     };
     const currentPlan = {
       taskId: request.taskId, projectId: request.projectId,
       buildId: request.buildId || "", capability: request.capability,
-      workspaceRoot: request.workspaceRoot, plan: request.plan,
+      workspaceRoot: request.workspaceRoot, workspaceIdentity: request.workspaceIdentity,
+      plan: request.plan, sandbox: request.policy?.sandbox,
     };
     if (sha256(JSON.stringify(stable(priorPlan))) !== sha256(JSON.stringify(stable(currentPlan)))) {
       throw new Error("resume lineage does not match the immutable prior recipe");
@@ -621,6 +982,15 @@ export function createGameFactoryWorker({
   function reconcile(run) {
     if (!run || !run.state || GAME_FACTORY_TERMINAL_STATES.includes(run.state.status)) return run;
     const state = run.state;
+    if (useExternalExecutor) {
+      if (["STARTING", "RUNNING", "CANCEL_REQUESTED"].includes(state.status) && !heartbeatIsFresh(run)) {
+        run.state = {
+          ...state, status: "INTERRUPTION_PENDING",
+          error: "external executor heartbeat is stale; the executor must reconcile this run before it is retried",
+        };
+      }
+      return run;
+    }
     const heartbeatFresh = !["RUNNING", "CANCEL_REQUESTED"].includes(state.status) || heartbeatIsFresh(run);
     if (["STARTING", "RUNNING", "CANCEL_REQUESTED"].includes(state.status) &&
         state.runnerPid && (!processAlive(state.runnerPid) || !heartbeatFresh)) {
@@ -650,7 +1020,8 @@ export function createGameFactoryWorker({
   }
 
   function describe() {
-    const executionConfigured = configured() && !!configuredRuntimeDir && attested && attestedToolchain;
+    const sandboxGate = (!configuredSandboxProgram && !requireSandbox) || measuredSandbox.ok === true;
+    const executionConfigured = configured() && !!configuredRuntimeDir && attested && attestedToolchain && sandboxGate;
     return {
       protocol: GAME_FACTORY_WORKER_PROTOCOL, configured: configured(), node: nodeName,
       programs: programs.slice(), maxConcurrent: concurrency,
@@ -658,7 +1029,15 @@ export function createGameFactoryWorker({
       isolation: "sanitized-process-environment-plus-external-attestation",
       isolationAttested: attested, separateRuntimeDirectory: !!configuredRuntimeDir,
       toolchainAttested: attestedToolchain,
-      secureForUntrustedCode: false,
+      sandboxRequired: requireSandbox, sandboxConfigured: !!configuredSandboxProgram,
+      externalExecutor: useExternalExecutor, externalExecutorRequired: requireExternalExecutor,
+      sandboxReady: measuredSandbox.ok === true,
+      sandbox: measuredSandbox.ok ? {
+        kind: "fd-launcher", program: measuredSandbox.program, version: measuredSandbox.version,
+        sha256: measuredSandbox.sha256, appArmorComponents: measuredSandbox.appArmorComponents,
+        seccomp: measuredSandbox.seccomp, executorId: measuredSandbox.executorId || "",
+      } : null,
+      secureForUntrustedCode: attested && attestedToolchain && measuredSandbox.ok === true,
     };
   }
 
@@ -693,20 +1072,44 @@ export function createGameFactoryWorker({
     return { ok: true, node: nodeName, ...describe(), detected, runs, active };
   }
 
-  function launch(runDir, request, state = null) {
+  function launch(runDir, request, state = null, sandbox = null) {
     const runtimeHome = join(existingRealpath(configuredRuntimeDir) || resolve(configuredRuntimeDir), "run-" + sha256(request.runId).slice(0, 32));
     mkdirSync(runtimeHome, { recursive: true, mode: 0o700 });
     try { chmodSync(runtimeHome, 0o700); } catch {}
+    const exactSandbox = sandboxIdentity(sandbox);
+    const runtimeIdentity = workerPathIdentity(runtimeHome);
     let next = state || appendRunState(runDir, {
       runId: request.runId, taskId: request.taskId, projectId: request.projectId,
-      capability: request.capability, status: "STARTING", createdAt: request.createdAt,
+      capability: request.capability, status: useExternalExecutor ? "QUEUED" : "STARTING", createdAt: request.createdAt,
       checkpoint: request.resumeFrom || { completedSteps: 0 }, runnerPid: 0, childPid: 0,
+      sandbox: exactSandbox || { kind: "none" }, runtimeIdentity,
     });
+    if (useExternalExecutor) {
+      const launchPath = join(runDir, "launch-request.json");
+      if (!existsSync(launchPath)) writeDurableNew(launchPath, json({
+        protocol: "game-factory-executor/1", runId: request.runId,
+        requestHash: request.requestHash || workerRequestHash(request), requestedAt: new Date().toISOString(),
+        sandbox: exactSandbox,
+      }));
+      return next;
+    }
     let child;
     try {
       child = spawn(process.execPath, [RUNNER, runDir], {
         detached: true, windowsHide: true, stdio: "ignore",
-        env: { ...sanitizeWorkerEnvironment(process.env, { homeDir: runtimeHome }), GAME_FACTORY_RUNTIME_HOME: runtimeHome },
+        env: {
+          ...sanitizeWorkerEnvironment(process.env, { homeDir: runtimeHome }),
+          GAME_FACTORY_RUNTIME_HOME: runtimeHome,
+          GAME_FACTORY_SANDBOX_REQUIRED: sandbox ? "1" : "0",
+          ...(sandbox ? {
+            GAME_FACTORY_SANDBOX_PROGRAM: sandbox.program,
+            GAME_FACTORY_SANDBOX_SHA256: configuredSandboxSha256,
+            GAME_FACTORY_SANDBOX_NODE_SECCOMP_PATH: configuredNodeSeccompPath,
+            GAME_FACTORY_SANDBOX_NODE_SECCOMP_SHA256: configuredNodeSeccompSha256,
+            GAME_FACTORY_SANDBOX_GODOT_SECCOMP_PATH: configuredGodotSeccompPath,
+            GAME_FACTORY_SANDBOX_GODOT_SECCOMP_SHA256: configuredGodotSeccompSha256,
+          } : {}),
+        },
       });
       child.unref();
       next = appendRunState(runDir, { status: "STARTING", runnerPid: child.pid || 0 });
@@ -725,7 +1128,15 @@ export function createGameFactoryWorker({
   function start(input) {
     try {
       const execution = ensureExecutionReady();
-      const request = normalizeWorkerRequest(input || {}, { roots, pathGuard, allowedPrograms: programs });
+      const normalizedRequest = normalizeWorkerRequest(input || {}, { roots, pathGuard, allowedPrograms: programs });
+      const request = {
+        ...normalizedRequest,
+        policy: {
+          ...normalizedRequest.policy,
+          sandbox: sandboxIdentity(execution.sandbox),
+          executor: useExternalExecutor ? "external-static" : "local",
+        },
+      };
       const { stateRoot, runtimeRoot } = execution;
       if (isUnder(request.workspaceRoot, stateRoot) || isUnder(stateRoot, request.workspaceRoot)) {
         throw new Error("workspaceRoot and the worker state directory must not overlap");
@@ -745,12 +1156,16 @@ export function createGameFactoryWorker({
           return { ok: false, conflict: true, node: nodeName, runId: request.runId, error: "runId already belongs to a different immutable request" };
         }
         let existing = reconcile({ runDir, request: prior, state: readRunState(runDir) });
-        if (!existing.state) existing.state = launch(runDir, prior);
-        else if (existing.state.status === "STARTING" && existing.state.runnerPid && processAlive(existing.state.runnerPid) && !existsSync(join(runDir, "launch.json"))) {
+        const expectedReplaySandbox = sandboxIdentity(execution.sandbox) || { kind: "none" };
+        if (existing.state?.sandbox && JSON.stringify(existing.state.sandbox) !== JSON.stringify(expectedReplaySandbox)) {
+          return { ok: false, conflict: true, retryable: false, node: nodeName, runId: request.runId, error: "stored run sandbox identity differs from the measured external executor" };
+        }
+        if (!existing.state) existing.state = launch(runDir, prior, null, execution.sandbox);
+        else if (!useExternalExecutor && existing.state.status === "STARTING" && existing.state.runnerPid && processAlive(existing.state.runnerPid) && !existsSync(join(runDir, "launch.json"))) {
           // Recover a crash after the runner pid was journaled but before its launch latch.
           writeDurableNew(join(runDir, "launch.json"), json({ runnerPid: existing.state.runnerPid, launchedAt: new Date().toISOString(), recovered: true }));
-        } else if (existing.state.status === "STARTING" && !existing.state.runnerPid) {
-          existing.state = launch(runDir, prior, existing.state);
+        } else if (!useExternalExecutor && existing.state.status === "STARTING" && !existing.state.runnerPid) {
+          existing.state = launch(runDir, prior, existing.state, execution.sandbox);
         }
         return { ok: true, replayed: true, node: nodeName, ...publicState(existing.state) };
       }
@@ -784,7 +1199,7 @@ export function createGameFactoryWorker({
       }
       const stored = { ...request, requestHash: hash };
       writeDurableNew(join(runDir, "request.json"), json(stored));
-      const state = launch(runDir, request);
+      const state = launch(runDir, request, null, execution.sandbox);
       return { ok: state.status !== "FAILED", node: nodeName, ...publicState(state) };
       });
     } catch (error) {
@@ -818,6 +1233,9 @@ export function createGameFactoryWorker({
       const cancelMode = String(mode).toLowerCase() === "immediate" ? "immediate" : "safe";
       writeCancelRequest(run.runDir, cancelMode, reason);
       if (cancelMode === "immediate") {
+        if (useExternalExecutor) {
+          return { ok: true, node: nodeName, ...publicState({ ...readRunState(run.runDir), status: "CANCEL_REQUESTED", cancelMode }) };
+        }
         if (run.state.runnerPid && processAlive(run.state.runnerPid) && !heartbeatIsFresh(run)) {
           return {
             ok: false, retryable: true, node: nodeName, runId: clean(runId, 240),

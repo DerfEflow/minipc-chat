@@ -8,10 +8,17 @@ import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  createGameFactoryWorker, normalizeWorkerRequest, processAlive, sanitizeWorkerEnvironment,
+  buildWorkerSandboxCommand, createGameFactoryWorker, normalizeWorkerRequest, processAlive, sanitizeWorkerEnvironment,
   redactWorkerText, workerRequestHash,
 } from "./hands/gamefactory-worker.mjs";
 import { createGameFactoryWorkerAdapter } from "./gamefactoryworker.mjs";
+
+// Keep the historical test entry point stable, but do not execute the retired detached JS
+// worker/runner topology. Active adapter and Hands-to-static-broker coverage lives in this suite.
+const ACTIVE_STATIC_BROKER_TOPOLOGY = true;
+if (ACTIVE_STATIC_BROKER_TOPOLOGY) {
+  await import("./gamefactoryworker_active_test.mjs");
+} else {
 
 const root = mkdtempSync(join(tmpdir(), "dominion-gfw-"));
 const workspace = join(root, "workspace");
@@ -177,6 +184,42 @@ try {
     assert.equal(worker.describe().isolationAttested, true);
     assert.equal(worker.describe().separateRuntimeDirectory, true);
     assert.equal(worker.describe().toolchainAttested, true);
+    const requiredSandbox = createGameFactoryWorker({
+      stateDir: join(root, "sandbox-required-state"), runtimeDir: join(root, "sandbox-required-runtime"),
+      isolationAttested: true, toolchainAttested: true, sandboxRequired: true,
+      node: "gx10-gamefactory", roots: [workspace], allowedPrograms: ["node"],
+    });
+    assert.equal(requiredSandbox.probe().ok, false);
+    assert.match(requiredSandbox.probe().error, /sandbox is required/);
+    assert.equal(requiredSandbox.describe().secureForUntrustedCode, false);
+    const missingSandbox = createGameFactoryWorker({
+      stateDir: join(root, "sandbox-missing-state"), runtimeDir: join(root, "sandbox-missing-runtime"),
+      isolationAttested: true, toolchainAttested: true, sandboxRequired: true,
+      sandboxProgram: join(root, "missing-bwrap"), node: "gx10-gamefactory",
+      roots: [workspace], allowedPrograms: ["node"],
+    });
+    assert.equal(missingSandbox.probe().ok, false);
+    assert.match(missingSandbox.probe().error, /trusted bwrap executable|Linux/);
+  });
+
+  await test("bubblewrap recipe is namespace-separated and binds only workspace/runtime writable", async () => {
+    if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap")) return;
+    const sandboxRuntime = join(root, "sandbox-command-runtime");
+    mkdirSync(sandboxRuntime, { recursive: true });
+    const command = buildWorkerSandboxCommand({
+      program: process.execPath, args: [join(workspace, "success.mjs")], cwd: workspace,
+    }, {
+      program: "/usr/bin/bwrap", workspaceRoot: workspace, runtimeHome: sandboxRuntime,
+      environment: sanitizeWorkerEnvironment({ PATH: process.env.PATH, HANDS_TOKEN: "must-not-cross" }, { homeDir: sandboxRuntime }),
+    });
+    for (const flag of ["--unshare-user", "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts", "--clearenv", "--tmpfs"]) {
+      assert.equal(command.args.includes(flag), true, `missing ${flag}`);
+    }
+    const binds = command.args.flatMap((item, index) => item === "--bind" ? [command.args.slice(index + 1, index + 3)] : []);
+    assert.deepEqual(binds, [[workspace, workspace], [sandboxRuntime, sandboxRuntime]]);
+    assert.equal(command.args.includes(stateDir), false);
+    assert.equal(command.args.includes(join(process.cwd(), "hands")), false);
+    assert.equal(JSON.stringify(command).includes("must-not-cross"), false);
   });
 
   await test("recovers a crash after immutable intent but before launch state", async () => {
@@ -184,7 +227,8 @@ try {
     writeFileSync(script, `import { writeFileSync } from "node:fs"; writeFileSync("recovered.txt", "ok");\n`);
     const input = request("run-intent-only", [{ program: process.execPath, args: [script], cwd: workspace }], ["recovered.txt"]);
     const normalized = normalizeWorkerRequest(input, { roots: [workspace], allowedPrograms: ["node"] });
-    const stored = { ...normalized, requestHash: workerRequestHash(normalized) };
+    const currentIntent = { ...normalized, policy: { ...normalized.policy, sandbox: null, executor: "local" } };
+    const stored = { ...currentIntent, requestHash: workerRequestHash(currentIntent) };
     const runDir = join(stateDir, "run-" + createHash("sha256").update(input.runId).digest("hex").slice(0, 32));
     mkdirSync(runDir, { recursive: true });
     writeFileSync(join(runDir, "request.json"), JSON.stringify(stored, null, 2) + "\n");
@@ -335,4 +379,5 @@ try {
   console.log(`\n${passed} game factory worker tests passed`);
 } finally {
   rmSync(root, { recursive: true, force: true });
+}
 }

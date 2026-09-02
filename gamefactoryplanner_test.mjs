@@ -7,7 +7,14 @@ import { renderGameArtifact } from "./gamefactorytemplates.mjs";
 const clone = (value) => structuredClone(value);
 const digest = (value) => createHash("sha256").update(Buffer.from(value, "utf8")).digest("hex");
 
-function harness({ localWritesEnabled = true, driveWritesEnabled = false, failIngestOnce = "", failMirror = "" } = {}) {
+function harness({
+  localWritesEnabled = true,
+  driveWritesEnabled = true,
+  failIngestOnce = "",
+  failMirror = "",
+  nativeCopiesVerified = false,
+  mirrorEvidenceMissing = "",
+} = {}) {
   const commands = new Map();
   const versions = new Map();
   const project = {
@@ -62,13 +69,18 @@ function harness({ localWritesEnabled = true, driveWritesEnabled = false, failIn
       if (artifact && artifact.sha256 === sha256 && artifact.size === size && artifact.mimeType === mimeType) {
         const primary = artifact.copies.find((copy) => copy.backend === "primary");
         if (!primary) artifact.copies.push({ backend: "primary", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 });
+        if (nativeCopiesVerified && !artifact.copies.some((copy) => copy.backend === "chatgpt_project")) {
+          artifact.copies.push({ backend: "chatgpt_project", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 });
+        }
         return { status: 200, body: { ok: true, artifactId: artifact.id, version: artifact.version, sha256, size, reused: true } };
       }
       const version = (versions.get(artifactKey) || 0) + 1;
       versions.set(artifactKey, version);
+      const copies = [{ backend: "primary", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 }];
+      if (nativeCopiesVerified) copies.push({ backend: "chatgpt_project", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 });
       artifact = {
         id: `artifact-${artifactKey}-${version}`, artifactKey, version, sha256, size, mimeType,
-        provenance, copies: [{ backend: "primary", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 }], complete: false,
+        provenance, copies, complete: false,
       };
       project.artifacts.push(artifact);
       project.version++;
@@ -78,6 +90,9 @@ function harness({ localWritesEnabled = true, driveWritesEnabled = false, failIn
       mirrorCalls++;
       const artifact = project.artifacts.find((item) => item.id === artifactId);
       if (artifact?.artifactKey === failMirror) return { status: 502, body: { code: "drive_mirror_failed", error: "Drive unavailable" } };
+      if (artifact?.artifactKey === mirrorEvidenceMissing) {
+        return { status: 200, body: { ok: true, artifactId, sha256: artifact.sha256, size: artifact.size } };
+      }
       artifact.copies = artifact.copies.filter((copy) => copy.backend !== "google_drive");
       artifact.copies.push({ backend: "google_drive", status: "VERIFIED", algorithm: "sha256", fingerprint: artifact.sha256 });
       artifact.complete = MANDATORY_ARTIFACT_BACKENDS.every((backend) => artifact.copies.some((copy) => copy.backend === backend && copy.status === "VERIFIED"));
@@ -104,19 +119,30 @@ await test("disabled local artifact writes fail before the lifecycle transition"
   assert.deepEqual(h.counts(), { executeCalls: 0, ingestCalls: 0, mirrorCalls: 0 });
 });
 
+await test("disabled Drive mirroring fails before the lifecycle transition", async () => {
+  const h = harness({ driveWritesEnabled: false });
+  const planner = createGameFactoryPlanner({ store: h.store, artifactMirror: h.artifactMirror });
+  const response = await planner.startSpecification({ uid: "owner", projectId: h.project.id, key: "start-no-mirror", expectedVersion: 1 });
+  assert.equal(response.status, 503);
+  assert.equal(response.body.code, "mirror_writes_disabled");
+  assert.equal(h.project.state, "IDEA");
+  assert.deepEqual(h.counts(), { executeCalls: 0, ingestCalls: 0, mirrorCalls: 0 });
+});
+
 await test("a trusted start renders all eleven exact templates and records no approval", async () => {
-  const h = harness();
+  const h = harness({ nativeCopiesVerified: true });
   const planner = createGameFactoryPlanner({ store: h.store, artifactMirror: h.artifactMirror });
   const response = await planner.startSpecification({ uid: "owner", email: "owner@example.com", projectId: h.project.id, key: "start-vector", expectedVersion: 1, actor: "owner@example.com" });
   assert.equal(response.status, 200);
   assert.equal(response.body.ok, true);
   assert.equal(response.body.project.state, "SPECIFICATION");
   assert.equal(response.body.specification.localReady, true);
-  assert.equal(response.body.specification.requiredCopiesComplete, false);
-  assert.equal(response.body.specification.approvalSubjectReady, false);
+  assert.equal(response.body.specification.requiredCopiesComplete, true);
+  assert.equal(response.body.specification.approvalSubjectReady, true);
   assert.equal(response.body.specification.specificationApprovalRecorded, false);
   assert.equal(response.body.specification.requiredHumanApproval, "SPECIFICATION");
   assert.equal(response.body.artifacts.length, 11);
+  assert.equal(h.counts().mirrorCalls, 11);
   assert.deepEqual(h.project.approvals, []);
   for (const artifact of response.body.artifacts) {
     const rendered = renderGameArtifact("vector-vault", artifact.artifactKey);
@@ -125,15 +151,48 @@ await test("a trusted start renders all eleven exact templates and records no ap
     assert.equal(artifact.artifact.sha256, artifact.expected.sha256);
     assert.equal(artifact.deterministicMatch, true);
     assert.equal(artifact.localPrimary.verified, true);
-    assert.equal(artifact.twoCopyReady, false);
+    assert.equal(artifact.twoCopyReady, true);
     assert.deepEqual(artifact.requiredCopies.map((copy) => copy.backend), [...MANDATORY_ARTIFACT_BACKENDS]);
-    assert.equal(artifact.requiredCopies.some((copy) => copy.backend === "chatgpt_project" && copy.verified), false);
+    assert.equal(artifact.requiredCopies.some((copy) => copy.backend === "google_drive" && copy.verified), true);
+    assert.equal(artifact.requiredCopies.some((copy) => copy.backend === "chatgpt_project" && copy.verified), true);
   }
+});
+
+await test("2xx Drive results cannot hide a missing mandatory native-project copy", async () => {
+  const h = harness();
+  const planner = createGameFactoryPlanner({ store: h.store, artifactMirror: h.artifactMirror });
+  const response = await planner.startSpecification({ uid: "owner", projectId: h.project.id, key: "start-native-missing", expectedVersion: 1 });
+  assert.equal(response.status, 503);
+  assert.equal(response.body.code, "mandatory_artifact_copies_incomplete");
+  assert.equal(response.body.ok, false);
+  assert.equal(response.body.partial, true);
+  assert.equal(response.body.project.state, "SPECIFICATION");
+  assert.equal(response.body.specification.requiredCopiesComplete, false);
+  assert.equal(response.body.storage.complianceComplete, false);
+  assert.equal(response.body.failures.mirror.length, 0);
+  assert.equal(response.body.failures.mandatoryCopies.length, REQUIRED_GAME_ARTIFACTS.length);
+  for (const failure of response.body.failures.mandatoryCopies) assert.deepEqual(failure.backends, ["chatgpt_project"]);
+});
+
+await test("a 2xx mirror response without verified store evidence remains a loud partial failure", async () => {
+  const missingEvidence = REQUIRED_GAME_ARTIFACTS[6];
+  const h = harness({ nativeCopiesVerified: true, mirrorEvidenceMissing: missingEvidence });
+  const planner = createGameFactoryPlanner({ store: h.store, artifactMirror: h.artifactMirror });
+  const response = await planner.startSpecification({ uid: "owner", projectId: h.project.id, key: "start-store-evidence-missing", expectedVersion: 1 });
+  assert.equal(response.status, 503);
+  assert.equal(response.body.code, "mandatory_artifact_copies_incomplete");
+  assert.equal(response.body.ok, false);
+  assert.equal(response.body.partial, true);
+  assert.deepEqual(response.body.failures.mirror, []);
+  assert.deepEqual(response.body.failures.mandatoryCopies, [{ artifactKey: missingEvidence, backends: ["google_drive"] }]);
+  const artifact = response.body.artifacts.find((item) => item.artifactKey === missingEvidence);
+  assert.equal(artifact.mirror.status, 200);
+  assert.equal(artifact.requiredCopies.find((copy) => copy.backend === "google_drive").verified, false);
 });
 
 await test("the same command safely recovers a partial ingest without duplicate artifact versions", async () => {
   const missingOnce = REQUIRED_GAME_ARTIFACTS[4];
-  const h = harness({ failIngestOnce: missingOnce });
+  const h = harness({ failIngestOnce: missingOnce, nativeCopiesVerified: true });
   const planner = createGameFactoryPlanner({ store: h.store, artifactMirror: h.artifactMirror });
   const input = { uid: "owner", projectId: h.project.id, key: "start-recover", expectedVersion: 1 };
   const first = await planner.startSpecification(input);

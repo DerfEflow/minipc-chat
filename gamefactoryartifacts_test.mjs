@@ -101,8 +101,8 @@ try {
     assert.equal(made.body.local.status, "VERIFIED");
     assert.equal(made.body.complete, false);
     assert.equal(made.body.compliance.status, "blocked");
-    const rel = made.body.local.locator.replace("factory-local://", "").replaceAll("/", "\\");
-    firstPath = join(dir, "objects", rel);
+    const rel = made.body.local.locator.replace("factory-local://", "").split("/");
+    firstPath = join(dir, "objects", ...rel);
     assert.equal(existsSync(firstPath), true);
     assert.equal(readFileSync(firstPath, "utf8"), "immutable brief");
     const provenance = store.detail.artifacts.find((item) => item.id === made.body.artifactId).provenance;

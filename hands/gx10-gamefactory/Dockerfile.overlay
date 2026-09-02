@@ -1,0 +1,6 @@
+# Retired experimental overlay. It cannot be built or used for the live worker lane.
+# Android tooling requires a separately reviewed target plus human-provided accepted-license
+# material; no automated license acceptance or Android SDK layer is present here.
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:e9b5516b06baeaea9a8e65a7aec6a85fbb960a30b52b66968f2c8092b3e2a3eb
+FROM ${NODE_IMAGE}
+RUN echo "retired overlay: use hands/gx10-gamefactory/Dockerfile controller|executor" >&2; exit 78

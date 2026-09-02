@@ -1,0 +1,42 @@
+# Dominion Hands — scoped GX10 game-factory worker image.
+#
+# This is deliberately separate from hands/Dockerfile, whose legacy max-access topology is still
+# used by other Hands surfaces. This image is the bounded worker-control container: it is non-root,
+# contains the complete module closure, and expects exactly three scoped writable mounts. The
+# Compose topology keeps both worker attestations false by default. Those booleans are evidence
+# acknowledgements, not a sandbox, and must not be enabled merely because this image starts.
+# Production builds must supply a Node 24 image reference pinned by digest and verified for GX10's
+# measured architecture. There is intentionally no floating base-image default.
+ARG NODE_IMAGE
+FROM ${NODE_IMAGE}
+ARG NODE_IMAGE
+LABEL org.opencontainers.image.base.name="${NODE_IMAGE}"
+
+RUN node -e 'if (!/@sha256:[a-f0-9]{64}$/i.test(process.argv[1])) process.exit(1)' "${NODE_IMAGE}" \
+    && node -e 'if (Number(process.versions.node.split(".")[0]) !== 24) process.exit(1)' \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends debianutils \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 dominion-hands \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /runtime/hands-home --shell /usr/sbin/nologin dominion-hands \
+    && mkdir -p /app /workspace /state /runtime \
+    && chown -R 10001:10001 /workspace /state /runtime \
+    && node --version \
+    && which node \
+    && test "$(id -u dominion-hands)" = "10001" \
+    && test "$(id -g dominion-hands)" = "10001"
+
+WORKDIR /app
+COPY hands/hands.mjs ./hands.mjs
+COPY hands/snapshot.mjs ./snapshot.mjs
+COPY hands/browser.mjs ./browser.mjs
+COPY hands/desktop.mjs ./desktop.mjs
+COPY hands/gamefactory-worker.mjs ./gamefactory-worker.mjs
+COPY hands/gamefactory-runner.mjs ./gamefactory-runner.mjs
+COPY hands/gx10-worker-entrypoint.mjs ./gx10-worker-entrypoint.mjs
+RUN chmod 0444 /app/*.mjs && chmod 0555 /app
+
+ENV NODE_ENV=production
+USER 10001:10001
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["node", "gx10-worker-entrypoint.mjs"]

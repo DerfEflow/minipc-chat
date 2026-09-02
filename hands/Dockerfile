@@ -31,6 +31,11 @@
 FROM node:24-slim
 WORKDIR /app
 COPY hands/hands.mjs ./hands.mjs
+COPY hands/snapshot.mjs ./snapshot.mjs
+COPY hands/browser.mjs ./browser.mjs
+COPY hands/desktop.mjs ./desktop.mjs
+COPY hands/gamefactory-worker.mjs ./gamefactory-worker.mjs
+COPY hands/gamefactory-runner.mjs ./gamefactory-runner.mjs
 # The node runs as root inside the container ON PURPOSE for the max-access end goal: to read/write
 # across a bind-mounted host it must not be blocked by host-uid ownership. The carve-out guard, not
 # the container uid, is the security boundary Fred specified. For a scoped deployment, drop this and

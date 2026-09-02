@@ -36,6 +36,267 @@ try {
     assert.equal(store.getProject(other, projectId), null);
   });
 
+  test("trusted synthetic canaries are fixed, evidence-free, tenant-scoped and replay-safe", () => {
+    const canaryProjectId = store.listProjects(owner)[9].id;
+    const secondCanaryProjectId = store.listProjects(owner)[8].id;
+    const before = store.getProject(owner, canaryProjectId);
+    assert.equal(before.workspaceRoot, "");
+    assert.equal(store.getProject(owner, secondCanaryProjectId).workspaceRoot, "");
+    assert.equal(before.tasks.length, 0);
+    assert.equal(before.tests.length, 0);
+    assert.equal(before.artifacts.length, 0);
+    assert.equal(before.releases.length, 0);
+
+    const key = "synthetic-canary-replay-0001";
+    const first = store.queueSyntheticCanary({
+      uid: owner, projectId: canaryProjectId, key, actor: "owner@example.com",
+      workspaceRoot: "/caller/cannot/override", payload: { workspaceRoot: "/caller/cannot/override" },
+    });
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    assert.equal(first.body.capability, "quality_assurance");
+    assert.equal(first.body.effects.qaEvidence, false);
+    assert.match(first.body.audit.idempotencyFingerprint, /^[a-f0-9]{64}$/);
+    const detail = store.getProject(owner, canaryProjectId);
+    const task = detail.tasks.find((item) => item.id === first.body.taskId);
+    assert.ok(task);
+    assert.equal(task.buildId, "");
+    assert.equal(task.capability, "quality_assurance");
+    assert.equal(task.safeToRetry, true);
+    assert.equal(task.maxAttempts, 2);
+    assert.deepEqual(task.payload.workerPlan, {
+      workspaceRoot: "/workspace/system-canary",
+      steps: [{ label: "Report the Node.js runtime version", program: "node", args: ["--version"], cwd: ".", timeoutMs: 30_000 }],
+      collect: [],
+    });
+    assert.deepEqual(Object.keys(task.payload).sort(), ["syntheticCanary", "workerPlan"]);
+    assert.equal("workspaceRoot" in task.payload, false);
+    assert.equal(JSON.stringify(task.payload).includes("gx10"), false);
+    assert.equal(detail.tests.length, 0);
+    assert.equal(detail.artifacts.length, 0);
+    assert.equal(detail.releases.length, 0);
+    assert.equal(detail.activeBuild, null);
+
+    const replay = store.queueSyntheticCanary({ uid: owner, projectId: canaryProjectId, key, actor: "owner@example.com" });
+    assert.equal(replay.status, 201);
+    assert.equal(replay.body.replayed, true);
+    assert.equal(replay.body.taskId, first.body.taskId);
+    assert.equal(store.getProject(owner, canaryProjectId).tasks.length, 1);
+    const concurrent = store.queueSyntheticCanary({ uid: owner, projectId: canaryProjectId, key: "synthetic-canary-concurrent-01" });
+    assert.equal(concurrent.status, 409);
+    assert.equal(concurrent.body.code, "synthetic_canary_in_progress");
+    const crossProjectConcurrent = store.queueSyntheticCanary({
+      uid: owner, projectId: secondCanaryProjectId, key: "synthetic-canary-cross-project-01",
+    });
+    assert.equal(crossProjectConcurrent.status, 409);
+    assert.equal(crossProjectConcurrent.body.code, "synthetic_canary_in_progress");
+    assert.equal(crossProjectConcurrent.body.taskId, first.body.taskId);
+    const conflict = store.queueSyntheticCanary({ uid: owner, projectId: secondCanaryProjectId, key });
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.body.code, "idempotency_conflict");
+    assert.equal(store.queueSyntheticCanary({ uid: other, projectId: canaryProjectId, key: "synthetic-other-tenant-01" }).status, 404);
+    assert.equal(store.queueSyntheticCanary({ uid: owner, projectId: ` ${canaryProjectId}`, key: "synthetic-bad-project-01" }).body.code, "bad_project_id");
+    assert.equal(store.queueSyntheticCanary({ uid: owner, projectId: canaryProjectId, key: "bad;canary-key-0001" }).body.code, "bad_idempotency_key");
+
+    const claimed = store.claimNextTask({ workerId: "gx10-gamefactory", capability: "quality_assurance", leaseMs: 15_000 });
+    assert.equal(claimed.id, first.body.taskId);
+    const failed = store.failTask({
+      uid: owner, taskId: claimed.id, workerId: "gx10-gamefactory", attempt: claimed.attempt,
+      error: "synthetic probe failed", retryable: false,
+    });
+    assert.equal(failed.status, 200);
+    assert.equal(failed.body.syntheticCanary, true);
+    assert.equal(failed.body.projectLifecycleUnaffected, true);
+    const afterFailure = store.getProject(owner, canaryProjectId);
+    assert.equal(afterFailure.state, before.state);
+    assert.equal(afterFailure.version, before.version);
+    assert.equal(afterFailure.tests.length, 0);
+    assert.equal(afterFailure.artifacts.length, 0);
+    assert.equal(afterFailure.releases.length, 0);
+    assert.ok(afterFailure.events.some((event) => event.type === "synthetic_canary.queued"));
+    assert.ok(afterFailure.events.some((event) => event.type === "synthetic_canary.failed"));
+
+    const inspection = new DatabaseSync(store.file);
+    const checkpointsBefore = Number(inspection.prepare("SELECT COUNT(*) AS n FROM game_checkpoints WHERE projectId=?").get(canaryProjectId).n);
+    const success = store.queueSyntheticCanary({ uid: owner, projectId: canaryProjectId, key: "synthetic-canary-success-0001" });
+    assert.equal(success.status, 201);
+    const successClaim = store.claimNextTask({ workerId: "gx10-gamefactory", capability: "quality_assurance", leaseMs: 15_000 });
+    assert.equal(successClaim.id, success.body.taskId);
+    const completed = store.completeTask({
+      uid: owner, taskId: successClaim.id, workerId: "gx10-gamefactory", attempt: successClaim.attempt,
+      result: { status: "SUCCEEDED", artifacts: [{ path: "forged.apk" }] },
+      checkpoint: { completedSteps: 1, complete: true, safeBoundary: true },
+    });
+    assert.equal(completed.status, 200);
+    assert.equal(Number(inspection.prepare("SELECT COUNT(*) AS n FROM game_checkpoints WHERE projectId=?").get(canaryProjectId).n), checkpointsBefore);
+    inspection.close();
+    const afterSuccess = store.getProject(owner, canaryProjectId);
+    assert.equal(afterSuccess.artifacts.length, 0);
+    assert.equal(afterSuccess.tests.length, 0);
+    assert.equal(afterSuccess.releases.length, 0);
+    assert.ok(afterSuccess.events.some((event) => event.type === "synthetic_canary.completed"));
+  });
+
+  test("an expired synthetic canary never poisons the game lifecycle", () => {
+    const canaryProjectId = store.listProjects(owner)[9].id;
+    const queued = store.queueSyntheticCanary({
+      uid: owner, projectId: canaryProjectId, key: "synthetic-canary-expiry-0001", actor: "owner@example.com",
+    });
+    assert.equal(queued.status, 201);
+    let claimed = store.claimNextTask({ workerId: "gx10-gamefactory", capability: "quality_assurance", leaseMs: 15_000 });
+    assert.equal(claimed.id, queued.body.taskId);
+    clock += 20_000;
+    const firstExpiry = store.reconcile();
+    assert.equal(firstExpiry.requeued, 1);
+    claimed = store.claimNextTask({ workerId: "gx10-gamefactory", capability: "quality_assurance", leaseMs: 15_000 });
+    assert.equal(claimed.id, queued.body.taskId);
+    clock += 20_000;
+    const finalExpiry = store.reconcile();
+    assert.equal(finalExpiry.failed, 0);
+    const detail = store.getProject(owner, canaryProjectId);
+    assert.equal(detail.state, "IDEA");
+    assert.equal(detail.tasks.find((task) => task.id === queued.body.taskId).status, "FAILED");
+  });
+
+  test("an ordinary task cannot forge the synthetic canary lifecycle exemption", () => {
+    const ordinaryProjectId = store.listProjects(owner)[7].id;
+    const payload = {
+      syntheticCanary: { schema: "game-factory.synthetic-worker-canary.v1", evidenceEffects: "none" },
+      workerPlan: {
+        workspaceRoot: "/workspace/system-canary",
+        steps: [{
+          label: "Report the Node.js runtime version", program: "node", args: ["--version"], cwd: ".", timeoutMs: 30_000,
+        }],
+        collect: [],
+      },
+    };
+    const queued = store.queueTask({
+      uid: owner, projectId: ordinaryProjectId, buildId: "", capability: "quality_assurance",
+      title: "Trusted synthetic worker canary", payload,
+      acceptance: ["The fixed Node.js version probe exits successfully without collecting artifacts."],
+      priority: 1000, safeToRetry: true, maxAttempts: 2,
+    });
+    assert.equal(queued.status, 201);
+    assert.match(queued.body.taskId, /^gft_[0-9a-f-]{36}$/);
+    assert.doesNotMatch(queued.body.taskId, /^gft_canary_/);
+    const claimed = store.claimNextTask({ workerId: "gx10-gamefactory", capability: "quality_assurance", leaseMs: 15_000 });
+    assert.equal(claimed.id, queued.body.taskId);
+    const failed = store.failTask({
+      uid: owner, taskId: claimed.id, workerId: "gx10-gamefactory", attempt: claimed.attempt,
+      error: "ordinary lookalike failed", retryable: false,
+    });
+    assert.equal(failed.status, 200);
+    assert.equal(failed.body.syntheticCanary, undefined);
+    const detail = store.getProject(owner, ordinaryProjectId);
+    assert.equal(detail.state, "FAILED");
+    assert.ok(detail.events.some((event) => event.type === "task.failed" && event.payload.taskId === claimed.id));
+    assert.equal(detail.events.some((event) => event.type.startsWith("synthetic_canary.") && event.payload.taskId === claimed.id), false);
+  });
+
+  test("a real synthetic canary keeps its lifecycle exemption after store restart", () => {
+    const restartDir = mkdtempSync(join(tmpdir(), "dominion-gamefactory-canary-restart-"));
+    const restartUid = "restart-owner";
+    let first;
+    try {
+      first = createGameFactoryStore({ dir: restartDir, now: () => clock });
+      const project = first.seedPortfolio({ uid: restartUid, email: "restart@example.com" })[0];
+      assert.equal(first.getProject(restartUid, project.id).workspaceRoot, "");
+      const queued = first.queueSyntheticCanary({
+        uid: restartUid, projectId: project.id, key: "restart-canary-idempotency-01", actor: restartUid,
+      });
+      assert.equal(queued.status, 201);
+      assert.match(queued.body.taskId, /^gft_canary_[a-f0-9]{32}$/);
+      first.close(); first = null;
+      const reopened = createGameFactoryStore({ dir: restartDir, now: () => clock });
+      try {
+        const claimed = reopened.claimNextTask({ workerId: "gx10-gamefactory", capability: "quality_assurance", leaseMs: 15_000 });
+        assert.equal(claimed.id, queued.body.taskId);
+        const failed = reopened.failTask({
+          uid: restartUid, taskId: claimed.id, workerId: "gx10-gamefactory", attempt: claimed.attempt,
+          error: "restart canary failed", retryable: false,
+        });
+        assert.equal(failed.body.syntheticCanary, true);
+        assert.equal(reopened.getProject(restartUid, project.id).state, "IDEA");
+      } finally { reopened.close(); }
+    } finally {
+      try { first?.close(); } catch {}
+      rmSync(restartDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a security stop overrides stale completion and invalidates every unsafe pause checkpoint", () => {
+    const securityUid = "security-stop-owner";
+    const [securityProject] = store.seedPortfolio({ uid: securityUid, email: "security-stop@example.com" });
+    const queued = store.queueTask({
+      uid: securityUid, projectId: securityProject.id, capability: "gameplay_engineering",
+      title: "Race a completion against proof loss", safeToRetry: true,
+    });
+    assert.equal(queued.status, 201);
+    const claimed = store.claimNextTask({
+      workerId: "gx10-gamefactory", capability: "gameplay_engineering", leaseMs: 30_000,
+    });
+    assert.equal(claimed.id, queued.body.taskId);
+    const beforePause = store.getProject(securityUid, securityProject.id);
+    assert.equal(store.executeCommand({
+      uid: securityUid, projectId: securityProject.id, key: "security-stop-pause-race",
+      expectedVersion: beforePause.version, type: "pause",
+    }).status, 202);
+    // Simulate the stale leader winning first: it commits success and both a task checkpoint and
+    // finalizePause's generic owner-operation checkpoint.
+    assert.equal(store.completeTask({
+      uid: securityUid, taskId: claimed.id, workerId: "gx10-gamefactory", attempt: claimed.attempt,
+      result: { status: "SUCCEEDED", staleObserver: true }, checkpoint: { complete: true, unsafeAfterProofLoss: true },
+    }).status, 200);
+    assert.equal(store.getProject(securityUid, securityProject.id).state, "PAUSED");
+    const inspection = new DatabaseSync(store.file);
+    const compatibleBefore = Number(inspection.prepare(
+      "SELECT COUNT(*) AS n FROM game_checkpoints WHERE projectId=? AND compatible=1",
+    ).get(securityProject.id).n);
+    assert.ok(compatibleBefore >= 2);
+
+    const stopped = store.securityStopTask({
+      uid: securityUid, taskId: claimed.id, attempt: claimed.attempt,
+      error: "The worker lost its current isolation proof while this task was active.",
+    });
+    assert.equal(stopped.status, 200);
+    assert.equal(stopped.body.securityStopped, true);
+    assert.ok(stopped.body.invalidatedCheckpoints >= 2);
+    const corrected = store.getProject(securityUid, securityProject.id);
+    assert.equal(corrected.tasks.find((task) => task.id === claimed.id).status, "FAILED");
+    assert.equal(corrected.tasks.find((task) => task.id === claimed.id).result.securityStopped, true);
+    assert.equal(corrected.state, "BLOCKED");
+    assert.match(corrected.blocker, /lost its isolation proof/i);
+    assert.equal(Number(inspection.prepare(
+      "SELECT COUNT(*) AS n FROM game_checkpoints WHERE projectId=? AND compatible=1",
+    ).get(securityProject.id).n), 0);
+    assert.equal(store.completeTask({
+      uid: securityUid, taskId: claimed.id, workerId: "gx10-gamefactory", attempt: claimed.attempt,
+      result: { status: "SUCCEEDED", tooLate: true }, checkpoint: { forged: true },
+    }).body.code, "lease_lost");
+    const replay = store.securityStopTask({
+      uid: securityUid, taskId: claimed.id, attempt: claimed.attempt, error: "same security stop",
+    });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.body.replayed, true);
+    inspection.close();
+
+    const secondProject = store.seedPortfolio({ uid: securityUid, email: "security-stop@example.com" })[1];
+    const secondQueued = store.queueTask({
+      uid: securityUid, projectId: secondProject.id, capability: "gameplay_engineering",
+      title: "Security stop wins first", safeToRetry: true,
+    });
+    const secondClaim = store.claimNextTask({
+      workerId: "gx10-gamefactory", capability: "gameplay_engineering", leaseMs: 30_000,
+    });
+    assert.equal(secondClaim.id, secondQueued.body.taskId);
+    assert.equal(store.securityStopTask({
+      uid: securityUid, taskId: secondClaim.id, attempt: secondClaim.attempt,
+    }).status, 200);
+    assert.equal(store.completeTask({
+      uid: securityUid, taskId: secondClaim.id, workerId: "gx10-gamefactory", attempt: secondClaim.attempt,
+      result: { status: "SUCCEEDED" }, checkpoint: { shouldNotExist: true },
+    }).body.code, "lease_lost");
+  });
+
   test("commands require optimistic version and replay by idempotency key", () => {
     const before = store.getProject(owner, projectId);
     const args = { uid: owner, projectId, key: "advance-1", expectedVersion: before.version, type: "advance", actor: "owner@example.com" };

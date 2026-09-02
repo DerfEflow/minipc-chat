@@ -7,6 +7,20 @@ const MAX_BODY = 1024 * 1024;
 const MAX_ARTIFACT_CONTENT_BYTES = 512 * 1024;
 const REVIEWABLE_ARTIFACT_MIMES = new Set(["text/markdown", "text/plain"]);
 const ARTIFACT_CONTENT_ROUTE = /^\/api\/game-factory\/games\/([^/]+)\/artifacts\/([^/]+)\/content$/;
+const SYNTHETIC_CANARY_ROUTE = "/api/game-factory/admin/synthetic-canary";
+const SYNTHETIC_CANARY_ACTION = "game-factory-synthetic-canary";
+
+export function verifiedHumanFactoryOwner(req, tenant, mode = "") {
+  const identity = req && req.dominionIdentity && typeof req.dominionIdentity === "object" ? req.dominionIdentity : {};
+  const identityEmail = String(identity.email || "").trim().toLowerCase();
+  const tenantEmail = String(tenant && tenant.email || "").trim().toLowerCase();
+  return String(mode || "").trim().toLowerCase() === "owner"
+    && tenant?.isOwner === true
+    && identity.source === "jwt"
+    && identity.verified === true
+    && !!identityEmail
+    && identityEmail === tenantEmail;
+}
 
 async function bodyJson(req, maxBytes = MAX_BODY) {
   let bytes = 0, text = "";
@@ -288,6 +302,7 @@ export function createGameFactoryHttp({
   releaseHealth = () => ({ writesEnabled: false }),
   planner = null,
   readArtifactContent = null,
+  syntheticCanary = null,
   // Builds, worker tasks, artifact attestations, QA evidence and store status are machine facts.
   // A signed-in browser must not be able to manufacture them. Production therefore fails closed;
   // a trusted in-process adapter may opt in with an explicit authorizer.
@@ -312,11 +327,57 @@ export function createGameFactoryHttp({
     const url = u instanceof URL ? u : new URL(req.url, "http://localhost");
     const path = url.pathname.replace(/\/$/, "");
     const artifactContentMatch = path.match(ARTIFACT_CONTENT_ROUTE);
-    const check = wall(req, { ownerOnly: path === "/api/game-factory/health" || !!artifactContentMatch });
+    const isSyntheticCanary = path === SYNTHETIC_CANARY_ROUTE;
+    const check = wall(req, { ownerOnly: path === "/api/game-factory/health" || !!artifactContentMatch || isSyntheticCanary });
     if (check.response) return json(res, check.response.status, check.response.body);
     const T = check.T, uid = T.uid || "owner";
-    if (req.method === "POST" && req.headers["x-dominion-action"] !== "game-factory") {
+    const expectedAction = isSyntheticCanary ? SYNTHETIC_CANARY_ACTION : "game-factory";
+    if (req.method === "POST" && req.headers["x-dominion-action"] !== expectedAction) {
       return json(res, 403, { error: "This factory action did not come through Dominion's protected action channel.", code: "action_header_required" });
+    }
+
+    if (isSyntheticCanary) {
+      // Unlike authorizeEvidenceWrite, this identity rule is not injectable: even a trusted
+      // in-process adapter cannot turn a service principal or forged browser header into a canary.
+      if (!verifiedHumanFactoryOwner(req, T, gate.mode)) {
+        return json(res, 403, { error: "The synthetic canary requires a verified human owner JWT.", code: "human_owner_required" });
+      }
+      if (req.method !== "POST") {
+        return json(res, 405, { error: "The synthetic canary accepts POST only.", code: "method_not_allowed" });
+      }
+      if (syntheticCanary?.enabled !== true || typeof syntheticCanary.run !== "function") {
+        return json(res, 404, { error: "The synthetic canary is not enabled.", code: "synthetic_canary_disabled" });
+      }
+      const body = await bodyJson(req, 4096);
+      if (body && body.__bodyError) return json(res, body.status || 400, { error: body.error, code: body.code });
+      const keys = Object.keys(body || {});
+      if (keys.length !== 1 || keys[0] !== "projectId") {
+        return json(res, 400, { error: "The synthetic canary accepts only projectId.", code: "bad_canary_schema" });
+      }
+      const rawProjectId = body.projectId;
+      if (typeof rawProjectId !== "string" || rawProjectId !== rawProjectId.trim()
+          || !/^gf_[a-z0-9_-]{3,160}$/.test(rawProjectId)) {
+        return json(res, 400, { error: "A valid existing factory project is required.", code: "bad_project_id" });
+      }
+      const headerKey = req.headers["idempotency-key"];
+      if (typeof headerKey !== "string" || headerKey !== headerKey.trim()
+          || headerKey.length < 16 || headerKey.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(headerKey)) {
+        return json(res, 400, { error: "A 16-128 character Idempotency-Key header is required.", code: "bad_idempotency_key" });
+      }
+      let result;
+      try {
+        result = await syntheticCanary.run({
+          uid, email: T.email || "", projectId: rawProjectId, key: headerKey,
+          actor: T.email || uid, tenant: T,
+        });
+      } catch {
+        log("game factory synthetic canary adapter failed");
+        return json(res, 503, { error: "The synthetic canary adapter is unavailable.", code: "synthetic_canary_unavailable" });
+      }
+      if (!result || !Number.isInteger(result.status) || !result.body || typeof result.body !== "object") {
+        return json(res, 503, { error: "The synthetic canary adapter returned an invalid response.", code: "synthetic_canary_unavailable" });
+      }
+      return json(res, result.status, result.body);
     }
 
     if (req.method === "GET" && path === "/api/game-factory/config") {

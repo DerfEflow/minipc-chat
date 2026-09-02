@@ -1,11 +1,13 @@
 /* Detached, restart-independent executor for hands/gamefactory-worker.mjs. */
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import {
+  appendFileSync, chmodSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import {
-  GAME_FACTORY_TERMINAL_STATES, appendRunState, collectRunArtifacts, killWorkerTree,
+  GAME_FACTORY_TERMINAL_STATES, appendRunState, assertWorkerPathBoundary, buildWorkerSandboxCommand, collectRunArtifacts, killWorkerTree,
   normalizeWorkerRequest, readCancelRequest, readRunRequest, readRunState,
-  redactWorkerText, sanitizeWorkerEnvironment, workerRequestHash,
+  probeWorkerSandbox, redactWorkerText, sanitizeWorkerEnvironment, workerPathIdentity, workerRequestHash,
 } from "./gamefactory-worker.mjs";
 
 const runDir = resolve(String(process.argv[2] || ""));
@@ -20,6 +22,12 @@ const privateKeyBlock = { "stdout.log": false, "stderr.log": false };
 const runtimeHomeInput = String(process.env.GAME_FACTORY_RUNTIME_HOME || "").trim();
 if (!runtimeHomeInput) process.exit(4);
 const runtimeHome = resolve(runtimeHomeInput);
+const sandboxProgram = String(process.env.GAME_FACTORY_SANDBOX_PROGRAM || "").trim();
+const sandboxRequired = process.platform === "linux" || process.env.GAME_FACTORY_SANDBOX_REQUIRED === "1";
+const sandboxSha256 = String(process.env.GAME_FACTORY_SANDBOX_SHA256 || "").trim();
+const sandboxAppArmorProfile = String(process.env.GAME_FACTORY_SANDBOX_APPARMOR_PROFILE || "").trim();
+const sandboxSeccompPath = String(process.env.GAME_FACTORY_SANDBOX_SECCOMP_PATH || "").trim();
+const sandboxSeccompSha256 = String(process.env.GAME_FACTORY_SANDBOX_SECCOMP_SHA256 || "").trim();
 mkdirSync(runtimeHome, { recursive: true, mode: 0o700 });
 try { chmodSync(runtimeHome, 0o700); } catch {}
 
@@ -72,17 +80,55 @@ function validStoredStep(step) {
   } catch { return false; }
 }
 
+function sameIdentity(left, right) {
+  return !!left && !!right && String(left.dev) === String(right.dev) && String(left.ino) === String(right.ino);
+}
+
+function openVerifiedDirectory(path, expected, label) {
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_DIRECTORY || 0) | (constants.O_NOFOLLOW || 0));
+  const metadata = fstatSync(fd, { bigint: true });
+  const actual = { dev: String(metadata.dev), ino: String(metadata.ino) };
+  if (!metadata.isDirectory() || !sameIdentity(actual, expected)) {
+    closeSync(fd);
+    throw new Error(`${label} directory identity changed after request authorization`);
+  }
+  return fd;
+}
+
 function processStep(step, index) {
   return new Promise((done) => {
     const started = Date.now();
     let child;
+    const inherited = [];
     try {
-      child = spawn(step.program, step.args, {
-        cwd: step.cwd, env: sanitizeWorkerEnvironment(process.env, { homeDir: runtimeHome }), windowsHide: true,
-        detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"],
+      const childEnvironment = sanitizeWorkerEnvironment(process.env, { homeDir: runtimeHome });
+      let launch;
+      let stdio = ["ignore", "pipe", "pipe"];
+      if (sandboxProgram) {
+        assertWorkerPathBoundary(request.workspaceRoot);
+        assertWorkerPathBoundary(runtimeHome);
+        const workspaceFd = openVerifiedDirectory(request.workspaceRoot, request.workspaceIdentity, "workspace");
+        const runtimeFd = openVerifiedDirectory(runtimeHome, readRunState(runDir)?.runtimeIdentity, "runtime");
+        const cwdFd = openVerifiedDirectory(step.cwd, step.cwdIdentity, "step cwd");
+        const seccompFd = openSync(sandboxSeccompPath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+        inherited.push(workspaceFd, runtimeFd, cwdFd, seccompFd);
+        launch = buildWorkerSandboxCommand(step, {
+          program: sandboxProgram, workspaceRoot: request.workspaceRoot,
+          runtimeHome, environment: childEnvironment,
+          workspaceFd: 3, runtimeFd: 4, cwdFd: 5, seccompFd: 6,
+        });
+        stdio = ["ignore", "pipe", "pipe", ...inherited];
+      } else {
+        launch = { program: step.program, args: step.args, env: childEnvironment };
+      }
+      child = spawn(launch.program, launch.args, {
+        cwd: step.cwd, env: launch.env, windowsHide: true,
+        detached: process.platform !== "win32", stdio,
       });
     } catch (error) {
       return done({ ok: false, code: -1, error: redactWorkerText(error && error.message || error, 1200), ms: Date.now() - started });
+    } finally {
+      for (const fd of inherited) try { closeSync(fd); } catch {}
     }
     appendRunState(runDir, { status: "RUNNING", runnerPid: process.pid, childPid: child.pid || 0, currentStep: index });
     child.stdout.on("data", (chunk) => writeLog("stdout.log", chunk));
@@ -127,6 +173,32 @@ async function main() {
   if (!launch || Number(launch.runnerPid) !== process.pid) return;
   const latchedState = readRunState(runDir);
   if (!latchedState || Number(latchedState.runnerPid) !== process.pid) return;
+  if (sandboxRequired && !sandboxProgram) {
+    appendRunState(runDir, {
+      status: "FAILED", endedAt: new Date().toISOString(), runnerPid: 0, childPid: 0,
+      error: "worker sandbox was required but the measured sandbox program was not delivered to the runner",
+    });
+    return;
+  }
+  if (sandboxRequired) {
+    const measured = probeWorkerSandbox({
+      program: sandboxProgram, sha256: sandboxSha256, appArmorProfile: sandboxAppArmorProfile,
+      seccompPath: sandboxSeccompPath, seccompSha256: sandboxSeccompSha256,
+      protectedRoots: [dirname(runDir), runtimeHome, "/app"],
+    });
+    const expected = request.policy?.sandbox;
+    const actual = measured.ok ? {
+      kind: "bubblewrap", version: measured.version, sha256: measured.sha256,
+      appArmorProfile: measured.appArmorProfile, seccompSha256: measured.seccompSha256,
+    } : null;
+    if (!measured.ok || !expected || JSON.stringify(actual) !== JSON.stringify(expected)) {
+      appendRunState(runDir, {
+        status: "FAILED", endedAt: new Date().toISOString(), runnerPid: 0, childPid: 0,
+        error: measured.error || "stored sandbox identity does not match the measured executor sandbox",
+      });
+      return;
+    }
+  }
   if (!request.plan.steps.every(validStoredStep)) {
     appendRunState(runDir, { status: "FAILED", endedAt: new Date().toISOString(), runnerPid: 0, childPid: 0, error: "stored worker recipe failed runner-side policy validation" });
     return;
