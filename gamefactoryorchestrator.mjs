@@ -454,7 +454,14 @@ export function createGameFactoryDispatchJournal({ dir, now = () => Date.now() }
 
   function writeSecurityLatch(row, response = null, error = "worker isolation proof was lost") {
     if (!row) return null;
-    if (row.status === SECURITY_INTERRUPTED) return asDispatch(row);
+    // A pending security latch is already the absorbing lane fence. Reconciliation may revisit it
+    // while cancellation/death proof remains unavailable, but those retries are not new security
+    // incidents: rewriting the row would append an unbounded event stream and advance the global
+    // security epoch once per tick. Preserve the original incident evidence until securityFinish()
+    // binds the terminal proof.
+    if (row.status === SECURITY_CANCEL_REQUESTED || row.status === SECURITY_INTERRUPTED) {
+      return asDispatch(row);
+    }
     const stamp = at();
     db.prepare(`UPDATE dispatches SET status=?,remoteStatus=?,lastResponse=?,error=?,endedAt=0,updatedAt=?
       WHERE runId=?`).run(
