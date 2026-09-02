@@ -10,6 +10,7 @@ import { createReadStream, existsSync, lstatSync, mkdirSync, realpathSync, statS
 import { open } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { MANDATORY_ARTIFACT_BACKENDS, REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
+import { LOCKED_NATIVE_CHATGPT_PROJECT_ID, OWNER_ATTESTED_NATIVE_PROJECT_FALLBACK_APPROVED } from "./gamefactorynativeevidence.mjs";
 
 const TRUE = new Set(["1", "true", "yes", "on", "enabled"]);
 const SECRET_KEY = /(authorization|cookie|credential|password|private.?key|secret|token)/i;
@@ -36,8 +37,14 @@ const compliance = () => ({
   complete: false,
   requiredVerifiedBackends: [...MANDATORY_ARTIFACT_BACKENDS],
   nativeProjectConfigured: false,
-  fallbackBackend: "primary",
-  blocker: "Native ChatGPT Project artifact storage is unavailable to this runtime; the local primary is only a fallback and cannot satisfy that copy requirement.",
+  nativeProjectVerification: "DOCUMENTED_API_UNAVAILABLE",
+  ownerAttestedBrowserFallback: {
+    approved: OWNER_ATTESTED_NATIVE_PROJECT_FALLBACK_APPROVED,
+    offlineOperatorOnly: true,
+    projectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+  },
+  fallbackBackend: "none",
+  blocker: "No documented native ChatGPT Project verification API is configured. An approved owner-attested browser-upload record may be added only through the offline privileged operator command after primary and Drive verification.",
 });
 
 export function gameFactoryArtifactFlags(env = process.env) {
@@ -371,8 +378,14 @@ export function createGameFactoryArtifactMirror({
       driveConfigured: typeof driveForTenant === "function",
       driveWritesEnabled: !!driveWritesEnabled,
       nativeProjectConfigured: false,
+      nativeProjectVerification: "DOCUMENTED_API_UNAVAILABLE",
+      ownerAttestedBrowserFallback: {
+        approved: OWNER_ATTESTED_NATIVE_PROJECT_FALLBACK_APPROVED,
+        offlineOperatorOnly: true,
+        projectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+      },
       requiredVerifiedBackends: [...MANDATORY_ARTIFACT_BACKENDS],
-      fallbackBackend: "primary",
+      fallbackBackend: "none",
       complianceComplete: false,
       blocker: compliance().blocker,
       immutable: true,

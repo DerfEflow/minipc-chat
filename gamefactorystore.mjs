@@ -14,6 +14,11 @@ import {
   GAME_STATES, HOLD_STATES, projectIdFor, normalizeIdempotencyKey,
   defaultNextState, transitionDecision, allowedTransitions, stateProgress, approvalAllowed,
 } from "./gamefactory.mjs";
+import {
+  LOCKED_NATIVE_CHATGPT_PROJECT_ID, NATIVE_PROJECT_API_VERIFIED_STATUS, NATIVE_PROJECT_OWNER_ATTESTED_STATUS,
+  nativeProjectEvidenceCanComplete, normalizeNativeApiProjectManifest,
+  normalizeNativeProjectInvalidationManifest, normalizeOwnerAttestedNativeProjectManifest,
+} from "./gamefactorynativeevidence.mjs";
 
 const parse = (value, fallback = null) => { try { return JSON.parse(value); } catch { return fallback; } };
 const cleanText = (value, max = 1000) => String(value == null ? "" : value).trim().slice(0, max);
@@ -95,10 +100,16 @@ function isSyntheticCanaryTask(row) {
       || String(row.buildId || "") || !row.safeToRetry || Number(row.maxAttempts) !== SYNTHETIC_CANARY_MAX_ATTEMPTS) return false;
   return requestHash({ payload: parse(row.payload, {}), acceptance: parse(row.acceptance, []) }) === SYNTHETIC_CANARY_SIGNATURE;
 }
-const SCHEMA_VERSION = 1;
-const SCHEMA_CHECKSUM = createHash("sha256").update([
+const SCHEMA_V1_CHECKSUM = createHash("sha256").update([
   "game_projects:v1", "game_builds:v1", "game_tasks:v1", "game_checkpoints:v1",
   "game_events:v1", "game_artifacts:v1", "game_artifact_copies:v1",
+  "game_test_runs:v1", "game_approvals:v1", "game_releases:v1",
+  "game_model_runs:v1", "command_idempotency:v1", "outbox_events:v1",
+].join("|")).digest("hex");
+const SCHEMA_VERSION = 2;
+const SCHEMA_CHECKSUM = createHash("sha256").update([
+  "game_projects:v1", "game_builds:v1", "game_tasks:v1", "game_checkpoints:v1",
+  "game_events:v1", "game_artifacts:v1", "game_artifact_copies:v1", "game_artifact_native_evidence:v1",
   "game_test_runs:v1", "game_approvals:v1", "game_releases:v1",
   "game_model_runs:v1", "command_idempotency:v1", "outbox_events:v1",
 ].join("|")).digest("hex");
@@ -280,6 +291,42 @@ export function createGameFactoryStore({
       UNIQUE(artifactId, backend)
     );
 
+    /*
+     * Native ChatGPT Project evidence cannot use the mutable copy-status projection above.  A
+     * later observation must not relabel a prior claim.  This ledger is append-only in normal
+     * code: an invalidation is a new row bound to the original evidence id, never an UPDATE or
+     * DELETE.  RESTRICT also prevents an accidental project/artifact deletion from erasing the
+     * audit history.
+     */
+    CREATE TABLE IF NOT EXISTS game_artifact_native_evidence (
+      id TEXT PRIMARY KEY,
+      artifactId TEXT NOT NULL REFERENCES game_artifacts(id) ON DELETE RESTRICT,
+      projectId TEXT NOT NULL REFERENCES game_projects(id) ON DELETE RESTRICT,
+      uid TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      targetEvidenceId TEXT NOT NULL DEFAULT '',
+      nativeProjectId TEXT NOT NULL,
+      fingerprint TEXT NOT NULL DEFAULT '',
+      size INTEGER NOT NULL DEFAULT 0,
+      operator TEXT NOT NULL DEFAULT '',
+      browserEvidenceRef TEXT NOT NULL DEFAULT '',
+      manifestHash TEXT NOT NULL,
+      manifest TEXT NOT NULL,
+      createdAt INTEGER NOT NULL,
+      UNIQUE(artifactId, kind, manifestHash)
+    );
+    CREATE INDEX IF NOT EXISTS gf_native_evidence_artifact ON game_artifact_native_evidence(artifactId, createdAt, id);
+    CREATE INDEX IF NOT EXISTS gf_native_evidence_target ON game_artifact_native_evidence(targetEvidenceId, createdAt, id);
+    /* The application never mutates evidence, and the database rejects accidental mutation too.
+     * A filesystem/database administrator can always replace a SQLite file, so projections also
+     * revalidate every record and fail closed; these triggers protect the ordinary store path. */
+    CREATE TRIGGER IF NOT EXISTS gf_native_evidence_no_update
+      BEFORE UPDATE ON game_artifact_native_evidence
+      BEGIN SELECT RAISE(ABORT, 'native Project evidence is append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS gf_native_evidence_no_delete
+      BEFORE DELETE ON game_artifact_native_evidence
+      BEGIN SELECT RAISE(ABORT, 'native Project evidence is append-only'); END;
+
     CREATE TABLE IF NOT EXISTS game_test_runs (
       id TEXT PRIMARY KEY,
       projectId TEXT NOT NULL REFERENCES game_projects(id) ON DELETE CASCADE,
@@ -372,9 +419,16 @@ export function createGameFactoryStore({
     );
   `);
 
-  const schemaRow = db.prepare("SELECT version,checksum FROM game_factory_schema WHERE singleton=1").get();
+  let schemaRow = db.prepare("SELECT version,checksum FROM game_factory_schema WHERE singleton=1").get();
+  if (schemaRow && Number(schemaRow.version) === 1 && schemaRow.checksum === SCHEMA_V1_CHECKSUM && existingSchemaVersion === 1) {
+    // The only supported migration is the known v1 schema.  In particular, old mutable
+    // chatgpt_project rows are deliberately not copied into the new append-only ledger.
+    db.prepare("UPDATE game_factory_schema SET version=?,checksum=?,appliedAt=? WHERE singleton=1")
+      .run(SCHEMA_VERSION, SCHEMA_CHECKSUM, Number(now()) || Date.now());
+    schemaRow = db.prepare("SELECT version,checksum FROM game_factory_schema WHERE singleton=1").get();
+  }
   if ((schemaRow && (Number(schemaRow.version) !== SCHEMA_VERSION || schemaRow.checksum !== SCHEMA_CHECKSUM)) ||
-      (existingSchemaVersion === SCHEMA_VERSION && !schemaRow)) {
+      (!schemaRow && existingSchemaVersion !== 0)) {
     db.close();
     throw new Error("Game Factory database schema metadata does not match this build.");
   }
@@ -405,6 +459,8 @@ export function createGameFactoryStore({
     releases: db.prepare("SELECT rowid AS sequence,* FROM game_releases WHERE projectId=? AND uid=? ORDER BY updatedAt DESC,rowid DESC"),
     artifacts: db.prepare("SELECT * FROM game_artifacts WHERE projectId=? AND uid=? ORDER BY artifactKey, version DESC"),
     copies: db.prepare("SELECT * FROM game_artifact_copies WHERE artifactId=? ORDER BY backend"),
+    nativeEvidence: db.prepare("SELECT * FROM game_artifact_native_evidence WHERE artifactId=? ORDER BY createdAt,id"),
+    nativeEvidenceById: db.prepare("SELECT * FROM game_artifact_native_evidence WHERE id=?"),
     queued: db.prepare(`SELECT t.* FROM game_tasks t JOIN game_projects p ON p.id=t.projectId AND p.uid=t.uid
       WHERE t.status='QUEUED' AND t.cancelRequested=0 AND p.state NOT IN ('PAUSED','BLOCKED','FAILED','DEPLOYED')
         AND p.operation='' AND (?='' OR t.capability=?)
@@ -454,23 +510,127 @@ export function createGameFactoryStore({
     return q.projects.all(cleanUid(uid)).map(asProject);
   }
 
+  function nativeEvidenceArtifact(row) {
+    return {
+      id: row.id, artifactKey: row.artifactKey, version: row.version, sha256: row.sha256,
+      size: row.size, mimeType: row.mimeType, provenance: parse(row.provenance, {}),
+    };
+  }
+
+  function nativeEvidenceCopy(row, legacyRows = []) {
+    const artifact = nativeEvidenceArtifact(row);
+    const entries = q.nativeEvidence.all(row.id);
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    const invalidated = new Set();
+    let corrupt = false;
+
+    for (const entry of entries) {
+      if (entry.kind !== "INVALIDATED") continue;
+      try {
+        const manifest = normalizeNativeProjectInvalidationManifest(parse(entry.manifest, {}), { stored: true });
+        const target = byId.get(manifest.evidenceId);
+        if (!target || target.kind === "INVALIDATED" || entry.targetEvidenceId !== manifest.evidenceId
+            || entry.projectId !== row.projectId || entry.uid !== row.uid
+            || entry.nativeProjectId !== LOCKED_NATIVE_CHATGPT_PROJECT_ID
+            || entry.manifestHash !== manifest.manifestHash
+            || entry.operator !== manifest.operator || entry.browserEvidenceRef !== manifest.browserEvidenceRef) {
+          corrupt = true;
+          continue;
+        }
+        invalidated.add(manifest.evidenceId);
+      } catch { corrupt = true; }
+    }
+
+    const active = [];
+    for (const entry of entries) {
+      if (![NATIVE_PROJECT_OWNER_ATTESTED_STATUS, NATIVE_PROJECT_API_VERIFIED_STATUS].includes(entry.kind)) continue;
+      try {
+        const manifest = entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS
+          ? normalizeOwnerAttestedNativeProjectManifest(parse(entry.manifest, {}), artifact, { stored: true })
+          : normalizeNativeApiProjectManifest(parse(entry.manifest, {}), artifact, { stored: true });
+        const operator = entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? manifest.operator : "";
+        const browserEvidenceRef = entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? manifest.browserEvidenceRef : "";
+        if (entry.projectId !== row.projectId || entry.uid !== row.uid || entry.nativeProjectId !== LOCKED_NATIVE_CHATGPT_PROJECT_ID
+            || entry.manifestHash !== manifest.manifestHash || entry.fingerprint !== artifact.sha256 || Number(entry.size) !== Number(artifact.size)
+            || entry.operator !== operator || entry.browserEvidenceRef !== browserEvidenceRef) {
+          corrupt = true;
+          continue;
+        }
+        if (!invalidated.has(entry.id)) active.push({ entry, manifest });
+      } catch { corrupt = true; }
+    }
+
+    if (corrupt) {
+      return {
+        backend: "chatgpt_project", status: "EVIDENCE_CORRUPT", fingerprint: "", algorithm: "sha256", attempts: entries.length,
+        lastError: "Append-only native Project evidence is malformed or internally inconsistent.", verifiedAt: 0,
+        provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+      };
+    }
+    if (active.length > 1) {
+      return {
+        backend: "chatgpt_project", status: "AMBIGUOUS", fingerprint: "", algorithm: "sha256", attempts: entries.length,
+        lastError: "More than one active native Project evidence record exists; explicit invalidation is required before completion.", verifiedAt: 0,
+        provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+      };
+    }
+    if (active.length === 1) {
+      const { entry, manifest } = active[0];
+      return {
+        id: entry.id, backend: "chatgpt_project", status: entry.kind, fingerprint: artifact.sha256, algorithm: "sha256", attempts: 1,
+        lastError: "", verifiedAt: entry.createdAt,
+        provenance: entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? "OWNER_ATTESTED_BROWSER_UPLOAD" : "NATIVE_API_VERIFIED",
+        nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID, manifestHash: manifest.manifestHash,
+        browserEvidenceRef: entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? manifest.browserEvidenceRef : "",
+      };
+    }
+    if (entries.some((entry) => entry.kind === "INVALIDATED")) {
+      return {
+        backend: "chatgpt_project", status: "INVALIDATED", fingerprint: "", algorithm: "sha256", attempts: entries.length,
+        lastError: "The prior native Project evidence was invalidated by a later owner browser observation.", verifiedAt: 0,
+        provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+      };
+    }
+    if (legacyRows.length) {
+      return {
+        backend: "chatgpt_project", status: "UNTRUSTED_LEGACY", fingerprint: "", algorithm: "sha256", attempts: legacyRows.length,
+        lastError: "Legacy mutable native Project copy rows cannot satisfy completion without v2 append-only evidence.", verifiedAt: 0,
+        provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+      };
+    }
+    return {
+      backend: "chatgpt_project", status: "MISSING", fingerprint: "", algorithm: "sha256", attempts: 0,
+      lastError: "No native Project evidence has been recorded.", verifiedAt: 0,
+      provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+    };
+  }
+
+  function copySatisfiesBackend(copy, artifact, backend) {
+    if (!copy || copy.backend !== backend || copy.algorithm !== "sha256" || copy.fingerprint !== artifact.sha256) return false;
+    return backend === "chatgpt_project" ? nativeProjectEvidenceCanComplete(copy) : copy.status === "VERIFIED";
+  }
+
   function artifactSummary(projectId, uid) {
     const rows = q.artifacts.all(projectId, cleanUid(uid));
     const latest = new Map();
     for (const row of rows) if (!latest.has(row.artifactKey)) latest.set(row.artifactKey, row);
     const artifacts = [];
     for (const [artifactKey, row] of latest) {
-      const copies = q.copies.all(row.id).map((copy) => ({
+      const storedCopies = q.copies.all(row.id);
+      const legacyNative = storedCopies.filter((copy) => copy.backend === "chatgpt_project");
+      const copies = storedCopies.filter((copy) => copy.backend !== "chatgpt_project").map((copy) => ({
         id: copy.id, backend: copy.backend, locator: copy.locator, status: copy.status,
         fingerprint: copy.fingerprint, algorithm: copy.algorithm, attempts: copy.attempts,
         lastError: copy.lastError, verifiedAt: copy.verifiedAt,
       }));
-      artifacts.push({
+      copies.push(nativeEvidenceCopy(row, legacyNative));
+      const artifact = {
         id: row.id, artifactKey, version: row.version, sha256: row.sha256, size: row.size,
         mimeType: row.mimeType, provenance: parse(row.provenance, {}), createdAt: row.createdAt,
         copies,
-        complete: requiredBackends.every((backend) => copies.some((copy) => copy.backend === backend && copy.status === "VERIFIED" && copy.algorithm === "sha256" && copy.fingerprint === row.sha256)),
-      });
+      };
+      artifact.complete = requiredBackends.every((backend) => copySatisfiesBackend(copies.find((copy) => copy.backend === backend), artifact, backend));
+      artifacts.push(artifact);
     }
     const byKey = new Map(artifacts.map((artifact) => [artifact.artifactKey, artifact]));
     const missing = REQUIRED_GAME_ARTIFACTS.filter((key) => !byKey.get(key)?.complete);
@@ -1229,9 +1389,127 @@ export function createGameFactoryStore({
     });
   }
 
+  function nativeEvidencePrerequisites(artifact) {
+    const copies = q.copies.all(artifact.id);
+    const verified = (backend) => copies.some((copy) => copy.backend === backend && copy.status === "VERIFIED"
+      && copy.algorithm === "sha256" && copy.fingerprint === artifact.sha256);
+    return ["primary", "google_drive"].filter((backend) => !verified(backend));
+  }
+
+  function currentArtifactRow(artifact) {
+    return db.prepare("SELECT * FROM game_artifacts WHERE projectId=? AND artifactKey=? ORDER BY version DESC LIMIT 1")
+      .get(artifact.projectId, artifact.artifactKey);
+  }
+
+  function appendNativeProjectEvidence({ uid, artifactId, manifest, kind }) {
+    const who = cleanUid(uid);
+    return tx(() => {
+      const artifact = db.prepare("SELECT * FROM game_artifacts WHERE id=? AND uid=?").get(cleanText(artifactId, 180), who);
+      if (!artifact) return result(404, { error: "No such artifact.", code: "not_found" });
+      const current = currentArtifactRow(artifact);
+      if (!current || current.id !== artifact.id) {
+        return result(409, { error: "Native Project evidence can only bind the current immutable artifact version.", code: "native_project_artifact_not_current" });
+      }
+      const missingPrerequisites = nativeEvidencePrerequisites(artifact);
+      if (missingPrerequisites.length) {
+        const backend = missingPrerequisites[0];
+        return result(409, {
+          error: `The exact current ${backend === "primary" ? "primary" : "Google Drive"} copy must be SHA-256 verified before native Project evidence can be recorded.`,
+          code: backend === "primary" ? "native_project_primary_unverified" : "native_project_drive_unverified",
+          missing: missingPrerequisites,
+        });
+      }
+      let bound;
+      try {
+        bound = kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS
+          ? normalizeOwnerAttestedNativeProjectManifest(manifest, nativeEvidenceArtifact(artifact))
+          : normalizeNativeApiProjectManifest(manifest, nativeEvidenceArtifact(artifact));
+      } catch (error) {
+        return result(400, { error: safeText(error?.message || "Invalid native Project evidence.", 1000), code: cleanText(error?.code || "bad_native_project_manifest", 120) });
+      }
+      const existing = db.prepare("SELECT * FROM game_artifact_native_evidence WHERE artifactId=? AND kind=? AND manifestHash=?")
+        .get(artifact.id, kind, bound.manifestHash);
+      if (existing) {
+        const projection = nativeEvidenceCopy(artifact, q.copies.all(artifact.id).filter((copy) => copy.backend === "chatgpt_project"));
+        return result(200, {
+          ok: nativeProjectEvidenceCanComplete(projection), replayed: true, evidenceId: existing.id,
+          status: projection.status, manifestHash: bound.manifestHash,
+        });
+      }
+      const projection = nativeEvidenceCopy(artifact, q.copies.all(artifact.id).filter((copy) => copy.backend === "chatgpt_project"));
+      if (projection.status === "EVIDENCE_CORRUPT" || projection.status === "AMBIGUOUS") {
+        return result(409, { error: "Existing native Project evidence is not unambiguous and valid.", code: "native_project_evidence_unresolved" });
+      }
+      if (nativeProjectEvidenceCanComplete(projection)) {
+        return result(409, { error: "A different native Project evidence record is already active; record an append-only invalidation before replacing it.", code: "native_project_evidence_already_active" });
+      }
+      const project = q.project.get(artifact.projectId, who);
+      if (!project) return result(404, { error: "No such game.", code: "not_found" });
+      const id = "gfn_" + randomUUID();
+      const at = timestamp();
+      const operator = kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? bound.operator : "";
+      const browserEvidenceRef = kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? bound.browserEvidenceRef : "";
+      db.prepare(`INSERT INTO game_artifact_native_evidence
+        (id,artifactId,projectId,uid,kind,targetEvidenceId,nativeProjectId,fingerprint,size,operator,browserEvidenceRef,manifestHash,manifest,createdAt)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        id, artifact.id, artifact.projectId, who, kind, "", LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+        artifact.sha256, artifact.size, operator, browserEvidenceRef, bound.manifestHash, json(bound), at,
+      );
+      bump(project);
+      emit(project, "artifact.native_project_evidence_recorded", {
+        artifactId: artifact.id, evidenceId: id, status: kind, provenance: kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? "OWNER_ATTESTED_BROWSER_UPLOAD" : "NATIVE_API_VERIFIED",
+        manifestHash: bound.manifestHash,
+      }, { actor: operator || "native-project-api" });
+      return result(201, { ok: true, evidenceId: id, status: kind, manifestHash: bound.manifestHash });
+    });
+  }
+
+  function recordOwnerAttestedNativeProjectEvidence({ uid, artifactId, manifest } = {}) {
+    return appendNativeProjectEvidence({ uid, artifactId, manifest, kind: NATIVE_PROJECT_OWNER_ATTESTED_STATUS });
+  }
+
+  function invalidateNativeProjectEvidence({ uid, artifactId, manifest } = {}) {
+    const who = cleanUid(uid);
+    return tx(() => {
+      const artifact = db.prepare("SELECT * FROM game_artifacts WHERE id=? AND uid=?").get(cleanText(artifactId, 180), who);
+      if (!artifact) return result(404, { error: "No such artifact.", code: "not_found" });
+      let bound;
+      try { bound = normalizeNativeProjectInvalidationManifest(manifest); }
+      catch (error) { return result(400, { error: safeText(error?.message || "Invalid native Project invalidation.", 1000), code: cleanText(error?.code || "bad_native_project_invalidation", 120) }); }
+      const existing = db.prepare("SELECT * FROM game_artifact_native_evidence WHERE artifactId=? AND kind='INVALIDATED' AND manifestHash=?")
+        .get(artifact.id, bound.manifestHash);
+      if (existing) return result(200, { ok: true, replayed: true, evidenceId: existing.id, status: "INVALIDATED", manifestHash: bound.manifestHash });
+      const target = q.nativeEvidenceById.get(bound.evidenceId);
+      if (!target || target.artifactId !== artifact.id || target.projectId !== artifact.projectId || target.uid !== who
+          || ![NATIVE_PROJECT_OWNER_ATTESTED_STATUS, NATIVE_PROJECT_API_VERIFIED_STATUS].includes(target.kind)) {
+        return result(404, { error: "The native Project evidence to invalidate does not belong to this exact artifact.", code: "native_project_evidence_not_found" });
+      }
+      const priorInvalidation = db.prepare("SELECT id FROM game_artifact_native_evidence WHERE kind='INVALIDATED' AND targetEvidenceId=? LIMIT 1").get(target.id);
+      if (priorInvalidation) return result(409, { error: "The native Project evidence has already been invalidated; it cannot be relabeled or edited.", code: "native_project_evidence_already_invalidated" });
+      const project = q.project.get(artifact.projectId, who);
+      if (!project) return result(404, { error: "No such game.", code: "not_found" });
+      const id = "gfn_" + randomUUID();
+      const at = timestamp();
+      db.prepare(`INSERT INTO game_artifact_native_evidence
+        (id,artifactId,projectId,uid,kind,targetEvidenceId,nativeProjectId,fingerprint,size,operator,browserEvidenceRef,manifestHash,manifest,createdAt)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        id, artifact.id, artifact.projectId, who, "INVALIDATED", target.id, LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+        "", 0, bound.operator, bound.browserEvidenceRef, bound.manifestHash, json(bound), at,
+      );
+      bump(project);
+      emit(project, "artifact.native_project_evidence_invalidated", {
+        artifactId: artifact.id, evidenceId: target.id, invalidationId: id, reason: bound.reason, manifestHash: bound.manifestHash,
+      }, { actor: bound.operator });
+      return result(201, { ok: true, evidenceId: id, status: "INVALIDATED", manifestHash: bound.manifestHash });
+    });
+  }
+
   function recordArtifactCopy({ uid, artifactId, backend, locator = "", status = "PENDING", fingerprint = "", algorithm = "sha256", error = "" }) {
     const who = cleanUid(uid), be = cleanText(backend, 80).toLowerCase();
     if (!KNOWN_ARTIFACT_BACKENDS.includes(be)) return result(400, { error: "Unknown artifact storage backend.", code: "bad_backend" });
+    if (be === "chatgpt_project") {
+      return result(403, { error: "Native ChatGPT Project evidence can only be recorded through the append-only offline operator path or a future documented native API adapter.", code: "native_project_evidence_offline_only" });
+    }
     return tx(() => {
       const artifact = db.prepare("SELECT * FROM game_artifacts WHERE id=? AND uid=?").get(artifactId, who);
       if (!artifact) return result(404, { error: "No such artifact.", code: "not_found" });
@@ -1459,7 +1737,8 @@ export function createGameFactoryStore({
     file,
     seedPortfolio, listProjects, getProject, executeCommand,
     createBuild, queueTask, queueSyntheticCanary, claimNextTask, heartbeatTask, completeTask, failTask, securityStopTask,
-    recordArtifact, recordArtifactCopy, recordTestRun, recordRelease,
+    recordArtifact, recordArtifactCopy, recordOwnerAttestedNativeProjectEvidence,
+    invalidateNativeProjectEvidence, recordTestRun, recordRelease,
     events, getApprovalSubject, reconcile, health, stats,
     close() { try { db.close(); } catch {} },
   };

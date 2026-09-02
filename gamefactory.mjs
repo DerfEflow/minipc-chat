@@ -211,7 +211,7 @@ export function transitionDecision(project, toState, evidence = {}) {
     return { ok: false, code: "qa_gate_required", error: "Every required QA suite must pass for this exact build before approval.", missing: evidence.qaMissing || [] };
   }
   if (from === "APPROVED" && to === "STORE_PREP" && !evidence.artifactsComplete) {
-    return { ok: false, code: "artifact_copies_required", error: "Every required artifact needs two verified copies before store preparation." };
+    return { ok: false, code: "artifact_copies_required", error: "Every required artifact needs a verified Drive copy and approved native Project evidence before store preparation." };
   }
   if (from === "APPROVED" && to === "STORE_PREP" && !evidence.legalAndPrivacyApproved) {
     return { ok: false, code: "legal_privacy_approval_required", error: "The publisher must approve the current legal and privacy evidence before store preparation." };

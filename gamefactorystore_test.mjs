@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createGameFactoryStore } from "./gamefactorystore.mjs";
 import { REQUIRED_GAME_ARTIFACTS, QA_REQUIRED_SUITES } from "./gamefactory.mjs";
+import {
+  LOCKED_NATIVE_CHATGPT_PROJECT_ID, NATIVE_PROJECT_OWNER_ATTESTED_STATUS, OWNER_ATTESTATION_ACKNOWLEDGEMENT,
+  OWNER_ATTESTATION_OPERATOR, expectedNativeProjectFilename,
+} from "./gamefactorynativeevidence.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "dominion-gamefactory-"));
 let clock = 1_800_000_000_000;
@@ -21,6 +25,35 @@ let n = 0;
 const test = (name, fn) => { const out = fn(); n++; console.log("ok", n, "-", name); return out; };
 const owner = "owner-uid";
 const other = "other-uid";
+
+function ownerAttestationManifest(artifact, suffix = "visible-source") {
+  return {
+    formatVersion: 1,
+    kind: NATIVE_PROJECT_OWNER_ATTESTED_STATUS,
+    nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+    artifactId: artifact.id,
+    artifactKey: artifact.artifactKey,
+    artifactVersion: artifact.version,
+    sha256: artifact.sha256,
+    size: artifact.size,
+    filename: expectedNativeProjectFilename(artifact),
+    sourceCount: 1,
+    operator: OWNER_ATTESTATION_OPERATOR,
+    observedAt: new Date(clock).toISOString(),
+    browserEvidenceRef: `chatgpt-project-browser://${LOCKED_NATIVE_CHATGPT_PROJECT_ID}/visible/${artifact.id}-${suffix}`,
+    uploadMethod: "BROWSER_FILE_UPLOAD",
+    evidenceOrigin: "OWNER_CONTROLLED_CHATGPT_PROJECT_BROWSER",
+    sourceListVisible: true,
+    screenshotOnly: false,
+    ownerAttestation: OWNER_ATTESTATION_ACKNOWLEDGEMENT,
+  };
+}
+
+function recordOwnerAttestedNative(uid, gameId, artifactId, suffix = "visible-source") {
+  const artifact = store.getProject(uid, gameId)?.artifacts?.find((item) => item.id === artifactId);
+  assert.ok(artifact, "test fixture needs the current artifact");
+  return store.recordOwnerAttestedNativeProjectEvidence({ uid, artifactId, manifest: ownerAttestationManifest(artifact, suffix) });
+}
 
 try {
   test("portfolio seeding is complete and repeatable", () => {
@@ -417,20 +450,38 @@ try {
     assert.equal(store.getProject(owner, projectId).activeBuild.id, buildId);
   });
 
-  test("artifact copies conflict on a wrong sha256 and complete only with two backends", () => {
+  test("native Project completion requires append-only owner evidence after primary and Drive verification", () => {
     const hash = "a".repeat(64);
     const made = store.recordArtifact({ uid: owner, projectId, artifactKey: REQUIRED_GAME_ARTIFACTS[0], sha256: hash, size: 12, mimeType: "text/markdown" });
     assert.equal(made.status, 201);
     const wrong = store.recordArtifactCopy({ uid: owner, artifactId: made.body.artifactId, backend: "primary", status: "VERIFIED", fingerprint: "b".repeat(64) });
     assert.equal(wrong.status, 409);
     assert.equal(wrong.body.status, "CONFLICT");
+    const missingPrimary = recordOwnerAttestedNative(owner, projectId, made.body.artifactId);
+    assert.equal(missingPrimary.status, 409);
+    assert.equal(missingPrimary.body.code, "native_project_primary_unverified");
     assert.equal(store.recordArtifactCopy({ uid: owner, artifactId: made.body.artifactId, backend: "primary", status: "VERIFIED", fingerprint: hash }).status, 200);
     assert.equal(store.getProject(owner, projectId).artifacts[0].complete, false);
+    const missingDrive = recordOwnerAttestedNative(owner, projectId, made.body.artifactId);
+    assert.equal(missingDrive.status, 409);
+    assert.equal(missingDrive.body.code, "native_project_drive_unverified");
     assert.equal(store.recordArtifactCopy({ uid: owner, artifactId: made.body.artifactId, backend: "google_drive", status: "VERIFIED", fingerprint: hash }).status, 200);
     assert.equal(store.getProject(owner, projectId).artifacts[0].complete, false);
-    assert.equal(store.recordArtifactCopy({ uid: owner, artifactId: made.body.artifactId, backend: "chatgpt_project", status: "VERIFIED", fingerprint: hash }).status, 200);
-    assert.equal(store.getProject(owner, projectId).artifacts[0].complete, true);
+    const rejected = store.recordArtifactCopy({ uid: owner, artifactId: made.body.artifactId, backend: "chatgpt_project", status: "VERIFIED", fingerprint: hash });
+    assert.equal(rejected.status, 403);
+    assert.equal(rejected.body.code, "native_project_evidence_offline_only");
+    const evidence = recordOwnerAttestedNative(owner, projectId, made.body.artifactId);
+    assert.equal(evidence.status, 201, JSON.stringify(evidence.body));
+    const replay = recordOwnerAttestedNative(owner, projectId, made.body.artifactId);
+    assert.equal(replay.status, 200);
+    assert.equal(replay.body.replayed, true);
+    const current = store.getProject(owner, projectId).artifacts.find((artifact) => artifact.id === made.body.artifactId);
+    assert.equal(current.complete, true);
+    assert.equal(current.copies.find((copy) => copy.backend === "chatgpt_project").status, "OWNER_ATTESTED");
     assert.equal(store.recordArtifactCopy({ uid: owner, artifactId: made.body.artifactId, backend: "invented", status: "VERIFIED", fingerprint: hash }).status, 400);
+    const replacement = recordOwnerAttestedNative(owner, projectId, made.body.artifactId, "second-visible-source");
+    assert.equal(replacement.status, 409);
+    assert.equal(replacement.body.code, "native_project_evidence_already_active");
     assert.equal(store.getProject(owner, projectId).complete, false);
   });
 
@@ -466,8 +517,9 @@ try {
       const hash = String(key.charCodeAt(0) % 10).repeat(64);
       const created = store.recordArtifact({ uid: owner, projectId, artifactKey: key, sha256: hash });
       assert.equal(created.status, 201);
-      assert.equal(store.recordArtifactCopy({ uid: owner, artifactId: created.body.artifactId, backend: "chatgpt_project", status: "VERIFIED", fingerprint: hash }).status, 200);
+      assert.equal(store.recordArtifactCopy({ uid: owner, artifactId: created.body.artifactId, backend: "primary", status: "VERIFIED", fingerprint: hash }).status, 200);
       assert.equal(store.recordArtifactCopy({ uid: owner, artifactId: created.body.artifactId, backend: "google_drive", status: "VERIFIED", fingerprint: hash }).status, 200);
+      assert.equal(recordOwnerAttestedNative(owner, projectId, created.body.artifactId).status, 201);
     }
     before = store.getProject(owner, projectId);
     const staleSubject = store.executeCommand({ uid: owner, projectId, key: "approve-stale-specification", expectedVersion: before.version, type: "approve", payload: { gate: "SPECIFICATION", subjectHash: "f".repeat(64) }, actor: "owner@example.com" });
@@ -496,8 +548,9 @@ try {
       const hash = ((index % 6) + 10).toString(16).repeat(64);
       const created = store.recordArtifact({ uid: other, projectId: pilotId, artifactKey: key, sha256: hash });
       assert.equal(created.status, 201);
-      assert.equal(store.recordArtifactCopy({ uid: other, artifactId: created.body.artifactId, backend: "chatgpt_project", status: "VERIFIED", fingerprint: hash }).status, 200);
+      assert.equal(store.recordArtifactCopy({ uid: other, artifactId: created.body.artifactId, backend: "primary", status: "VERIFIED", fingerprint: hash }).status, 200);
       assert.equal(store.recordArtifactCopy({ uid: other, artifactId: created.body.artifactId, backend: "google_drive", status: "VERIFIED", fingerprint: hash }).status, 200);
+      assert.equal(recordOwnerAttestedNative(other, pilotId, created.body.artifactId).status, 201);
     }
     assert.equal(command("approve", { gate: "SPECIFICATION" }).status, 200);
     assert.equal(command("advance").body.project.state, "ARCHITECTURE");
@@ -562,8 +615,9 @@ try {
       const hash = ((index % 6) + 10).toString(16).repeat(64);
       const artifact = store.recordArtifact({ uid: releaseUid, projectId: releaseProject.id, artifactKey: key, sha256: hash, size: 100 + index });
       assert.equal(artifact.status, 201);
-      assert.equal(store.recordArtifactCopy({ uid: releaseUid, artifactId: artifact.body.artifactId, backend: "chatgpt_project", status: "VERIFIED", fingerprint: hash }).status, 200);
+      assert.equal(store.recordArtifactCopy({ uid: releaseUid, artifactId: artifact.body.artifactId, backend: "primary", status: "VERIFIED", fingerprint: hash }).status, 200);
       assert.equal(store.recordArtifactCopy({ uid: releaseUid, artifactId: artifact.body.artifactId, backend: "google_drive", status: "VERIFIED", fingerprint: hash }).status, 200);
+      assert.equal(recordOwnerAttestedNative(releaseUid, releaseProject.id, artifact.body.artifactId).status, 201);
     }
     assert.equal(command("approve", { gate: "SPECIFICATION" }).status, 200);
     assert.equal(command("advance").body.project.state, "ARCHITECTURE");
@@ -642,7 +696,7 @@ try {
     assert.ok(events.length >= 15);
     assert.equal(events[0].type, "project.created");
     assert.equal(store.health().ok, true);
-    assert.equal(store.health().schema.version, 1);
+    assert.equal(store.health().schema.version, 2);
     assert.equal(store.stats().runningTasks, 0);
     assert.ok(store.stats().taskStatus.COMPLETED >= 1);
   });

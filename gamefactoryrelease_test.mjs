@@ -11,7 +11,7 @@ function project(overrides = {}) {
     artifacts: [{
       id: "artifact-1", artifactKey: "00_GAME_BRIEF", sha256: artifactHash,
       copies: [
-        { backend: "chatgpt_project", status: "VERIFIED", algorithm: "sha256", fingerprint: artifactHash },
+        { backend: "chatgpt_project", status: "OWNER_ATTESTED", algorithm: "sha256", fingerprint: artifactHash },
         { backend: "google_drive", status: "VERIFIED", algorithm: "sha256", fingerprint: artifactHash },
       ],
     }],

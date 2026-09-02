@@ -192,7 +192,8 @@ try {
       assert.equal(ingested.status, 201);
       assert.equal((await integration.mirrorArtifact({ uid: "owner", projectId, artifactId: ingested.body.artifactId })).status, 200);
       const artifact = durable.getProject("owner", projectId).artifacts.find((item) => item.id === ingested.body.artifactId);
-      assert.deepEqual(artifact.copies.map((item) => item.backend).sort(), ["google_drive", "primary"]);
+      assert.deepEqual(artifact.copies.map((item) => item.backend).sort(), ["chatgpt_project", "google_drive", "primary"]);
+      assert.equal(artifact.copies.find((item) => item.backend === "chatgpt_project").status, "MISSING");
       assert.equal(artifact.complete, false);
       assert.equal(durable.getProject("owner", projectId).complete, false);
     } finally {

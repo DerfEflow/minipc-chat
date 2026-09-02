@@ -70,14 +70,14 @@ function harness({
         const primary = artifact.copies.find((copy) => copy.backend === "primary");
         if (!primary) artifact.copies.push({ backend: "primary", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 });
         if (nativeCopiesVerified && !artifact.copies.some((copy) => copy.backend === "chatgpt_project")) {
-          artifact.copies.push({ backend: "chatgpt_project", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 });
+          artifact.copies.push({ backend: "chatgpt_project", status: "OWNER_ATTESTED", algorithm: "sha256", fingerprint: sha256 });
         }
         return { status: 200, body: { ok: true, artifactId: artifact.id, version: artifact.version, sha256, size, reused: true } };
       }
       const version = (versions.get(artifactKey) || 0) + 1;
       versions.set(artifactKey, version);
       const copies = [{ backend: "primary", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 }];
-      if (nativeCopiesVerified) copies.push({ backend: "chatgpt_project", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 });
+      if (nativeCopiesVerified) copies.push({ backend: "chatgpt_project", status: "OWNER_ATTESTED", algorithm: "sha256", fingerprint: sha256 });
       artifact = {
         id: `artifact-${artifactKey}-${version}`, artifactKey, version, sha256, size, mimeType,
         provenance, copies, complete: false,
@@ -95,7 +95,8 @@ function harness({
       }
       artifact.copies = artifact.copies.filter((copy) => copy.backend !== "google_drive");
       artifact.copies.push({ backend: "google_drive", status: "VERIFIED", algorithm: "sha256", fingerprint: artifact.sha256 });
-      artifact.complete = MANDATORY_ARTIFACT_BACKENDS.every((backend) => artifact.copies.some((copy) => copy.backend === backend && copy.status === "VERIFIED"));
+      artifact.complete = MANDATORY_ARTIFACT_BACKENDS.every((backend) => artifact.copies.some((copy) => copy.backend === backend
+        && (copy.status === "VERIFIED" || (backend === "chatgpt_project" && copy.status === "OWNER_ATTESTED"))));
       project.version++;
       return { status: 200, body: { ok: true, artifactId, sha256: artifact.sha256, size: artifact.size } };
     },

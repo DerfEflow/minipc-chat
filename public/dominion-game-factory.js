@@ -319,7 +319,7 @@
         <article class="dgf-info"><small>Active work</small><b>${esc(task?.title || "No task is writing")}</b><p>${task ? `${esc(human(task.capability))} · attempt ${Number(task.attempt) || 0}/${Number(task.maxAttempts) || 0}` : "A queued task can be claimed only when no other writer owns this game."}</p></article>
         <article class="dgf-info"><small>Next work</small><b>${esc(next?.title || "No task queued")}</b><p>${next ? esc(human(next.capability)) : "The orchestrator has not scheduled another capability."}</p></article>
         <article class="dgf-info"><small>Active build</small><b>${esc(game.activeBuild?.versionName || game.activeBuildId || "Not created")}</b><p>${game.activeBuild ? `${esc(game.activeBuild.status)} · ${Number(game.activeBuild.versionCode) || 0}` : "Release evidence is bound to an immutable build when one exists."}</p></article>
-        <article class="dgf-info"><small>Required artifacts</small><b>${game.complete ? "11 of 11 verified" : `${Math.max(0, (game.required?.length || 11) - (game.missing?.length || 0))} of ${game.required?.length || 11} verified`}</b><p>Completion requires two verified backends for every required artifact.</p></article>
+        <article class="dgf-info"><small>Required artifacts</small><b>${game.complete ? "11 of 11 complete" : `${Math.max(0, (game.required?.length || 11) - (game.missing?.length || 0))} of ${game.required?.length || 11} complete`}</b><p>Completion requires a byte-verified Drive copy and approved native Project evidence for every required artifact.</p></article>
       </div>
       ${healthMarkup()}
       ${lifecycleMarkup(game)}`;
@@ -340,11 +340,14 @@
       const reviewControl = viewer.enabled
         ? `<button class="dgf-action dgf-artifact-open" type="button" data-artifact-key="${esc(key)}" aria-label="Open ${esc(key)} as verified plain text">Read artifact</button>`
         : `<small class="dgf-artifact-unavailable">${esc(viewer.reason || (artifact ? "Verified artifact content is unavailable on this runtime." : "Content is unavailable until a verified text artifact is recorded."))}</small>`;
-      return `<article class="dgf-artifact"><header><b>${esc(key)}</b><span class="dgf-chip" data-tone="${artifact?.complete ? "done" : "hold"}">${artifact?.complete ? "Verified" : "Incomplete"}</span></header>
+      return `<article class="dgf-artifact"><header><b>${esc(key)}</b><span class="dgf-chip" data-tone="${artifact?.complete ? "done" : "hold"}">${artifact?.complete ? "Complete" : "Incomplete"}</span></header>
         <p>${artifact ? `Version ${Number(artifact.version) || 1} · ${Number(artifact.size || 0).toLocaleString()} bytes` : "No immutable version recorded."}</p>
         ${copies.length ? copies.map((copy) => {
-          const verified = copy.status === "VERIFIED" && copy.algorithm === "sha256" && copy.fingerprint === artifact.sha256;
-          const status = verified ? "Verified" : copy.status === "VERIFIED" ? "Verification insufficient" : human(copy.status);
+          const hashBound = copy.algorithm === "sha256" && copy.fingerprint === artifact.sha256;
+          const ownerAttested = copy.backend === "chatgpt_project" && copy.status === "OWNER_ATTESTED";
+          const nativeApiVerified = copy.backend === "chatgpt_project" && copy.status === "NATIVE_API_VERIFIED";
+          const verified = hashBound && (copy.status === "VERIFIED" || ownerAttested || nativeApiVerified);
+          const status = verified ? (ownerAttested ? "Owner-attested browser upload" : nativeApiVerified ? "Native API verified" : "Verified") : copy.status === "VERIFIED" ? "Verification insufficient" : human(copy.status);
           return `<span class="dgf-copy" data-ok="${verified}">${esc(copy.backend)} · ${esc(status)}</span>`;
         }).join("") : `<span class="dgf-copy">No verified copies</span>`}
         <div class="dgf-artifact-review">${reviewControl}</div>
@@ -641,7 +644,7 @@
       const version = Number(result.artifact?.version) || 1;
       const fingerprint = String(result.artifact?.sha256 || "").slice(0, 12);
       status.textContent = result.artifact?.complete
-        ? `Version ${version} · ${fingerprint}… · all required copies verified.`
+        ? `Version ${version} · ${fingerprint}… · all required evidence is complete.`
         : `Version ${version} · ${fingerprint}… · local content verified; another required copy may still be pending.`;
     } catch (error) {
       if (artifactDialog === dialog && !controller.signal.aborted) status.textContent = `Artifact could not be opened: ${readable(error)}`;

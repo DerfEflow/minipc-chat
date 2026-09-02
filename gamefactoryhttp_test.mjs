@@ -8,6 +8,10 @@ import { join } from "node:path";
 import { createGameFactoryGate } from "./gamefactory.mjs";
 import { createGameFactoryStore } from "./gamefactorystore.mjs";
 import { createGameFactoryHttp } from "./gamefactoryhttp.mjs";
+import {
+  LOCKED_NATIVE_CHATGPT_PROJECT_ID, NATIVE_PROJECT_OWNER_ATTESTED_STATUS, OWNER_ATTESTATION_ACKNOWLEDGEMENT,
+  OWNER_ATTESTATION_OPERATOR, expectedNativeProjectFilename,
+} from "./gamefactorynativeevidence.mjs";
 
 class Response extends EventEmitter {
   constructor() { super(); this.statusCode = 0; this.headers = {}; this.body = ""; this.ended = false; }
@@ -66,10 +70,24 @@ function recordVerifiedArtifact(projectId, artifactKey, fill) {
   const sha256 = String(fill).repeat(64).slice(0, 64);
   const artifact = store.recordArtifact({ uid: owner.uid, projectId, artifactKey, sha256, size: 10, mimeType: "text/markdown" });
   assert.equal(artifact.status, 201);
-  for (const backend of ["chatgpt_project", "google_drive"]) {
+  for (const backend of ["primary", "google_drive"]) {
     const copy = store.recordArtifactCopy({ uid: owner.uid, artifactId: artifact.body.artifactId, backend, locator: `${backend}://${artifactKey}`, status: "VERIFIED", fingerprint: sha256 });
     assert.equal(copy.status, 200);
   }
+  const current = store.getProject(owner.uid, projectId).artifacts.find((item) => item.id === artifact.body.artifactId);
+  const native = store.recordOwnerAttestedNativeProjectEvidence({
+    uid: owner.uid, artifactId: artifact.body.artifactId,
+    manifest: {
+      formatVersion: 1, kind: NATIVE_PROJECT_OWNER_ATTESTED_STATUS, nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+      artifactId: current.id, artifactKey: current.artifactKey, artifactVersion: current.version,
+      sha256: current.sha256, size: current.size, filename: expectedNativeProjectFilename(current), sourceCount: 1,
+      operator: OWNER_ATTESTATION_OPERATOR, observedAt: "2026-09-02T12:00:00.000Z",
+      browserEvidenceRef: `chatgpt-project-browser://${LOCKED_NATIVE_CHATGPT_PROJECT_ID}/visible/${current.id}`,
+      uploadMethod: "BROWSER_FILE_UPLOAD", evidenceOrigin: "OWNER_CONTROLLED_CHATGPT_PROJECT_BROWSER",
+      sourceListVisible: true, screenshotOnly: false, ownerAttestation: OWNER_ATTESTATION_ACKNOWLEDGEMENT,
+    },
+  });
+  assert.equal(native.status, 201, JSON.stringify(native.body));
   return artifact.body.artifactId;
 }
 
@@ -361,6 +379,9 @@ try {
     assert.equal(artifact.res.statusCode, 201);
     const copy = await call(api, { method: "POST", path: `/api/game-factory/artifacts/${artifact.res.json().artifactId}/copies`, tenant: owner, body: { backend: "primary", status: "VERIFIED", fingerprint: "a".repeat(64), locator: "local://brief" } });
     assert.equal(copy.res.statusCode, 200);
+    const nativeDenied = await call(api, { method: "POST", path: `/api/game-factory/artifacts/${artifact.res.json().artifactId}/copies`, tenant: owner, body: { backend: "chatgpt_project", status: "VERIFIED", fingerprint: "a".repeat(64), locator: "browser://forged" } });
+    assert.equal(nativeDenied.res.statusCode, 403);
+    assert.equal(nativeDenied.res.json().code, "native_project_evidence_offline_only");
     assert.equal((await call(api, { method: "POST", path: `/api/game-factory/games/${projectId}/tests`, tenant: owner, body: { buildId, suite: "core-loop", status: "PASSED", sourceHash: "abc123" } })).res.statusCode, 201);
     assert.equal((await call(api, {
       method: "POST", path: `/api/game-factory/games/${projectId}/releases`, tenant: owner,

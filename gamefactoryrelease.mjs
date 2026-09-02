@@ -6,6 +6,7 @@
  * Persisting a READY/BLOCKED assessment is independently feature-flagged and defaults off.
  */
 import { MANDATORY_ARTIFACT_BACKENDS } from "./gamefactory.mjs";
+import { nativeProjectEvidenceCanComplete } from "./gamefactorynativeevidence.mjs";
 
 const TRUE = new Set(["1", "true", "yes", "on", "enabled"]);
 const SHA256 = /^[a-f0-9]{64}$/i;
@@ -110,8 +111,9 @@ function artifactCompliance(detail) {
   const artifacts = Array.isArray(detail.artifacts) ? detail.artifacts : [];
   const byKey = new Map(artifacts.map((artifact) => [artifact.artifactKey, artifact]));
   const verified = (artifact, backend) => (artifact?.copies || []).some((copy) => copy.backend === backend
-    && copy.status === "VERIFIED" && clean(copy.algorithm, 32).toLowerCase() === "sha256"
-    && clean(copy.fingerprint, 128).toLowerCase() === clean(artifact.sha256, 128).toLowerCase());
+    && clean(copy.algorithm, 32).toLowerCase() === "sha256"
+    && clean(copy.fingerprint, 128).toLowerCase() === clean(artifact.sha256, 128).toLowerCase()
+    && (backend === "chatgpt_project" ? nativeProjectEvidenceCanComplete(copy) : copy.status === "VERIFIED"));
   const missing = required.filter((key) => {
     const artifact = byKey.get(key);
     return !artifact || MANDATORY_ARTIFACT_BACKENDS.some((backend) => !verified(artifact, backend));

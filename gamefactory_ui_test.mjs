@@ -20,13 +20,13 @@ const includes = (source, value, label = value) => assert.ok(source.includes(val
 
 test("the classic owner surface parses and its versioned assets ship in the shell", () => {
   assert.doesNotThrow(() => new Script(js));
-  for (const asset of ["/dominion-game-factory.css?v=1", "/dominion-game-factory.js?v=1"]) {
+  for (const asset of ["/dominion-game-factory.css?v=2", "/dominion-game-factory.js?v=2"]) {
     includes(html, asset, `${asset} in index.html`);
     includes(sw, `"${asset}"`, `${asset} in the service-worker shell`);
   }
   includes(js, "window.DominionGameFactory", "stable surface global");
   includes(sw, '"/games"', "offline-capable deep route");
-  assert.match(sw, /dominion-ai-v183-mobile-game-factory/, "asset changes must advance the PWA cache");
+  assert.match(sw, /dominion-ai-v184-mobile-game-factory/, "asset changes must advance the PWA cache");
 });
 
 test("owner navigation stays hidden until the server account capability arrives", () => {
@@ -132,7 +132,7 @@ test("the overlay isolates the shell, traps focus, and restores it on close", ()
   includes(js, 'event.target.closest?.("dialog")', "nested dialogs retain their own focus and Escape behavior");
   includes(js, "moveTabFocus(event)", "ARIA tab keyboard navigation");
   includes(js, "focus?.focus?.()", "return focus");
-  includes(html, "dominion-game-factory.css?v=1", "factory style link");
+  includes(html, "dominion-game-factory.css?v=2", "factory style link");
   const styles = [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="\/([^"?]+\.css)/g)].map((match) => match[1]);
   assert.equal(styles.at(-1), "dominion-mobile.css", "the established touch correction sheet must remain last");
 });
@@ -148,8 +148,10 @@ test("mobile interaction and reduced-motion requirements are explicit", () => {
 });
 
 test("release and artifact claims remain evidence-based", () => {
-  includes(js, "Completion requires two verified backends", "two-copy artifact rule");
+  includes(js, "Completion requires a byte-verified Drive copy and approved native Project evidence", "two-copy artifact rule");
   includes(js, 'copy.status === "VERIFIED"', "copy verification state");
+  includes(js, 'copy.status === "OWNER_ATTESTED"', "owner-attested native Project provenance");
+  includes(js, "Owner-attested browser upload", "truthful owner-attested label");
   includes(js, 'copy.algorithm === "sha256" && copy.fingerprint === artifact.sha256', "copy verification matches the registered artifact hash");
   includes(js, "Evidence must match the active build", "build-bound test evidence");
   includes(js, "New builds invalidate stale approvals", "approval invalidation truth");

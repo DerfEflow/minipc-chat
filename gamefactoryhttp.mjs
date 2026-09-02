@@ -579,6 +579,12 @@ export function createGameFactoryHttp({
       }
       const body = await bodyJson(req);
       if (body && body.__bodyError) return json(res, body.status || 400, { error: body.error, code: body.code });
+      if (String(body.backend || "").trim().toLowerCase() === "chatgpt_project") {
+        // Native Project completion is intentionally not an HTTP capability.  Even a trusted
+        // factory adapter cannot turn a browser request, worker result, screenshot, or generic
+        // local observation into owner-attested evidence.
+        return json(res, 403, { error: "Native ChatGPT Project evidence is recorded only by the offline privileged operator command or a future documented native API adapter.", code: "native_project_evidence_offline_only" });
+      }
       const result = store.recordArtifactCopy({ uid, artifactId: decodeURIComponent(copyMatch[1]), backend: body.backend, locator: body.locator, status: body.status, fingerprint: body.fingerprint, algorithm: body.algorithm, error: body.error });
       return json(res, result.status, result.body);
     }

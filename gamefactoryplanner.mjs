@@ -8,6 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import { MANDATORY_ARTIFACT_BACKENDS, REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
+import { nativeProjectEvidenceCanComplete } from "./gamefactorynativeevidence.mjs";
 import { PORTFOLIO_PACKAGE_DATE, renderGameArtifact } from "./gamefactorytemplates.mjs";
 
 const result = (status, body) => ({ status, body });
@@ -35,7 +36,8 @@ function verifiedCopy(artifact, backend) {
   return {
     backend,
     status: copy?.status || "MISSING",
-    verified: !!copy && copy.status === "VERIFIED" && copy.algorithm === "sha256" && copy.fingerprint === artifact?.sha256,
+    verified: !!copy && copy.algorithm === "sha256" && copy.fingerprint === artifact?.sha256
+      && (backend === "chatgpt_project" ? nativeProjectEvidenceCanComplete(copy) : copy.status === "VERIFIED"),
   };
 }
 
