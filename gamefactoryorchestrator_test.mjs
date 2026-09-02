@@ -255,7 +255,23 @@ try {
     assert.equal(latched.status, "SECURITY_CANCEL_REQUESTED");
     assert.equal(latched.endedAt, 0);
     assert.equal(journal.hasPendingSecurity(), true);
-    assert.ok(journal.securityEpoch() > 0);
+    const latchedEpoch = journal.securityEpoch();
+    assert.ok(latchedEpoch > 0);
+    for (let retry = 0; retry < 100; retry++) {
+      const replay = journal.securityLatch(request.runId,
+        { probe: { secureForUntrustedCode: false, retry } }, `proof still lost ${retry}`);
+      assert.equal(replay.status, "SECURITY_CANCEL_REQUESTED");
+      assert.equal(replay.endedAt, 0);
+      assert.equal(journal.securityEpoch(), latchedEpoch);
+    }
+    const inspection = new DatabaseSync(join(dir, "gamefactory-dispatch.db"), { readOnly: true });
+    try {
+      assert.equal(Number(inspection.prepare(
+        "SELECT COUNT(*) AS count FROM dispatch_events WHERE runId=? AND type='dispatch.security_latched'",
+      ).get(request.runId).count), 1);
+    } finally {
+      inspection.close();
+    }
     assert.equal(journal.update(request.runId, { status: "RUNNING" }).status, "SECURITY_CANCEL_REQUESTED");
     assert.equal(journal.finish(request.runId, "SUCCEEDED", { ok: true, status: "SUCCEEDED" }).status, "SECURITY_CANCEL_REQUESTED");
 
