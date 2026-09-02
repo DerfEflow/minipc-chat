@@ -213,7 +213,8 @@ export function durableRemoveTrusted(path, { ownerUid = null, ownerGid = null, m
   catch (error) { if (error?.code === "ENOENT") return false; throw error; }
   try {
     const before = fstatSync(fd); const visible = lstatSync(path);
-    if (!before.isFile() || before.nlink !== 1 || (before.mode & 0o777) !== mode
+    if (!before.isFile() || before.nlink !== 1
+        || (process.platform !== "win32" && (before.mode & 0o777) !== mode)
         || before.dev !== visible.dev || before.ino !== visible.ino || visible.isSymbolicLink()
         || (ownerUid != null && before.uid !== ownerUid)
         || (ownerGid != null && before.gid !== ownerGid)) {
@@ -223,7 +224,8 @@ export function durableRemoveTrusted(path, { ownerUid = null, ownerGid = null, m
     fsyncParent(path);
     const after = fstatSync(fd);
     if (after.dev !== before.dev || after.ino !== before.ino || after.nlink !== 0
-        || after.size !== before.size || (after.mode & 0o777) !== mode) {
+        || after.size !== before.size
+        || (process.platform !== "win32" && (after.mode & 0o777) !== mode)) {
       throw new Error("spool cleanup target changed during durable removal");
     }
     return true;

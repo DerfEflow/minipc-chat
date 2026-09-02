@@ -8,7 +8,8 @@ import { createGameFactoryBrokerController } from "./hands/gamefactory-broker-co
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const empty = sha("");
-const uid = process.getuid(); const gid = process.getgid();
+const uid = process.getuid?.() ?? null;
+const gid = process.getgid?.() ?? null;
 const hashes = Object.fromEntries(["brokerBinarySha256", "nodeGuardSha256", "godotGuardSha256", "nodeExecutableSha256",
   "godotExecutableSha256", "nodeFilterSha256", "godotFilterSha256", "appArmorPolicySha256", "outerSeccompSha256",
   "deploymentPolicySha256"].map((name) => [name, sha(name)]));

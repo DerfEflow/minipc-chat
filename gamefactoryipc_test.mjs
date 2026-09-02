@@ -67,7 +67,12 @@ try {
     mkdirSync(lostFound); chmodSync(lostFound, 0o700);
     const pending = join(dir, ".tmp-00000000-0000-4000-8000-000000000001");
     writeFileSync(pending, "pending\n", { mode: 0o600 });
-    if (process.platform !== "win32" && uid !== 0) {
+  if (process.platform === "win32") {
+      recoverDurableTree(dir, { ownerUid: uid, ownerGid: null, flat: false });
+      assert.equal(existsSync(pending), false);
+      return;
+    }
+    if (uid !== 0) {
       assert.throws(() => recoverDurableTree(dir, {
         ownerUid: uid, ownerGid: null, requireExt4LostFound: true, flat: true,
       }), /invalid ext4 lost[+]found shell/);
