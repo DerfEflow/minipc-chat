@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const hands = join(root, "hands");
-const text = (path) => readFileSync(join(hands, path), "utf8");
+// Git archive/check-out EOL conversion is platform-dependent.  These fixtures are line-oriented
+// policy/source text, so normalize them before slicing profile bodies or matching exact lines.
+const text = (path) => readFileSync(join(hands, path), "utf8").replace(/\r\n?/g, "\n");
 const compose = text("docker-compose.gx10-worker.yml");
 const legacyCompose = text("docker-compose.yml");
 const dockerfile = text("gx10-gamefactory/Dockerfile");
