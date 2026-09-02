@@ -40,6 +40,12 @@ try {
     commandDir: commands, resultDir: results, node: "test-broker", brokerOwnerUid: uid, spoolGid: gid,
     expected: hashes, isolationAttested: true, toolchainAttested: true,
   });
+  const probe = controller.probe();
+  assert.equal(probe.ok, true, probe.error);
+  assert.equal(probe.state, "ready");
+  assert.equal(probe.secureForUntrustedCode, true);
+  assert.equal(probe.externalBroker, true);
+  assert.equal(probe.separateBrokerCgroup, true);
   const started = controller.start({
     runId: "artifact-ferry-1", taskId: "task-1", projectId: "project-1", capability: "quality_assurance",
     workspaceRoot: "/workspace/vector-vault", plan: {
