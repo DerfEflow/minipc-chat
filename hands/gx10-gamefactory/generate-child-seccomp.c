@@ -1,4 +1,5 @@
 /* Build architecture-native, runtime-specific, default-deny filters consumed by fd-launcher. */
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/sched.h>

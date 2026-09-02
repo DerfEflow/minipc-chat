@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,13 @@ import { createGameFactoryDispatchJournal, createGameFactoryOrchestrator } from 
 
 const roots = [];
 const cleanups = [];
+const sha = (value) => createHash("sha256").update(value).digest("hex");
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+}
+const stableHash = (value) => sha(JSON.stringify(stable(value)));
 function temp(name) {
   const dir = mkdtempSync(join(tmpdir(), `dominion-${name}-`));
   cleanups.push(dir);
@@ -26,6 +34,10 @@ class FakeWorker {
     return {
       ok: true, node: this.node, configured: true, secureForUntrustedCode: true,
       externalBroker: true, separateBrokerCgroup: true, maxConcurrent: 1,
+      controllerRecoveryEpoch: sha("fake-controller-recovery"),
+      brokerInstanceId: sha("fake-broker-instance"),
+      containerGenerationId: sha("fake-container-generation"),
+      brokerBootIdSha256: sha("fake-broker-boot"),
       programs: ["node", "godot"], capabilities: ["quality_assurance", "godot"],
     };
   }
@@ -152,6 +164,35 @@ function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
+}
+
+function authorityAbsenceResponse(request, probe, overrides = {}) {
+  const completed = Number(request?.resumeFrom?.completedSteps) || 0;
+  const total = request.plan.steps.length - completed;
+  const generations = Array.from({ length: total }, (_, stepIndex) => ({
+    stepIndex, totalSteps: total, generationId: sha(`${request.runId}:generation:${stepIndex}`),
+    previousGenerationId: stepIndex ? sha(`${request.runId}:generation:${stepIndex - 1}`) : null,
+    packetSha256: sha(`${request.runId}:packet:${stepIndex}`),
+  }));
+  const body = {
+    protocol: "game-factory-controller-authorization-absence-proof/1", runId: request.runId,
+    orchestratorRequestHash: stableHash(request), controllerRequestHash: sha(`${request.runId}:controller-request`),
+    absenceReceiptSha256: sha(`${request.runId}:absence-receipt`),
+    controllerRecoveryEpoch: probe.controllerRecoveryEpoch,
+    brokerInstanceId: probe.brokerInstanceId, containerGenerationId: probe.containerGenerationId,
+    brokerBootIdSha256: probe.brokerBootIdSha256,
+    recordedControllerRecoveryEpoch: probe.controllerRecoveryEpoch,
+    recordedBrokerInstanceId: probe.brokerInstanceId,
+    recordedContainerGenerationId: probe.containerGenerationId,
+    recordedBrokerBootIdSha256: probe.brokerBootIdSha256,
+    generations,
+    ...overrides,
+  };
+  return {
+    ok: true, node: probe.node, runId: request.runId, status: "INTERRUPTED",
+    cancellationResolved: true, dispatchAuthorityAbsent: true,
+    dispatchAuthorityAbsenceProof: { ...body, proofSha256: sha(JSON.stringify(body)) },
+  };
 }
 
 let passed = 0;
@@ -323,6 +364,62 @@ try {
     journal.close();
   });
 
+  await test("the journal binds current controller no-authorization proof only before any payload generation", async () => {
+    const dir = temp("gfo-authorization-absence");
+    const journal = createGameFactoryDispatchJournal({ dir });
+    const worker = new FakeWorker(); const probe = await worker.probe();
+    const make = (suffix) => {
+      const task = { id: `task-absence-${suffix}`, uid: "owner", projectId: `project-absence-${suffix}`,
+        buildId: "", attempt: 1, capability: "quality_assurance", safeToRetry: true };
+      const request = { runId: `${task.id}:attempt:1`, taskId: task.id, projectId: task.projectId,
+        capability: task.capability, attempt: 1, workspaceRoot: "F:\\Games\\Safe",
+        plan: { steps: [{ program: "node", args: ["--version"], cwd: "." }] } };
+      journal.recordIntent({ task, request, workerId: worker.node });
+      return { task, request };
+    };
+
+    const valid = make("valid"); const response = authorityAbsenceResponse(valid.request, probe);
+    const bound = journal.bindAuthorizationAbsence(valid.request.runId, response, probe);
+    assert.equal(bound.ok, true, bound.error);
+    assert.equal(journal.bindAuthorizationAbsence(valid.request.runId, response, probe).replayed, true);
+    assert.equal(journal.payloadGeneration(valid.request.runId), null);
+    assert.equal(journal.bindPayloadGeneration(valid.request.runId, {
+      ok: true, runId: valid.request.runId, payloadStepIndex: 0, payloadTotalSteps: 1,
+      payloadGenerationId: "a".repeat(64), payloadPreviousGenerationId: null,
+    }, "start").ok, false);
+    journal.securityLatch(valid.request.runId, response, "failed dispatch");
+    journal.securityFinish(valid.request.runId, response, "absence proved");
+    assert.equal(journal.listRetentionPending().length, 1);
+    assert.equal(journal.recordRetentionAck(valid.request.runId, {
+      ok: true, runId: valid.request.runId, retentionAcknowledged: true, retentionPruned: true,
+      generationsPruned: 0, dispatchAuthorityAbsent: true,
+    }), true);
+    assert.equal(journal.listRetentionPending().length, 0);
+
+    const forgedEpoch = make("forged-epoch");
+    const forgedEpochResponse = authorityAbsenceResponse(forgedEpoch.request, probe, {
+      controllerRecoveryEpoch: sha("previous-controller-recovery"),
+    });
+    assert.equal(journal.bindAuthorizationAbsence(forgedEpoch.request.runId, forgedEpochResponse, probe).ok, false);
+
+    const forgedChain = make("forged-chain");
+    const badGeneration = [{ stepIndex: 0, totalSteps: 1,
+      generationId: sha("forged-generation"), previousGenerationId: sha("forged-previous"),
+      packetSha256: sha("forged-packet") }];
+    const forgedChainResponse = authorityAbsenceResponse(forgedChain.request, probe, { generations: badGeneration });
+    assert.equal(journal.bindAuthorizationAbsence(forgedChain.request.runId, forgedChainResponse, probe).ok, false);
+
+    const previouslyBound = make("previous-generation");
+    const generationId = "b".repeat(64);
+    assert.equal(journal.bindPayloadGeneration(previouslyBound.request.runId, {
+      ok: true, runId: previouslyBound.request.runId, payloadStepIndex: 0, payloadTotalSteps: 1,
+      payloadGenerationId: generationId, payloadPreviousGenerationId: null,
+    }, "start").ok, true);
+    assert.equal(journal.bindAuthorizationAbsence(previouslyBound.request.runId,
+      authorityAbsenceResponse(previouslyBound.request, probe), probe).ok, false);
+    journal.close();
+  });
+
   await test("the journal binds resume generations to only the immutable remaining plan", async () => {
     const dir = temp("gfo-resume-generation-chain");
     const journal = createGameFactoryDispatchJournal({ dir });
@@ -432,6 +529,47 @@ try {
     assert.equal(restarted.health().journal.active, 1);
     assert.equal(worker.cancelCalls.length, 1);
     await restarted.close();
+    store.close();
+  });
+
+  await test("closes a failed pre-journal dispatch only with current typed no-authorization proof", async () => {
+    const { store, journalDir, uid, project } = setup("gfo-pre-journal-absence");
+    const worker = new FakeWorker(); let failedRequest = null; let absenceCalls = 0;
+    worker.start = async (request) => {
+      failedRequest = request;
+      return { ok: false, node: worker.node, runId: request.runId, retryable: false,
+        error: "journal publication failed before final link" };
+    };
+    worker.status = async (runId) => ({ ok: false, node: worker.node, runId,
+      commandAbsent: true, cancellationResolved: false,
+      error: "no controller authorization exists for this run" });
+    worker.authorizationAbsent = async (request) => {
+      absenceCalls++;
+      return authorityAbsenceResponse(request, await FakeWorker.prototype.probe.call(worker));
+    };
+    worker.acknowledge = async (runId) => {
+      worker.acknowledgeCalls.push(runId);
+      return { ok: true, node: worker.node, runId, retentionAcknowledged: true,
+        retentionPruned: true, generationsPruned: 0, dispatchAuthorityAbsent: true };
+    };
+    const taskId = queue(store, uid, project.id);
+    const orchestrator = createGameFactoryOrchestrator({ store, worker, journalDir });
+    const tick = await orchestrator.tick();
+    assert.equal(tick.claimed, 1);
+    assert.ok(failedRequest);
+    assert.equal(worker.runs.size, 0);
+    assert.equal(absenceCalls, 1);
+    const dispatch = orchestrator.journal.latestForTask(taskId);
+    assert.equal(dispatch.status, "SECURITY_INTERRUPTED");
+    assert.ok(dispatch.endedAt > 0);
+    assert.equal(orchestrator.journal.payloadGeneration(dispatch.runId), null);
+    assert.equal(orchestrator.journal.hasPendingSecurity(), false);
+    assert.equal(orchestrator.journal.listRetentionPending().length, 0);
+    assert.deepEqual(worker.acknowledgeCalls, [dispatch.runId]);
+    const task = store.getProject(uid, project.id).tasks.find((item) => item.id === taskId);
+    assert.equal(task.status, "FAILED");
+    assert.equal(task.result.securityStopped, true);
+    await orchestrator.close();
     store.close();
   });
 

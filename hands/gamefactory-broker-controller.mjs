@@ -1,5 +1,5 @@
 /* Workspace-blind token-bearing controller for the static binary broker. No spawn/toolchain code. */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { basename, posix, resolve } from "node:path";
 import {
@@ -19,7 +19,16 @@ const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$/;
 const TERMINAL = new Set(["SUCCEEDED", "PAUSED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 const RETENTION_TOMBSTONE_LIMIT = 256;
 const RETENTION_RUN_LIMIT = 32;
+const ABSENCE_RECEIPT_PROTOCOL = "game-factory-controller-authorization-absent/1";
+const ABSENCE_PROOF_PROTOCOL = "game-factory-controller-authorization-absence-proof/1";
+const ABSENCE_RETAINED_PROTOCOL = "game-factory-controller-authorization-absent-retained/1";
 const sha = (value) => createHash("sha256").update(value).digest("hex");
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+}
+const stableHash = (value) => sha(JSON.stringify(stable(value)));
 const ARTIFACT_MIME = Object.freeze({
   html: "text/html", js: "text/javascript", css: "text/css", json: "application/json",
   wasm: "application/wasm", pck: "application/octet-stream", zip: "application/zip",
@@ -157,9 +166,11 @@ function normalize(input) {
 
 export function createGameFactoryBrokerController({ commandDir = "", resultDir = "", replyDir = "",
   node = "gx10-gamefactory", brokerOwnerUid = 10003, spoolGid = 11000, expected = {},
-  isolationAttested = false, toolchainAttested = false } = {}) {
+  isolationAttested = false, toolchainAttested = false, recoveryEpoch = "" } = {}) {
   const commands = resolve(commandDir); const results = resolve(resultDir || replyDir);
   const controllerUid = process.getuid?.(); const brokerUid = Number(brokerOwnerUid);
+  if (recoveryEpoch && !HEX64.test(recoveryEpoch)) fail("controller recovery epoch is invalid");
+  const controllerRecoveryEpoch = recoveryEpoch || randomBytes(32).toString("hex");
   function requireSpoolDirectories() {
     if (process.platform !== "linux") return;
     const commandMetadata = lstatSync(commands); const resultMetadata = lstatSync(results);
@@ -254,13 +265,134 @@ export function createGameFactoryBrokerController({ commandDir = "", resultDir =
     }
     return journal;
   }
-  function readJournal(runId) {
-    const value = readTrustedJson(journalPath(runId), { ownerUid: controllerUid, ownerGid: spoolGid, maxBytes: 1_000_000 });
+  function validateJournal(value, runId) {
     if (value?.protocol !== "game-factory-controller-broker/1" || value.request?.runId !== runId
         || !Array.isArray(value.packets) || !value.packets.length) fail("controller run journal is invalid");
     for (const packet of value.packets) if (!HEX64.test(packet.generationId || "")
         || sha(Buffer.from(packet.bytes || "", "base64")) !== packet.packetSha256) fail("controller packet journal is invalid");
     return value;
+  }
+  function readRunRecord(runId) {
+    return readTrustedJson(journalPath(runId), {
+      ownerUid: controllerUid, ownerGid: spoolGid, maxBytes: 1_000_000,
+    });
+  }
+  function readJournal(runId) { return validateJournal(readRunRecord(runId), runId); }
+  function absenceReceiptBody(value) {
+    return {
+      protocol: value?.protocol, runId: value?.runId, taskId: value?.taskId,
+      projectId: value?.projectId, capability: value?.capability,
+      orchestratorRequestHash: value?.orchestratorRequestHash,
+      controllerRequestHash: value?.controllerRequestHash,
+      brokerInstanceId: value?.brokerInstanceId,
+      containerGenerationId: value?.containerGenerationId,
+      brokerBootIdSha256: value?.brokerBootIdSha256,
+      recordedControllerRecoveryEpoch: value?.recordedControllerRecoveryEpoch,
+      generations: value?.generations, recordedAt: value?.recordedAt,
+    };
+  }
+  function validateAbsenceReceipt(value, expectedRunId = "", expectedRequestHash = "") {
+    const body = absenceReceiptBody(value);
+    if (!value || typeof value !== "object" || Array.isArray(value)
+        || JSON.stringify(Object.keys(value)) !== JSON.stringify([...Object.keys(body), "receiptSha256"])
+        || body.protocol !== ABSENCE_RECEIPT_PROTOCOL || body.runId !== expectedRunId
+        || !RUN_ID.test(body.runId || "") || !body.taskId || !body.projectId
+        || !new Set(["quality_assurance", "godot"]).has(body.capability)
+        || !HEX64.test(body.orchestratorRequestHash || "")
+        || (expectedRequestHash && body.orchestratorRequestHash !== expectedRequestHash)
+        || !HEX64.test(body.controllerRequestHash || "")
+        || !HEX64.test(body.brokerInstanceId || "") || !HEX64.test(body.containerGenerationId || "")
+        || !HEX64.test(body.brokerBootIdSha256 || "")
+        || !HEX64.test(body.recordedControllerRecoveryEpoch || "")
+        || !Array.isArray(body.generations) || !body.generations.length || body.generations.length > 24
+        || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(body.recordedAt || "")
+        || !Number.isFinite(Date.parse(body.recordedAt))
+        || value.receiptSha256 !== sha(JSON.stringify(body))) {
+      fail("controller authorization-absence receipt is invalid");
+    }
+    const ids = new Set();
+    for (let index = 0; index < body.generations.length; index++) {
+      const item = body.generations[index], prior = body.generations[index - 1] || null;
+      const keys = ["stepIndex", "totalSteps", "generationId", "previousGenerationId", "packetSha256"];
+      if (!item || typeof item !== "object" || Array.isArray(item)
+          || JSON.stringify(Object.keys(item)) !== JSON.stringify(keys)
+          || item.stepIndex !== index || item.totalSteps !== body.generations.length
+          || !HEX64.test(item.generationId || "") || !HEX64.test(item.packetSha256 || "")
+          || (index === 0 ? item.previousGenerationId !== null
+            : item.previousGenerationId !== prior.generationId)
+          || ids.has(item.generationId)) fail("controller authorization-absence generation is invalid");
+      ids.add(item.generationId);
+    }
+    return { ...body, receiptSha256: value.receiptSha256 };
+  }
+  function assertNoGenerationEvidence(generations) {
+    const commandEntries = new Set(readdirSync(commands));
+    const resultEntries = readdirSync(results);
+    for (const item of generations) {
+      for (const name of [`request-${item.generationId}.bin`, `cancel-${item.generationId}.bin`,
+        `ack-${item.generationId}.bin`]) {
+        if (commandEntries.has(name)) fail("payload authorization evidence already exists for this run");
+      }
+      const exactResults = new Set([
+        `result-${item.generationId}.bin`, `stdout-${item.generationId}.log`,
+        `stderr-${item.generationId}.log`, `artifacts-${item.generationId}.json`,
+        `pruned-${item.generationId}.bin`,
+      ]);
+      if (resultEntries.some((name) => exactResults.has(name)
+          || name.startsWith(`artifact-${item.generationId}-`))) {
+        fail("payload result evidence already exists for this run");
+      }
+    }
+  }
+  function assertNoPriorLineageEvidence(runId, generations) {
+    assertNoGenerationEvidence(generations);
+    for (const pathName of [pausePath(runId), retentionPath(runId)]) {
+      if (existsSync(pathName)) fail("prior controller lineage evidence exists for this run");
+    }
+  }
+  function buildAbsenceReceipt(input, request, journal, ready) {
+    const body = {
+      protocol: ABSENCE_RECEIPT_PROTOCOL, runId: request.runId, taskId: request.taskId,
+      projectId: request.projectId, capability: request.capability,
+      orchestratorRequestHash: stableHash(input), controllerRequestHash: journal.requestHash,
+      brokerInstanceId: ready.brokerInstanceId, containerGenerationId: ready.containerGenerationId,
+      brokerBootIdSha256: ready.brokerBootIdSha256,
+      recordedControllerRecoveryEpoch: controllerRecoveryEpoch,
+      generations: journal.packets.map((packet, stepIndex) => ({
+        stepIndex, totalSteps: journal.packets.length, generationId: packet.generationId,
+        previousGenerationId: stepIndex ? journal.packets[stepIndex - 1].generationId : null,
+        packetSha256: packet.packetSha256,
+      })),
+      recordedAt: new Date().toISOString(),
+    };
+    return { ...body, receiptSha256: sha(JSON.stringify(body)) };
+  }
+  function absenceProof(receipt) {
+    assertNoPriorLineageEvidence(receipt.runId, receipt.generations);
+    const ready = requireReady();
+    const body = {
+      protocol: ABSENCE_PROOF_PROTOCOL, runId: receipt.runId,
+      orchestratorRequestHash: receipt.orchestratorRequestHash,
+      controllerRequestHash: receipt.controllerRequestHash,
+      absenceReceiptSha256: receipt.receiptSha256,
+      controllerRecoveryEpoch,
+      brokerInstanceId: ready.brokerInstanceId,
+      containerGenerationId: ready.containerGenerationId,
+      brokerBootIdSha256: ready.brokerBootIdSha256,
+      recordedControllerRecoveryEpoch: receipt.recordedControllerRecoveryEpoch,
+      recordedBrokerInstanceId: receipt.brokerInstanceId,
+      recordedContainerGenerationId: receipt.containerGenerationId,
+      recordedBrokerBootIdSha256: receipt.brokerBootIdSha256,
+      generations: receipt.generations,
+    };
+    return { ...body, proofSha256: sha(JSON.stringify(body)) };
+  }
+  function absenceResult(receipt, { replayed = false } = {}) {
+    return {
+      ok: true, node, runId: receipt.runId, status: "INTERRUPTED",
+      cancellationResolved: true, dispatchAuthorityAbsent: true,
+      dispatchAuthorityAbsenceProof: absenceProof(receipt), replayed,
+    };
   }
   function pauseEnvelope(journal, reason = "") {
     const commandId = sha(`${journal.request.runId}\n${journal.requestHash}\nPAUSE`);
@@ -487,10 +619,32 @@ export function createGameFactoryBrokerController({ commandDir = "", resultDir =
         || value.tombstoneSha256 !== sha(JSON.stringify(body))) fail("controller retention tombstone is invalid");
     return { ...body, retention: validateRetention(body.retention, expectedRunId), tombstoneSha256: value.tombstoneSha256 };
   }
-  function readTombstone(runId) {
-    return validateTombstone(readTrustedJson(tombstonePath(runId), {
+  function absenceTombstoneBody(value) {
+    return { protocol: value?.protocol, runId: value?.runId, prunedAt: value?.prunedAt, receipt: value?.receipt };
+  }
+  function validateAbsenceTombstone(value, expectedRunId = "", expectedRequestHash = "") {
+    const body = absenceTombstoneBody(value);
+    if (!value || typeof value !== "object" || Array.isArray(value)
+        || JSON.stringify(Object.keys(value)) !== JSON.stringify([...Object.keys(body), "tombstoneSha256"])
+        || body.protocol !== ABSENCE_RETAINED_PROTOCOL || body.runId !== expectedRunId
+        || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(body.prunedAt || "")
+        || !Number.isFinite(Date.parse(body.prunedAt))
+        || value.tombstoneSha256 !== sha(JSON.stringify(body))) {
+      fail("controller authorization-absence tombstone is invalid");
+    }
+    return { ...body, receipt: validateAbsenceReceipt(body.receipt, expectedRunId, expectedRequestHash),
+      tombstoneSha256: value.tombstoneSha256 };
+  }
+  function validateAnyTombstone(value, expectedRunId = "", expectedRequestHash = "") {
+    if (value?.protocol === ABSENCE_RETAINED_PROTOCOL) {
+      return validateAbsenceTombstone(value, expectedRunId, expectedRequestHash);
+    }
+    return validateTombstone(value, expectedRunId);
+  }
+  function readAnyTombstone(runId, expectedRequestHash = "") {
+    return validateAnyTombstone(readTrustedJson(tombstonePath(runId), {
       ownerUid: controllerUid, ownerGid: spoolGid, maxBytes: 1_000_000,
-    }), runId);
+    }), runId, expectedRequestHash);
   }
   function removeCommand(path) {
     return durableRemoveTrusted(path, { ownerUid: controllerUid, ownerGid: spoolGid, mode: 0o640 });
@@ -515,7 +669,7 @@ export function createGameFactoryBrokerController({ commandDir = "", resultDir =
       const value = readTrustedJson(posix.join(commands, name), {
         ownerUid: controllerUid, ownerGid: spoolGid, maxBytes: 1_000_000,
       });
-      const tombstone = validateTombstone(value, value?.runId);
+      const tombstone = validateAnyTombstone(value, value?.runId);
       if (name !== `retained-${runKey(tombstone.runId)}.json`) fail("retention tombstone filename is not bound to its run");
       entries.push({ name, at: Date.parse(tombstone.prunedAt) });
     }
@@ -623,7 +777,12 @@ export function createGameFactoryBrokerController({ commandDir = "", resultDir =
   }
   function status(runId, { advance = true } = {}) {
     try {
-      const journal = readJournal(exact(runId, "runId"));
+      const id = exact(runId, "runId");
+      const record = readRunRecord(id);
+      if (record?.protocol === ABSENCE_RECEIPT_PROTOCOL) {
+        return absenceResult(validateAbsenceReceipt(record, id), { replayed: true });
+      }
+      const journal = validateJournal(record, id);
       for (let index = 0; index < journal.packets.length; index++) {
         const packet = journal.packets[index]; const path = posix.join(results, `result-${packet.generationId}.bin`);
         if (!existsSync(path)) return runningResult(journal, index);
@@ -636,9 +795,58 @@ export function createGameFactoryBrokerController({ commandDir = "", resultDir =
       }
       fail("controller state traversal failed");
     } catch (error) {
-      if (error?.code === "ENOENT") return { ok: false, commandAbsent: true, cancellationResolved: false,
-        node, runId: String(runId || ""), error: "no controller authorization exists for this run" };
+      if (error?.code === "ENOENT") {
+        try {
+          const tombstone = readAnyTombstone(exact(runId, "runId"));
+          if (tombstone.protocol === ABSENCE_RETAINED_PROTOCOL) {
+            return absenceResult(tombstone.receipt, { replayed: true });
+          }
+        } catch (tombstoneError) {
+          if (tombstoneError?.code !== "ENOENT") {
+            return { ok: false, node, runId: String(runId || ""),
+              error: redactWorkerText(tombstoneError.message || tombstoneError, 1200) };
+          }
+        }
+        return { ok: false, commandAbsent: true, cancellationResolved: false,
+          node, runId: String(runId || ""), error: "no controller authorization exists for this run" };
+      }
       return { ok: false, node, runId: String(runId || ""), error: redactWorkerText(error.message || error, 1200) };
+    }
+  }
+  function authorizationAbsent(input) {
+    try {
+      const ready = requireReady(); const request = normalize(input); validateResumeLineage(request);
+      const orchestratorRequestHash = stableHash(input);
+      try {
+        const tombstone = readAnyTombstone(request.runId, orchestratorRequestHash);
+        if (tombstone.protocol !== ABSENCE_RETAINED_PROTOCOL) {
+          fail("runId already has retained payload authorization evidence");
+        }
+        return absenceResult(tombstone.receipt, { replayed: true });
+      } catch (error) { if (error?.code !== "ENOENT") throw error; }
+
+      const journal = buildJournal(request, ready);
+      const receipt = buildAbsenceReceipt(input, request, journal, ready);
+      assertNoPriorLineageEvidence(request.runId, receipt.generations);
+      const path = journalPath(request.runId);
+      try { durableNoReplace(path, JSON.stringify(receipt) + "\n", 0o640, { gid: null }); }
+      catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        const prior = readRunRecord(request.runId);
+        if (prior?.protocol !== ABSENCE_RECEIPT_PROTOCOL) {
+          fail("payload authorization already exists for this run");
+        }
+        return absenceResult(validateAbsenceReceipt(prior, request.runId, orchestratorRequestHash), { replayed: true });
+      }
+      // The receipt occupies the immutable run journal name before the proof is returned. It is a
+      // durable no-start fence: every concurrent/future start observes EEXIST and may never publish
+      // a broker packet for this run. Re-scan after publication so unexpected pre-existing evidence
+      // cannot be certified even if it appeared between normalization and the atomic fence.
+      assertNoPriorLineageEvidence(request.runId, receipt.generations);
+      return absenceResult(receipt);
+    } catch (error) {
+      return { ok: false, node, runId: input?.runId, cancellationResolved: false,
+        error: redactWorkerText(error.message || error, 1200) };
     }
   }
   function start(input) {
@@ -646,10 +854,22 @@ export function createGameFactoryBrokerController({ commandDir = "", resultDir =
       const ready = requireReady(); const request = normalize(input); validateResumeLineage(request);
       const journal = buildJournal(request, ready);
       const path = journalPath(request.runId);
+      try {
+        const tombstone = readAnyTombstone(request.runId, stableHash(input));
+        if (tombstone.protocol === ABSENCE_RETAINED_PROTOCOL) {
+          return absenceResult(tombstone.receipt, { replayed: true });
+        }
+        return { ok: false, conflict: true, retryable: false, node, runId: request.runId,
+          error: "runId already belongs to retained terminal work" };
+      } catch (error) { if (error?.code !== "ENOENT") throw error; }
       try { durableNoReplace(path, JSON.stringify(journal) + "\n", 0o640, { gid: null }); }
       catch (error) {
         if (error?.code !== "EEXIST") throw error;
-        const prior = readJournal(request.runId);
+        const record = readRunRecord(request.runId);
+        if (record?.protocol === ABSENCE_RECEIPT_PROTOCOL) {
+          return absenceResult(validateAbsenceReceipt(record, request.runId, stableHash(input)), { replayed: true });
+        }
+        const prior = validateJournal(record, request.runId);
         if (prior.requestHash !== journal.requestHash) return { ok: false, conflict: true, retryable: false,
           node, runId: request.runId, error: "runId already belongs to different immutable work" };
         return { ...status(request.runId), replayed: true };
@@ -719,11 +939,41 @@ export function createGameFactoryBrokerController({ commandDir = "", resultDir =
       exact(id, "runId");
       pruneTombstones();
       try {
-        const tombstone = readTombstone(id);
+        const tombstone = readAnyTombstone(id);
+        if (tombstone.protocol === ABSENCE_RETAINED_PROTOCOL) {
+          assertNoPriorLineageEvidence(id, tombstone.receipt.generations);
+          removeCommand(journalPath(id));
+          return { ok: true, node, runId: id, retentionAcknowledged: true, retentionPruned: true,
+            generationsPruned: 0, dispatchAuthorityAbsent: true, replayed: true };
+        }
         cleanupControllerRetention(tombstone.retention);
         return { ok: true, node, runId: id, retentionAcknowledged: true, retentionPruned: true,
           generationsPruned: tombstone.retention.generations.length, replayed: true };
       } catch (error) { if (error?.code !== "ENOENT") throw error; }
+
+      try {
+        const record = readRunRecord(id);
+        if (record?.protocol === ABSENCE_RECEIPT_PROTOCOL) {
+          const receipt = validateAbsenceReceipt(record, id);
+          assertNoPriorLineageEvidence(id, receipt.generations);
+          const body = { protocol: ABSENCE_RETAINED_PROTOCOL, runId: id,
+            prunedAt: new Date().toISOString(), receipt };
+          const tombstone = { ...body, tombstoneSha256: sha(JSON.stringify(body)) };
+          try { durableNoReplace(tombstonePath(id), JSON.stringify(tombstone) + "\n", 0o640, { gid: null }); }
+          catch (error) {
+            if (error?.code !== "EEXIST") throw error;
+            validateAbsenceTombstone(readTrustedJson(tombstonePath(id), {
+              ownerUid: controllerUid, ownerGid: spoolGid, maxBytes: 1_000_000,
+            }), id, receipt.orchestratorRequestHash);
+          }
+          removeCommand(journalPath(id));
+          pruneTombstones();
+          return { ok: true, node, runId: id, retentionAcknowledged: true, retentionPruned: true,
+            generationsPruned: 0, dispatchAuthorityAbsent: true };
+        }
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
 
       let retention;
       try { retention = readRetention(id); }
@@ -794,12 +1044,13 @@ export function createGameFactoryBrokerController({ commandDir = "", resultDir =
       programs: ["node", "godot"], capabilities: ["quality_assurance", "godot"], maxConcurrent: 1,
       externalBroker: true, separateBrokerCgroup: true,
       secureForUntrustedCode: isolationAttested === true && toolchainAttested === true,
-      brokerInstanceId: ready.brokerInstanceId, landlockAbi: ready.landlockAbi }; }
+      brokerInstanceId: ready.brokerInstanceId, containerGenerationId: ready.containerGenerationId,
+      brokerBootIdSha256: ready.brokerBootIdSha256, controllerRecoveryEpoch, landlockAbi: ready.landlockAbi }; }
     catch (error) { return { protocol: PROTOCOL, configured: !!commandDir && !!results, state: "blocked", node,
       programs: ["node", "godot"], capabilities: ["quality_assurance", "godot"], maxConcurrent: 1,
       externalBroker: true, separateBrokerCgroup: true, secureForUntrustedCode: false,
       error: redactWorkerText(error.message || error, 1200) }; }
   }
   return { describe, probe: () => { const value = describe(); return { ...value, ok: value.state === "ready" && value.secureForUntrustedCode === true }; },
-    start, status, cancel, collect, acknowledge };
+    start, status, cancel, collect, acknowledge, authorizationAbsent };
 }

@@ -18,6 +18,7 @@ const SECURITY_CANCEL_REQUESTED = "SECURITY_CANCEL_REQUESTED";
 const SECURITY_INTERRUPTED = "SECURITY_INTERRUPTED";
 const isSecurityStatus = (value) => value === SECURITY_CANCEL_REQUESTED || value === SECURITY_INTERRUPTED;
 const PAYLOAD_GENERATION_ID = /^[a-f0-9]{64}$/;
+const AUTHORITY_ABSENCE_PROOF_PROTOCOL = "game-factory-controller-authorization-absence-proof/1";
 // The live GX10 broker has one reviewed Web/Godot lane. Mobile SDKs, licenses, signing, and
 // release/publisher writes are intentionally outside this capability set.
 const DEFAULT_CAPABILITIES = Object.freeze(["quality_assurance", "godot"]);
@@ -71,6 +72,7 @@ function asDispatch(row) {
     runId: row.runId, taskId: row.taskId, attempt: row.attempt, uid: row.uid,
     projectId: row.projectId, buildId: row.buildId || "", workerId: row.workerId,
     capability: row.capability, status: row.status, remoteStatus: row.remoteStatus || "",
+    requestHash: row.requestHash,
     task: parse(row.taskJson, {}), request: parse(row.requestJson, {}),
     lastResponse: parse(row.lastResponse, null), error: row.error || "",
     createdAt: row.createdAt, updatedAt: row.updatedAt, lastSeenAt: row.lastSeenAt,
@@ -245,6 +247,8 @@ export function createGameFactoryDispatchJournal({ dir, now = () => Date.now() }
     return tx(() => {
       const dispatch = db.prepare("SELECT requestJson FROM dispatches WHERE runId=?").get(id);
       if (!dispatch) return { ok: false, error: "payload generation evidence has no durable dispatch" };
+      if (db.prepare("SELECT 1 AS yes FROM dispatch_events WHERE runId=? AND type='dispatch.authorization_absent_bound' LIMIT 1")
+        .get(id)) return { ok: false, error: "payload generation evidence conflicts with durable no-authorization proof" };
       const request = parse(dispatch.requestJson, {});
       const expectedTotal = expectedPayloadTotal(request);
       if (!expectedTotal || prefix[0].totalSteps !== expectedTotal || prefix.length > expectedTotal) {
@@ -284,6 +288,97 @@ export function createGameFactoryDispatchJournal({ dir, now = () => Date.now() }
     const request = parse(dispatch?.requestJson, {});
     const expectedTotal = expectedPayloadTotal(request);
     return expectedTotal === state.latest.totalSteps && state.entries.length <= expectedTotal ? state.latest : null;
+  }
+
+  function authorityAbsenceProofBody(value) {
+    return {
+      protocol: value?.protocol, runId: value?.runId,
+      orchestratorRequestHash: value?.orchestratorRequestHash,
+      controllerRequestHash: value?.controllerRequestHash,
+      absenceReceiptSha256: value?.absenceReceiptSha256,
+      controllerRecoveryEpoch: value?.controllerRecoveryEpoch,
+      brokerInstanceId: value?.brokerInstanceId,
+      containerGenerationId: value?.containerGenerationId,
+      brokerBootIdSha256: value?.brokerBootIdSha256,
+      recordedControllerRecoveryEpoch: value?.recordedControllerRecoveryEpoch,
+      recordedBrokerInstanceId: value?.recordedBrokerInstanceId,
+      recordedContainerGenerationId: value?.recordedContainerGenerationId,
+      recordedBrokerBootIdSha256: value?.recordedBrokerBootIdSha256,
+      generations: value?.generations,
+    };
+  }
+
+  function bindAuthorizationAbsence(runId, evidence, workerProof) {
+    const id = clean(runId, 500);
+    const proof = evidence?.dispatchAuthorityAbsenceProof;
+    const body = authorityAbsenceProofBody(proof);
+    if (!id || evidence?.ok !== true || evidence.runId !== id
+        || clean(evidence.status, 80).toUpperCase() !== "INTERRUPTED"
+        || evidence.cancellationResolved !== true || evidence.dispatchAuthorityAbsent !== true
+        || evidence.payloadGenerationId != null || evidence.payloadDeathProof != null
+        || !proof || typeof proof !== "object" || Array.isArray(proof)
+        || JSON.stringify(Object.keys(proof)) !== JSON.stringify([...Object.keys(body), "proofSha256"])
+        || body.protocol !== AUTHORITY_ABSENCE_PROOF_PROTOCOL || body.runId !== id
+        || !PAYLOAD_GENERATION_ID.test(body.orchestratorRequestHash || "")
+        || !PAYLOAD_GENERATION_ID.test(body.controllerRequestHash || "")
+        || !PAYLOAD_GENERATION_ID.test(body.absenceReceiptSha256 || "")
+        || !PAYLOAD_GENERATION_ID.test(body.controllerRecoveryEpoch || "")
+        || !PAYLOAD_GENERATION_ID.test(body.brokerInstanceId || "")
+        || !PAYLOAD_GENERATION_ID.test(body.containerGenerationId || "")
+        || !PAYLOAD_GENERATION_ID.test(body.brokerBootIdSha256 || "")
+        || !PAYLOAD_GENERATION_ID.test(body.recordedControllerRecoveryEpoch || "")
+        || !PAYLOAD_GENERATION_ID.test(body.recordedBrokerInstanceId || "")
+        || !PAYLOAD_GENERATION_ID.test(body.recordedContainerGenerationId || "")
+        || !PAYLOAD_GENERATION_ID.test(body.recordedBrokerBootIdSha256 || "")
+        || proof.proofSha256 !== createHash("sha256").update(JSON.stringify(body)).digest("hex")
+        || workerProof?.ok !== true || workerProof.secureForUntrustedCode !== true
+        || body.controllerRecoveryEpoch !== workerProof.controllerRecoveryEpoch
+        || body.brokerInstanceId !== workerProof.brokerInstanceId
+        || body.containerGenerationId !== workerProof.containerGenerationId
+        || body.brokerBootIdSha256 !== workerProof.brokerBootIdSha256) {
+      return { ok: false, error: "controller no-authorization proof is invalid or is not bound to the current worker recovery epoch" };
+    }
+    if (!Array.isArray(body.generations) || !body.generations.length || body.generations.length > 24) {
+      return { ok: false, error: "controller no-authorization proof has no bounded planned generation chain" };
+    }
+    const generations = []; const ids = new Set();
+    for (let index = 0; index < body.generations.length; index++) {
+      const item = body.generations[index], prior = body.generations[index - 1] || null;
+      const keys = ["stepIndex", "totalSteps", "generationId", "previousGenerationId", "packetSha256"];
+      if (!item || typeof item !== "object" || Array.isArray(item)
+          || JSON.stringify(Object.keys(item)) !== JSON.stringify(keys)
+          || item.stepIndex !== index || item.totalSteps !== body.generations.length
+          || !PAYLOAD_GENERATION_ID.test(item.generationId || "")
+          || !PAYLOAD_GENERATION_ID.test(item.packetSha256 || "")
+          || (index === 0 ? item.previousGenerationId !== null : item.previousGenerationId !== prior.generationId)
+          || ids.has(item.generationId)) {
+        return { ok: false, error: "controller no-authorization planned generation chain is invalid" };
+      }
+      ids.add(item.generationId); generations.push(item);
+    }
+    return tx(() => {
+      const dispatch = db.prepare("SELECT requestHash,requestJson FROM dispatches WHERE runId=?").get(id);
+      if (!dispatch || dispatch.requestHash !== body.orchestratorRequestHash) {
+        return { ok: false, error: "controller no-authorization proof does not match the immutable dispatch request" };
+      }
+      if (expectedPayloadTotal(parse(dispatch.requestJson, {})) !== generations.length) {
+        return { ok: false, error: "controller no-authorization generation total does not match the immutable dispatch plan" };
+      }
+      const generationState = readPayloadGenerationState(id);
+      if (!generationState.ok || generationState.entries.length) {
+        return { ok: false, error: "controller no-authorization proof conflicts with a bound payload generation" };
+      }
+      const prior = db.prepare(`SELECT payload FROM dispatch_events
+        WHERE runId=? AND type='dispatch.authorization_absent_bound' ORDER BY id LIMIT 1`).get(id);
+      if (prior) {
+        const priorProof = parse(prior.payload, null)?.proof;
+        return priorProof?.proofSha256 === proof.proofSha256
+          ? { ok: true, replayed: true, proof: priorProof }
+          : { ok: false, error: "controller no-authorization proof conflicts with durable prior proof" };
+      }
+      event(id, "dispatch.authorization_absent_bound", { proof });
+      return { ok: true, replayed: false, proof };
+    });
   }
 
   function recordIntent({ task, request, workerId }) {
@@ -470,6 +565,9 @@ export function createGameFactoryDispatchJournal({ dir, now = () => Date.now() }
       const row = db.prepare("SELECT * FROM dispatches WHERE runId=?").get(clean(runId, 500));
       if (!row || !row.endedAt || response?.ok !== true || response.runId !== row.runId
           || response.retentionAcknowledged !== true || response.retentionPruned !== true) return false;
+      const absenceBound = !!db.prepare("SELECT 1 AS yes FROM dispatch_events WHERE runId=? AND type='dispatch.authorization_absent_bound' LIMIT 1")
+        .get(row.runId);
+      if (absenceBound && (response.dispatchAuthorityAbsent !== true || response.generationsPruned !== 0)) return false;
       if (!db.prepare("SELECT 1 AS yes FROM dispatch_events WHERE runId=? AND type='dispatch.retention_pruned' LIMIT 1")
         .get(row.runId)) event(row.runId, "dispatch.retention_pruned", response);
       return true;
@@ -480,7 +578,7 @@ export function createGameFactoryDispatchJournal({ dir, now = () => Date.now() }
     return db.prepare(`SELECT d.* FROM dispatches d
       WHERE d.endedAt>0
         AND EXISTS (SELECT 1 FROM dispatch_events g
-          WHERE g.runId=d.runId AND g.type='dispatch.payload_generation_bound')
+          WHERE g.runId=d.runId AND g.type IN ('dispatch.payload_generation_bound','dispatch.authorization_absent_bound'))
         AND NOT EXISTS (SELECT 1 FROM dispatch_events a
           WHERE a.runId=d.runId AND a.type='dispatch.retention_pruned')
       ORDER BY d.endedAt LIMIT ?`)
@@ -534,7 +632,7 @@ export function createGameFactoryDispatchJournal({ dir, now = () => Date.now() }
   return {
     file, recordIntent, update, finish, finishIfSecurityEpoch, securityLatch, securityFinish,
     observeProofLoss, get, hasPendingSecurity, securityEpoch,
-    bindPayloadGeneration, payloadGeneration,
+    bindPayloadGeneration, payloadGeneration, bindAuthorizationAbsence,
     listActive, listRetentionPending, recordRetentionAck, latestForTask,
     acquireLeadership, releaseLeadership, health,
     close() { try { db.close(); } catch {} },
@@ -600,6 +698,10 @@ export function createGameFactoryOrchestrator({
       && result.node === expectedWorkerNode
       && result.externalBroker === true
       && result.separateBrokerCgroup === true
+      && PAYLOAD_GENERATION_ID.test(result.controllerRecoveryEpoch || "")
+      && PAYLOAD_GENERATION_ID.test(result.brokerInstanceId || "")
+      && PAYLOAD_GENERATION_ID.test(result.containerGenerationId || "")
+      && PAYLOAD_GENERATION_ID.test(result.brokerBootIdSha256 || "")
       && result.maxConcurrent === 1
       && Array.isArray(result.programs) && result.programs.length === 2
       && result.programs[0] === "node" && result.programs[1] === "godot"
@@ -641,11 +743,11 @@ export function createGameFactoryOrchestrator({
   const currentDispatch = (runId) => durable.get(runId);
   const securityLatched = (runId) => isSecurityStatus(currentDispatch(runId)?.status);
 
-  async function interruptForMissingDeathProof(dispatch, evidence, reason) {
+  async function interruptForMissingDeathProof(dispatch, evidence, reason, workerProof = null) {
     const current = durable.securityLatch(dispatch.runId, evidence,
       safeText(reason, 1000) || "The worker did not prove that the bound payload generation is dead.")
       || currentDispatch(dispatch.runId) || dispatch;
-    await interruptForProofLoss(current);
+    await interruptForProofLoss(current, workerProof);
     return false;
   }
 
@@ -794,7 +896,7 @@ export function createGameFactoryOrchestrator({
     await finishNormally(dispatch, remote.status, collected, "", expectedSecurityEpoch);
   }
 
-  async function interruptForProofLoss(dispatch) {
+  async function interruptForProofLoss(dispatch, workerProof = null) {
     const proofLoss = "The worker lost its current isolation proof while this task was active.";
     const detail = safeText(dispatch?.error, 1000);
     const reason = detail && detail !== proofLoss ? `${proofLoss} ${detail}` : proofLoss;
@@ -875,9 +977,20 @@ export function createGameFactoryOrchestrator({
     catch (error) {
       remote = { ok: false, runId: current.runId, error: safeText(error?.message || error, 1000) || "worker status failed" };
     }
-    const remoteBinding = remote?.ok === true
-      ? durable.bindPayloadGeneration(current.runId, remote, "status")
-      : { ok: true, skipped: true };
+    const remoteAbsenceBinding = remote?.dispatchAuthorityAbsent === true
+      ? durable.bindAuthorizationAbsence(current.runId, remote, workerProof)
+      : null;
+    const remoteBinding = remoteAbsenceBinding
+      ? { ok: remoteAbsenceBinding.ok, skipped: true, error: remoteAbsenceBinding.error }
+      : remote?.ok === true
+        ? durable.bindPayloadGeneration(current.runId, remote, "status")
+        : { ok: true, skipped: true };
+    if (storeStopped && remoteAbsenceBinding?.ok === true) {
+      const finished = durable.securityFinish(current.runId,
+        { status: remote, cancellation: null, storeBoundary }, reason);
+      if (finished?.endedAt) await acknowledgeRetention(finished);
+      return;
+    }
     if (storeStopped && remoteBinding.ok && hasPayloadDeathProof(remote, current.runId)) {
       durable.securityFinish(current.runId, { status: remote, cancellation: null, storeBoundary }, reason);
       return;
@@ -891,7 +1004,37 @@ export function createGameFactoryOrchestrator({
     } catch (error) {
       cancelled = { ok: false, runId: current.runId, error: safeText(error?.message || error, 1000) || "security cancellation failed" };
     }
-    const evidence = { status: remote || null, cancellation: cancelled || null, storeBoundary };
+    const cancelledAbsenceBinding = cancelled?.dispatchAuthorityAbsent === true
+      ? durable.bindAuthorizationAbsence(current.runId, cancelled, workerProof)
+      : null;
+    if (storeStopped && cancelledAbsenceBinding?.ok === true) {
+      const evidence = { status: remote || null, cancellation: cancelled, storeBoundary };
+      const finished = durable.securityFinish(current.runId, evidence, reason);
+      if (finished?.endedAt) await acknowledgeRetention(finished);
+      return;
+    }
+    let authorityAbsent = null; let authorityAbsentBinding = null;
+    const plainStatusAbsent = remote?.ok === false && remote.commandAbsent === true
+      && remote.runId === current.runId && remote.cancellationResolved === false;
+    const plainCancelAbsent = cancelled?.ok === false && cancelled.commandAbsent === true
+      && cancelled.runId === current.runId && cancelled.cancellationResolved === false;
+    if (plainStatusAbsent && plainCancelAbsent && typeof worker.authorizationAbsent === "function"
+        && secureProbeMatchesExpectedWorker(workerProof) && durable.payloadGeneration(current.runId) === null) {
+      try { authorityAbsent = await worker.authorizationAbsent(current.request); }
+      catch (error) {
+        authorityAbsent = { ok: false, runId: current.runId,
+          error: safeText(error?.message || error, 1000) || "controller no-authorization proof failed" };
+      }
+      authorityAbsentBinding = durable.bindAuthorizationAbsence(current.runId, authorityAbsent, workerProof);
+      if (storeStopped && authorityAbsentBinding.ok) {
+        const evidence = { status: remote, cancellation: cancelled, authorityAbsent, storeBoundary };
+        const finished = durable.securityFinish(current.runId, evidence, reason);
+        if (finished?.endedAt) await acknowledgeRetention(finished);
+        return;
+      }
+    }
+    const evidence = { status: remote || null, cancellation: cancelled || null,
+      authorityAbsent, storeBoundary };
     if (storeStopped && remoteBinding.ok && hasPayloadDeathProof(cancelled, current.runId)) {
       durable.securityFinish(current.runId, evidence, reason);
       return;
@@ -900,7 +1043,10 @@ export function createGameFactoryOrchestrator({
     // Plain notFound/commandAbsent is deliberately unresolved: only a generation-bound broker
     // death proof can establish that no payload remains. Retain the absorbing latch and retry the
     // deterministic immediate cancellation on the next tick.
-    const evidenceError = remoteBinding.ok ? "" : safeText(remoteBinding.error, 1000);
+    const evidenceError = [remoteBinding.ok ? "" : safeText(remoteBinding.error, 1000),
+      cancelledAbsenceBinding && !cancelledAbsenceBinding.ok ? safeText(cancelledAbsenceBinding.error, 1000) : "",
+      authorityAbsentBinding && !authorityAbsentBinding.ok ? safeText(authorityAbsentBinding.error, 1000) : "",
+    ].filter(Boolean).join(" ");
     durable.securityLatch(current.runId, evidence,
       [reason, taskFailureError, evidenceError].filter(Boolean).join(" "));
   }
@@ -914,7 +1060,7 @@ export function createGameFactoryOrchestrator({
             ? "Another task on this worker lost isolation proof; this active dispatch is also stopped."
             : "The worker lost its current isolation proof while this task was active.") || current;
       }
-      await interruptForProofLoss(current);
+      await interruptForProofLoss(current, workerProof);
       return;
     }
     if (current.status === SECURITY_INTERRUPTED) return;
@@ -928,7 +1074,7 @@ export function createGameFactoryOrchestrator({
     if (!generationBinding.ok) {
       current = durable.securityLatch(current.runId, remote,
         `The worker returned invalid payload generation evidence: ${safeText(generationBinding.error, 1000)}`) || current;
-      await interruptForProofLoss(current);
+      await interruptForProofLoss(current, workerProof);
       return;
     }
     if (await proofLossFence(current, expectedSecurityEpoch)) return;
@@ -942,14 +1088,14 @@ export function createGameFactoryOrchestrator({
       if (!generationBinding.ok) {
         current = durable.securityLatch(current.runId, remote,
           `The worker returned invalid payload generation evidence: ${safeText(generationBinding.error, 1000)}`) || current;
-        await interruptForProofLoss(current);
+        await interruptForProofLoss(current, workerProof);
         return;
       }
       if (isSecurityStatus(current.status) || durable.hasPendingSecurity()
           || durable.securityEpoch() !== Number(expectedSecurityEpoch)) {
         if (!isSecurityStatus(current.status)) current = durable.securityLatch(current.runId, remote,
           "Another task on this worker lost isolation proof while this dispatch was starting.") || current;
-        return interruptForProofLoss(current);
+        return interruptForProofLoss(current, workerProof);
       }
     }
     const stamp = Number(now()) || Date.now();
@@ -981,7 +1127,7 @@ export function createGameFactoryOrchestrator({
       status: TERMINAL_REMOTE.has(remoteStatus) ? "COLLECTING" : remoteStatus || "RUNNING",
       remoteStatus, lastResponse: remote, lastSeenAt: stamp, error: "",
     }, "dispatch.remote_status");
-    if (isSecurityStatus(observed?.status)) return interruptForProofLoss(observed);
+    if (isSecurityStatus(observed?.status)) return interruptForProofLoss(observed, workerProof);
     if (TERMINAL_REMOTE.has(remoteStatus)) {
       return terminal(observed || current, { ...remote, status: remoteStatus }, expectedSecurityEpoch);
     }
@@ -1014,7 +1160,7 @@ export function createGameFactoryOrchestrator({
     return lastProbe;
   }
 
-  async function claimOne(capability, expectedSecurityEpoch) {
+  async function claimOne(capability, expectedSecurityEpoch, workerProof = null) {
     const incidentChanged = () => durable.hasPendingSecurity()
       || durable.securityEpoch() !== expectedSecurityEpoch;
     if (incidentChanged()) return false;
@@ -1066,13 +1212,13 @@ export function createGameFactoryOrchestrator({
     if (!generationBinding.ok) {
       current = durable.securityLatch(request.runId, started,
         `The worker returned invalid payload generation evidence: ${safeText(generationBinding.error, 1000)}`) || current;
-      await interruptForProofLoss(current || durable.get(request.runId));
+      await interruptForProofLoss(current || durable.get(request.runId), workerProof);
       return true;
     }
     if (isSecurityStatus(current?.status) || incidentChanged()) {
       if (!isSecurityStatus(current?.status)) current = durable.securityLatch(request.runId, started,
         "The worker lane entered a security stop while worker.start was in flight.") || current;
-      await interruptForProofLoss(current || durable.get(request.runId));
+      await interruptForProofLoss(current || durable.get(request.runId), workerProof);
       return true;
     }
     if (!started || started.ok === false) {
@@ -1087,13 +1233,13 @@ export function createGameFactoryOrchestrator({
         if (incidentChanged()) {
           current = durable.securityLatch(request.runId, started,
             "The worker lane entered a security stop while an uncertain start was being journaled.") || current;
-          await interruptForProofLoss(current || durable.get(request.runId));
+          await interruptForProofLoss(current || durable.get(request.runId), workerProof);
         }
         return true;
       }
       await interruptForMissingDeathProof(current || durable.get(request.runId), started,
         safeText(started && (started.error || started.reason), 1000)
-          || "The worker did not accept the task and did not prove that no payload was started.");
+          || "The worker did not accept the task and did not prove that no payload was started.", workerProof);
       return true;
     }
     current = durable.update(request.runId, {
@@ -1104,7 +1250,7 @@ export function createGameFactoryOrchestrator({
     if (incidentChanged()) {
       current = durable.securityLatch(request.runId, started,
         "The worker lane entered a security stop while the accepted start was being journaled.") || current;
-      await interruptForProofLoss(current || durable.get(request.runId));
+      await interruptForProofLoss(current || durable.get(request.runId), workerProof);
     }
     return true;
   }
@@ -1180,7 +1326,7 @@ export function createGameFactoryOrchestrator({
         let active = durable.listActive().length;
         for (const capability of workerCaps) {
           if (active >= concurrency || durable.hasPendingSecurity()) break;
-          if (await claimOne(capability, reconciliationSecurityEpoch)) {
+          if (await claimOne(capability, reconciliationSecurityEpoch, workerReady)) {
             report.claimed++;
             active = durable.listActive().length;
           }

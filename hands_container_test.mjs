@@ -124,7 +124,8 @@ await test("capabilities and sandbox defaults remain blocked and Web-only", () =
 
 await test("controller-only dispatch and module split remove generic token-side execution", () => {
   assert.match(handsSource, /GAME_FACTORY_CONTROLLER_ONLY/);
-  for (const operation of ["node_info", "game_factory_probe", "game_factory_start", "game_factory_status", "game_factory_cancel", "game_factory_collect"]) {
+  for (const operation of ["node_info", "game_factory_probe", "game_factory_start", "game_factory_authorization_absent",
+    "game_factory_status", "game_factory_cancel", "game_factory_collect", "game_factory_acknowledge"]) {
     assert.match(handsSource, new RegExp(`"${operation}"`));
   }
   assert.match(handsSource, /token-bearing Hands process is restricted to the game-factory controller protocol/);
@@ -165,3 +166,22 @@ await test("recovery never replays an orphan and immediate cancellation dominate
 
 console.log(`\n${passed} Hands container tests passed`);
 }
+
+// The active topology assertions above are superseded by the static broker suite, but these two
+// pure helpers still describe how any retained legacy executor record is classified. Keep their
+// behavioral coverage even though the executor is excluded from every active image/service.
+assert.deepEqual(classifyExecutorRecovery([], 2), { action: "accept", completedSteps: 0 });
+assert.deepEqual(classifyExecutorRecovery([
+  { status: "ACCEPTED", checkpoint: { completedSteps: 0 } },
+], 2), { action: "resume", completedSteps: 0 });
+assert.deepEqual(classifyExecutorRecovery([
+  { status: "STEP_SUCCEEDED", checkpoint: { completedSteps: 1 } },
+], 2), { action: "resume", completedSteps: 1 });
+assert.deepEqual(classifyExecutorRecovery([
+  { status: "STEP_STARTED", executorId: "same", checkpoint: { completedSteps: 1 } },
+], 2), { action: "interrupt", completedSteps: 1 });
+assert.equal(selectExecutorCancellation([
+  { mode: "immediate", requestedAt: "2026-08-31T10:00:00.000Z", id: "immediate" },
+  { mode: "safe", requestedAt: "2026-08-31T11:00:00.000Z", id: "later-safe" },
+]).id, "immediate");
+console.log("ok - inert executor recovery helpers retain their legacy safety behavior");
