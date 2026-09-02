@@ -114,6 +114,7 @@
         "ioctl",
         "lgetxattr",
         "link",
+        "linkat",
         "listen",
         "listxattr",
         "llistxattr",
