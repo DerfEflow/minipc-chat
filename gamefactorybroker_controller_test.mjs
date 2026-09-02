@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,6 +8,7 @@ import {
   encodeBrokerReadiness, encodeBrokerResult,
 } from "./hands/gamefactory-broker-protocol.mjs";
 import { createGameFactoryBrokerController } from "./hands/gamefactory-broker-controller.mjs";
+import { recoverDurableTree } from "./hands/gamefactory-ipc.mjs";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const empty = sha("");
@@ -36,9 +37,15 @@ try {
     readinessSequence: "1", updatedAt: new Date().toISOString(),
   };
   writeFileSync(join(results, "broker-ready.bin"), encodeBrokerReadiness(ready), { mode: 0o640 });
+  // Reproduce a controller crash before durableNoReplace linked the final run journal. Entrypoint
+  // recovery removes only the trusted private marker/temp pair; no final journal or packet exists.
+  writeFileSync(join(commands, ".publish-a11ce"), "pending\n", { mode: 0o640 });
+  writeFileSync(join(commands, ".tmp-a11ce"), "partial journal\n", { mode: 0o640 });
+  recoverDurableTree(commands, { ownerUid: uid, ownerGid: gid, flat: true });
+  assert.equal(readdirSync(commands).some((name) => /^\.(?:tmp|publish)-/.test(name)), false);
   const controller = createGameFactoryBrokerController({
     commandDir: commands, resultDir: results, node: "test-broker", brokerOwnerUid: uid, spoolGid: gid,
-    expected: hashes, isolationAttested: true, toolchainAttested: true,
+    expected: hashes, isolationAttested: true, toolchainAttested: true, recoveryEpoch: sha("recovery-1"),
   });
   const probe = controller.probe();
   assert.equal(probe.ok, true, probe.error);
@@ -46,14 +53,61 @@ try {
   assert.equal(probe.secureForUntrustedCode, true);
   assert.equal(probe.externalBroker, true);
   assert.equal(probe.separateBrokerCgroup, true);
-  const started = controller.start({
+  assert.equal(probe.controllerRecoveryEpoch, sha("recovery-1"));
+  assert.equal(probe.containerGenerationId, ready.containerGenerationId);
+  assert.equal(probe.brokerBootIdSha256, ready.brokerBootIdSha256);
+
+  const absentRequest = {
+    runId: "pre-journal-crash-1", taskId: "task-absent", projectId: "project-absent",
+    capability: "quality_assurance", workspaceRoot: "/workspace/vector-vault", plan: {
+      steps: [{ program: "node", args: ["--check", "src/absent.js"], cwdRelative: ".", timeoutMs: 1_000 }],
+      collect: [],
+    },
+  };
+  const absent = controller.authorizationAbsent(absentRequest);
+  assert.equal(absent.ok, true, absent.error);
+  assert.equal(absent.status, "INTERRUPTED");
+  assert.equal(absent.cancellationResolved, true);
+  assert.equal(absent.dispatchAuthorityAbsent, true);
+  assert.equal(absent.dispatchAuthorityAbsenceProof.protocol,
+    "game-factory-controller-authorization-absence-proof/1");
+  assert.equal(absent.dispatchAuthorityAbsenceProof.controllerRecoveryEpoch, sha("recovery-1"));
+  assert.equal(absent.dispatchAuthorityAbsenceProof.recordedControllerRecoveryEpoch, sha("recovery-1"));
+  for (const generation of absent.dispatchAuthorityAbsenceProof.generations) {
+    assert.equal(existsSync(join(commands, `request-${generation.generationId}.bin`)), false);
+  }
+  const absentStatus = controller.status(absentRequest.runId);
+  assert.equal(absentStatus.dispatchAuthorityAbsent, true);
+  assert.equal(controller.start(absentRequest).dispatchAuthorityAbsent, true);
+  assert.equal(controller.start({ ...absentRequest, plan: { ...absentRequest.plan,
+    steps: [{ ...absentRequest.plan.steps[0], args: ["--version"] }] } }).ok, false);
+  const absentAck = controller.acknowledge(absentRequest.runId);
+  assert.equal(absentAck.ok, true, absentAck.error);
+  assert.equal(absentAck.retentionPruned, true);
+  assert.equal(absentAck.generationsPruned, 0);
+  assert.equal(existsSync(join(commands, `run-${sha(absentRequest.runId).slice(0, 32)}.json`)), false);
+  const recoveredController = createGameFactoryBrokerController({
+    commandDir: commands, resultDir: results, node: "test-broker", brokerOwnerUid: uid, spoolGid: gid,
+    expected: hashes, isolationAttested: true, toolchainAttested: true, recoveryEpoch: sha("recovery-2"),
+  });
+  const recoveredAbsence = recoveredController.status(absentRequest.runId);
+  assert.equal(recoveredAbsence.dispatchAuthorityAbsent, true);
+  assert.equal(recoveredAbsence.dispatchAuthorityAbsenceProof.controllerRecoveryEpoch, sha("recovery-2"));
+  assert.equal(recoveredAbsence.dispatchAuthorityAbsenceProof.recordedControllerRecoveryEpoch, sha("recovery-1"));
+  assert.equal(recoveredController.start(absentRequest).dispatchAuthorityAbsent, true);
+
+  const artifactRequest = {
     runId: "artifact-ferry-1", taskId: "task-1", projectId: "project-1", capability: "quality_assurance",
     workspaceRoot: "/workspace/vector-vault", plan: {
       steps: [{ program: "node", args: ["--check", "src/check.js"], cwdRelative: ".", timeoutMs: 1_000 }],
       collect: ["dist/index.html"],
     },
-  });
+  };
+  const started = controller.start(artifactRequest);
   assert.equal(started.ok, true, started.error);
+  const priorAuthorization = controller.authorizationAbsent(artifactRequest);
+  assert.equal(priorAuthorization.ok, false);
+  assert.equal(priorAuthorization.error, "payload authorization evidence already exists for this run");
   const generationId = started.payloadGenerationId;
   const request = decodeBrokerRequest(readFileSync(join(commands, `request-${generationId}.bin`)));
   assert.equal(request.brokerInstanceId, ready.brokerInstanceId);

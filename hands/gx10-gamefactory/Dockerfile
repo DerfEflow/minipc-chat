@@ -11,7 +11,7 @@ COPY hands/gx10-gamefactory/fd-launcher.c /tmp/fd-launcher.c
 COPY hands/gx10-gamefactory/generate-child-seccomp.c /tmp/generate-child-seccomp.c
 RUN gcc -O2 -fPIE -fstack-protector-strong -D_FORTIFY_SOURCE=3 -Wall -Wextra -Werror \
       /tmp/fd-launcher.c -Wl,-z,relro,-z,now,-z,noexecstack -static-pie -o /tmp/fd-launcher \
-    && gcc -O2 -Wall -Wextra -Werror /tmp/generate-child-seccomp.c -lseccomp -o /tmp/generate-child-seccomp \
+    && gcc -std=c17 -O2 -Wall -Wextra -Werror /tmp/generate-child-seccomp.c -lseccomp -o /tmp/generate-child-seccomp \
     && mkdir -p /out/opt/dominion-sandbox \
     && install -o root -g root -m 0555 /tmp/fd-launcher /out/opt/dominion-sandbox/fd-launcher \
     && /tmp/generate-child-seccomp node /out/opt/dominion-sandbox/node-seccomp.bpf \
@@ -153,7 +153,7 @@ COPY hands/gx10-gamefactory/fd-launcher.c hands/gx10-gamefactory/launch-broker.c
      hands/gx10-gamefactory/payload-guard.c hands/gx10-gamefactory/generate-child-seccomp.c /tmp/build/
 RUN mkdir -p /out/opt/dominion-broker /out/opt/dominion-payload \
     && cp -a /opt/dominion-payload/. /out/opt/dominion-payload/ \
-    && gcc -O2 -Wall -Wextra -Werror /tmp/build/generate-child-seccomp.c -lseccomp -o /tmp/generate-child-seccomp \
+    && gcc -std=c17 -O2 -Wall -Wextra -Werror /tmp/build/generate-child-seccomp.c -lseccomp -o /tmp/generate-child-seccomp \
     && /tmp/generate-child-seccomp node /out/opt/dominion-broker/node-seccomp.bpf \
     && /tmp/generate-child-seccomp godot /out/opt/dominion-broker/godot-seccomp.bpf \
     && node_sha="$(sha256sum /out/opt/dominion-payload/node | cut -d' ' -f1)" \

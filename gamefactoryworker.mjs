@@ -59,7 +59,8 @@ export function createGameFactoryWorkerAdapter({
     const outbound = safeValue(args || {});
     // A build request containing a credential must not cross the Hands transport. Cancel reasons
     // are free text and may be safely redacted instead of blocking the owner's stop operation.
-    if (tool === "game_factory_start" && !sameJson(outbound, args || {})) {
+    if (new Set(["game_factory_start", "game_factory_authorization_absent"]).has(tool)
+        && !sameJson(outbound, args || {})) {
       stats.failures++;
       stats.lastError = "worker request was refused because it contained credential material or exceeded protocol bounds";
       return { ok: false, refused: true, retryable: false, node: target, error: stats.lastError };
@@ -105,6 +106,7 @@ export function createGameFactoryWorkerAdapter({
     node: target,
     probe() { return call("game_factory_probe", {}, 20_000); },
     start(request) { return call("game_factory_start", request, 30_000); },
+    authorizationAbsent(request) { return call("game_factory_authorization_absent", request, 30_000); },
     status(runId) {
       const ref = runReference(runId);
       return ref ? call("game_factory_status", { runId: ref }, 20_000)

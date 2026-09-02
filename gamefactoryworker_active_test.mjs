@@ -14,6 +14,11 @@ await test("adapter dispatches every active operation only to the exact configur
     node: "GX10-GameFactory",
     dispatch: async (node, tool, args, options) => {
       calls.push({ node, tool, args, options });
+      if (tool === "game_factory_authorization_absent") return {
+        ok: true, node, runId: args.runId, status: "INTERRUPTED", cancellationResolved: true,
+        dispatchAuthorityAbsent: true,
+        dispatchAuthorityAbsenceProof: { protocol: "game-factory-controller-authorization-absence-proof/1" },
+      };
       return {
         ok: true, node, runId: args.runId || "run-1", status: "RUNNING",
         secureForUntrustedCode: true, externalBroker: true, separateBrokerCgroup: true,
@@ -23,16 +28,21 @@ await test("adapter dispatches every active operation only to the exact configur
   });
   assert.equal((await adapter.probe()).ok, true);
   assert.equal((await adapter.start({ runId: "run-1", recipe: "fixed" })).ok, true);
+  const absent = await adapter.authorizationAbsent({ runId: "run-absent", recipe: "fixed" });
+  assert.equal(absent.ok, true);
+  assert.equal(absent.dispatchAuthorityAbsent, true);
+  assert.equal(absent.dispatchAuthorityAbsenceProof.protocol,
+    "game-factory-controller-authorization-absence-proof/1");
   assert.equal((await adapter.status("run-1")).ok, true);
   assert.equal((await adapter.cancel("run-1", { mode: "immediate", reason: "owner stop" })).ok, true);
   assert.equal((await adapter.collect("run-1")).ok, true);
   assert.equal((await adapter.acknowledge("run-1")).ok, true);
-  assert.deepEqual(calls.map((call) => call.node), Array(6).fill("gx10-gamefactory"));
+  assert.deepEqual(calls.map((call) => call.node), Array(7).fill("gx10-gamefactory"));
   assert.deepEqual(calls.map((call) => call.tool), [
-    "game_factory_probe", "game_factory_start", "game_factory_status", "game_factory_cancel", "game_factory_collect",
-    "game_factory_acknowledge",
+    "game_factory_probe", "game_factory_start", "game_factory_authorization_absent", "game_factory_status",
+    "game_factory_cancel", "game_factory_collect", "game_factory_acknowledge",
   ]);
-  assert.equal(adapter.health().calls, 6);
+  assert.equal(adapter.health().calls, 7);
 });
 
 await test("adapter rejects missing or mismatched node provenance", async () => {
@@ -60,6 +70,8 @@ await test("adapter blocks secret-bearing starts and redacts cancellation and re
   });
   const refused = await adapter.start({ runId: "run-secret", apiKey: marker });
   assert.equal(refused.ok, false); assert.equal(refused.refused, true); assert.equal(calls.length, 0);
+  const refusedAbsence = await adapter.authorizationAbsent({ runId: "run-secret", apiKey: marker });
+  assert.equal(refusedAbsence.ok, false); assert.equal(refusedAbsence.refused, true); assert.equal(calls.length, 0);
   const cancelled = await adapter.cancel("run-1", { mode: "safe", reason: `Bearer ${marker}` });
   assert.equal(cancelled.ok, true);
   assert.equal(JSON.stringify(calls[0]).includes(marker), false);
@@ -88,7 +100,8 @@ await test("Hands active wiring exposes only the controller to the static broker
   const source = readFileSync(new URL("./hands/hands.mjs", import.meta.url), "utf8");
   assert.match(source, /createGameFactoryBrokerController/);
   assert.doesNotMatch(source, /import\(["'][.]\/gamefactory-(?:worker|executor|runner)[.]mjs["']\)/);
-  for (const operation of ["game_factory_probe", "game_factory_start", "game_factory_status", "game_factory_cancel", "game_factory_collect", "game_factory_acknowledge"]) {
+  for (const operation of ["game_factory_probe", "game_factory_start", "game_factory_authorization_absent",
+    "game_factory_status", "game_factory_cancel", "game_factory_collect", "game_factory_acknowledge"]) {
     assert.match(source, new RegExp(`"${operation}"`));
   }
   assert.match(source, /token-bearing Hands process is restricted to the game-factory controller protocol/);

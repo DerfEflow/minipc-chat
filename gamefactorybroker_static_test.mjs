@@ -345,6 +345,15 @@ test("payload ioctl surface is limited to Node's inherited output pipes", () => 
     "ioctl must not enter an unconditional syscall allowlist");
 });
 
+test("child seccomp generators remain strict-C feature complete", () => {
+  assert.match(childSeccomp, /^\/\*[^\n]+\*\/\n#define _GNU_SOURCE\n/,
+    "Linux clone argument types must remain visible under the strict C17 build used by the images");
+  const generatorCompiles = dockerfile.match(
+    /gcc -std=c17[^\n]*generate-child-seccomp[.]c[^\n]*-lseccomp/g) || [];
+  assert.equal(generatorCompiles.length, 2,
+    "both sandbox-builder and broker-builder must compile the seccomp generator under strict C17");
+});
+
 test("service seccomp profiles constrain clone and deny process inspection and broker networking", () => {
   for (const profile of [controllerSeccomp, brokerSeccomp]) {
     const allows = profile.syscalls.filter((rule) => rule.action === "SCMP_ACT_ALLOW");

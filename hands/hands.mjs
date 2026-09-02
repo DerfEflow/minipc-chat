@@ -353,6 +353,7 @@ export async function executeJob(tool, args = {}, meta = {}) {
   if (process.env.GAME_FACTORY_CONTROLLER_ONLY === "1" && !new Set([
     "node_info", "game_factory_probe", "game_factory_start", "game_factory_status",
     "game_factory_cancel", "game_factory_collect", "game_factory_acknowledge",
+    "game_factory_authorization_absent",
   ]).has(String(tool))) return refuse("this token-bearing Hands process is restricted to the game-factory controller protocol");
   // Carve-outs first, on the raw args blob, for every tool that TOUCHES the machine. The Ollama
   // passthrough (fix C, 2026-07-20) is exempt: its args are model I/O — chat messages and prompts —
@@ -372,6 +373,9 @@ export async function executeJob(tool, args = {}, meta = {}) {
       case "game_factory_start":
         if (!GAME_FACTORY_SPOOL_GUARD.ok) return refuse(GAME_FACTORY_SPOOL_GUARD.reason);
         return (await getGameFactoryWorker()).start(args);
+      case "game_factory_authorization_absent":
+        if (!GAME_FACTORY_SPOOL_GUARD.ok) return refuse(GAME_FACTORY_SPOOL_GUARD.reason);
+        return (await getGameFactoryWorker()).authorizationAbsent(args);
       case "game_factory_status":
         if (!GAME_FACTORY_SPOOL_GUARD.ok) return refuse(GAME_FACTORY_SPOOL_GUARD.reason);
         return (await getGameFactoryWorker()).status(args.runId);
