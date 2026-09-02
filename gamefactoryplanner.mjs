@@ -8,7 +8,6 @@
  */
 import { createHash } from "node:crypto";
 import { MANDATORY_ARTIFACT_BACKENDS, REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
-import { nativeProjectEvidenceCanComplete } from "./gamefactorynativeevidence.mjs";
 import { PORTFOLIO_PACKAGE_DATE, renderGameArtifact } from "./gamefactorytemplates.mjs";
 
 const result = (status, body) => ({ status, body });
@@ -31,18 +30,18 @@ function renderedSpecification(slug) {
   });
 }
 
-function verifiedCopy(artifact, backend) {
+function verifiedCopy(artifact, backend, authoritativeComplete) {
   const copy = (artifact?.copies || []).find((candidate) => candidate.backend === backend) || null;
   return {
     backend,
     status: copy?.status || "MISSING",
-    verified: !!copy && copy.algorithm === "sha256" && copy.fingerprint === artifact?.sha256
-      && (backend === "chatgpt_project" ? nativeProjectEvidenceCanComplete(copy) : copy.status === "VERIFIED"),
+    verified: !!copy && authoritativeComplete === true,
   };
 }
 
 export function createGameFactoryPlanner({ store, artifactMirror, log = () => {} } = {}) {
-  if (!store || typeof store.getProject !== "function" || typeof store.executeCommand !== "function") {
+  if (!store || typeof store.getProject !== "function" || typeof store.executeCommand !== "function"
+      || typeof store.artifactCopyComplete !== "function") {
     throw new Error("createGameFactoryPlanner needs a game factory store");
   }
   if (!artifactMirror || typeof artifactMirror.health !== "function" || typeof artifactMirror.ingestBuffer !== "function") {
@@ -174,8 +173,11 @@ export function createGameFactoryPlanner({ store, artifactMirror, log = () => {}
     const current = new Map((detail.artifacts || []).map((artifact) => [artifact.artifactKey, artifact]));
     const artifacts = manifest.map((expected) => {
       const artifact = current.get(expected.artifactKey) || null;
-      const local = verifiedCopy(artifact, "primary");
-      const requiredCopies = MANDATORY_ARTIFACT_BACKENDS.map((backend) => verifiedCopy(artifact, backend));
+      const copyComplete = (backend) => !!artifact && store.artifactCopyComplete({
+        uid: who, projectId: project, artifactId: artifact.id, backend,
+      });
+      const local = verifiedCopy(artifact, "primary", copyComplete("primary"));
+      const requiredCopies = MANDATORY_ARTIFACT_BACKENDS.map((backend) => verifiedCopy(artifact, backend, copyComplete(backend)));
       const op = operation.get(expected.artifactKey) || {};
       const ingestStatus = Number(op.ingest?.status) || 500;
       const mirrorStatus = op.mirror

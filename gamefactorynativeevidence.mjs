@@ -15,6 +15,9 @@ export const NATIVE_PROJECT_API_VERIFIED_STATUS = "NATIVE_API_VERIFIED";
 export const OWNER_ATTESTED_NATIVE_PROJECT_FALLBACK_APPROVED = true;
 export const OWNER_ATTESTATION_OPERATOR = "Fred Wolfe";
 export const OWNER_ATTESTATION_ACKNOWLEDGEMENT = "I directly verified in the owner-controlled native ChatGPT Project browser UI that exactly one file was uploaded with this exact filename to the locked Project.";
+// Only bounded wall-clock drift is tolerated. Durable evidence must not predate its artifact and
+// each later attestation/invalidation must carry a strictly newer per-artifact observation time.
+export const NATIVE_PROJECT_EVIDENCE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 const MIME_EXTENSIONS = Object.freeze({
   "application/json": "json",
@@ -27,6 +30,7 @@ const MIME_EXTENSIONS = Object.freeze({
   "application/vnd.android.package-archive": "apk",
 });
 const HEX64 = /^[a-f0-9]{64}$/;
+const EVIDENCE_ID = /^gfn_[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const REF_SEGMENT = /^[A-Za-z0-9._~/-]{8,400}$/;
 const OPERATOR = /^[A-Za-z][A-Za-z .,'@_-]{1,159}$/;
 const INVALIDATION_REASONS = new Set(["SOURCE_REMOVED", "SOURCE_AMBIGUOUS", "PROJECT_MISMATCH", "UPLOAD_METHOD_INVALID"]);
@@ -60,7 +64,7 @@ function exactKeys(value, keys, label) {
 function canonicalTimestamp(value, field = "observedAt") {
   const raw = text(value, 64);
   const at = Date.parse(raw);
-  if (!raw || !Number.isFinite(at) || new Date(at).toISOString() !== raw) {
+  if (typeof value !== "string" || value !== raw || !raw || !Number.isFinite(at) || new Date(at).toISOString() !== raw) {
     fail("bad_native_project_manifest", `${field} must be an exact ISO-8601 timestamp.`);
   }
   return raw;
@@ -97,7 +101,8 @@ function browserReference(value) {
   const raw = text(value, 500);
   const prefix = `chatgpt-project-browser://${LOCKED_NATIVE_CHATGPT_PROJECT_ID}/`;
   const rest = raw.startsWith(prefix) ? raw.slice(prefix.length) : "";
-  if (!rest || !REF_SEGMENT.test(rest) || rest.includes("..") || raw.includes("?") || raw.includes("#")) {
+  if (typeof value !== "string" || value !== raw || !rest || !REF_SEGMENT.test(rest)
+      || rest.includes("..") || raw.includes("?") || raw.includes("#")) {
     fail("bad_browser_evidence_reference", "browserEvidenceRef must be an opaque owner-browser reference for the locked native Project.");
   }
   return raw;
@@ -106,16 +111,17 @@ function apiReference(value) {
   const raw = text(value, 500);
   const prefix = `chatgpt-project-api://${LOCKED_NATIVE_CHATGPT_PROJECT_ID}/`;
   const rest = raw.startsWith(prefix) ? raw.slice(prefix.length) : "";
-  if (!rest || !REF_SEGMENT.test(rest) || rest.includes("..") || raw.includes("?") || raw.includes("#")) {
+  if (typeof value !== "string" || value !== raw || !rest || !REF_SEGMENT.test(rest)
+      || rest.includes("..") || raw.includes("?") || raw.includes("#")) {
     fail("bad_native_api_receipt", "verificationReceiptRef must be an opaque documented-native-API reference for the locked Project.");
   }
   return raw;
 }
 function boundArtifactFields(input, artifact, filename) {
   const current = expectedArtifact(artifact);
-  if (text(input.artifactId, 180) !== current.id || text(input.artifactKey, 120).toUpperCase() !== current.key
-      || Number(input.artifactVersion) !== current.version || text(input.sha256, 64).toLowerCase() !== current.sha256
-      || Number(input.size) !== current.size || text(input.filename, 300) !== filename) {
+  if (input.artifactId !== current.id || input.artifactKey !== current.key
+      || input.artifactVersion !== current.version || input.sha256 !== current.sha256
+      || input.size !== current.size || input.filename !== filename) {
     fail("native_project_artifact_mismatch", "The native Project evidence does not bind the exact current artifact version, hash, size, and filename.");
   }
   return current;
@@ -131,22 +137,22 @@ export function normalizeOwnerAttestedNativeProjectManifest(input, artifact, { s
     ...(stored ? ["manifestHash"] : []),
   ];
   exactKeys(input, keys, "owner-attested native Project manifest");
-  if (Number(input.formatVersion) !== NATIVE_PROJECT_EVIDENCE_FORMAT_VERSION || input.kind !== NATIVE_PROJECT_OWNER_ATTESTED_STATUS
-      || text(input.nativeProjectId, 120) !== LOCKED_NATIVE_CHATGPT_PROJECT_ID) {
+  if (input.formatVersion !== NATIVE_PROJECT_EVIDENCE_FORMAT_VERSION || input.kind !== NATIVE_PROJECT_OWNER_ATTESTED_STATUS
+      || input.nativeProjectId !== LOCKED_NATIVE_CHATGPT_PROJECT_ID) {
     fail("bad_native_project_manifest", "The owner-attested manifest is not for the locked native Project evidence format.");
   }
   const filename = expectedNativeProjectFilename(artifact);
   const current = boundArtifactFields(input, artifact, filename);
-  if (Number(input.sourceCount) !== 1 || text(input.uploadMethod, 80) !== "BROWSER_FILE_UPLOAD"
-      || text(input.evidenceOrigin, 120) !== "OWNER_CONTROLLED_CHATGPT_PROJECT_BROWSER"
+  if (input.sourceCount !== 1 || input.uploadMethod !== "BROWSER_FILE_UPLOAD"
+      || input.evidenceOrigin !== "OWNER_CONTROLLED_CHATGPT_PROJECT_BROWSER"
       || input.sourceListVisible !== true || input.screenshotOnly !== false) {
     fail("native_project_browser_proof_invalid", "Owner-attested fallback requires one visible file uploaded through the native Project browser file-upload control; screenshots, pasted text, and local observations are insufficient.");
   }
   const operator = text(input.operator, 160);
-  if (!OPERATOR.test(operator) || operator !== OWNER_ATTESTATION_OPERATOR) {
+  if (input.operator !== operator || !OPERATOR.test(operator) || operator !== OWNER_ATTESTATION_OPERATOR) {
     fail("owner_attestation_operator_required", "The fallback requires the exact named project owner as operator.");
   }
-  if (text(input.ownerAttestation, 500) !== OWNER_ATTESTATION_ACKNOWLEDGEMENT) {
+  if (input.ownerAttestation !== OWNER_ATTESTATION_ACKNOWLEDGEMENT) {
     fail("owner_attestation_acknowledgement_required", "The required owner browser-upload acknowledgement is missing.");
   }
   const payload = {
@@ -170,7 +176,7 @@ export function normalizeOwnerAttestedNativeProjectManifest(input, artifact, { s
     ownerAttestation: OWNER_ATTESTATION_ACKNOWLEDGEMENT,
   };
   const bound = bind(payload);
-  if (stored && text(input.manifestHash, 64).toLowerCase() !== bound.manifestHash) {
+  if (stored && input.manifestHash !== bound.manifestHash) {
     fail("native_project_manifest_hash_mismatch", "The stored owner-attested manifest hash does not match its canonical payload.");
   }
   return bound;
@@ -183,14 +189,14 @@ export function normalizeNativeApiProjectManifest(input, artifact, { stored = fa
     ...(stored ? ["manifestHash"] : []),
   ];
   exactKeys(input, keys, "native API Project manifest");
-  if (Number(input.formatVersion) !== NATIVE_PROJECT_EVIDENCE_FORMAT_VERSION || input.kind !== NATIVE_PROJECT_API_VERIFIED_STATUS
-      || text(input.nativeProjectId, 120) !== LOCKED_NATIVE_CHATGPT_PROJECT_ID || Number(input.sourceCount) !== 1) {
+  if (input.formatVersion !== NATIVE_PROJECT_EVIDENCE_FORMAT_VERSION || input.kind !== NATIVE_PROJECT_API_VERIFIED_STATUS
+      || input.nativeProjectId !== LOCKED_NATIVE_CHATGPT_PROJECT_ID || input.sourceCount !== 1) {
     fail("bad_native_project_manifest", "The native API manifest is not for the locked Project or does not prove exactly one source.");
   }
   const filename = expectedNativeProjectFilename(artifact);
   const current = boundArtifactFields(input, artifact, filename);
   const apiVersion = text(input.apiVersion, 120);
-  if (!apiVersion || !/^[A-Za-z0-9._-]{1,120}$/.test(apiVersion)) fail("bad_native_api_receipt", "A documented native API version is required.");
+  if (input.apiVersion !== apiVersion || !apiVersion || !/^[A-Za-z0-9._-]{1,120}$/.test(apiVersion)) fail("bad_native_api_receipt", "A documented native API version is required.");
   const payload = {
     formatVersion: NATIVE_PROJECT_EVIDENCE_FORMAT_VERSION,
     kind: NATIVE_PROJECT_API_VERIFIED_STATUS,
@@ -207,7 +213,7 @@ export function normalizeNativeApiProjectManifest(input, artifact, { stored = fa
     verificationReceiptRef: apiReference(input.verificationReceiptRef),
   };
   const bound = bind(payload);
-  if (stored && text(input.manifestHash, 64).toLowerCase() !== bound.manifestHash) {
+  if (stored && input.manifestHash !== bound.manifestHash) {
     fail("native_project_manifest_hash_mismatch", "The stored native API manifest hash does not match its canonical payload.");
   }
   return bound;
@@ -220,9 +226,9 @@ export function normalizeNativeProjectInvalidationManifest(input, { stored = fal
   ];
   exactKeys(input, keys, "native Project invalidation manifest");
   const reason = text(input.reason, 80);
-  const sourceCount = Number(input.observedSourceCount);
-  if (Number(input.formatVersion) !== NATIVE_PROJECT_EVIDENCE_FORMAT_VERSION || input.kind !== "INVALIDATED"
-      || text(input.nativeProjectId, 120) !== LOCKED_NATIVE_CHATGPT_PROJECT_ID || !INVALIDATION_REASONS.has(reason)
+  const sourceCount = input.observedSourceCount;
+  if (input.formatVersion !== NATIVE_PROJECT_EVIDENCE_FORMAT_VERSION || input.kind !== "INVALIDATED"
+      || input.nativeProjectId !== LOCKED_NATIVE_CHATGPT_PROJECT_ID || input.reason !== reason || !INVALIDATION_REASONS.has(reason)
       || !Number.isSafeInteger(sourceCount) || sourceCount < 0) {
     fail("bad_native_project_invalidation", "The native Project invalidation manifest is invalid.");
   }
@@ -231,7 +237,8 @@ export function normalizeNativeProjectInvalidationManifest(input, { stored = fal
   }
   const evidenceId = text(input.evidenceId, 180);
   const operator = text(input.operator, 160);
-  if (!evidenceId || !OPERATOR.test(operator) || operator !== OWNER_ATTESTATION_OPERATOR) {
+  if (input.evidenceId !== evidenceId || input.operator !== operator || !nativeProjectEvidenceIdValid(evidenceId)
+      || !OPERATOR.test(operator) || operator !== OWNER_ATTESTATION_OPERATOR) {
     fail("owner_attestation_operator_required", "Only the named owner can invalidate native Project evidence.");
   }
   const payload = {
@@ -246,14 +253,77 @@ export function normalizeNativeProjectInvalidationManifest(input, { stored = fal
     browserEvidenceRef: browserReference(input.browserEvidenceRef),
   };
   const bound = bind(payload);
-  if (stored && text(input.manifestHash, 64).toLowerCase() !== bound.manifestHash) {
+  if (stored && input.manifestHash !== bound.manifestHash) {
     fail("native_project_manifest_hash_mismatch", "The stored invalidation manifest hash does not match its canonical payload.");
   }
   return bound;
 }
 
-export function nativeProjectEvidenceCanComplete(copy) {
-  if (!copy || copy.backend !== "chatgpt_project" || copy.algorithm !== "sha256" || !HEX64.test(String(copy.fingerprint || ""))) return false;
-  return copy.status === NATIVE_PROJECT_API_VERIFIED_STATUS
-    || (OWNER_ATTESTED_NATIVE_PROJECT_FALLBACK_APPROVED && copy.status === NATIVE_PROJECT_OWNER_ATTESTED_STATUS);
+export function nativeProjectEvidenceIdValid(value) {
+  return EVIDENCE_ID.test(String(value || ""));
+}
+
+/*
+ * Completion callers receive the store's validated projection, not the raw ledger row.  Recheck
+ * every immutable artifact binding here anyway so a caller-shaped status/fingerprint pair cannot
+ * be mistaken for native Project evidence by the planner or release assessor.
+ */
+export function nativeProjectEvidenceCanComplete(copy, artifact) {
+  try {
+    const current = expectedArtifact(artifact);
+    const filename = expectedNativeProjectFilename(artifact);
+    if (!plainObject(copy) || copy.backend !== "chatgpt_project" || copy.algorithm !== "sha256"
+        || copy.nativeProjectId !== LOCKED_NATIVE_CHATGPT_PROJECT_ID
+        || !nativeProjectEvidenceIdValid(copy.id) || !HEX64.test(String(copy.manifestHash || ""))
+        || copy.fingerprint !== current.sha256 || copy.artifactId !== current.id
+        || copy.artifactKey !== current.key || copy.artifactVersion !== current.version
+        || copy.size !== current.size || copy.filename !== filename || copy.sourceCount !== 1) {
+      return false;
+    }
+    if (copy.status === NATIVE_PROJECT_API_VERIFIED_STATUS) {
+      if (copy.provenance !== "NATIVE_API_VERIFIED") return false;
+      const bound = normalizeNativeApiProjectManifest({
+        formatVersion: NATIVE_PROJECT_EVIDENCE_FORMAT_VERSION,
+        kind: NATIVE_PROJECT_API_VERIFIED_STATUS,
+        nativeProjectId: copy.nativeProjectId,
+        artifactId: copy.artifactId,
+        artifactKey: copy.artifactKey,
+        artifactVersion: copy.artifactVersion,
+        sha256: copy.fingerprint,
+        size: copy.size,
+        filename: copy.filename,
+        sourceCount: copy.sourceCount,
+        verifiedAt: copy.nativeVerifiedAt,
+        apiVersion: copy.apiVersion,
+        verificationReceiptRef: copy.verificationReceiptRef,
+      }, artifact);
+      return bound.manifestHash === copy.manifestHash;
+    }
+    if (!OWNER_ATTESTED_NATIVE_PROJECT_FALLBACK_APPROVED
+        || copy.status !== NATIVE_PROJECT_OWNER_ATTESTED_STATUS
+        || copy.provenance !== "OWNER_ATTESTED_BROWSER_UPLOAD") return false;
+    const bound = normalizeOwnerAttestedNativeProjectManifest({
+      formatVersion: NATIVE_PROJECT_EVIDENCE_FORMAT_VERSION,
+      kind: NATIVE_PROJECT_OWNER_ATTESTED_STATUS,
+      nativeProjectId: copy.nativeProjectId,
+      artifactId: copy.artifactId,
+      artifactKey: copy.artifactKey,
+      artifactVersion: copy.artifactVersion,
+      sha256: copy.fingerprint,
+      size: copy.size,
+      filename: copy.filename,
+      sourceCount: copy.sourceCount,
+      operator: copy.operator,
+      observedAt: copy.observedAt,
+      browserEvidenceRef: copy.browserEvidenceRef,
+      uploadMethod: copy.uploadMethod,
+      evidenceOrigin: copy.evidenceOrigin,
+      sourceListVisible: copy.sourceListVisible,
+      screenshotOnly: copy.screenshotOnly,
+      ownerAttestation: copy.ownerAttestation,
+    }, artifact);
+    return bound.manifestHash === copy.manifestHash;
+  } catch {
+    return false;
+  }
 }

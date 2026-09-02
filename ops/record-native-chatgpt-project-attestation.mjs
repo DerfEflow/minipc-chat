@@ -7,8 +7,9 @@
  * attestation in the local append-only Game Factory ledger.  It deliberately reads a regular
  * manifest file rather than accepting pasted JSON or stdin.
  */
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { TextDecoder } from "node:util";
 import { createGameFactoryStore } from "../gamefactorystore.mjs";
 import { LOCKED_NATIVE_CHATGPT_PROJECT_ID } from "../gamefactorynativeevidence.mjs";
 
@@ -51,8 +52,8 @@ function parseArgs(argv) {
 function regularJsonManifest(input) {
   if (!isAbsolute(input)) throw new Error("--manifest must be an absolute path to a regular JSON file.");
   const requested = resolve(input);
-  const stat = lstatSync(requested);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 64 * 1024) {
+  const beforeOpen = lstatSync(requested, { bigint: true });
+  if (!beforeOpen.isFile() || beforeOpen.isSymbolicLink() || beforeOpen.size < 2n || beforeOpen.size > 64n * 1024n) {
     throw new Error("--manifest must be a non-symlink regular JSON file between 2 bytes and 64 KiB.");
   }
   const resolvedTarget = resolve(realpathSync(requested));
@@ -60,9 +61,38 @@ function regularJsonManifest(input) {
     ? resolvedTarget.toLowerCase() === requested.toLowerCase()
     : resolvedTarget === requested;
   if (!samePath) throw new Error("--manifest must not resolve through a link.");
+  let flags = constants.O_RDONLY;
+  if (Number.isInteger(constants.O_NOFOLLOW)) flags |= constants.O_NOFOLLOW;
+  if (Number.isInteger(constants.O_CLOEXEC)) flags |= constants.O_CLOEXEC;
+  let descriptor;
+  let bytes;
+  try {
+    descriptor = openSync(requested, flags);
+    const opened = fstatSync(descriptor, { bigint: true });
+    const afterOpen = lstatSync(requested, { bigint: true });
+    const afterResolved = resolve(realpathSync(requested));
+    const sameResolvedPath = process.platform === "win32"
+      ? afterResolved.toLowerCase() === requested.toLowerCase()
+      : afterResolved === requested;
+    if (!opened.isFile() || !afterOpen.isFile() || afterOpen.isSymbolicLink() || !sameResolvedPath
+        || opened.dev !== beforeOpen.dev || opened.ino !== beforeOpen.ino
+        || afterOpen.dev !== opened.dev || afterOpen.ino !== opened.ino
+        || opened.size !== beforeOpen.size || opened.size < 2n || opened.size > 64n * 1024n) {
+      throw new Error("--manifest changed identity or stopped being a non-symlink regular file while it was opened.");
+    }
+    bytes = readFileSync(descriptor);
+    const afterRead = fstatSync(descriptor, { bigint: true });
+    if (afterRead.dev !== opened.dev || afterRead.ino !== opened.ino || afterRead.size !== opened.size
+        || afterRead.mtimeNs !== opened.mtimeNs || afterRead.ctimeNs !== opened.ctimeNs
+        || BigInt(bytes.length) !== opened.size) {
+      throw new Error("--manifest changed while its bytes were being read.");
+    }
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
   let parsed;
-  try { parsed = JSON.parse(readFileSync(requested, "utf8")); }
-  catch { throw new Error("--manifest must contain valid JSON."); }
+  try { parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
+  catch { throw new Error("--manifest must contain valid UTF-8 JSON."); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("--manifest must contain a JSON object.");
   return parsed;
 }

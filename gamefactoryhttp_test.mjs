@@ -81,7 +81,7 @@ function recordVerifiedArtifact(projectId, artifactKey, fill) {
       formatVersion: 1, kind: NATIVE_PROJECT_OWNER_ATTESTED_STATUS, nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
       artifactId: current.id, artifactKey: current.artifactKey, artifactVersion: current.version,
       sha256: current.sha256, size: current.size, filename: expectedNativeProjectFilename(current), sourceCount: 1,
-      operator: OWNER_ATTESTATION_OPERATOR, observedAt: "2026-09-02T12:00:00.000Z",
+      operator: OWNER_ATTESTATION_OPERATOR, observedAt: new Date(current.createdAt).toISOString(),
       browserEvidenceRef: `chatgpt-project-browser://${LOCKED_NATIVE_CHATGPT_PROJECT_ID}/visible/${current.id}`,
       uploadMethod: "BROWSER_FILE_UPLOAD", evidenceOrigin: "OWNER_CONTROLLED_CHATGPT_PROJECT_BROWSER",
       sourceListVisible: true, screenshotOnly: false, ownerAttestation: OWNER_ATTESTATION_ACKNOWLEDGEMENT,

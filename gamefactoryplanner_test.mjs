@@ -2,10 +2,41 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { MANDATORY_ARTIFACT_BACKENDS, REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
 import { createGameFactoryPlanner } from "./gamefactoryplanner.mjs";
+import {
+  LOCKED_NATIVE_CHATGPT_PROJECT_ID, NATIVE_PROJECT_OWNER_ATTESTED_STATUS, OWNER_ATTESTATION_ACKNOWLEDGEMENT,
+  OWNER_ATTESTATION_OPERATOR, expectedNativeProjectFilename, nativeProjectEvidenceCanComplete,
+  normalizeOwnerAttestedNativeProjectManifest,
+} from "./gamefactorynativeevidence.mjs";
 import { renderGameArtifact } from "./gamefactorytemplates.mjs";
 
 const clone = (value) => structuredClone(value);
 const digest = (value) => createHash("sha256").update(Buffer.from(value, "utf8")).digest("hex");
+
+function nativeCopy(artifact) {
+  const observedAt = "2026-09-02T12:00:00.000Z";
+  const manifest = normalizeOwnerAttestedNativeProjectManifest({
+    formatVersion: 1, kind: NATIVE_PROJECT_OWNER_ATTESTED_STATUS,
+    nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID, artifactId: artifact.id,
+    artifactKey: artifact.artifactKey, artifactVersion: artifact.version, sha256: artifact.sha256,
+    size: artifact.size, filename: expectedNativeProjectFilename(artifact), sourceCount: 1,
+    operator: OWNER_ATTESTATION_OPERATOR, observedAt,
+    browserEvidenceRef: `chatgpt-project-browser://${LOCKED_NATIVE_CHATGPT_PROJECT_ID}/visible/${artifact.id}`,
+    uploadMethod: "BROWSER_FILE_UPLOAD", evidenceOrigin: "OWNER_CONTROLLED_CHATGPT_PROJECT_BROWSER",
+    sourceListVisible: true, screenshotOnly: false, ownerAttestation: OWNER_ATTESTATION_ACKNOWLEDGEMENT,
+  }, artifact);
+  return {
+    id: "gfn_00000000-0000-4000-8000-000000000000", backend: "chatgpt_project",
+    status: NATIVE_PROJECT_OWNER_ATTESTED_STATUS, fingerprint: artifact.sha256, algorithm: "sha256",
+    nativeProjectId: manifest.nativeProjectId, manifestHash: manifest.manifestHash,
+    artifactId: artifact.id, artifactKey: artifact.artifactKey, artifactVersion: artifact.version,
+    size: artifact.size, filename: manifest.filename, sourceCount: 1,
+    provenance: "OWNER_ATTESTED_BROWSER_UPLOAD", operator: OWNER_ATTESTATION_OPERATOR,
+    observedAt, browserEvidenceRef: manifest.browserEvidenceRef,
+    uploadMethod: manifest.uploadMethod, evidenceOrigin: manifest.evidenceOrigin,
+    sourceListVisible: manifest.sourceListVisible, screenshotOnly: manifest.screenshotOnly,
+    ownerAttestation: manifest.ownerAttestation,
+  };
+}
 
 function harness({
   localWritesEnabled = true,
@@ -13,6 +44,7 @@ function harness({
   failIngestOnce = "",
   failMirror = "",
   nativeCopiesVerified = false,
+  callerShapedNativeCopies = false,
   mirrorEvidenceMissing = "",
 } = {}) {
   const commands = new Map();
@@ -24,15 +56,27 @@ function harness({
     approvalSubjects: { SPECIFICATION: { ready: false, code: "approval_subject_missing" } },
   };
   let executeCalls = 0, ingestCalls = 0, mirrorCalls = 0;
+  const copyComplete = (artifact, backend) => {
+    const copy = artifact?.copies?.find((candidate) => candidate.backend === backend);
+    if (!copy || copy.algorithm !== "sha256" || copy.fingerprint !== artifact.sha256) return false;
+    return backend === "chatgpt_project" ? nativeProjectEvidenceCanComplete(copy, artifact) : copy.status === "VERIFIED";
+  };
   const store = {
     getProject(uid, projectId) {
       if (uid !== project.uid || projectId !== project.id) return null;
+      for (const artifact of project.artifacts) {
+        artifact.complete = MANDATORY_ARTIFACT_BACKENDS.every((backend) => copyComplete(artifact, backend));
+      }
       const copy = clone(project);
       const relevant = new Set(["00_GAME_BRIEF", "01_MARKET_CASE", "02_RELEASE_ROADMAP", "03_BUILD_WORKFLOW"]);
       const relevantReady = copy.artifacts.filter((item) => relevant.has(item.artifactKey)).length === relevant.size
         && copy.artifacts.filter((item) => relevant.has(item.artifactKey)).every((item) => item.complete);
       copy.approvalSubjects.SPECIFICATION = relevantReady ? { ready: true, hash: "a".repeat(64) } : { ready: false, code: "approval_artifact_copies_missing" };
       return copy;
+    },
+    artifactCopyComplete({ uid, projectId, artifactId, backend }) {
+      if (uid !== project.uid || projectId !== project.id) return false;
+      return copyComplete(project.artifacts.find((artifact) => artifact.id === artifactId), backend);
     },
     executeCommand(input) {
       executeCalls++;
@@ -70,6 +114,8 @@ function harness({
         const primary = artifact.copies.find((copy) => copy.backend === "primary");
         if (!primary) artifact.copies.push({ backend: "primary", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 });
         if (nativeCopiesVerified && !artifact.copies.some((copy) => copy.backend === "chatgpt_project")) {
+          artifact.copies.push(nativeCopy(artifact));
+        } else if (callerShapedNativeCopies && !artifact.copies.some((copy) => copy.backend === "chatgpt_project")) {
           artifact.copies.push({ backend: "chatgpt_project", status: "OWNER_ATTESTED", algorithm: "sha256", fingerprint: sha256 });
         }
         return { status: 200, body: { ok: true, artifactId: artifact.id, version: artifact.version, sha256, size, reused: true } };
@@ -77,11 +123,12 @@ function harness({
       const version = (versions.get(artifactKey) || 0) + 1;
       versions.set(artifactKey, version);
       const copies = [{ backend: "primary", status: "VERIFIED", algorithm: "sha256", fingerprint: sha256 }];
-      if (nativeCopiesVerified) copies.push({ backend: "chatgpt_project", status: "OWNER_ATTESTED", algorithm: "sha256", fingerprint: sha256 });
       artifact = {
         id: `artifact-${artifactKey}-${version}`, artifactKey, version, sha256, size, mimeType,
         provenance, copies, complete: false,
       };
+      if (nativeCopiesVerified) artifact.copies.push(nativeCopy(artifact));
+      else if (callerShapedNativeCopies) artifact.copies.push({ backend: "chatgpt_project", status: "OWNER_ATTESTED", algorithm: "sha256", fingerprint: sha256 });
       project.artifacts.push(artifact);
       project.version++;
       return { status: 201, body: { ok: true, artifactId: artifact.id, version, sha256, size } };
@@ -95,8 +142,7 @@ function harness({
       }
       artifact.copies = artifact.copies.filter((copy) => copy.backend !== "google_drive");
       artifact.copies.push({ backend: "google_drive", status: "VERIFIED", algorithm: "sha256", fingerprint: artifact.sha256 });
-      artifact.complete = MANDATORY_ARTIFACT_BACKENDS.every((backend) => artifact.copies.some((copy) => copy.backend === backend
-        && (copy.status === "VERIFIED" || (backend === "chatgpt_project" && copy.status === "OWNER_ATTESTED"))));
+      artifact.complete = MANDATORY_ARTIFACT_BACKENDS.every((backend) => copyComplete(artifact, backend));
       project.version++;
       return { status: 200, body: { ok: true, artifactId, sha256: artifact.sha256, size: artifact.size } };
     },
@@ -173,6 +219,15 @@ await test("2xx Drive results cannot hide a missing mandatory native-project cop
   assert.equal(response.body.failures.mirror.length, 0);
   assert.equal(response.body.failures.mandatoryCopies.length, REQUIRED_GAME_ARTIFACTS.length);
   for (const failure of response.body.failures.mandatoryCopies) assert.deepEqual(failure.backends, ["chatgpt_project"]);
+});
+
+await test("caller-shaped owner-attested copy objects cannot convince the planner", async () => {
+  const h = harness({ callerShapedNativeCopies: true });
+  const planner = createGameFactoryPlanner({ store: h.store, artifactMirror: h.artifactMirror });
+  const response = await planner.startSpecification({ uid: "owner", projectId: h.project.id, key: "start-forged-native", expectedVersion: 1 });
+  assert.equal(response.status, 503);
+  assert.equal(response.body.code, "mandatory_artifact_copies_incomplete");
+  assert.equal(response.body.artifacts.every((artifact) => artifact.requiredCopies.find((copy) => copy.backend === "chatgpt_project")?.verified === false), true);
 });
 
 await test("a 2xx mirror response without verified store evidence remains a loud partial failure", async () => {

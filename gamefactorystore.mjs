@@ -15,8 +15,9 @@ import {
   defaultNextState, transitionDecision, allowedTransitions, stateProgress, approvalAllowed,
 } from "./gamefactory.mjs";
 import {
-  LOCKED_NATIVE_CHATGPT_PROJECT_ID, NATIVE_PROJECT_API_VERIFIED_STATUS, NATIVE_PROJECT_OWNER_ATTESTED_STATUS,
-  nativeProjectEvidenceCanComplete, normalizeNativeApiProjectManifest,
+  LOCKED_NATIVE_CHATGPT_PROJECT_ID, NATIVE_PROJECT_API_VERIFIED_STATUS, NATIVE_PROJECT_EVIDENCE_CLOCK_SKEW_MS,
+  NATIVE_PROJECT_OWNER_ATTESTED_STATUS, nativeProjectEvidenceCanComplete, nativeProjectEvidenceIdValid,
+  normalizeNativeApiProjectManifest,
   normalizeNativeProjectInvalidationManifest, normalizeOwnerAttestedNativeProjectManifest,
 } from "./gamefactorynativeevidence.mjs";
 
@@ -459,7 +460,7 @@ export function createGameFactoryStore({
     releases: db.prepare("SELECT rowid AS sequence,* FROM game_releases WHERE projectId=? AND uid=? ORDER BY updatedAt DESC,rowid DESC"),
     artifacts: db.prepare("SELECT * FROM game_artifacts WHERE projectId=? AND uid=? ORDER BY artifactKey, version DESC"),
     copies: db.prepare("SELECT * FROM game_artifact_copies WHERE artifactId=? ORDER BY backend"),
-    nativeEvidence: db.prepare("SELECT * FROM game_artifact_native_evidence WHERE artifactId=? ORDER BY createdAt,id"),
+    nativeEvidence: db.prepare("SELECT rowid AS sequence,* FROM game_artifact_native_evidence WHERE artifactId=? ORDER BY rowid"),
     nativeEvidenceById: db.prepare("SELECT * FROM game_artifact_native_evidence WHERE id=?"),
     queued: db.prepare(`SELECT t.* FROM game_tasks t JOIN game_projects p ON p.id=t.projectId AND p.uid=t.uid
       WHERE t.status='QUEUED' AND t.cancelRequested=0 AND p.state NOT IN ('PAUSED','BLOCKED','FAILED','DEPLOYED')
@@ -517,97 +518,150 @@ export function createGameFactoryStore({
     };
   }
 
-  function nativeEvidenceCopy(row, legacyRows = []) {
+  function nativeEvidenceState(row, legacyRows = []) {
     const artifact = nativeEvidenceArtifact(row);
     const entries = q.nativeEvidence.all(row.id);
     const byId = new Map(entries.map((entry) => [entry.id, entry]));
     const invalidated = new Set();
-    let corrupt = false;
+    const recorded = [];
+    let corrupt = !Number.isSafeInteger(Number(row.createdAt));
+    let lastObservedAt = null;
+    let lastCreatedAt = null;
 
     for (const entry of entries) {
-      if (entry.kind !== "INVALIDATED") continue;
       try {
-        const manifest = normalizeNativeProjectInvalidationManifest(parse(entry.manifest, {}), { stored: true });
-        const target = byId.get(manifest.evidenceId);
-        if (!target || target.kind === "INVALIDATED" || entry.targetEvidenceId !== manifest.evidenceId
+        if (!nativeProjectEvidenceIdValid(entry.id) || entry.artifactId !== row.id
             || entry.projectId !== row.projectId || entry.uid !== row.uid
             || entry.nativeProjectId !== LOCKED_NATIVE_CHATGPT_PROJECT_ID
-            || entry.manifestHash !== manifest.manifestHash
-            || entry.operator !== manifest.operator || entry.browserEvidenceRef !== manifest.browserEvidenceRef) {
-          corrupt = true;
+            || !Number.isSafeInteger(Number(entry.createdAt)) || Number(entry.createdAt) < Number(row.createdAt)
+            || (lastCreatedAt !== null && Number(entry.createdAt) < lastCreatedAt)) {
+          throw new Error("native Project evidence row metadata is inconsistent");
+        }
+        const manifest = entry.kind === "INVALIDATED"
+          ? normalizeNativeProjectInvalidationManifest(parse(entry.manifest, {}), { stored: true })
+          : entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS
+            ? normalizeOwnerAttestedNativeProjectManifest(parse(entry.manifest, {}), artifact, { stored: true })
+            : entry.kind === NATIVE_PROJECT_API_VERIFIED_STATUS
+              ? normalizeNativeApiProjectManifest(parse(entry.manifest, {}), artifact, { stored: true })
+              : null;
+        if (!manifest) throw new Error("unknown native Project evidence kind");
+        const observedAt = Date.parse(entry.kind === NATIVE_PROJECT_API_VERIFIED_STATUS ? manifest.verifiedAt : manifest.observedAt);
+        if (!Number.isFinite(observedAt) || observedAt < Number(row.createdAt)
+            || observedAt > Number(entry.createdAt) + NATIVE_PROJECT_EVIDENCE_CLOCK_SKEW_MS
+            || (lastObservedAt !== null && observedAt <= lastObservedAt)) {
+          throw new Error("native Project evidence chronology is inconsistent");
+        }
+        lastObservedAt = observedAt;
+        lastCreatedAt = Number(entry.createdAt);
+
+        if (entry.kind === "INVALIDATED") {
+          const target = byId.get(manifest.evidenceId);
+          if (!target || target.kind === "INVALIDATED" || Number(target.sequence) >= Number(entry.sequence)
+              || entry.targetEvidenceId !== manifest.evidenceId || entry.fingerprint !== "" || Number(entry.size) !== 0
+              || entry.manifestHash !== manifest.manifestHash || entry.operator !== manifest.operator
+              || entry.browserEvidenceRef !== manifest.browserEvidenceRef || invalidated.has(manifest.evidenceId)) {
+            throw new Error("native Project invalidation row is inconsistent");
+          }
+          invalidated.add(manifest.evidenceId);
           continue;
         }
-        invalidated.add(manifest.evidenceId);
-      } catch { corrupt = true; }
-    }
 
-    const active = [];
-    for (const entry of entries) {
-      if (![NATIVE_PROJECT_OWNER_ATTESTED_STATUS, NATIVE_PROJECT_API_VERIFIED_STATUS].includes(entry.kind)) continue;
-      try {
-        const manifest = entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS
-          ? normalizeOwnerAttestedNativeProjectManifest(parse(entry.manifest, {}), artifact, { stored: true })
-          : normalizeNativeApiProjectManifest(parse(entry.manifest, {}), artifact, { stored: true });
-        const operator = entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? manifest.operator : "";
-        const browserEvidenceRef = entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? manifest.browserEvidenceRef : "";
-        if (entry.projectId !== row.projectId || entry.uid !== row.uid || entry.nativeProjectId !== LOCKED_NATIVE_CHATGPT_PROJECT_ID
-            || entry.manifestHash !== manifest.manifestHash || entry.fingerprint !== artifact.sha256 || Number(entry.size) !== Number(artifact.size)
-            || entry.operator !== operator || entry.browserEvidenceRef !== browserEvidenceRef) {
-          corrupt = true;
-          continue;
+        const ownerAttested = entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS;
+        const candidate = {
+          id: entry.id, backend: "chatgpt_project", status: entry.kind, fingerprint: manifest.sha256,
+          algorithm: "sha256", attempts: 1, lastError: "", verifiedAt: Number(entry.createdAt),
+          provenance: ownerAttested ? "OWNER_ATTESTED_BROWSER_UPLOAD" : "NATIVE_API_VERIFIED",
+          nativeProjectId: manifest.nativeProjectId, manifestHash: manifest.manifestHash,
+          artifactId: manifest.artifactId, artifactKey: manifest.artifactKey,
+          artifactVersion: manifest.artifactVersion, size: manifest.size, filename: manifest.filename,
+          sourceCount: manifest.sourceCount,
+          operator: ownerAttested ? manifest.operator : "",
+          observedAt: ownerAttested ? manifest.observedAt : "",
+          browserEvidenceRef: ownerAttested ? manifest.browserEvidenceRef : "",
+          uploadMethod: ownerAttested ? manifest.uploadMethod : "",
+          evidenceOrigin: ownerAttested ? manifest.evidenceOrigin : "",
+          sourceListVisible: ownerAttested ? manifest.sourceListVisible : false,
+          screenshotOnly: ownerAttested ? manifest.screenshotOnly : false,
+          ownerAttestation: ownerAttested ? manifest.ownerAttestation : "",
+          nativeVerifiedAt: ownerAttested ? "" : manifest.verifiedAt,
+          apiVersion: ownerAttested ? "" : manifest.apiVersion,
+          verificationReceiptRef: ownerAttested ? "" : manifest.verificationReceiptRef,
+        };
+        if (entry.targetEvidenceId !== "" || entry.manifestHash !== manifest.manifestHash
+            || entry.fingerprint !== artifact.sha256 || Number(entry.size) !== Number(artifact.size)
+            || entry.operator !== candidate.operator || entry.browserEvidenceRef !== candidate.browserEvidenceRef
+            || !nativeProjectEvidenceCanComplete(candidate, artifact)) {
+          throw new Error("native Project evidence row is inconsistent");
         }
-        if (!invalidated.has(entry.id)) active.push({ entry, manifest });
-      } catch { corrupt = true; }
+        recorded.push(candidate);
+      } catch {
+        corrupt = true;
+      }
     }
 
+    const state = { entries, lastObservedAt, lastCreatedAt };
+    const active = recorded.filter((candidate) => !invalidated.has(candidate.id));
     if (corrupt) {
-      return {
+      state.copy = {
         backend: "chatgpt_project", status: "EVIDENCE_CORRUPT", fingerprint: "", algorithm: "sha256", attempts: entries.length,
         lastError: "Append-only native Project evidence is malformed or internally inconsistent.", verifiedAt: 0,
         provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
       };
-    }
-    if (active.length > 1) {
-      return {
+    } else if (active.length > 1) {
+      state.copy = {
         backend: "chatgpt_project", status: "AMBIGUOUS", fingerprint: "", algorithm: "sha256", attempts: entries.length,
         lastError: "More than one active native Project evidence record exists; explicit invalidation is required before completion.", verifiedAt: 0,
         provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
       };
-    }
-    if (active.length === 1) {
-      const { entry, manifest } = active[0];
-      return {
-        id: entry.id, backend: "chatgpt_project", status: entry.kind, fingerprint: artifact.sha256, algorithm: "sha256", attempts: 1,
-        lastError: "", verifiedAt: entry.createdAt,
-        provenance: entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? "OWNER_ATTESTED_BROWSER_UPLOAD" : "NATIVE_API_VERIFIED",
-        nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID, manifestHash: manifest.manifestHash,
-        browserEvidenceRef: entry.kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? manifest.browserEvidenceRef : "",
-      };
-    }
-    if (entries.some((entry) => entry.kind === "INVALIDATED")) {
-      return {
+    } else if (active.length === 1) {
+      state.copy = active[0];
+    } else if (entries.some((entry) => entry.kind === "INVALIDATED")) {
+      state.copy = {
         backend: "chatgpt_project", status: "INVALIDATED", fingerprint: "", algorithm: "sha256", attempts: entries.length,
         lastError: "The prior native Project evidence was invalidated by a later owner browser observation.", verifiedAt: 0,
         provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
       };
-    }
-    if (legacyRows.length) {
-      return {
+    } else if (legacyRows.length) {
+      state.copy = {
         backend: "chatgpt_project", status: "UNTRUSTED_LEGACY", fingerprint: "", algorithm: "sha256", attempts: legacyRows.length,
         lastError: "Legacy mutable native Project copy rows cannot satisfy completion without v2 append-only evidence.", verifiedAt: 0,
         provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
       };
+    } else {
+      state.copy = {
+        backend: "chatgpt_project", status: "MISSING", fingerprint: "", algorithm: "sha256", attempts: 0,
+        lastError: "No native Project evidence has been recorded.", verifiedAt: 0,
+        provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+      };
     }
-    return {
-      backend: "chatgpt_project", status: "MISSING", fingerprint: "", algorithm: "sha256", attempts: 0,
-      lastError: "No native Project evidence has been recorded.", verifiedAt: 0,
-      provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
-    };
+    return state;
+  }
+
+  function nativeEvidenceCopy(row, legacyRows = []) {
+    return nativeEvidenceState(row, legacyRows).copy;
   }
 
   function copySatisfiesBackend(copy, artifact, backend) {
     if (!copy || copy.backend !== backend || copy.algorithm !== "sha256" || copy.fingerprint !== artifact.sha256) return false;
-    return backend === "chatgpt_project" ? nativeProjectEvidenceCanComplete(copy) : copy.status === "VERIFIED";
+    return backend === "chatgpt_project" ? nativeProjectEvidenceCanComplete(copy, artifact) : copy.status === "VERIFIED";
+  }
+
+  // Completion-sensitive callers ask the store to re-project the durable rows by identity. They
+  // never decide native Project completion from a copy object supplied by an HTTP/worker caller.
+  function artifactCopyComplete({ uid, projectId, artifactId, backend } = {}) {
+    const who = cleanUid(uid);
+    const be = cleanText(backend, 80).toLowerCase();
+    if (!KNOWN_ARTIFACT_BACKENDS.includes(be)) return false;
+    const row = db.prepare("SELECT * FROM game_artifacts WHERE id=? AND projectId=? AND uid=?")
+      .get(cleanText(artifactId, 180), cleanText(projectId, 180), who);
+    if (!row) return false;
+    if (be === "chatgpt_project") {
+      const storedCopies = q.copies.all(row.id);
+      const copy = nativeEvidenceCopy(row, storedCopies.filter((candidate) => candidate.backend === "chatgpt_project"));
+      return copySatisfiesBackend(copy, nativeEvidenceArtifact(row), be);
+    }
+    const copy = q.copies.all(row.id).find((candidate) => candidate.backend === be) || null;
+    return copySatisfiesBackend(copy, nativeEvidenceArtifact(row), be);
   }
 
   function artifactSummary(projectId, uid) {
@@ -1401,6 +1455,24 @@ export function createGameFactoryStore({
       .get(artifact.projectId, artifact.artifactKey);
   }
 
+  function nativeEvidenceTimeFailure({ artifact, bound, kind, at, state }) {
+    const observedAt = Date.parse(kind === NATIVE_PROJECT_API_VERIFIED_STATUS ? bound.verifiedAt : bound.observedAt);
+    if (!Number.isFinite(observedAt)) {
+      return result(400, { error: "The native Project evidence timestamp is invalid.", code: "bad_native_project_manifest" });
+    }
+    if (observedAt < Number(artifact.createdAt)) {
+      return result(409, { error: "Native Project evidence cannot predate the immutable artifact it claims to observe.", code: "native_project_evidence_before_artifact" });
+    }
+    if (observedAt > at + NATIVE_PROJECT_EVIDENCE_CLOCK_SKEW_MS) {
+      return result(409, { error: "Native Project evidence cannot be recorded with a future observation timestamp.", code: "native_project_evidence_in_future" });
+    }
+    if ((state.lastObservedAt !== null && observedAt <= state.lastObservedAt)
+        || (state.lastCreatedAt !== null && at < state.lastCreatedAt)) {
+      return result(409, { error: "Native Project evidence must advance the append-only artifact chronology.", code: "native_project_evidence_not_monotonic" });
+    }
+    return null;
+  }
+
   function appendNativeProjectEvidence({ uid, artifactId, manifest, kind }) {
     const who = cleanUid(uid);
     return tx(() => {
@@ -1430,23 +1502,30 @@ export function createGameFactoryStore({
       const existing = db.prepare("SELECT * FROM game_artifact_native_evidence WHERE artifactId=? AND kind=? AND manifestHash=?")
         .get(artifact.id, kind, bound.manifestHash);
       if (existing) {
-        const projection = nativeEvidenceCopy(artifact, q.copies.all(artifact.id).filter((copy) => copy.backend === "chatgpt_project"));
+        const projection = nativeEvidenceState(artifact, q.copies.all(artifact.id).filter((copy) => copy.backend === "chatgpt_project")).copy;
+        if (projection.status === "EVIDENCE_CORRUPT") {
+          return result(409, { error: "Existing native Project evidence is malformed or internally inconsistent.", code: "native_project_evidence_unresolved" });
+        }
         return result(200, {
-          ok: nativeProjectEvidenceCanComplete(projection), replayed: true, evidenceId: existing.id,
+          ok: projection.id === existing.id && nativeProjectEvidenceCanComplete(projection, nativeEvidenceArtifact(artifact)),
+          replayed: true, evidenceId: existing.id,
           status: projection.status, manifestHash: bound.manifestHash,
         });
       }
-      const projection = nativeEvidenceCopy(artifact, q.copies.all(artifact.id).filter((copy) => copy.backend === "chatgpt_project"));
+      const at = timestamp();
+      const state = nativeEvidenceState(artifact, q.copies.all(artifact.id).filter((copy) => copy.backend === "chatgpt_project"));
+      const projection = state.copy;
       if (projection.status === "EVIDENCE_CORRUPT" || projection.status === "AMBIGUOUS") {
         return result(409, { error: "Existing native Project evidence is not unambiguous and valid.", code: "native_project_evidence_unresolved" });
       }
-      if (nativeProjectEvidenceCanComplete(projection)) {
+      if (nativeProjectEvidenceCanComplete(projection, nativeEvidenceArtifact(artifact))) {
         return result(409, { error: "A different native Project evidence record is already active; record an append-only invalidation before replacing it.", code: "native_project_evidence_already_active" });
       }
+      const timeFailure = nativeEvidenceTimeFailure({ artifact, bound, kind, at, state });
+      if (timeFailure) return timeFailure;
       const project = q.project.get(artifact.projectId, who);
       if (!project) return result(404, { error: "No such game.", code: "not_found" });
       const id = "gfn_" + randomUUID();
-      const at = timestamp();
       const operator = kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? bound.operator : "";
       const browserEvidenceRef = kind === NATIVE_PROJECT_OWNER_ATTESTED_STATUS ? bound.browserEvidenceRef : "";
       db.prepare(`INSERT INTO game_artifact_native_evidence
@@ -1476,9 +1555,14 @@ export function createGameFactoryStore({
       let bound;
       try { bound = normalizeNativeProjectInvalidationManifest(manifest); }
       catch (error) { return result(400, { error: safeText(error?.message || "Invalid native Project invalidation.", 1000), code: cleanText(error?.code || "bad_native_project_invalidation", 120) }); }
+      const state = nativeEvidenceState(artifact, q.copies.all(artifact.id).filter((copy) => copy.backend === "chatgpt_project"));
+      if (state.copy.status === "EVIDENCE_CORRUPT") {
+        return result(409, { error: "Existing native Project evidence is malformed or internally inconsistent.", code: "native_project_evidence_unresolved" });
+      }
       const existing = db.prepare("SELECT * FROM game_artifact_native_evidence WHERE artifactId=? AND kind='INVALIDATED' AND manifestHash=?")
         .get(artifact.id, bound.manifestHash);
       if (existing) return result(200, { ok: true, replayed: true, evidenceId: existing.id, status: "INVALIDATED", manifestHash: bound.manifestHash });
+      const at = timestamp();
       const target = q.nativeEvidenceById.get(bound.evidenceId);
       if (!target || target.artifactId !== artifact.id || target.projectId !== artifact.projectId || target.uid !== who
           || ![NATIVE_PROJECT_OWNER_ATTESTED_STATUS, NATIVE_PROJECT_API_VERIFIED_STATUS].includes(target.kind)) {
@@ -1486,10 +1570,11 @@ export function createGameFactoryStore({
       }
       const priorInvalidation = db.prepare("SELECT id FROM game_artifact_native_evidence WHERE kind='INVALIDATED' AND targetEvidenceId=? LIMIT 1").get(target.id);
       if (priorInvalidation) return result(409, { error: "The native Project evidence has already been invalidated; it cannot be relabeled or edited.", code: "native_project_evidence_already_invalidated" });
+      const timeFailure = nativeEvidenceTimeFailure({ artifact, bound, kind: "INVALIDATED", at, state });
+      if (timeFailure) return timeFailure;
       const project = q.project.get(artifact.projectId, who);
       if (!project) return result(404, { error: "No such game.", code: "not_found" });
       const id = "gfn_" + randomUUID();
-      const at = timestamp();
       db.prepare(`INSERT INTO game_artifact_native_evidence
         (id,artifactId,projectId,uid,kind,targetEvidenceId,nativeProjectId,fingerprint,size,operator,browserEvidenceRef,manifestHash,manifest,createdAt)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
@@ -1737,7 +1822,7 @@ export function createGameFactoryStore({
     file,
     seedPortfolio, listProjects, getProject, executeCommand,
     createBuild, queueTask, queueSyntheticCanary, claimNextTask, heartbeatTask, completeTask, failTask, securityStopTask,
-    recordArtifact, recordArtifactCopy, recordOwnerAttestedNativeProjectEvidence,
+    recordArtifact, recordArtifactCopy, artifactCopyComplete, recordOwnerAttestedNativeProjectEvidence,
     invalidateNativeProjectEvidence, recordTestRun, recordRelease,
     events, getApprovalSubject, reconcile, health, stats,
     close() { try { db.close(); } catch {} },

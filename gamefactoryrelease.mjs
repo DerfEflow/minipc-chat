@@ -6,7 +6,6 @@
  * Persisting a READY/BLOCKED assessment is independently feature-flagged and defaults off.
  */
 import { MANDATORY_ARTIFACT_BACKENDS } from "./gamefactory.mjs";
-import { nativeProjectEvidenceCanComplete } from "./gamefactorynativeevidence.mjs";
 
 const TRUE = new Set(["1", "true", "yes", "on", "enabled"]);
 const SHA256 = /^[a-f0-9]{64}$/i;
@@ -106,14 +105,11 @@ function matchingTestPassed(detail, platform, build) {
     && (!commit || clean(test.sourceHash, 128).toLowerCase() === commit));
 }
 
-function artifactCompliance(detail) {
+function artifactCompliance(detail, authoritativeComplete) {
   const required = Array.isArray(detail.required) ? detail.required.map((item) => safeId(item, 120)).filter(Boolean) : [];
   const artifacts = Array.isArray(detail.artifacts) ? detail.artifacts : [];
   const byKey = new Map(artifacts.map((artifact) => [artifact.artifactKey, artifact]));
-  const verified = (artifact, backend) => (artifact?.copies || []).some((copy) => copy.backend === backend
-    && clean(copy.algorithm, 32).toLowerCase() === "sha256"
-    && clean(copy.fingerprint, 128).toLowerCase() === clean(artifact.sha256, 128).toLowerCase()
-    && (backend === "chatgpt_project" ? nativeProjectEvidenceCanComplete(copy) : copy.status === "VERIFIED"));
+  const verified = (artifact, backend) => !!artifact && authoritativeComplete(artifact, backend) === true;
   const missing = required.filter((key) => {
     const artifact = byKey.get(key);
     return !artifact || MANDATORY_ARTIFACT_BACKENDS.some((backend) => !verified(artifact, backend));
@@ -136,7 +132,8 @@ export function createGameFactoryReleaseReadiness({
   now = () => Date.now(),
   log = () => {},
 } = {}) {
-  if (!store || typeof store.getProject !== "function" || typeof store.recordRelease !== "function") {
+  if (!store || typeof store.getProject !== "function" || typeof store.recordRelease !== "function"
+      || typeof store.artifactCopyComplete !== "function") {
     throw new Error("createGameFactoryReleaseReadiness needs a game factory store");
   }
   if (typeof capabilityProvider !== "function") throw new Error("capabilityProvider must be a function");
@@ -160,7 +157,9 @@ export function createGameFactoryReleaseReadiness({
     if (!packageIdValid(target, pkg)) blockers.push(blocker("PACKAGE_ID_REQUIRED", "package", `Provide a valid ${target} package identifier.`));
     if (!releaseVersion) blockers.push(blocker("VERSION_NAME_REQUIRED", "package", "Provide a release version name."));
     if (releaseCode < 1) blockers.push(blocker("VERSION_CODE_REQUIRED", "package", "Provide a positive immutable version/build code."));
-    const artifactStatus = artifactCompliance(detail);
+    const artifactStatus = artifactCompliance(detail, (artifact, backend) => store.artifactCopyComplete({
+      uid: clean(uid, 80).toLowerCase(), projectId: detail.id, artifactId: artifact.id, backend,
+    }));
     if (!artifactStatus.complete) blockers.push(blocker("ARTIFACT_COPIES_INCOMPLETE", "artifacts", "Every required artifact needs verified ChatGPT Project and Google Drive copies; a local primary does not substitute for either."));
     const testsPassed = !!build && matchingTestPassed(detail, target, build);
     if (!testsPassed) blockers.push(blocker("AUTOMATED_TESTS_REQUIRED", "quality", `A passing ${target} test run bound to this build is required.`));
