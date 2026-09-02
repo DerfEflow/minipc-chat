@@ -74,6 +74,45 @@ export function selectHistoryWindow(history, {
   };
 }
 
+/*
+ * A single message can be bigger than the whole window (a move manifest, a pasted log, a replayed
+ * assistant turn), and window selection cannot help there: selectHistoryWindow always keeps at
+ * least one message, so one oversize message sails through "compaction" untouched and the
+ * provider refuses the request. This squeezes any individual message that alone exceeds its share
+ * of the budget, keeping the head and tail (the parts instructions and conclusions live in) and
+ * marking the cut out loud so the model treats missing middle as missing, never as absent code.
+ */
+export function squeezeOversizeMessages(messages, {
+  contextTokens = 128_000,
+  maxShare = 0.45,
+} = {}) {
+  const source = Array.isArray(messages) ? messages : [];
+  const budgetChars = Math.max(8_000, Math.floor((Number(contextTokens) || 128_000) * maxShare) * 4);
+  let squeezed = 0;
+  const out = source.map((m) => {
+    if (!m || typeof m.content !== "string" || m.content.length <= budgetChars) return m;
+    const head = m.content.slice(0, Math.floor(budgetChars * 0.7));
+    const tail = m.content.slice(-Math.floor(budgetChars * 0.25));
+    squeezed++;
+    return {
+      ...m,
+      content: head +
+        "\n\n[CONTEXT SQUEEZE: " + (m.content.length - head.length - tail.length) +
+        " characters were cut from the middle of this message to fit the model's context window." +
+        " Treat the omitted span as unknown, not as empty; re-read the source before relying on it.]\n\n" +
+        tail,
+    };
+  });
+  return { messages: out, squeezed };
+}
+
+// Provider refusals for an over-window request, across every dialect this app speaks. Matching one
+// of these means "shrink and retry", never "the move failed".
+export const CONTEXT_OVERFLOW_RX = /context.length|context window|maximum context|too many tokens|input is too long|prompt is too long|exceeds.{0,40}(context|token)|maximum prompt|request too large|tokens? exceeds|above the limit/i;
+export function isContextOverflowError(error) {
+  return CONTEXT_OVERFLOW_RX.test(String(error || ""));
+}
+
 export function compactExecutionMessages(messages, {
   contextTokens = 128_000,
   goal = "",

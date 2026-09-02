@@ -93,6 +93,11 @@ export const CRUCIBLE_GUIDE = [
   "  model catalog (only the Agent Army's Orchestrator seat is restricted): the General's picker",
   "  sits in its upper-left corner, and the Captain and the Sergeant carry theirs just below",
   "  their titles. Backgrounds: the General blue, the Captain copper, the Sergeant green.",
+  "  The catalog includes a 'Your GX10 (local)' group: models running on the owner's own GX10",
+  "  machine at home. They cost nothing per token, never send a byte to a third-party provider",
+  "  (allowed in every privacy mode), and work for planning, building, and review like any cloud",
+  "  seat. If the GX10 is off or unreachable, a step on one of its models says so and continues",
+  "  on another available model rather than stopping the build.",
   "  The Captain and the Sergeant start folded: an Open chat button in each header reveals that",
   "  window's conversation and composer, and a message routed to a folded window opens it",
   "  automatically. On phones the rank subtitle folds away so Open chat always fits the frame.",
@@ -209,6 +214,14 @@ export const CRUCIBLE_GUIDE = [
   "  screen dims EXCEPT a lit spotlight around the exact control the card's arrow points at,",
   "  so the thing being described is always visible. Every page and drawer opens scrolled to",
   "  its top. The flame card with a timer means work is in flight.",
+  "- EVERY BUILD HAS A COUNSEL working behind the scenes. When a step fails, its own brain model",
+  "  reads what went wrong and hands back a diagnosis and a fix before the step ever surfaces as",
+  "  failed. If the brain is unsure or its fix does not land, a frontier reviewer of last resort",
+  "  looks at the same failure once for a stronger correction. A step that still cannot pass moves",
+  "  to a stronger engine for one guided attempt before the build gives up on it honestly. Whatever",
+  "  generalizes past this one project is kept as a lesson and quietly follows every future build,",
+  "  so the same mistake is never paid for twice. The owner can see, and prune, what it has learned",
+  "  at /ide/lessons.",
 ].join("\n");
 
 // The instruction that rides with the guide.

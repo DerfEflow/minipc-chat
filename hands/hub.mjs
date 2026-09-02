@@ -40,6 +40,7 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
   const enabled = !!token;
   const tokenDigest = enabled ? sha(token) : null;
   const nodes = new Map();   // nodeKey -> { res, connectedAt, lastSeen, jobsSent, jobsDone }  (owner: name; user: "user:<uid>")
+  const dupLogAt = new Map(); // nodeKey -> last time the duplicate-connect refusal was narrated
   const jobs = new Map();    // jobId -> { node, resolve, timer, sentAt }
 
   const bearer = (req) => { const h = String(req.headers.authorization || ""); return h.startsWith("Bearer ") ? h.slice(7) : ""; };
@@ -92,7 +93,17 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     if (prev) {
       const aliveMs = Date.now() - (prev.lastBeatOk || prev.connectedAt);
       if (aliveMs < DUP_STALE_MS) {
-        log(`hands: node "${name}" duplicate connect REFUSED (live stream healthy, last beat ${Math.round(aliveMs / 1000)}s ago) — a second client is running somewhere`);
+        /*
+         * Log ONCE PER HOUR per node, not once per knock. A stuck twin retries every 30s forever
+         * (observed live 2026-09-01: the laptop's orphan filled the entire production log window
+         * with this one line), and a log that is 95% one message hides every real failure. The
+         * refusal itself still happens on every knock; only the narration is throttled.
+         */
+        const now = Date.now();
+        if (!dupLogAt.has(name) || now - dupLogAt.get(name) > 3600_000) {
+          dupLogAt.set(name, now);
+          log(`hands: node "${name}" duplicate connect REFUSED (live stream healthy, last beat ${Math.round(aliveMs / 1000)}s ago) — a second client is running somewhere (repeats suppressed for 1h)`);
+        }
         return json(res, 409, { error: "a live stream for this node already exists; refusing the duplicate" });
       }
       try { prev.res.end(); } catch {} clearInterval(prev.beat);

@@ -41,7 +41,7 @@ import { createSeatFailover } from "./seatfailover.mjs";
 import { continuationContext, createLoopWatch, contextExceeded, emptyResponseInstruction, reasoningOnlyPause, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
 import { TOOLBOX_OPEN_NAME, withToolbox, openToolbox } from "./toolbox.mjs";
 import { modelToolResult, toolResultFailed, toolMutationSucceeded } from "./toolresult.mjs";
-import { approxMessageTokens, selectHistoryWindow, compactExecutionMessages } from "./contextwindow.mjs";
+import { approxMessageTokens, selectHistoryWindow, compactExecutionMessages, squeezeOversizeMessages, isContextOverflowError } from "./contextwindow.mjs";
 import { openAIResponsesStream } from "./openairesponses.mjs";
 import { anthropicMessagesStream } from "./anthropicmessages.mjs";
 import {
@@ -169,12 +169,14 @@ import {
 } from "./altana-money.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_PROMPT_MAX_CHARS, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs, ledgerFromEvents } from "./idejobs.mjs";
-import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages } from "./ideengine.mjs";
+import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, PLANNER_FORMAT_REMINDER, plannerRepairMessages, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages, fitManifestToBudget, manifestBudgetBytes } from "./ideengine.mjs";
+import { createLessonStore, strongerModelFor, failureDossier, brainReportMessages, parseBrainReport, reportLine } from "./idelessons.mjs";
+import { ollamaPayloadFromOpenAI, openAIResultFromOllama, gx10Failure } from "./gx10.mjs";
 import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor, adequacyWarning, chunksForPart } from "./ideaf.mjs";
 import { isRepoCmd, startBranchPlan, salvageCommitPlan, githubPushPlan, mergePlan, buildBranch } from "./idegit.mjs";
 import { ensureRepo, repoNameFrom, shipSummary } from "./idegithub.mjs";
 import { createTelemetry, estimatePartTokens } from "./idetelemetry.mjs";
-import { taskRoadmapMessages, parseTaskRoadmap, topoOrder, readyTasks, filesCollide, resolveTaskAssignments, reduceTaskGoal, classifyReduction, validateStoredSplit, fitPartsToAgents } from "./idetasks.mjs";
+import { taskRoadmapMessages, parseTaskRoadmap, roadmapRepairMessages, topoOrder, readyTasks, filesCollide, resolveTaskAssignments, reduceTaskGoal, classifyReduction, validateStoredSplit, fitPartsToAgents } from "./idetasks.mjs";
 import { runTaskPool, createGate } from "./idepool.mjs";
 import { ownershipFilter, afPlanMoves, afWorkerMove, afReviewMove, afQcMove } from "./ideafrun.mjs";
 import { routeMove, resolveAssignments, assertRouterModelsExist } from "./iderouter.mjs";
@@ -682,6 +684,15 @@ const NVIDIA_KEY = cfgGet("NVIDIA_API_KEY", cfgGet("NVIDIA_KEY", ""));
  * so the same streamer serves it and no google-specific transport exists to rot.
  */
 const GOOGLE_AISTUDIO_KEY = cfgGet("GOOGLE_AI_STUDIO_API_KEY", "");
+/*
+ * GX10 local lane (Fred, 2026-09-01: "utilize the models sitting on the GX10"). Default transport
+ * is the dominion-hands-gx10 relay (GX10_NODE names the hands node), which needs no key and no
+ * public hostname. GX10_LLM_URL flips the lane to a direct OpenAI-dialect endpoint (the
+ * ollama-gate bearer proxy on the box, once its hostname exists) with GX10_LLM_KEY as the bearer.
+ */
+const GX10_NODE = cfgGet("GX10_NODE", "gx10");
+const GX10_LLM_URL = cfgGet("GX10_LLM_URL", "");
+const GX10_LLM_KEY = cfgGet("GX10_LLM_KEY", "");
 // One endpoint config per provider. All of these speak the OpenAI-compatible chat-completions
 // format, so a single streamer serves them — only base URL, key, and a couple of headers differ.
 const PROVIDER_CFG = {
@@ -693,6 +704,9 @@ const PROVIDER_CFG = {
   moonshot:   { url: cfgGet("MOONSHOT_URL", "https://api.moonshot.ai/v1/chat/completions"), key: () => MOONSHOT_KEY, label: "Moonshot (direct)", extraHeaders: {}, wantUsage: false },
   nvidia:     { url: cfgGet("NVIDIA_URL", "https://integrate.api.nvidia.com/v1/chat/completions"), key: () => NVIDIA_KEY, label: "NVIDIA (direct)", extraHeaders: {}, wantUsage: false },
   google:     { url: cfgGet("GOOGLE_AISTUDIO_URL", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"), key: () => GOOGLE_AISTUDIO_KEY, label: "Google AI Studio (direct)", extraHeaders: {}, wantUsage: false },
+  // key() truthiness is the "is this lane usable" signal everywhere (altKeyedModelFor, the picker
+  // grey-out): the hands relay needs no secret, so the node name stands in when no URL is set.
+  gx10:       { url: GX10_LLM_URL, key: () => (GX10_LLM_URL ? (GX10_LLM_KEY || "hands") : (GX10_NODE ? "hands" : "")), label: "GX10 (local)", extraHeaders: {}, wantUsage: false },
 };
 /*
  * Resolve-at-call-time provider routing (SOW docs/PROVIDER-CACHING-SOW.md, W1). A model may
@@ -720,6 +734,20 @@ function resolveProviderCfg(provider) {
   }
   return { cfg, provider, fellBack: false };
 }
+/*
+ * Module-scope "does this model have a live provider key right now" check. Crucible's counsel
+ * choosers below (crucibleBrainModel / crucibleFrontierModel) and the boot log line that reports
+ * which counsel seats are live both need this, and it needs nothing but PROVIDER_CFG and the
+ * catalog, both already settled by this point in the file. Several route handlers further down
+ * build an identically-named `const keyForModel` of their own, scoped to that one request; those
+ * are unrelated shadows and this module-scope one is never what they call.
+ */
+function keyForModel(id) {
+  const rec = modelById(id);
+  const cfg = rec && PROVIDER_CFG[rec.provider || "openrouter"];
+  return !!(cfg && cfg.key());
+}
+
 // Allow-list = exactly the catalog ids (the single source of truth). A forced model is treated as
 // "cloud" ONLY if it's in the catalog — an unknown id can never silently egress.
 const isCloudModel = (m) => typeof m === "string" && CATALOG_IDS.has(m);
@@ -772,6 +800,16 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
       const rest = messages.filter((m) => m && m.role !== "system" && m.role !== "developer");
       messages = [{ role: "system", content: sys.map((m) => String(m.content || "")).join("\n\n") }, ...rest];
     }
+  }
+  /*
+   * GX10 local lane. With no direct URL configured, the call rides the hands relay: the
+   * dominion-hands-gx10 container's ollama_chat op runs the model on the box and streams tokens
+   * back through the hub. With GX10_LLM_URL set, control falls through to the generic
+   * OpenAI-dialect streamer below (live-probed 2026-09-01: Ollama 0.32's /v1/chat/completions
+   * streams SSE, emits tool_call deltas, and honors stream_options.include_usage).
+   */
+  if (earlyProvider === "gx10" && !GX10_LLM_URL) {
+    return gx10HandsChatStream(earlyRec, catalogId, messages, opts, onDelta);
   }
   if (earlyProvider === "openai") {
     const cfg = PROVIDER_CFG.openai;
@@ -1723,6 +1761,62 @@ const ideJobs = createIdeJobs({ dir: dataPath("ide"), log: (m) => console.log(m)
   const rec = ideJobs.loadFromDisk();
   if (rec.recovered) console.log(`[dominion-ai] ide jobs: recovered ${rec.recovered}, sealed ${rec.interrupted} as interrupted`);
 }
+
+/*
+ * CRUCIBLE COUNSEL (2026-09-01 reliability overhaul, wiring half). ideengine.mjs's `runMove`
+ * already knows how to ask a brain model for a diagnosis, escalate to a frontier reviewer, and
+ * hand a failure to a stronger seat; this is the server side of that, wiring a real lessons store
+ * and two real model choices into every build. lessons.json sits beside the job journal at
+ * <DATA_DIR>/ide, the same directory ideJobs itself uses, so one backup sweep covers both.
+ */
+const ideLessons = createLessonStore({ dir: join(DATA_DIR, "ide") });
+// Env knobs: model ids go through cfgGet (the same accessor every other configurable model id in
+// this file uses); the numeric knobs read process.env directly since there is no catalog lookup
+// or provider-file fallback for a plain integer or float to route through.
+const CRUCIBLE_BRAIN_MODEL = cfgGet("CRUCIBLE_BRAIN_MODEL", "");
+const CRUCIBLE_FRONTIER_MODEL = cfgGet("CRUCIBLE_FRONTIER_MODEL", "");
+const CRUCIBLE_FRONTIER_MAX = (() => {
+  const raw = process.env.CRUCIBLE_FRONTIER_MAX;
+  if (raw === undefined || raw === "") return 3;
+  const n = Math.trunc(Number(raw));
+  return Number.isFinite(n) ? Math.max(0, n) : 3;
+})();
+const CRUCIBLE_MIN_BRAIN_CONFIDENCE = (() => {
+  const raw = process.env.CRUCIBLE_MIN_BRAIN_CONFIDENCE;
+  if (raw === undefined || raw === "") return 0.6;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0.6;
+})();
+
+/*
+ * Which model reads a failed step first (the "brain"), and which model is asked when the brain is
+ * unsure or its fix does not land (the "frontier" reviewer of last resort). An env override wins
+ * when it names a keyed model; absent one, the brain defaults to the GX10 box's own 120B seat
+ * (free, local, always warm when the box is up) and the frontier defaults to Sonnet 5 direct. Both
+ * fall back honestly when their preferred seat has no live key, and the frontier is never allowed
+ * to land on the same model as the brain, because a seat agreeing with itself in the same voice
+ * gives the build an echo where it needed a second opinion.
+ */
+function crucibleBrainModel(planModel) {
+  if (CRUCIBLE_BRAIN_MODEL && keyForModel(CRUCIBLE_BRAIN_MODEL)) return CRUCIBLE_BRAIN_MODEL;
+  if (keyForModel("gx10/gpt-oss-120b")) return "gx10/gpt-oss-120b";
+  return planModel || "";
+}
+function crucibleFrontierModel(brainModel) {
+  if (CRUCIBLE_FRONTIER_MODEL && CRUCIBLE_FRONTIER_MODEL !== brainModel && keyForModel(CRUCIBLE_FRONTIER_MODEL)) return CRUCIBLE_FRONTIER_MODEL;
+  if ("anthropic/claude-sonnet-5" !== brainModel && keyForModel("anthropic/claude-sonnet-5")) return "anthropic/claude-sonnet-5";
+  const fallback = ORCHESTRATOR_FALLBACKS.find((id) => id !== brainModel && keyForModel(id));
+  return fallback || "";
+}
+{
+  // Boot-time display only: no build has picked a plan model yet, so the owner's default stands
+  // in for one, purely to show which counsel seats would be live if a build started right now.
+  const bootBrain = crucibleBrainModel(defaultModelFor(true));
+  const bootFrontier = crucibleFrontierModel(bootBrain);
+  const ls = ideLessons.stats();
+  console.log(`[dominion-ai] crucible counsel: brain=${bootBrain || "off"}  ·  frontier=${bootFrontier || "off"} (cap ${CRUCIBLE_FRONTIER_MAX}/build)  ·  lessons: ${ls.active} active / ${ls.retired} retired`);
+}
+
 // `billing` is declared further down, so it is read through a thunk rather than captured here:
 // capturing it directly is a temporal-dead-zone crash at boot. The indirection is deliberate.
 const ideFeature = createIdeFeature({
@@ -2172,6 +2266,39 @@ async function handleIde(req, res, u) {
     let probe = null;
     try { probe = await ideHandsFor(T)("node_info", {}); } catch { probe = null; }
     return send({ status: 200, body: { online: !!(probe && probe.ok) } });
+  }
+
+  // Crucible counsel audit surface, owner only: which lessons are active, what they have earned,
+  // and which two models the choosers would pick right now. It sits outside ideFeature.wall on
+  // purpose: this is Fred inspecting the mechanism, and no build spend happens here.
+  if (req.method === "GET" && path === "/ide/lessons") {
+    if (!T.isOwner) return send({ status: 403, body: { error: "owner only" } });
+    const brain = crucibleBrainModel(defaultModelFor(!!T.isOwner));
+    const frontier = crucibleFrontierModel(brain);
+    return send({ status: 200, body: {
+      ok: true,
+      lessons: ideLessons.list({ status: "active" }),
+      stats: ideLessons.stats(),
+      counsel: { brain, frontier, frontierMax: CRUCIBLE_FRONTIER_MAX },
+    } });
+  }
+  // The brain/frontier journal for one build, owner only: what each verdict actually said, kept
+  // separately from lessons.json because a report carries this build's move titles and files while
+  // a lesson is stripped down to a policy any project can read.
+  if (req.method === "GET" && path === "/ide/reports") {
+    if (!T.isOwner) return send({ status: 403, body: { error: "owner only" } });
+    const safeId = String(u.searchParams.get("jobId") || "").replace(/[^A-Za-z0-9_-]/g, "");
+    if (!safeId) return send({ status: 200, body: { ok: true, reports: [] } });
+    let reports = [];
+    try {
+      const raw = readFileSync(join(DATA_DIR, "ide", "reports", safeId + ".jsonl"), "utf8");
+      reports = raw.trim().split("\n").filter(Boolean).slice(-200).map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      }).filter(Boolean);
+    } catch {
+      reports = [];   // no report file yet for this job is not an error, just nothing to show
+    }
+    return send({ status: 200, body: { ok: true, reports } });
   }
 
   const body = (await readJsonBody(req)) || {};
@@ -2784,6 +2911,23 @@ async function handleIde(req, res, u) {
         : runIdeProbe(job, { ask })),
     }));
   }
+  // Prune a lesson that turned out wrong or stale. Owner only, same as the rest of the counsel
+  // audit surface: this store is shared across every tenant's builds, so nobody but Fred prunes it.
+  if (req.method === "POST" && path === "/ide/lessons/retire") {
+    if (!T.isOwner) return send({ status: 403, body: { error: "owner only" } });
+    const ok = ideLessons.retire(String(body.id || ""));
+    if (!ok) return send({ status: 404, body: { error: "No active lesson by that id." } });
+    return send({ status: 200, body: { ok: true } });
+  }
+  // Fred teaching the store a policy directly, no failed build required. Recorded with source
+  // "human" so it never gets overwritten by a later frontier correction the way a brain-sourced
+  // lesson can (idelessons.mjs record(): frontier only ever upgrades a "brain" source).
+  if (req.method === "POST" && path === "/ide/lessons/add") {
+    if (!T.isOwner) return send({ status: 403, body: { error: "owner only" } });
+    const { lesson } = ideLessons.record({ text: body.text, scope: body.scope, source: "human" });
+    if (!lesson) return send({ status: 200, body: { error: "That did not read as a usable policy line (too short, or it looked like it carried project data)." } });
+    return send({ status: 200, body: { ok: true, lesson } });
+  }
   return sjson(res, 404, { error: "unknown ide route" });
 }
 
@@ -3288,12 +3432,34 @@ function ideSettingsFromBody(raw) {
 // retry the same model; they never trigger a cheaper or different model behind the user's back.
 async function ideChatOnce(model, messages, { signal, executionPolicy, maxContinuations, sessionId, budgetGuard = null } = {}) {
   const startedAt = Date.now();
-  const convo = (Array.isArray(messages) ? messages : []).map((m) => ({ ...m }));
+  let convo = (Array.isArray(messages) ? messages : []).map((m) => ({ ...m }));
   const checkpointed = !!(executionPolicy && executionPolicy.persistence && executionPolicy.persistence.checkpoint);
   const continuationCap = Math.max(2, Math.min(Number(maxContinuations) || (checkpointed ? 12 : 6), 20));
   let content = "", costUsd = 0, usage = null, finishReason = "", lastError = "";
+  /*
+   * WORK WITHIN THE SELECTED MODEL'S WINDOW (Fred, 2026-09-01). This path had no compaction at
+   * all: an over-window conversation (or one over-window message) went to the provider verbatim,
+   * came back as a 400, burned all three retries on the identical payload, and surfaced as a
+   * failed move. Now the conversation is squeezed and compacted BEFORE the call whenever the
+   * estimate crosses 72% of the model's real window, and a provider overflow refusal triggers one
+   * harder compaction and a retry instead of an instant failure.
+   */
+  const ctxTokens = Math.max(16_000, Number((modelById(model) || {}).ctx) || 128_000);
+  const goalText = String((convo.find((m) => m && m.role === "user") || {}).content || "").slice(0, 2_000);
+  const fitConvo = (aggressive = false) => {
+    const squeezed = squeezeOversizeMessages(convo, { contextTokens: ctxTokens, maxShare: aggressive ? 0.3 : 0.45 });
+    convo = squeezed.messages;
+    const estimate = convo.reduce((n, m) => n + approxMessageTokens(m), 0);
+    if (aggressive || estimate > ctxTokens * 0.72) {
+      convo = compactExecutionMessages(convo, { contextTokens: ctxTokens, goal: goalText });
+    }
+    return squeezed.squeezed;
+  };
+  fitConvo(false);
+  let overflowCompactions = 0;
 
   for (let part = 0; part <= continuationCap; part++) {
+    if (part > 0) fitConvo(false);   // continuations append turns; keep the window honest each round
     let r = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       const requestedOutputTokens = outLimitFor(model);
@@ -3317,6 +3483,13 @@ async function ideChatOnce(model, messages, { signal, executionPolicy, maxContin
       }
       if (r && r.ok) break;
       lastError = String(r && r.error || "model unreachable");
+      // An over-window refusal never recovers by resending the same bytes. Compact harder once
+      // (twice at most across the whole turn) and retry with the smaller conversation.
+      if (isContextOverflowError(lastError) && overflowCompactions < 2) {
+        overflowCompactions++;
+        fitConvo(true);
+        continue;
+      }
       if (signal && signal.aborted || !ideRetryableFailure(r) || attempt === 2) break;
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
     }
@@ -3542,6 +3715,17 @@ async function ideChatWithWorkspaceTools(model, messages, {
         }
       }
       if (r && r.ok) break;
+      // Same rule as ideChatOnce: an over-window refusal is fixed by shrinking, not resending —
+      // compact and spend the next attempt on the smaller conversation instead of breaking out.
+      if (isContextOverflowError(r && r.error) && attempt < 2 && !(signal && signal.aborted)) {
+        convo = squeezeOversizeMessages(convo, { contextTokens, maxShare: 0.3 }).messages;
+        convo = compactExecutionMessages(convo, {
+          contextTokens,
+          goal: String((messages || []).find((m) => m && m.role === "user")?.content || ""),
+          evidence,
+        });
+        continue;
+      }
       if (signal && signal.aborted || !ideRetryableFailure(r) || attempt === 2) break;
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
     }
@@ -3914,9 +4098,22 @@ async function handleIdeTasks(req, res, T, body) {
     const r = await ideChatOnce(model, messages, {});
     if (r.costUsd) { try { await meterTurn(T, r.costUsd, prompt, ""); } catch {} }
     if (!r.ok) return { ok: false, why: r.error || "unreachable", costUsd: r.costUsd || 0 };
-    const parsed = parseTaskRoadmap(r.content, maxTasks);
-    if (!parsed.ok) return { ok: false, why: "unusable roadmap: " + parsed.error, raw: String(r.content || "").slice(0, 2000), costUsd: r.costUsd || 0 };
-    return { ok: true, tasks: parsed.tasks, costUsd: r.costUsd || 0 };
+    let parsed = parseTaskRoadmap(r.content, maxTasks);
+    let costUsd = r.costUsd || 0;
+    if (!parsed.ok) {
+      /*
+       * Same repair discipline as the build planner: a prose reply gets ONE second ask carrying
+       * its own words plus the format demand as the last word, before the seat is declared failed.
+       * Without this, a model that narrates instead of listing burns the seat AND its substitute
+       * for the same cosmetic reason.
+       */
+      const r2 = await ideChatOnce(model, roadmapRepairMessages({ goal: prompt, maxTasks, badReply: r.content }), {});
+      costUsd += r2.costUsd || 0;
+      if (r2.costUsd) { try { await meterTurn(T, r2.costUsd, prompt, ""); } catch {} }
+      if (r2.ok) parsed = parseTaskRoadmap(r2.content, maxTasks);
+      if (!parsed.ok) return { ok: false, why: "unusable roadmap: " + parsed.error, raw: String((r2.ok ? r2.content : r.content) || "").slice(0, 2000), costUsd };
+    }
+    return { ok: true, tasks: parsed.tasks, costUsd };
   };
   try {
     let usedModel = first;
@@ -4143,7 +4340,19 @@ async function runIdeBuild(job, {
   // Every Crucible role gets the same durable contract and provider-native policy. Planning,
   // review, and audit turns can inspect the live workspace; file-writing remains centralized in
   // the engine so custom crews keep their ownership boundaries and no model writes concurrently.
-  const chat = async ({ model, messages, forceInspection = false, resumeState = null }) => {
+  const chat = async ({ model, messages, forceInspection = false, resumeState = null, bare = false }) => {
+    /*
+     * BARE mode: no execution-manager wrap, no forge framework, no research tools. Format-repair
+     * calls use it deliberately. Measured 2026-09-01: the same model that ships perfect
+     * ```path= blocks on a bare request loses the format under the wrapped call's added prompts
+     * and tool epochs, so re-asking through the same wrapping repeated the same failure. A repair
+     * call is a closed-world transformation of evidence already in the messages; it needs the
+     * model's full attention on the format contract, not more apparatus.
+     */
+    if (bare) {
+      return ideChatOnce(model, (Array.isArray(messages) ? messages : []).map((m) => ({ ...m })),
+        { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
+    }
     const policy = executionPolicyFor(model);
     const managed = (Array.isArray(messages) ? messages : []).map((m) => ({ ...m }));
     const manager = executionManagerPrompt(taskContract, policy) + "\n\n" + forgeFrameworkPrompt(selectedForgeTier);
@@ -4225,6 +4434,50 @@ async function runIdeBuild(job, {
     return first;
   };
 
+  /*
+   * Crucible counsel wiring: give this build a brain, a frontier reviewer of last resort, one-shot
+   * escalation to a stronger seat, and the shared lessons store, per idelessons.mjs / ideengine.mjs
+   * runMove. planModel does not exist yet this early in the function (it is only computed once the
+   * standard-crew planner branch runs, well below), so the choice here falls back to the same
+   * default the planner itself falls back to: defaultModelFor(isOwner). The planner block further
+   * down re-derives its OWN policies string from ideLessons against the real planModel once that
+   * value exists; this pair only decides which two models runMove's brain/frontier rungs call for
+   * every move, repair, and verify failure in this build.
+   */
+  const brainModel = crucibleBrainModel(defaultModelFor(!!T.isOwner));
+  const frontierModel = crucibleFrontierModel(brainModel);
+  let frontierCalls = 0;
+  const advisors = {
+    brainModel,
+    frontierModel,
+    minBrainConfidence: CRUCIBLE_MIN_BRAIN_CONFIDENCE,
+    frontierCallsLeft: () => Math.max(0, CRUCIBLE_FRONTIER_MAX - frontierCalls),
+    noteFrontierCall: () => { frontierCalls++; },
+  };
+
+  // One journal line per brain/frontier verdict, kept on disk for the owner to audit at
+  // GET /ide/reports?jobId=... . dossier.reply and checkOutput can carry the user's own project
+  // source or test output, so only the fields below are persisted; a write failure here must
+  // never break the build, so it is swallowed rather than thrown.
+  async function reportCrucibleCounsel(reportJob, { source, model, stage, dossier, report: verdict }) {
+    try {
+      const dir = join(DATA_DIR, "ide", "reports");
+      await mkdir(dir, { recursive: true });
+      const safeId = String((reportJob && reportJob.id) || "").replace(/[^A-Za-z0-9_-]/g, "");
+      if (!safeId) return;
+      const line = JSON.stringify({
+        at: Date.now(),
+        jobId: safeId,
+        workspaceId: (reportJob && reportJob.workspaceId) || "",
+        source, model, stage,
+        moveTitle: (dossier && dossier.title) || "",
+        files: (dossier && dossier.files) || [],
+        report: verdict,
+      }) + "\n";
+      await appendFile(join(dir, safeId + ".jsonl"), line);
+    } catch {}
+  }
+
   const engine = createIdeEngine({
     jobs: ideJobs,
     chat,
@@ -4232,6 +4485,11 @@ async function runIdeBuild(job, {
     router: (move, assign) => routeMove(move, assign),
     meter: async (usd) => { await meterTurn(T, usd, prompt, ""); },
     log: (m) => console.log(m),
+    modelInfo: (id) => modelById(id),
+    lessons: ideLessons,
+    advisors,
+    escalate: (model) => strongerModelFor(model, { catalog: CATALOG_MODELS, keyed: keyForModel, fallbacks: ORCHESTRATOR_FALLBACKS }),
+    report: reportCrucibleCounsel,
   });
 
   // Model calls debit the guard as they settle, including retries and parallel AF calls. Callers
@@ -4439,11 +4697,41 @@ async function runIdeBuild(job, {
      * build forever (the bug this replaced: answers only ever resumed probes, so a paused BUILD
      * was unreleasable by anyone).
      */
-    const ask = async (id, question, options) => {
+    /*
+     * A question with an `auto` policy answers ITSELF after auto.afterMs of silence, in the open:
+     * the journal records the auto-continue line and the answer event, so the UI unfreezes and an
+     * attended user still wins the race by answering first. Without this, a failed move at 2 AM
+     * froze the whole build until morning (Fred: "constantly having to reset it or start over").
+     * Money questions never carry an auto policy: a budget is answered by a human or not at all.
+     */
+    const ask = async (id, question, options, auto = null) => {
       const from = (ideJobs.get(job.id) || { events: [] }).events.length;
-      ideJobs.emit(job.id, { type: "need_input", id, question, options });
+      ideJobs.emit(job.id, { type: "need_input", id, question, options,
+        ...(auto && auto.answer ? { default: auto.answer } : {}) });
+      let timer = null;
+      if (auto && auto.answer && Number(auto.afterMs) > 0) {
+        timer = setTimeout(() => {
+          try {
+            ideJobs.emit(job.id, { type: "run", command: "auto-continue", ok: true,
+              output: "No one answered within " + Math.max(1, Math.round(auto.afterMs / 60000))
+                + " minute(s), so the build chose “" + auto.answer + "” and kept going. Answer a question to choose differently next time." });
+            ideJobs.emit(job.id, { type: "answer", id, answer: auto.answer, auto: true });
+          } catch {}
+        }, auto.afterMs);
+        if (timer.unref) timer.unref();
+      }
       const ans = await ideJobs.waitForAnswer(job.id, from);
+      if (timer) clearTimeout(timer);
       return ans ? String(ans.answer || "") : null;    // null = the job was sealed while waiting
+    };
+    // Unattended builds keep moving: a failed move auto-retries once, then auto-skips, never
+    // auto-stops. The map remembers which moves already burned their auto-retry.
+    const IDE_ASK_AUTO_MS = Math.max(30_000, Number(process.env.IDE_ASK_AUTO_MS) || 180_000);
+    const autoRetried = new Set();
+    const moveFailAuto = (moveId) => {
+      const first = !autoRetried.has(moveId);
+      autoRetried.add(moveId);
+      return { afterMs: IDE_ASK_AUTO_MS, answer: first ? phrase("move_retry", reg) : phrase("move_skip", reg) };
     };
     const capOriginal = budget.capUsd;
     // Money for humans. toFixed(2) turned a deliberately tiny test cap into "limit of $0.00,
@@ -4501,7 +4789,9 @@ async function runIdeBuild(job, {
         ideJobs.emit(job.id, { type: "move", id: move.id, title: move.title, state: "running",
           why: move.why, taskClass: decision.taskClass, model: decision.model, routeWhy: decision.why });
         try {
-          const manifest = await engine.readManifest(workspace.root, move.files || []);
+          const rawManifest = await engine.readManifest(workspace.root, move.files || []);
+          const modelCtx = (modelById(decision.model) || {}).ctx || 128_000;
+          const manifest = fitManifestToBudget(rawManifest, manifestBudgetBytes(modelCtx)).manifest;
           const baseMessages = buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal: prompt });
           let res = null, parsed = null, own = null, totalCost = 0, resumeState = null;
           for (let attempt = 1; attempt <= 3; attempt++) {
@@ -4710,7 +5000,8 @@ async function runIdeBuild(job, {
         ideJobs.emit(job.id, { type: "move", id, title, state: "running", model });
         await gate.enter();
         try {
-          const manifest = await engine.readManifest(workspace.root, files || []);
+          const rawManifest = await engine.readManifest(workspace.root, files || []);
+          const manifest = fitManifestToBudget(rawManifest, manifestBudgetBytes((modelById(model) || {}).ctx || 128_000)).manifest;
           const move = { title, files, why: "Own these files only. " + (contract || "") };
           const baseMessages = buildMoveMessages({ move, manifest, workspaceName: workspace.name, goal: prompt });
           let totalCost = 0, last = null, parsed = null, own = null, resumeState = null;
@@ -4932,7 +5223,10 @@ async function runIdeBuild(job, {
             return n + " (" + ((failedTask && failedTask.title) || "task") + (reason ? " - " + reason : "") + ")";
           }).join("; ").slice(0, 900);
           const answer = await ask("tasks-failed", phrase("tasks_failed_question", reg, failedList.length, list),
-            [phrase("tasks_retry", reg), phrase("tasks_skip", reg), phrase("move_stop", reg)]);
+            [phrase("tasks_retry", reg), phrase("tasks_skip", reg), phrase("move_stop", reg)],
+            { afterMs: IDE_ASK_AUTO_MS,
+              answer: autoRetried.has("tg:" + failedList.map((f) => f.n).join(",")) ? phrase("tasks_skip", reg) : phrase("tasks_retry", reg) });
+          autoRetried.add("tg:" + failedList.map((f) => f.n).join(","));
           if (answer === null) return null;
           if (ANSWER.stop.test(answer)) return "stop";
           if (ANSWER.retry.test(answer)) return "retry";
@@ -5005,6 +5299,24 @@ async function runIdeBuild(job, {
       if (divided.costUsd) { await meterTurn(T, divided.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: divided.costUsd, move: "af-divide" }); }
       if (!divided.ok) { ideJobs.finish(job.id, { type: "error", message: divided.error || "The divider could not be reached." }); return false; }
       let plan = parseDividerPlan(divided.content, maxParts);
+      if (!plan.ok) {
+        /*
+         * Same repair discipline as the build planner and the roadmap: a divider that narrates
+         * instead of listing gets ONE second ask carrying its own reply and the format demand as
+         * the last word, before the whole relay is refused. The overlap redo below already
+         * existed; this covers the other, more common death.
+         */
+        ideJobs.emit(job.id, { type: "run", command: "af referee", ok: false,
+          output: "The divider answered in prose instead of a division, so it is being asked once more for the division itself." });
+        const reask = await chat({ model: divModel, messages: [
+          ...divMessages,
+          { role: "assistant", content: String(divided.content || "").slice(0, 8000) },
+          { role: "user", content: "That answer was not a usable division. Answer NOW with ONLY the plan in EXACTLY the demanded format, nothing before it and nothing after it." },
+        ] });
+        spend(reask.costUsd);
+        if (reask.costUsd) { await meterTurn(T, reask.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: reask.costUsd, move: "af-divide" }); }
+        if (reask.ok) { plan = parseDividerPlan(reask.content, maxParts); divided = reask; }
+      }
       let dj = plan.ok ? verifyDisjoint(plan.parts) : { ok: false, overlaps: [] };
       if (plan.ok && !dj.ok) {
         const named = dj.overlaps.map((o) => o.file + " (parts " + o.a + " and " + o.b + ")").join(", ");
@@ -5019,7 +5331,12 @@ async function runIdeBuild(job, {
         if (redo.costUsd) { await meterTurn(T, redo.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: redo.costUsd, move: "af-divide" }); }
         if (redo.ok) { plan = parseDividerPlan(redo.content, maxParts); dj = plan.ok ? verifyDisjoint(plan.parts) : { ok: false, overlaps: [] }; }
       }
-      if (!plan.ok || !dj.ok) { ideJobs.finish(job.id, { type: "error", message: phrase("af_refused", reg) }); return false; }
+      if (!plan.ok || !dj.ok) {
+        const said = String(divided.content || "").replace(/\s+/g, " ").slice(0, 220);
+        ideJobs.finish(job.id, { type: "error", message: phrase("af_refused", reg)
+          + (said ? " The divider said: “" + said + "…”" : "") });
+        return false;
+      }
       // The manifest reader's atomic ceiling is also the maximum ownership grant. A divider may
       // legally return up to 40 files, so split oversized parts deterministically instead of
       // hiding files 25+ from the worker or falsely completing only the visible prefix.
@@ -5087,7 +5404,8 @@ async function runIdeBuild(job, {
       // verify are safe one at a time).
       for (const failed of workerStage.failures) {
         const answer = await ask("move-" + failed.id, phrase("move_failed_question", reg, failed.title),
-          [phrase("move_retry", reg), phrase("move_skip", reg), phrase("move_stop", reg)]);
+          [phrase("move_retry", reg), phrase("move_skip", reg), phrase("move_stop", reg)],
+          moveFailAuto("af-" + failed.id));
         if (answer === null) return false;
         if (ANSWER.skip.test(answer)) {
           knownIncomplete.push("AF worker part \"" + failed.title + "\" was explicitly skipped after failing.");
@@ -5096,7 +5414,7 @@ async function runIdeBuild(job, {
         if (ANSWER.stop.test(answer)) { ideJobs.finish(job.id, { type: "stopped", message: phrase("move_stopped", reg) }); return false; }
         const guided = !ANSWER.retry.test(answer)
           ? { ...failed, why: failed.why + " The user says: " + answer.slice(0, 500) } : failed;
-        const r2 = await engine.runMove(job, { move: guided, workspace, assignments: workerAssign, goal: prompt });
+        const r2 = await engine.runMove(job, { move: guided, workspace, assignments: workerAssign, goal: prompt, plannedFiles: [...expectedFiles] });
         spend(r2 && r2.costUsd);
         if (r2 && r2.blocked) { ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) }); return false; }
         if (!r2 || !r2.ok) knownIncomplete.push("AF worker part \"" + failed.title + "\" remained incomplete after guided recovery.");
@@ -5152,18 +5470,100 @@ async function runIdeBuild(job, {
       moves = [{ id: "m1", title: prompt.slice(0, 140), why: small.why, files: [], verify: "" }];
       ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, single: true });
     } else {
-      const planned = await chat({ model: planModel, messages: [
+      /*
+       * The format demand travels twice: once inside PLANNER_SYSTEM, and once as the FINAL user
+       * turn. The chat() wrapper appends the execution manager, the forge framework, and the
+       * observed-workspace evidence around this call, and a format rule that far from the end of
+       * the request is a rule models skip (watched live with qwen3-coder, 2026-09-01: prose
+       * narration instead of the array). The trailing turn stays separate because grounding is
+       * appended to the FIRST user message.
+       */
+      const plannerAsk = "PROJECT: " + (workspace.name || workspace.root) + "\n\nBUILD THIS:\n" + prompt;
+      // Policies earned from past builds' failures ride between the ask and the trailing format
+      // demand, never inside PLANNER_SYSTEM (that string is the byte-stable cache prefix; nothing
+      // per-build belongs in it) and never before plannerAsk (the format rule has to stay the LAST
+      // word the planner reads, per the comment above this block).
+      const plannerPolicies = ideLessons.policiesBlock({ scope: "planner", model: planModel });
+      const plannerMessages = [
         { role: "system", content: PLANNER_SYSTEM + "\n\n" + plannerVoice(reg) + "\n" + persona },
-        { role: "user", content: "PROJECT: " + (workspace.name || workspace.root) + "\n\nBUILD THIS:\n" + prompt },
-      ] });
+        { role: "user", content: plannerAsk },
+      ];
+      if (plannerPolicies) plannerMessages.push({ role: "user", content: plannerPolicies });
+      plannerMessages.push({ role: "user", content: PLANNER_FORMAT_REMINDER });
+      const planned = await chat({ model: planModel, messages: plannerMessages });
       spend(planned.costUsd);
       await meterTurn(T, planned.costUsd, prompt, "");
       if (planned.costUsd) ideJobs.emit(job.id, { type: "cost", usd: planned.costUsd, move: "plan" });
       if (!planned.ok) {
         return ideJobs.finish(job.id, { type: "error", message: planned.error || "The planner could not be reached." });
       }
-      const parsed = parseBlueprint(planned.content);
-      if (!parsed.ok) return ideJobs.finish(job.id, { type: "error", message: parsed.error });
+      let parsed = parseBlueprint(planned.content);
+      if (!parsed.ok) {
+        /*
+         * The plan is in there, in words. One repair call sends the model its OWN prose back with
+         * the format demand as the last word — a minimal bare call through ideChatOnce, deliberately
+         * outside the chat() wrapper whose added prompts caused the prose in the first place. Only
+         * when the second answer also parses to nothing does the job die, and then it quotes what
+         * the model actually said, because "did not return a usable plan" with the reply thrown
+         * away cost a day of guessing.
+         */
+        ideJobs.emit(job.id, { type: "run", command: "plan", ok: false,
+          output: "The planner answered in prose instead of a move list, so it is being asked once more for the list itself." });
+        const repair = await ideChatOnce(planModel,
+          plannerRepairMessages({ userPrompt: plannerAsk, badReply: planned.content }),
+          { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
+        spend(repair.costUsd);
+        await meterTurn(T, repair.costUsd, prompt, "");
+        if (repair.costUsd) ideJobs.emit(job.id, { type: "cost", usd: repair.costUsd, move: "plan" });
+        if (repair.ok) parsed = parseBlueprint(repair.content);
+        if (!parsed.ok) {
+          /*
+           * The planner failed twice in a row, which is exactly the kind of failure the brain
+           * exists to look at. It gets a real dossier (stage "planner"), and whatever it learns
+           * becomes a policy line every future planner call reads. This is a diagnosis for the
+           * record and the lessons store only. The build is already ending honestly below, and
+           * nothing here may change that or delay it past one call.
+           */
+          try {
+            if (brainModel) {
+              const plannerDossier = failureDossier({
+                move: { title: "plan the build", files: [] },
+                model: planModel,
+                taskClass: "build_code",
+                stage: "planner",
+                attempt: 2,
+                reply: repair.ok ? repair.content : planned.content,
+                checkOutput: "",
+                pipelineNotes: "format reminder as last turn, one bare repair call",
+                goal: prompt,
+              });
+              const brainPolicies = ideLessons.policiesBlock({ scope: "planner", model: brainModel });
+              const br = await ideChatOnce(brainModel, brainReportMessages(plannerDossier, { policies: brainPolicies }),
+                { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
+              spend(br.costUsd);
+              await meterTurn(T, br.costUsd, prompt, "");
+              if (br.costUsd) ideJobs.emit(job.id, { type: "cost", usd: br.costUsd, move: "plan" });
+              if (br.ok) {
+                const parsedBrain = parseBrainReport(br.content);
+                ideJobs.emit(job.id, { type: "run", command: "brain", ok: parsedBrain.ok,
+                  output: parsedBrain.ok
+                    ? reportLine(parsedBrain.report, { source: "brain", model: brainModel })
+                    : "The brain's reply could not be read as a diagnosis: " + parsedBrain.error });
+                if (parsedBrain.ok) {
+                  if (parsedBrain.report.lesson) {
+                    try { ideLessons.record({ text: parsedBrain.report.lesson, scope: "planner", source: "brain", model: planModel, tags: [parsedBrain.report.rootCause] }); } catch {}
+                  }
+                  try { ideLessons.bumpReports(); } catch {}
+                  try { await reportCrucibleCounsel(job, { source: "brain", model: planModel, stage: "planner", dossier: plannerDossier, report: parsedBrain.report }); } catch {}
+                }
+              }
+            }
+          } catch {}
+          const said = String((repair.ok ? repair.content : planned.content) || "").replace(/\s+/g, " ").slice(0, 220);
+          return ideJobs.finish(job.id, { type: "error",
+            message: parsed.error + (said ? " The model said: “" + said + "…”" : "") });
+        }
+      }
       moves = parsed.moves;
       for (const move of moves) for (const file of move.files || []) expectedFiles.add(file);
       /*
@@ -5199,7 +5599,7 @@ async function runIdeBuild(job, {
         budget.capUsd += Math.max(capOriginal, 0.5);
       }
 
-      const res = await engine.runMove(job, { move, workspace, assignments: resolved, goal: prompt });
+      const res = await engine.runMove(job, { move, workspace, assignments: resolved, goal: prompt, plannedFiles: [...expectedFiles] });
       spend(res && res.costUsd);
       if (res && res.blocked) return ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) });
 
@@ -5211,7 +5611,8 @@ async function runIdeBuild(job, {
          */
         const answer = await ask("move-" + move.id,
           phrase("move_failed_question", reg, move.title),
-          [phrase("move_retry", reg), phrase("move_skip", reg), phrase("move_stop", reg)]);
+          [phrase("move_retry", reg), phrase("move_skip", reg), phrase("move_stop", reg)],
+          moveFailAuto(move.id));
         if (answer === null) return;
         if (ANSWER.skip.test(answer)) {
           knownIncomplete.push("Build step \"" + move.title + "\" was explicitly skipped after failing.");
@@ -5243,7 +5644,7 @@ async function runIdeBuild(job, {
         applyFixes: async (critique) => {
           const fixMove = { id: "polish", title: reg === "technical" ? "Apply visual review findings" : "Make it look right",
             why: "The screenshot review found: " + critique.slice(0, 700), files: writtenFiles.slice(0, 12) };
-          const r = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt });
+          const r = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt, plannedFiles: [...expectedFiles] });
           spend(r && r.costUsd);
           if (r && r.ok) markCovered(r.covered);
           return { costUsd: (r && r.costUsd) || 0 };
@@ -5346,7 +5747,7 @@ async function runIdeBuild(job, {
                 title: (reg === "technical" ? "Close the audit findings" : "Finish the unfinished pieces")
                   + (capped.length > 1 ? " (batch " + (bi + 1) + " of " + capped.length + ")" : ""),
                 why, files: capped[bi] };
-              const fixed = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt });
+              const fixed = await engine.runMove(job, { move: fixMove, workspace, assignments: resolved, goal: prompt, plannedFiles: [...expectedFiles] });
               spend(fixed && fixed.costUsd);
               if (fixed && fixed.ok) markCovered(fixed.covered);
               else allFixed = false;
@@ -5528,6 +5929,10 @@ async function runIdeBuild(job, {
       ideJobs.emit(job.id, { type: "run", command: "github", ok: false,
         output: "The build finished, but shipping to GitHub failed: " + String((e && e.message) || e).slice(0, 200) });
     }
+    // A build that reached a genuine, verified completion is the strongest possible signal that
+    // whatever policies rode this planner call earned their keep; credit them the same way a
+    // passing move already credits move-scope lessons in the engine.
+    try { ideLessons.noteWinFor({ scope: "planner", model: planModel }); } catch {}
     ideJobs.finish(job.id, {
       type: "done",
       complete: true,
@@ -6889,6 +7294,48 @@ function systemPrompt(persona, modeFrag, wolfeTier = "ember", {
   if (modeFrag) s += "\n\n" + modeFrag;
   if (persona) s += "\n\nFor this conversation, adopt this style/role: " + persona;
   return s;
+}
+
+/*
+ * The GX10 hands-relay chat lane (see gx10.mjs for the pure shape translation). Returns the
+ * cloudChatStream result contract so every caller — ideChatOnce, the tool loop, chat — treats a
+ * GX10 seat exactly like any cloud model. Failures come back retryable, which is what lets the
+ * existing retry ladder and altKeyedModelFor reroute a build step when the box is off.
+ */
+async function gx10HandsChatStream(rec, catalogId, messages, opts = {}, onDelta) {
+  if (!handsHub || !handsHub.enabled) return gx10Failure("the hands hub is not enabled on this server", { retryable: false });
+  if (opts.signal && opts.signal.aborted) return { ok: false, aborted: true, error: "stopped" };
+  const directId = (rec && rec.directId) || catalogId;
+  const shaped = shapeCloudParams({ provider: "gx10", directId, temperature: opts.temperature, tools: Array.isArray(opts.tools) && opts.tools.length ? opts.tools : null });
+  const tools = shaped.tools ? sanitizeToolList(shaped.tools, { log: (m) => console.log("[dominion-ai] " + m) }).tools : null;
+  // Text attachments inline as fenced blocks exactly like the generic lane; images flatten to
+  // honest markers because no GX10 seat is vision-flagged.
+  const flattened = (Array.isArray(messages) ? messages : []).map((m) => {
+    const hasAtt = m && m.role === "user" && Array.isArray(m.attachments) && m.attachments.length;
+    if (!hasAtt) return m;
+    return { ...m, content: String(m.content ?? "") + attachmentTextBlocks(m) + attachmentImageMarkers(m) };
+  });
+  const payload = ollamaPayloadFromOpenAI({
+    model: directId,
+    messages: flattened,
+    tools,
+    num_predict: typeof opts.num_predict === "number" ? opts.num_predict : 0,
+    num_ctx: (rec && rec.ctx) || 0,
+    temperature: shaped.temperature,
+  });
+  let r;
+  try {
+    r = await handsHub.dispatchStream(GX10_NODE, "ollama_chat", { payload }, {
+      timeoutMs: 590000,
+      signal: opts.signal,
+      onChunk: (c) => { try { if (onDelta && c && c.delta) onDelta(c.delta); } catch { /* UI sink throws must not kill the stream */ } },
+    });
+  } catch (e) {
+    return gx10Failure(String((e && e.message) || e));
+  }
+  if (opts.signal && opts.signal.aborted) return { ok: false, aborted: true, error: "stopped" };
+  if (!r || r.ok === false || !r.response) return gx10Failure((r && r.error) || "the GX10 node did not answer");
+  return openAIResultFromOllama(r.response, { transport: "gx10" });
 }
 
 function buildOllamaPayload(model, messages, opts, stream) {

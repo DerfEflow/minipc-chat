@@ -12,8 +12,10 @@
 import assert from "node:assert/strict";
 import {
   isSmallAsk, parseBlueprint, parseFileBlocks, fileCoverage, carveOutReport, budgetCheck, estimateMove,
-  verifyCommandFor, verificationPlanFor, buildMoveMessages, createIdeEngine, SYSTEM_PREFIX, lineDiff, cleanShellOutput, isMissingToolFailure
+  verifyCommandFor, verificationPlanFor, buildMoveMessages, createIdeEngine, SYSTEM_PREFIX, lineDiff, cleanShellOutput, isMissingToolFailure,
+  PLANNER_SYSTEM, PLANNER_FORMAT_REMINDER, plannerRepairMessages, counselScopeFor
 } from "./ideengine.mjs";
+import { BRAIN_SYSTEM, FRONTIER_SYSTEM } from "./idelessons.mjs";
 
 let passed = 0, failed = 0;
 function t(name, fn) {
@@ -44,6 +46,65 @@ await t("a blueprint is dug out of prose and fences, and normalized", () => {
   assert.equal(parseBlueprint('{"moves":[{"title":"A"}]}').moves.length, 1);
   assert.equal(parseBlueprint("here is no json at all").ok, false, "refuses honestly rather than inventing a plan");
   assert.equal(parseBlueprint("[]").ok, false);
+});
+
+await t("a prose planning reply earns one repair call with the format demand as the last word", () => {
+  const prose = "I understand you want me to build an Express todo API. Let's begin by creating package.json.";
+  const msgs = plannerRepairMessages({ userPrompt: "PROJECT: X\n\nBUILD THIS:\ntodo api", badReply: prose });
+  assert.equal(msgs.length, 4);
+  assert.equal(msgs[0].role, "system");
+  assert.equal(msgs[0].content, PLANNER_SYSTEM, "the repair call is BARE: no manager, forge, or persona wrapping");
+  assert.equal(msgs[1].role, "user");
+  assert.match(msgs[1].content, /todo api/);
+  assert.equal(msgs[2].role, "assistant");
+  assert.match(msgs[2].content, /Let's begin/, "the model is shown its OWN failed reply to convert");
+  assert.equal(msgs[3].role, "user", "the format demand is the LAST message");
+  assert.match(msgs[3].content, /ONLY the JSON array/);
+  // A pathological giant reply is clipped so the repair call cannot itself overflow the window.
+  const huge = plannerRepairMessages({ userPrompt: "x", badReply: "y".repeat(50_000) });
+  assert.ok(huge[2].content.length <= 8000);
+});
+
+await t("the format reminder is a standalone final turn demanding pure JSON", () => {
+  assert.match(PLANNER_FORMAT_REMINDER, /ONLY the JSON array/);
+  assert.match(PLANNER_FORMAT_REMINDER, /parse as JSON/);
+  assert.ok(!/```/.test(PLANNER_FORMAT_REMINDER), "the reminder must not itself teach a fenced answer");
+});
+
+await t("a check blocked only by later planned files is recognised, and real failures are not", async () => {
+  const { checkBlockedByPlannedFiles } = await import("./ideengine.mjs");
+  const out = "> node --test\nCould not find 'test.mjs'\n";
+  assert.deepEqual(checkBlockedByPlannedFiles(out, ["server.mjs", "test.mjs"], ["server.mjs"]), ["test.mjs"],
+    "a missing later-move file is recognised");
+  assert.equal(checkBlockedByPlannedFiles(out, ["server.mjs", "test.mjs"], ["test.mjs"]), null,
+    "a move that OWNS the missing file gets no forgiveness");
+  assert.equal(checkBlockedByPlannedFiles("SyntaxError: unexpected token in server.mjs", ["server.mjs", "test.mjs"], ["server.mjs"]), null,
+    "a real code failure mentioning a planned file is NOT excused");
+  assert.equal(checkBlockedByPlannedFiles("Cannot find module './db.mjs'", ["a.mjs"], []), null,
+    "a missing file nobody plans to build is a real failure");
+  assert.deepEqual(checkBlockedByPlannedFiles("Error: Cannot find module 'src/routes.mjs'", ["src/routes.mjs"], []), ["src/routes.mjs"]);
+});
+
+await t("NO-CHANGE declarations are parsed outside fences and count as coverage", () => {
+  const reply = [
+    "NO-CHANGE: package.json",
+    "```path=server.mjs",
+    "console.log('hi');",
+    "```",
+    "NO-CHANGE: \"docs/readme.md\"",
+  ].join("\n");
+  const p = parseFileBlocks(reply);
+  assert.equal(p.files.length, 1);
+  assert.deepEqual(p.unchanged, ["package.json", "docs/readme.md"]);
+  const cov = fileCoverage(["package.json", "server.mjs", "docs/readme.md"], p.files, p.unchanged);
+  assert.equal(cov.complete, true, "declared files are covered without being rewritten");
+  // Escapes are refused in declarations exactly as in blocks.
+  const evil = parseFileBlocks("NO-CHANGE: ../secrets.txt\nNO-CHANGE: C:/windows/hosts");
+  assert.deepEqual(evil.unchanged, [], "traversal and absolute declarations are dropped");
+  // A NO-CHANGE line INSIDE a file body is content, not a declaration.
+  const inner = parseFileBlocks("```path=a.md\nNO-CHANGE: b.txt\n```");
+  assert.deepEqual(inner.unchanged, []);
+  assert.match(inner.files[0].content, /NO-CHANGE: b.txt/);
 });
 
 /* ---- file blocks ------------------------------------------------------------------------- */
@@ -541,6 +602,300 @@ await t("an oversized move SPLITS instead of writing nothing", async () => {
   const split = r.events.find((e) => /being split into/.test(e.message || ""));
   assert.ok(split, "the oversized move announces its split rather than failing silently");
   assert.equal(out.ok, true, "the work lands instead of being discarded");
+});
+
+/* ---- the counsel ladder: 2026-09-01, the 30B/120B test-isolation case that never escalated ---- */
+
+/*
+ * A rig for the ladder tests. Every failure the ladder needs to counsel is a plain COVERAGE
+ * failure (a move over two files, the model returns only one), not a verification failure: the
+ * repair loop inside runMoveOnce would need its own three-attempt reply queue on every single
+ * once-path invocation, and the ladder's own behavior (which rung fires, in what order, on what
+ * cost) is orthogonal to which stage produced the failure. package.json declares no scripts, so
+ * verify() has nothing to run and never contests a coverage-complete write.
+ *
+ * `chat` is keyed by model id into its own reply queue, exactly the "keys its answer on the
+ * model" pattern the brief asks for; several assertions below also check message CONTENT (the
+ * system turn against BRAIN_SYSTEM/FRONTIER_SYSTEM, or a GUIDANCE turn's presence) so a rig bug
+ * that fed the wrong queue to the wrong role would still be caught.
+ */
+function counselRig({
+  modelReplies = [], brainReplies = [], frontierReplies = [], strongerReplies = [],
+  frontierCallsLeftStart = 1, escalateTo = "gx10/gpt-oss-120b", minBrainConfidence = 0.6,
+  withBrain = true, withFrontier = true, withEscalate = true, withLessons = true,
+} = {}) {
+  const events = [], calls = [];
+  const jobs = { emit: (id, ev) => events.push(ev), finish: (id, ev) => events.push(ev) };
+  // A queued reply may be a plain string (the common case: a coder file-block reply that always
+  // succeeds) or a full { ok, content, costUsd, ... } object when a test needs to control cost or
+  // failure. Wrapping here keeps every call site below readable.
+  const wrap = (x) => (typeof x === "string" ? { ok: true, content: x, costUsd: 0.01 } : x);
+  const queues = {
+    "test/model": modelReplies.map(wrap),
+    "test/brain": brainReplies.map(wrap),
+    "test/frontier": frontierReplies.map(wrap),
+    "gx10/gpt-oss-120b": strongerReplies.map(wrap),
+  };
+  const chat = async (args) => {
+    calls.push(args);
+    const q = queues[args.model] || [];
+    return q.shift() || { ok: false, error: "no reply queued for " + args.model };
+  };
+  const hands = async (tool, args) => {
+    calls.push({ tool, args });
+    if (tool === "fs_read" && String(args.path).endsWith("package.json")) return { content: '{"scripts":{}}' };
+    if (tool === "fs_read") return { content: "existing contents" };
+    if (tool === "shell_run" && /rev-parse/.test(args.command)) return { stdout: "true" };
+    if (tool === "shell_run" && /commit/.test(args.command)) return { code: 0 };
+    if (tool === "shell_run") return { code: 0 };
+    if (tool === "fs_write") return { ok: true };
+    if (tool === "fs_list") return { entries: [] };
+    return {};
+  };
+  const router = () => ({ taskClass: "build_code", model: "test/model", why: "test" });
+  const meter = async () => {};
+  const lessonsCalls = { record: [], noteWinFor: [], bumpReports: 0, policiesBlock: [] };
+  const lessons = !withLessons ? null : {
+    policiesBlock: (a) => { lessonsCalls.policiesBlock.push(a); return ""; },
+    record: (a) => { lessonsCalls.record.push(a); },
+    noteWinFor: (a) => { lessonsCalls.noteWinFor.push(a); },
+    bumpReports: () => { lessonsCalls.bumpReports++; },
+  };
+  let frontierCallsLeft = frontierCallsLeftStart;
+  const advisors = (!withBrain && !withFrontier) ? null : {
+    brainModel: withBrain ? "test/brain" : "",
+    frontierModel: withFrontier ? "test/frontier" : "",
+    minBrainConfidence,
+    frontierCallsLeft: () => frontierCallsLeft,
+    noteFrontierCall: () => { frontierCallsLeft--; },
+  };
+  const escalate = withEscalate ? (() => escalateTo) : null;
+  const engine = createIdeEngine({ jobs, chat, hands, router, meter, lessons, advisors, escalate });
+  return {
+    engine, events, calls, lessonsCalls,
+    modelCalls: (m) => calls.filter((c) => c.model === m),
+    runEvents: () => events.filter((e) => e.type === "run"),
+    types: () => events.map((e) => e.type + (e.command ? ":" + e.command : "") + (e.state ? ":" + e.state : "")),
+  };
+}
+const CMOVE = { id: "m1", title: "Add a thing", why: "because", files: ["src/a.ts", "src/b.ts"] };
+const partial = "```path=src/a.ts\nexport const a = 1;\n```";
+const complete = partial + "\n```path=src/b.ts\nexport const b = 2;\n```";
+const brainJson = (fix, confidence, lesson) => JSON.stringify({
+  diagnosis: "The move omitted a planned file.", rootCause: "wrong_file_scope", fix,
+  lesson: lesson === undefined ? "Account for every planned file before declaring a move finished." : lesson,
+  confidence,
+});
+const frontierJson = (correction, confidence, lesson) => JSON.stringify({
+  correction, whyBrainWasWrong: "The brain's fix still left a file out.",
+  lesson: lesson === undefined ? "A missing planned file means the move is not actually done." : lesson,
+  confidence,
+});
+
+await t("counselScopeFor maps each stage to the lesson-store scope the spec names", () => {
+  assert.equal(counselScopeFor("format"), "move");
+  assert.equal(counselScopeFor("coverage"), "move");
+  assert.equal(counselScopeFor("verify"), "repair");
+  assert.equal(counselScopeFor("install"), "install");
+  assert.equal(counselScopeFor("no_change_contested"), "repair");
+  assert.equal(counselScopeFor("blocked"), "move");
+});
+
+await t("buildMoveMessages: policies sit before the accounting line, guidance turns land after the user message", () => {
+  const guidance = [{ role: "user", content: "BRAIN GUIDANCE (from the build's brain; act on it in this retry):\ndo the thing" }];
+  const msgs = buildMoveMessages({
+    move: { title: "T", files: ["a.ts"] }, manifest: [], workspaceName: "W",
+    policies: "POLICIES FROM PAST BUILDS (learned from real failures; follow them):\n- always check b.ts",
+    guidance,
+  });
+  assert.equal(msgs.length, 3, "[system, user, ...guidance]");
+  assert.equal(msgs[0].content, SYSTEM_PREFIX);
+  const userText = msgs[1].content;
+  const policiesAt = userText.indexOf("POLICIES FROM PAST BUILDS");
+  const accountingAt = userText.indexOf("Account for EVERY file listed");
+  assert.ok(policiesAt >= 0 && accountingAt >= 0 && policiesAt < accountingAt,
+    "the policies section must read BEFORE the final accounting line");
+  assert.equal(msgs[2], guidance[0], "guidance rides as its own turn after the user message");
+  // No policies, no guidance: shape is unchanged from before this feature existed.
+  const plain = buildMoveMessages({ move: { title: "T", files: [] } });
+  assert.equal(plain.length, 2);
+});
+
+await t("brain fixes a coverage failure with high confidence; one guided retry passes", async () => {
+  const r = counselRig({
+    modelReplies: [partial, partial, complete],
+    brainReplies: [{ ok: true, content: brainJson("Return src/b.ts too; it was in the manifest.", 0.9), costUsd: 0.02 }],
+  });
+  const out = await r.engine.runMove(JOB, { move: CMOVE, workspace: WS, assignments: {}, goal: "g" });
+  assert.equal(out.ok, true);
+  assert.equal(r.modelCalls("test/brain").length, 1, "exactly one brain call");
+  assert.equal(r.modelCalls("test/frontier").length, 0, "zero frontier calls: the brain closed it out");
+  assert.equal(r.modelCalls("test/brain")[0].messages[0].content, BRAIN_SYSTEM, "the brain call is bare: its own system prompt, not the move's");
+  const brainEvent = r.runEvents().find((e) => e.command === "brain");
+  assert.ok(brainEvent && brainEvent.ok === true, "a brain run event lands in the journal");
+  const retryAnnounce = r.events.find((e) => e.type === "move" && /brain's fix/i.test(e.message || ""));
+  assert.ok(retryAnnounce, "the guided retry is announced before it runs");
+  assert.ok(r.lessonsCalls.record.some((c) => c.source === "brain"), "the brain's generalizable lesson is recorded");
+  assert.ok(r.lessonsCalls.noteWinFor.length >= 1, "a passing counseled move still credits the lessons that rode along");
+  assert.ok(r.lessonsCalls.bumpReports >= 1);
+  assert.ok(!r.runEvents().some((e) => /below the/i.test(e.output || "")),
+    "a confident brain never trips the minBrainConfidence skip, so no such event appears");
+});
+
+await t("a low-confidence brain skips its own guided retry and hands the diagnosis straight to the frontier, which closes it out", async () => {
+  const r = counselRig({
+    modelReplies: [partial, partial,   // first once-path: fails coverage
+                   complete],          // frontier-guided retry: passes (no brain-guided retry in between)
+    brainReplies: [{ ok: true, content: brainJson("Try including src/b.ts.", 0.3), costUsd: 0.01 }],
+    frontierReplies: [{ ok: true, content: frontierJson("Return BOTH src/a.ts and src/b.ts as complete fenced blocks.", 0.85), costUsd: 0.03 }],
+    minBrainConfidence: 0.6,
+  });
+  const out = await r.engine.runMove(JOB, { move: CMOVE, workspace: WS, assignments: {}, goal: "g" });
+  assert.equal(out.ok, true);
+  assert.equal(r.modelCalls("test/brain").length, 1);
+  assert.equal(r.modelCalls("test/frontier").length, 1);
+  assert.equal(r.modelCalls("test/frontier")[0].messages[0].content, FRONTIER_SYSTEM);
+  // The coder is NOT re-run between the brain call and the frontier call: locate both in the raw
+  // call log and prove no "test/model" call landed strictly between them (a re-run would be the
+  // guided retry the confidence gate exists to skip).
+  const brainAt = r.calls.findIndex((c) => c.model === "test/brain");
+  const frontierAt = r.calls.findIndex((c) => c.model === "test/frontier");
+  assert.ok(brainAt >= 0 && frontierAt > brainAt);
+  const coderBetween = r.calls.filter((c, i) => c.model === "test/model" && i > brainAt && i < frontierAt);
+  assert.equal(coderBetween.length, 0, "no coder call spent between the brain's diagnosis and the frontier's review");
+  assert.ok(!r.events.some((e) => e.type === "move" && /brain's fix/i.test(e.message || "")),
+    "the guided retry is never announced: it never ran");
+  const skipEvent = r.runEvents().find((e) => e.command === "brain" && /below the/i.test(e.output || ""));
+  assert.ok(skipEvent && skipEvent.ok === true, "the skip is logged as an honest brain-rung event naming the confidence and the bar");
+  assert.match(skipEvent.output, /0\.30/);
+  assert.match(skipEvent.output, /0\.60/);
+  assert.match(r.modelCalls("test/frontier")[0].messages.map((m) => m.content).join("\n"), /Try including src\/b\.ts\./,
+    "the frontier still sees the brain's fix even though it was never tried");
+  const frontierEvent = r.runEvents().find((e) => e.command === "frontier");
+  assert.ok(frontierEvent && frontierEvent.ok === true);
+  assert.ok(r.lessonsCalls.record.some((c) => c.source === "frontier"), "the frontier's lesson is recorded under its own source");
+  const passingCall = r.modelCalls("test/model").find((c) => c.messages.some((m) => /GUIDANCE/.test(m.content)));
+  assert.ok(passingCall, "the retry after the frontier carries guidance");
+  const guidanceTurns = passingCall.messages.filter((m) => /GUIDANCE/.test(m.content));
+  assert.equal(guidanceTurns.length, 2, "both the brain's turn and the frontier's turn ride the winning retry");
+  assert.ok(guidanceTurns.some((m) => /^BRAIN GUIDANCE/.test(m.content)));
+  assert.ok(guidanceTurns.some((m) => /^FRONTIER GUIDANCE/.test(m.content)));
+});
+
+await t("minBrainConfidence set above 1 skips the guided retry even for a near-certain brain", async () => {
+  const r = counselRig({
+    modelReplies: [partial, partial,   // first once-path: fails coverage
+                   complete],          // frontier-guided retry: passes directly
+    brainReplies: [{ ok: true, content: brainJson("Try including src/b.ts.", 0.99), costUsd: 0.01 }],
+    frontierReplies: [{ ok: true, content: frontierJson("Return both files, complete.", 0.9), costUsd: 0.01 }],
+    minBrainConfidence: 1.01,
+  });
+  const out = await r.engine.runMove(JOB, { move: CMOVE, workspace: WS, assignments: {}, goal: "g" });
+  assert.equal(out.ok, true);
+  assert.equal(r.modelCalls("test/brain").length, 1);
+  assert.equal(r.modelCalls("test/frontier").length, 1, "a bar above 1.0 forces every failure through the frontier, even a 0.99-confident brain");
+  assert.ok(!r.events.some((e) => e.type === "move" && /brain's fix/i.test(e.message || "")),
+    "no guided retry ran for this near-certain brain either");
+  const skipEvent = r.runEvents().find((e) => e.command === "brain" && /below the/i.test(e.output || ""));
+  assert.ok(skipEvent, "the skip fires even at 0.99 confidence once the operator sets the bar above 1.0");
+  assert.match(skipEvent.output, /0\.99/);
+  assert.match(skipEvent.output, /1\.01/);
+});
+
+await t("frontierCallsLeft() at 0 skips the frontier rung entirely and goes straight to escalation", async () => {
+  const r = counselRig({
+    modelReplies: [partial, partial,   // first once-path fails
+                   partial, partial],  // brain-guided retry still fails
+    brainReplies: [{ ok: true, content: brainJson("Try including src/b.ts.", 0.9), costUsd: 0.01 }],
+    strongerReplies: [{ ok: true, content: complete, costUsd: 0.02 }],
+    frontierCallsLeftStart: 0,
+  });
+  const out = await r.engine.runMove(JOB, { move: CMOVE, workspace: WS, assignments: {}, goal: "g" });
+  assert.equal(out.ok, true);
+  assert.equal(r.modelCalls("test/frontier").length, 0, "no budget left, so the rung is skipped, not attempted and refused");
+  assert.ok(r.runEvents().some((e) => e.command === "escalation"), "the ladder moves straight to escalation");
+});
+
+await t("escalation to a stronger seat succeeds after brain and frontier both fail; the coder call on that seat carries every guidance turn", async () => {
+  const r = counselRig({
+    modelReplies: [partial, partial,   // first once-path fails
+                   partial, partial,   // brain-guided retry fails
+                   partial, partial],  // frontier-guided retry fails
+    brainReplies: [{ ok: true, content: brainJson("Try including src/b.ts.", 0.5), costUsd: 0.01 }],
+    frontierReplies: [{ ok: true, content: frontierJson("Return both files, complete.", 0.6), costUsd: 0.01 }],
+    strongerReplies: [{ ok: true, content: complete, costUsd: 0.02 }],
+  });
+  const out = await r.engine.runMove(JOB, { move: CMOVE, workspace: WS, assignments: {}, goal: "g" });
+  assert.equal(out.ok, true);
+  const escEvent = r.runEvents().find((e) => e.command === "escalation");
+  assert.ok(escEvent, "an escalation run event is emitted");
+  assert.match(escEvent.output, /test\/model/);
+  assert.match(escEvent.output, /gx10\/gpt-oss-120b/);
+  const strongCall = r.modelCalls("gx10/gpt-oss-120b")[0];
+  assert.ok(strongCall, "the stronger seat was actually called");
+  assert.ok(strongCall.messages.some((m) => /GUIDANCE/.test(m.content)), "the escalated attempt carries the accumulated guidance turns");
+});
+
+await t("brain, frontier, and escalation all fail: the honest failure carries the full counsel record and summed cost", async () => {
+  const r = counselRig({
+    modelReplies: [partial, partial, partial, partial, partial, partial],
+    brainReplies: [{ ok: true, content: brainJson("Try including src/b.ts.", 0.5), costUsd: 0.01 }],
+    frontierReplies: [{ ok: true, content: frontierJson("Return both files.", 0.6), costUsd: 0.01 }],
+    strongerReplies: [partial, partial].map((c) => ({ ok: true, content: c, costUsd: 0.01 })),
+  });
+  const out = await r.engine.runMove(JOB, { move: CMOVE, workspace: WS, assignments: {}, goal: "g" });
+  assert.equal(out.ok, false);
+  assert.deepEqual(out.counsel, { brain: true, frontier: true, escalatedTo: "gx10/gpt-oss-120b" });
+  const counselEvent = r.runEvents().find((e) => e.command === "counsel");
+  assert.ok(counselEvent && counselEvent.ok === false);
+  assert.match(counselEvent.output, /brain guidance/);
+  assert.match(counselEvent.output, /frontier correction/);
+  assert.match(counselEvent.output, /escalation to gx10\/gpt-oss-120b/);
+  // Every rung actually ran and every chat call in this test costs something; the total must
+  // reflect all of them, not just the last failed attempt.
+  assert.ok(out.costUsd > 0.05, "cost accumulates across the whole ladder, not just the final rung: " + out.costUsd);
+  // The new fields promised for every failure return survive the ladder too.
+  assert.equal(out.stage, "coverage");
+  assert.equal(typeof out.lastReply, "string");
+});
+
+await t("no advisors, lessons, or escalate injected: runMove returns runMoveOnce's result unchanged", async () => {
+  const r = rig({ chatReplies: [{ ok: true, content: "```path=NEED: src/other.ts\n\n```", costUsd: 0.01 }] });
+  const viaMove = await r.engine.runMove(JOB, { move: MOVE, workspace: WS, assignments: {} });
+  const r2 = rig({ chatReplies: [{ ok: true, content: "```path=NEED: src/other.ts\n\n```", costUsd: 0.01 }] });
+  const viaOnce = await r2.engine.runMoveOnce(JOB, { move: MOVE, workspace: WS, assignments: {} }, 0);
+  assert.deepEqual(viaMove, viaOnce, "with nothing to counsel with, runMove IS runMoveOnce");
+  assert.equal(viaMove.ok, false);
+  assert.equal(viaMove.stage, "format", "the new stage field rides even with no advisors wired in");
+  assert.equal(typeof viaMove.lastReply, "string");
+  assert.equal(typeof viaMove.checkOutput, "string");
+  assert.equal(typeof viaMove.pipelineNotes, "string");
+});
+
+await t("a carve-out (blocked) failure is terminal: the counsel ladder never runs, not even the brain", async () => {
+  const r = counselRig({ modelReplies: [{ ok: true, content: "```path=scripts/b.sh\npg_dump mydb\n```", costUsd: 0.01 }] });
+  const out = await r.engine.runMove(JOB, { move: { ...CMOVE, files: ["scripts/b.sh"] }, workspace: WS, assignments: {} });
+  assert.equal(out.blocked, true);
+  assert.equal(out.stage, "blocked");
+  assert.equal(r.modelCalls("test/brain").length, 0, "a terminal wall is never handed to the brain");
+  assert.equal(r.modelCalls("test/frontier").length, 0);
+  assert.equal(r.modelCalls("gx10/gpt-oss-120b").length, 0);
+  assert.ok(!r.runEvents().some((e) => e.command === "counsel"), "no counsel summary either: nothing was tried");
+});
+
+await t("brain returns unparseable prose: the ladder logs it honestly and moves on without throwing", async () => {
+  const r = counselRig({
+    modelReplies: [partial, partial,   // first once-path fails
+                   complete],          // frontier-guided retry succeeds (brain never produced guidance)
+    brainReplies: [{ ok: true, content: "I looked at it and I am not totally sure what happened here.", costUsd: 0.01 }],
+    frontierReplies: [{ ok: true, content: frontierJson("Return both files.", 0.7), costUsd: 0.01 }],
+  });
+  const out = await r.engine.runMove(JOB, { move: CMOVE, workspace: WS, assignments: {}, goal: "g" });
+  assert.equal(out.ok, true, "the ladder recovers via the frontier even though the brain's reply was unusable");
+  const brainEvent = r.runEvents().find((e) => e.command === "brain");
+  assert.ok(brainEvent && brainEvent.ok === false, "an unparseable brain reply is logged as a failed brain rung, not silence");
+  assert.match(brainEvent.output, /could not be read/i);
+  assert.equal(r.modelCalls("test/frontier").length, 1, "the ladder still reaches the frontier rung");
 });
 
 console.log("\n" + passed + " passed, " + failed + " failed");

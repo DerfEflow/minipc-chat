@@ -50,6 +50,44 @@ const VERSION = "hands/4";   // hands/4: durable, checkpointed game-factory work
 // presents these so its dial-out passes the Access layer; HANDS_TOKEN still authorizes at the app.
 const CF_ID = process.env.HANDS_CF_CLIENT_ID || "";
 const CF_SECRET = process.env.HANDS_CF_CLIENT_SECRET || "";
+
+/*
+ * SINGLE INSTANCE PER MACHINE (2026-09-01). The laptop was found running TWO hands clients: the
+ * hub kept the healthy stream and REFUSED the twin every 30 seconds, forever, flooding the
+ * production log and churning connections. Launchers cannot be trusted to prevent this (a
+ * scheduled task, a logon trigger, and a hand-started console can all coexist), so the node
+ * itself takes a machine-wide lock: a localhost port bound before anything else. A second copy
+ * finds the port taken and exits 0 quietly — success, because the machine IS being served.
+ *
+ * The lock is PER IDENTITY (node name + hub URL), mirroring the hub's own duplicate rule: two
+ * differently-named nodes on one machine are legitimate (the test suites spawn several), while
+ * two clients claiming the same name at the same hub are the exact pathology this kills. The
+ * port is derived from that identity; HANDS_SINGLETON_PORT overrides it, and 0 disables.
+ */
+const SINGLETON_PORT = (() => {
+  if (process.env.HANDS_SINGLETON_PORT != null) return Number(process.env.HANDS_SINGLETON_PORT) || 0;
+  const h = createHash("sha256").update(NODE_NAME + "\0" + HANDS_URL).digest();
+  return 47000 + (h.readUInt16BE(0) % 1000);
+})();
+async function acquireSingleton() {
+  if (!SINGLETON_PORT) return null;
+  const net = await import("node:net");
+  return new Promise((resolveLock) => {
+    const srv = net.createServer(() => {});
+    srv.once("error", (e) => {
+      if (e && e.code === "EADDRINUSE") {
+        console.log(`[hands:${NODE_NAME}] another hands client already serves this machine (port ${SINGLETON_PORT} held); exiting quietly`);
+        process.exit(0);
+      }
+      // Any other bind failure is unexpected but must not stop the node from serving.
+      console.log(`[hands:${NODE_NAME}] singleton lock unavailable (${e && e.code}); continuing without it`);
+      resolveLock(null);
+    });
+    srv.listen(SINGLETON_PORT, "127.0.0.1", () => { srv.unref(); resolveLock(srv); });
+  });
+}
+// Acquired inside main(), never at import time: tests import this module for executeJob without
+// starting the loop, and an import must not bind ports, print, or exit the host process.
 const authHeaders = (extra = {}) => {
   const h = { authorization: "Bearer " + HANDS_TOKEN, ...extra };
   if (CF_ID && CF_SECRET) { h["cf-access-client-id"] = CF_ID; h["cf-access-client-secret"] = CF_SECRET; }
@@ -939,6 +977,7 @@ export async function runHands() {
     process.exit(1);
   }
   if (!ROOTS.length) log("NOTE: no HANDS_ROOTS and HANDS_MAX_ACCESS unset — fs tools will refuse until roots are configured deliberately.");
+  await acquireSingleton();             // a same-identity twin exits here, before it ever dials out
   ELEVATED = await detectElevation();   // once, before the first connect, so the profile is complete
   log(`starting  ·  access=${MAX_ACCESS ? "MAX (all drives minus carve-outs)" : "scoped"}  ·  roots=${ROOTS.join(", ") || "(none)"}  ·  elevated=${ELEVATED}  ·  self-protected dirs=${SELF_PROTECT.length}  ·  platform=${process.platform}`);
   for (;;) {
