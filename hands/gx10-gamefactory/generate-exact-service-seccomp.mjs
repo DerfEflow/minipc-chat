@@ -38,7 +38,11 @@ const controllerNetwork = ["accept", "accept4", "bind", "connect", "getpeername"
   "listen", "recv", "recvfrom", "recvmmsg", "recvmsg", "send", "sendmmsg", "sendmsg", "sendto", "setsockopt", "shutdown"];
 const brokerOnly = ["fchown", "fchownat", "landlock_add_rule", "landlock_create_ruleset",
   "landlock_restrict_self", "pidfd_open", "pidfd_send_signal", "seccomp", "setsid", "symlinkat"];
-const names = [...new Set([...common, ...(role === "broker" ? [...godot, ...brokerOnly] : [...controllerNetwork, "link"])])].sort();
+// Node 24 implements fs.linkSync() with linkat(AT_FDCWD, ..., AT_FDCWD, ..., 0) on the
+// production arm64/glibc runtime. Keep both ABI spellings controller-only so the durable
+// no-replace publisher works across the reviewed architectures without granting the static broker
+// another namespace mutation primitive.
+const names = [...new Set([...common, ...(role === "broker" ? [...godot, ...brokerOnly] : [...controllerNetwork, "link", "linkat"])])].sort();
 const profile = { defaultAction: "SCMP_ACT_ERRNO", defaultErrnoRet: 1,
   archMap: [
     { architecture: "SCMP_ARCH_AARCH64", subArchitectures: ["SCMP_ARCH_ARM"] },

@@ -38,6 +38,10 @@ function load(role) {
   }
   assert.equal(allowed.has("symlinkat"), role === "broker",
     "only the static broker may publish an exact retained-generation indirection link");
+  for (const syscall of ["link", "linkat"]) {
+    assert.equal(allowed.has(syscall), role === "controller",
+      `${syscall} is required only by the controller's durable no-replace publisher`);
+  }
   return parsed;
 }
 

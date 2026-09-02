@@ -359,6 +359,13 @@ test("service seccomp profiles constrain clone and deny process inspection and b
   }
   const brokerAllows = brokerSeccomp.syscalls.filter((rule) => rule.action === "SCMP_ACT_ALLOW");
   assert.equal(brokerAllows.some((rule) => rule.names?.includes("socket")), false);
+  const controllerAllows = controllerSeccomp.syscalls.filter((rule) => rule.action === "SCMP_ACT_ALLOW");
+  for (const syscall of ["link", "linkat"]) {
+    assert.equal(controllerAllows.some((rule) => rule.names?.includes(syscall)), true,
+      `controller durable no-replace publication requires ${syscall}`);
+    assert.equal(brokerAllows.some((rule) => rule.names?.includes(syscall)), false,
+      `static broker must not receive controller-only ${syscall}`);
+  }
   const controllerFamilies = controllerSeccomp.syscalls.filter((rule) => rule.action === "SCMP_ACT_ALLOW"
     && rule.names?.includes("socket")).map((rule) => rule.args?.[0]?.value).sort((a, b) => a - b);
   assert.deepEqual(controllerFamilies, [2, 10, 16]);
