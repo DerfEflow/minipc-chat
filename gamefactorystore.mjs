@@ -475,6 +475,25 @@ export function createGameFactoryStore({
     return Number.isFinite(value) ? value : Date.now();
   };
 
+  // Native Project evidence is an append-only audit fact, so it may not inherit the store's
+  // generic wall-clock fallback.  A non-numeric, unsafe, fractional, negative, or throwing clock
+  // makes chronology unprovable and must fail before BEGIN IMMEDIATE (and before any append).
+  function nativeEvidenceTimestamp() {
+    try {
+      const value = now();
+      return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function nativeEvidenceClockFailure() {
+    return result(503, {
+      error: "The durable native Project evidence clock is unavailable or invalid.",
+      code: "native_project_clock_invalid",
+    });
+  }
+
   function tx(fn) {
     db.exec("BEGIN IMMEDIATE");
     try { const result = fn(); db.exec("COMMIT"); return result; }
@@ -1475,6 +1494,8 @@ export function createGameFactoryStore({
 
   function appendNativeProjectEvidence({ uid, artifactId, manifest, kind }) {
     const who = cleanUid(uid);
+    const at = nativeEvidenceTimestamp();
+    if (at === null) return nativeEvidenceClockFailure();
     return tx(() => {
       const artifact = db.prepare("SELECT * FROM game_artifacts WHERE id=? AND uid=?").get(cleanText(artifactId, 180), who);
       if (!artifact) return result(404, { error: "No such artifact.", code: "not_found" });
@@ -1512,7 +1533,6 @@ export function createGameFactoryStore({
           status: projection.status, manifestHash: bound.manifestHash,
         });
       }
-      const at = timestamp();
       const state = nativeEvidenceState(artifact, q.copies.all(artifact.id).filter((copy) => copy.backend === "chatgpt_project"));
       const projection = state.copy;
       if (projection.status === "EVIDENCE_CORRUPT" || projection.status === "AMBIGUOUS") {
@@ -1549,6 +1569,8 @@ export function createGameFactoryStore({
 
   function invalidateNativeProjectEvidence({ uid, artifactId, manifest } = {}) {
     const who = cleanUid(uid);
+    const at = nativeEvidenceTimestamp();
+    if (at === null) return nativeEvidenceClockFailure();
     return tx(() => {
       const artifact = db.prepare("SELECT * FROM game_artifacts WHERE id=? AND uid=?").get(cleanText(artifactId, 180), who);
       if (!artifact) return result(404, { error: "No such artifact.", code: "not_found" });
@@ -1562,7 +1584,6 @@ export function createGameFactoryStore({
       const existing = db.prepare("SELECT * FROM game_artifact_native_evidence WHERE artifactId=? AND kind='INVALIDATED' AND manifestHash=?")
         .get(artifact.id, bound.manifestHash);
       if (existing) return result(200, { ok: true, replayed: true, evidenceId: existing.id, status: "INVALIDATED", manifestHash: bound.manifestHash });
-      const at = timestamp();
       const target = q.nativeEvidenceById.get(bound.evidenceId);
       if (!target || target.artifactId !== artifact.id || target.projectId !== artifact.projectId || target.uid !== who
           || ![NATIVE_PROJECT_OWNER_ATTESTED_STATUS, NATIVE_PROJECT_API_VERIFIED_STATUS].includes(target.kind)) {

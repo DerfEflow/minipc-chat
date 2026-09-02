@@ -67,7 +67,7 @@ function invalidation(evidenceId, { reason = "SOURCE_REMOVED", observedSourceCou
 
 function setup(dir, uid = "owner-uid") {
   let clock = BASE_TIME;
-  const store = createGameFactoryStore({ dir, now: () => clock });
+  const store = createGameFactoryStore({ dir, now: () => typeof clock === "function" ? clock() : clock });
   const project = store.seedPortfolio({ uid, email: "owner@example.com" })[0];
   const made = store.recordArtifact({
     uid, projectId: project.id, artifactKey: REQUIRED_GAME_ARTIFACTS[0], sha256: "a".repeat(64), size: 12, mimeType: "text/markdown",
@@ -284,6 +284,48 @@ try {
         manifest: manifest(h.artifact, { observedAt: new Date(BASE_TIME + 3 * 60_000).toISOString(), suffix: "new-replacement" }),
       });
       assert.equal(replacement.status, 201);
+    } finally { h.store.close(); }
+  });
+
+  test("attestation and invalidation reject an invalid clock before any append", () => {
+    const dir = join(root, "invalid-clock");
+    const h = setup(dir, "invalid-clock-owner");
+    const countRows = () => {
+      const db = new DatabaseSync(join(dir, "gamefactory.db"));
+      try { return Number(db.prepare("SELECT COUNT(*) AS count FROM game_artifact_native_evidence").get().count); }
+      finally { db.close(); }
+    };
+    const badClocks = [NaN, Infinity, -Infinity, String(BASE_TIME), BASE_TIME + 0.5, -1, () => { throw new Error("clock unavailable"); }];
+    try {
+      for (const value of badClocks) {
+        h.setNow(value);
+        const response = h.store.recordOwnerAttestedNativeProjectEvidence({
+          uid: h.uid, artifactId: h.artifact.id,
+          manifest: manifest(h.artifact, { suffix: "invalid-clock-attestation" }),
+        });
+        assert.equal(response.status, 503);
+        assert.equal(response.body.code, "native_project_clock_invalid");
+        assert.equal(countRows(), 0);
+      }
+
+      h.setNow(BASE_TIME + 1_000);
+      const recorded = h.store.recordOwnerAttestedNativeProjectEvidence({
+        uid: h.uid, artifactId: h.artifact.id,
+        manifest: manifest(h.artifact, { observedAt: new Date(BASE_TIME + 1_000).toISOString(), suffix: "valid-before-clock-failure" }),
+      });
+      assert.equal(recorded.status, 201);
+      assert.equal(countRows(), 1);
+
+      for (const value of badClocks) {
+        h.setNow(value);
+        const response = h.store.invalidateNativeProjectEvidence({
+          uid: h.uid, artifactId: h.artifact.id,
+          manifest: invalidation(recorded.body.evidenceId, { observedAt: new Date(BASE_TIME + 2_000).toISOString() }),
+        });
+        assert.equal(response.status, 503);
+        assert.equal(response.body.code, "native_project_clock_invalid");
+        assert.equal(countRows(), 1);
+      }
     } finally { h.store.close(); }
   });
 
