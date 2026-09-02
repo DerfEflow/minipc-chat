@@ -31,7 +31,7 @@ import {
   mkdirSync, existsSync, readdirSync, statSync, readFileSync, writeFileSync,
   realpathSync, rmSync, renameSync,
 } from "node:fs";
-import { join, resolve, dirname, sep, normalize } from "node:path";
+import { join, resolve, dirname, sep, normalize, isAbsolute, win32 } from "node:path";
 import { packGz, unpackGz, safeEntryPath } from "./tarlite.mjs";
 
 const MAX_READ_BYTES = 2_000_000;
@@ -53,7 +53,18 @@ function contain(root, raw) {
   if (!want) return { ok: false, error: "a path is required" };
   // Accept both an absolute path inside the sandbox and a path relative to the guest's root, since
   // the model is told the absolute one but a client may still send a bare name.
-  const abs = normalize(want.startsWith(root) ? want : resolve(root, want.replace(/^[/\\]+/, "")));
+  // Refuse traversal using either platform's separator. On Linux, a backslash is otherwise a
+  // legal filename byte, so `..\\..\\secret` would be written *inside* the workshop and reported as
+  // accepted instead of being recognized as an attempted escape. A foreign-platform absolute path
+  // is likewise never made relative by stripping its root marker.
+  if (want.split(/[/\\]+/).includes("..")) {
+    return { ok: false, error: "that path is outside your workshop" };
+  }
+  const nativeAbsolute = isAbsolute(want);
+  if (!nativeAbsolute && win32.isAbsolute(want)) {
+    return { ok: false, error: "that path is outside your workshop" };
+  }
+  const abs = normalize(nativeAbsolute ? want : resolve(root, want));
   let probe = abs, realRoot;
   try { realRoot = realpathSync(root); } catch { realRoot = root; }
   while (probe && !existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);

@@ -1,0 +1,203 @@
+# Production candidate topology: workspace-blind token-bearing controller plus one static,
+# tokenless, networkless broker PID1 in separate cgroups. No Node scheduler/executor exists.
+#
+# This file does not replace docker-compose.yml. The legacy compose path intentionally remains for
+# existing non-factory Hands uses. Before starting these services, create command/reply/broker-state/
+# workspace/runtime directories with the documented directional ownership. Docker is forbidden from
+# silently creating a typo as a root-owned directory (`create_host_path: false`).
+#
+# Attestations remain off until the reviewed profiles and all negative/live canaries pass on GX10.
+name: dominion-gx10-game-factory
+
+services:
+  gx10-game-factory-controller:
+    build:
+      context: ..
+      dockerfile: hands/gx10-gamefactory/Dockerfile
+      target: controller
+      args:
+        NODE_IMAGE: "${GX10_NODE_IMAGE:?Set a Node 24 image reference pinned by sha256 digest for GX10}"
+    image: dominion-game-factory-controller-gx10:local
+    container_name: dominion-game-factory-controller-gx10
+    user: "10001:10001"
+    group_add:
+      - "11000"
+    privileged: false
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - apparmor=dominion-gx10-gamefactory-controller
+      - "seccomp=${GX10_GAME_FACTORY_CONTROLLER_SECCOMP_PROFILE:?Set the absolute reviewed controller seccomp JSON}"
+    ipc: private
+    pids_limit: 48
+    cpus: "${GX10_GAME_FACTORY_CONTROLLER_CPUS:-0.5}"
+    mem_limit: "${GX10_GAME_FACTORY_CONTROLLER_MEMORY:-384m}"
+    memswap_limit: "${GX10_GAME_FACTORY_CONTROLLER_MEMORY:-384m}"
+    shm_size: "64m"
+    ulimits:
+      core: 0
+      nofile:
+        soft: 1024
+        hard: 4096
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=33554432,uid=10001,gid=10001,mode=1777
+    environment:
+      HANDS_URL: "${HANDS_URL:?Set HANDS_URL to the production Dominion origin}"
+      HANDS_TOKEN: "${HANDS_TOKEN:?Set HANDS_TOKEN through the container secret environment}"
+      HANDS_NODE: gx10-gamefactory
+      HANDS_CF_CLIENT_ID: "${HANDS_CF_CLIENT_ID:-}"
+      HANDS_CF_CLIENT_SECRET: "${HANDS_CF_CLIENT_SECRET:-}"
+      HANDS_ROOTS: ""
+      HANDS_MAX_ACCESS: "0"
+      HANDS_DESKTOP: "0"
+      HANDS_SNAP_DIR: /tmp/hands-snapshots
+      HANDS_BROWSER_PROFILE: /tmp/browser-profile
+      HANDS_SHOT_DIR: /tmp/shots
+      HOME: /tmp/hands-home
+      TEMP: /tmp
+      TMP: /tmp
+      TMPDIR: /tmp
+      GAME_FACTORY_WORKER_COMMAND_DIR: /broker-requests
+      GAME_FACTORY_WORKER_REPLY_DIR: /broker-results
+      GAME_FACTORY_WORKER_EXTERNAL_BROKER: "1"
+      GAME_FACTORY_CONTROLLER_ONLY: "1"
+      GAME_FACTORY_WORKER_ISOLATION_ATTESTED: "${GAME_FACTORY_WORKER_ISOLATION_ATTESTED:-0}"
+      GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED: "${GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED:-0}"
+      GAME_FACTORY_BROKER_BINARY_SHA256: "${GX10_BROKER_BINARY_SHA256:?Set the measured static broker SHA-256}"
+      GAME_FACTORY_NODE_GUARD_SHA256: "${GX10_NODE_GUARD_SHA256:?Set the measured static Node guard SHA-256}"
+      GAME_FACTORY_GODOT_GUARD_SHA256: "${GX10_GODOT_GUARD_SHA256:?Set the measured static Godot guard SHA-256}"
+      GAME_FACTORY_PAYLOAD_NODE_SHA256: "${GX10_PAYLOAD_NODE_SHA256:?Set the measured copied payload Node SHA-256}"
+      GAME_FACTORY_PAYLOAD_GODOT_SHA256: "${GX10_PAYLOAD_GODOT_SHA256:?Set the measured copied payload Godot SHA-256}"
+      GAME_FACTORY_WORKER_NODE_SECCOMP_SHA256: "${GX10_NODE_SECCOMP_SHA256:?Set the measured Node raw-BPF SHA-256}"
+      GAME_FACTORY_WORKER_GODOT_SECCOMP_SHA256: "${GX10_GODOT_SECCOMP_SHA256:?Set the measured Godot raw-BPF SHA-256}"
+      GAME_FACTORY_APPARMOR_POLICY_SHA256: "${GX10_BROKER_APPARMOR_SHA256:?Set the reviewed broker AppArmor source SHA-256}"
+      GAME_FACTORY_OUTER_SECCOMP_SHA256: "${GX10_BROKER_OUTER_SECCOMP_SHA256:?Set the broker Docker seccomp JSON SHA-256}"
+      GAME_FACTORY_DEPLOYMENT_POLICY_SHA256: "${GX10_BROKER_DEPLOYMENT_POLICY_SHA256:?Set the broker semantic-policy SHA-256}"
+      GAME_FACTORY_WORKER_PROGRAMS: node,godot
+    volumes:
+      - type: bind
+        source: "${GX10_GAME_FACTORY_COMMANDS:?Set the existing controller-command directory}"
+        target: /broker-requests
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${GX10_GAME_FACTORY_RESULTS:?Set the existing broker-result directory}"
+        target: /broker-results
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gx10-game-factory-broker:
+    build:
+      context: ..
+      dockerfile: hands/gx10-gamefactory/Dockerfile
+      target: broker
+      args:
+        NODE_IMAGE: "${GX10_NODE_IMAGE:?Set a Node 24 image reference pinned by sha256 digest for GX10}"
+    image: dominion-game-factory-broker-gx10:local
+    container_name: dominion-game-factory-broker-gx10
+    user: "10003:10003"
+    group_add:
+      - "11000"
+    privileged: false
+    read_only: true
+    network_mode: none
+    # Read-only visibility of the host cgroup namespace lets PID1 bind its death proofs to the
+    # dedicated Docker cgroup. AppArmor and the read-only container root grant no cgroup writes.
+    cgroup: host
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - apparmor=dominion-gx10-gamefactory-broker
+      - "seccomp=${GX10_GAME_FACTORY_BROKER_SECCOMP_PROFILE:?Set the absolute reviewed broker seccomp JSON}"
+    ipc: private
+    pids_limit: 128
+    cpus: "${GX10_GAME_FACTORY_BROKER_CPUS:-2.0}"
+    mem_limit: "${GX10_GAME_FACTORY_BROKER_MEMORY:-2g}"
+    memswap_limit: "${GX10_GAME_FACTORY_BROKER_MEMORY:-2g}"
+    shm_size: "64m"
+    ulimits:
+      core: 0
+      nofile:
+        soft: 1024
+        hard: 4096
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16777216,uid=10003,gid=10003,mode=0700
+    environment:
+      GAME_FACTORY_BROKER_BINARY_SHA256: "${GX10_BROKER_BINARY_SHA256:?Set the measured static broker SHA-256}"
+      GAME_FACTORY_NODE_GUARD_SHA256: "${GX10_NODE_GUARD_SHA256:?Set the measured static Node guard SHA-256}"
+      GAME_FACTORY_GODOT_GUARD_SHA256: "${GX10_GODOT_GUARD_SHA256:?Set the measured static Godot guard SHA-256}"
+      GAME_FACTORY_NODE_FILTER_SHA256: "${GX10_NODE_SECCOMP_SHA256:?Set the measured Node raw-BPF SHA-256}"
+      GAME_FACTORY_GODOT_FILTER_SHA256: "${GX10_GODOT_SECCOMP_SHA256:?Set the measured Godot raw-BPF SHA-256}"
+      GAME_FACTORY_PAYLOAD_NODE_SHA256: "${GX10_PAYLOAD_NODE_SHA256:?Set the measured copied payload Node SHA-256}"
+      GAME_FACTORY_PAYLOAD_GODOT_SHA256: "${GX10_PAYLOAD_GODOT_SHA256:?Set the measured copied payload Godot SHA-256}"
+      GAME_FACTORY_APPARMOR_POLICY_SHA256: "${GX10_BROKER_APPARMOR_SHA256:?Set the reviewed broker AppArmor source SHA-256}"
+      GAME_FACTORY_OUTER_SECCOMP_SHA256: "${GX10_BROKER_OUTER_SECCOMP_SHA256:?Set the broker Docker seccomp JSON SHA-256}"
+      GAME_FACTORY_DEPLOYMENT_POLICY_SHA256: "${GX10_BROKER_DEPLOYMENT_POLICY_SHA256:?Set the broker semantic-policy SHA-256}"
+    volumes:
+      - type: bind
+        source: "${GX10_GAME_FACTORY_COMMANDS:?Set the existing controller-command directory}"
+        target: /broker-requests
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${GX10_GAME_FACTORY_BROKER_STATE:?Set the existing private broker-state directory}"
+        target: /broker-state
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${GX10_GAME_FACTORY_RESULTS:?Set the existing broker-result directory}"
+        target: /broker-results
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${GX10_GAME_FACTORY_WORKSPACE:?Set the mounted root of the dedicated fixed-size workspace loopback filesystem}"
+        target: /workspace
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${GX10_GAME_FACTORY_RUNTIME:?Set the mounted root of the dedicated fixed-size runtime loopback filesystem}"
+        target: /runtime
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${GX10_GAME_FACTORY_BROKER_APPARMOR_POLICY:?Set the installed reviewed broker AppArmor source}"
+        target: /opt/dominion-policy/dominion-gx10-gamefactory-broker.apparmor
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${GX10_GAME_FACTORY_BROKER_SECCOMP_PROFILE:?Set the absolute reviewed broker seccomp JSON}"
+        target: /opt/dominion-policy/seccomp-gx10-gamefactory-broker.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${GX10_GAME_FACTORY_BROKER_DEPLOYMENT_POLICY:?Set the reviewed semantic-policy packet}"
+        target: /opt/dominion-policy/gamefactory-broker-policy.bin
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

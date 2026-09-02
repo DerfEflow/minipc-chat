@@ -1810,6 +1810,8 @@ const gameFactoryStore = createGameFactoryStore({
   log: (message) => console.log("[dominion-ai] game-factory store: " + String(message || "")),
 });
 const gameFactoryReconcilerRequested = String(cfgGet("GAME_FACTORY_RECONCILER", "0")) === "1";
+const gameFactorySyntheticCanaryEnabled = String(cfgGet("GAME_FACTORY_SYNTHETIC_CANARY", "0")) === "1";
+const GAME_FACTORY_SYNTHETIC_CANARY_NODE = "gx10-gamefactory";
 const gameFactoryExposed = gameFactoryGate.allowed(OWNER_T);
 const gameFactoryWorker = createGameFactoryWorkerAdapter({
   dispatch: (node, tool, args, opts) => handsHub.dispatch(node, tool, args, opts),
@@ -1886,6 +1888,33 @@ function gameFactoryWorkerHealth(T) {
   return T && T.isOwner ? { ...gameFactoryOrchestrator.health(), ...common } : common;
 }
 
+async function runGameFactorySyntheticCanary(input) {
+  // Defense in depth below the HTTP identity wall: this operational seam is intentionally unusable
+  // in "all" mode, on an unpinned lane, or while the reconciler is dark/degraded/starting. The node
+  // is never accepted from the request; it is the exact server-configured worker adapter target.
+  if (!gameFactorySyntheticCanaryEnabled) {
+    return { status: 404, body: { error: "The synthetic canary is not enabled.", code: "synthetic_canary_disabled" } };
+  }
+  if (gameFactoryGate.mode !== "owner") {
+    return { status: 503, body: { error: "The synthetic canary requires owner-only factory mode.", code: "synthetic_canary_owner_mode_required" } };
+  }
+  if (gameFactoryWorker.node !== GAME_FACTORY_SYNTHETIC_CANARY_NODE) {
+    return { status: 503, body: { error: "The synthetic canary worker lane is not pinned to the required node.", code: "synthetic_canary_node_mismatch" } };
+  }
+  if (!gameFactoryOrchestratorEnabled || !gameFactoryWorker.enabled) {
+    return { status: 503, body: { error: "The synthetic canary worker runtime is disabled.", code: "synthetic_canary_runtime_disabled" } };
+  }
+  if (gameFactoryOrchestratorStartError) {
+    return { status: 503, body: { error: "The synthetic canary worker runtime is degraded.", code: "synthetic_canary_runtime_degraded" } };
+  }
+  if (!gameFactoryOrchestratorStarted) {
+    return { status: 503, body: { error: "The synthetic canary worker runtime is still starting.", code: "synthetic_canary_runtime_starting" } };
+  }
+  return gameFactoryStore.queueSyntheticCanary({
+    uid: input.uid, projectId: input.projectId, key: input.key, actor: input.actor,
+  });
+}
+
 const gameFactoryHttp = createGameFactoryHttp({
   store: gameFactoryStore,
   gate: gameFactoryGate,
@@ -1895,6 +1924,7 @@ const gameFactoryHttp = createGameFactoryHttp({
   releaseHealth: () => gameFactoryRelease.health(),
   planner: gameFactoryPlanner,
   readArtifactContent: (input) => gameFactoryArtifacts.readArtifactContent(input),
+  syntheticCanary: { enabled: gameFactorySyntheticCanaryEnabled, run: runGameFactorySyntheticCanary },
   log: (message) => console.log("[dominion-ai] " + String(message || "")),
 });
 
@@ -1909,15 +1939,35 @@ function gameFactoryPrincipalDenial(req) {
   const identity = req && req.dominionIdentity && typeof req.dominionIdentity === "object"
     ? req.dominionIdentity : {};
   const source = String(identity.source || "").trim().toLowerCase();
-  if (source === "service" || source === "service-owner") {
-    return { error: "The Mobile Game Factory requires a verified human owner session.", code: "human_owner_required" };
+  const identityEmail = String(identity.email || "").trim().toLowerCase();
+  const ownerEmail = String(OWNER_T.email || OWNER_EMAIL || "").trim().toLowerCase();
+  const denied = (status, { ownerOnly = true } = {}) => ({
+    status,
+    body: ownerOnly
+      ? { error: "The Mobile Game Factory requires a verified human owner session.", code: "human_owner_required" }
+      : { error: "The Mobile Game Factory requires a verified human session.", code: "human_identity_required" },
+  });
+  const verifiedHumanJwt = source === "jwt" && identity.verified === true && !!identityEmail;
+  // Single-tenant mode deliberately resolves every ordinary app request to OWNER_T, so the HTTP
+  // tenant wall cannot establish who presented this request. In owner-only factory mode, require
+  // the verified Access identity itself to be the configured owner before tenant resolution can
+  // grant any read or write. Missing/rejected/header-only identities are unauthenticated (401);
+  // verified non-owner and service identities are authenticated but unauthorized (403).
+  if (gameFactoryGate.mode === "owner") {
+    if (verifiedHumanJwt && identityEmail === ownerEmail) return null;
+    const authenticated = identity.verified === true && ["jwt", "service", "service-owner"].includes(source);
+    return denied(authenticated ? 403 : 401);
   }
-  // Preserve the handler's existing 401 response for a genuinely anonymous/rejected request. Any
-  // identity that could resolve to an account in owner mode must, however, come from the verified
-  // human-JWT path.
-  if (gameFactoryGate.mode === "owner" && String(identity.email || "").trim()
-      && !(source === "jwt" && identity.verified === true)) {
-    return { error: "The Mobile Game Factory requires a verified human owner session.", code: "human_owner_required" };
+  // `all`/`1` widens tenant entitlement, not authentication. This check remains ahead of the
+  // single-tenant OWNER_T fallback so widening the feature later cannot recreate the anonymous
+  // owner bypass. Per-tenant authorization remains in the HTTP wall when MULTI_TENANT is enabled.
+  if (gameFactoryGate.mode === "all" || gameFactoryGate.mode === "1") {
+    if (verifiedHumanJwt) return null;
+    const authenticated = identity.verified === true && ["service", "service-owner"].includes(source);
+    return denied(authenticated ? 403 : 401, { ownerOnly: false });
+  }
+  if (source === "service" || source === "service-owner") {
+    return denied(403);
   }
   return null;
 }
@@ -11181,7 +11231,7 @@ const server = http.createServer(async (req, res) => {
     // Mount only this exact namespace; static assets and unrelated /api routes still fall through.
     if (path === "/api/game-factory" || path.startsWith("/api/game-factory/")) {
       const principalDenial = gameFactoryPrincipalDenial(req);
-      if (principalDenial) return sjson(res, 403, principalDenial);
+      if (principalDenial) return sjson(res, principalDenial.status, principalDenial.body);
       return await gameFactoryHttp.handle(req, res, u);
     }
 
@@ -11700,7 +11750,7 @@ server.listen(PORT, HOST, () => {
   console.log(`[dominion-ai] listening ${HOST}:${PORT}  ->  Ollama light=${OLLAMA_LIGHT_URL}${SPLIT_TIERS ? "  heavy=" + OLLAMA_HEAVY_URL : ""}${OLLAMA_KEY ? "  (bearer)" : ""}  ·  data=${DATA_DIR}`);
   console.log(`[dominion-ai] tools: deck/forge/sandbox  ·  sync=${CTX.syncKey ? "set" : "MISSING"}  ·  run-password=${CTX.runPassword ? "set" : "unset"}  ·  sandbox=${CTX.sandboxDir}`);
   console.log(`[dominion-ai] hands: ${handsHub.enabled ? "ENABLED (dial-out hub at /hands/*, bearer-authed)" : "disabled (HANDS_TOKEN unset — /hands/* answers 503)"}`);
-  console.log(`[dominion-ai] game-factory: mode=${gameFactoryGate.mode}  ·  reconciler=${gameFactoryOrchestratorEnabled ? "starting on explicit node" : "disabled"}  ·  artifact-writes=${gameFactoryArtifactConfig.localWritesEnabled ? "on" : "off"}  ·  drive-mirror-writes=${gameFactoryArtifactConfig.driveWritesEnabled ? "on" : "off"}  ·  release-assessment-writes=${gameFactoryReleaseConfig.assessmentWritesEnabled ? "on" : "off"}`);
+  console.log(`[dominion-ai] game-factory: mode=${gameFactoryGate.mode}  ·  reconciler=${gameFactoryOrchestratorEnabled ? "starting on explicit node" : "disabled"}  ·  synthetic-canary=${gameFactorySyntheticCanaryEnabled ? "enabled (owner JWT; pinned lane required)" : "disabled"}  ·  artifact-writes=${gameFactoryArtifactConfig.localWritesEnabled ? "on" : "off"}  ·  drive-mirror-writes=${gameFactoryArtifactConfig.driveWritesEnabled ? "on" : "off"}  ·  release-assessment-writes=${gameFactoryReleaseConfig.assessmentWritesEnabled ? "on" : "off"}`);
   if (gameFactoryOrchestratorEnabled) {
     gameFactoryOrchestrator.start().then(async (report) => {
       // SIGTERM can arrive while the first reconciliation tick is awaiting the worker. stop() waits

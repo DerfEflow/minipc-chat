@@ -182,13 +182,24 @@ const refuse = (reason) => ({ ok: false, refused: true, reason });
 // Deliberately disabled until this exact Hands node receives a dedicated state directory. There
 // is no "pick the freshest machine" fallback: the server adapter dispatches to its configured node
 // name, and this node persists every run independently of the SSE request that started it.
-const GAME_FACTORY_WORKER_DIR_RAW = String(process.env.GAME_FACTORY_WORKER_DIR || "").trim();
-const GAME_FACTORY_WORKER_RUNTIME_DIR_RAW = String(process.env.GAME_FACTORY_WORKER_RUNTIME_DIR || "").trim();
+const GAME_FACTORY_WORKER_COMMAND_DIR_RAW = String(process.env.GAME_FACTORY_WORKER_COMMAND_DIR || "").trim();
+const GAME_FACTORY_WORKER_REPLY_DIR_RAW = String(process.env.GAME_FACTORY_WORKER_REPLY_DIR || "").trim();
 const GAME_FACTORY_WORKER_ISOLATION_ATTESTED = /^(?:1|true|yes)$/i.test(String(process.env.GAME_FACTORY_WORKER_ISOLATION_ATTESTED || "").trim());
 const GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED = /^(?:1|true|yes)$/i.test(String(process.env.GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED || "").trim());
+const GAME_FACTORY_WORKER_NODE_SECCOMP_SHA256 = String(process.env.GAME_FACTORY_WORKER_NODE_SECCOMP_SHA256 || "").trim();
+const GAME_FACTORY_WORKER_GODOT_SECCOMP_SHA256 = String(process.env.GAME_FACTORY_WORKER_GODOT_SECCOMP_SHA256 || "").trim();
+const GAME_FACTORY_APPARMOR_POLICY_SHA256 = String(process.env.GAME_FACTORY_APPARMOR_POLICY_SHA256 || "").trim();
+const GAME_FACTORY_OUTER_SECCOMP_SHA256 = String(process.env.GAME_FACTORY_OUTER_SECCOMP_SHA256 || "").trim();
+const GAME_FACTORY_BROKER_BINARY_SHA256 = String(process.env.GAME_FACTORY_BROKER_BINARY_SHA256 || "").trim();
+const GAME_FACTORY_NODE_GUARD_SHA256 = String(process.env.GAME_FACTORY_NODE_GUARD_SHA256 || "").trim();
+const GAME_FACTORY_GODOT_GUARD_SHA256 = String(process.env.GAME_FACTORY_GODOT_GUARD_SHA256 || "").trim();
+const GAME_FACTORY_PAYLOAD_NODE_SHA256 = String(process.env.GAME_FACTORY_PAYLOAD_NODE_SHA256 || "").trim();
+const GAME_FACTORY_PAYLOAD_GODOT_SHA256 = String(process.env.GAME_FACTORY_PAYLOAD_GODOT_SHA256 || "").trim();
+const GAME_FACTORY_DEPLOYMENT_POLICY_SHA256 = String(process.env.GAME_FACTORY_DEPLOYMENT_POLICY_SHA256 || "").trim();
+const GAME_FACTORY_WORKER_EXTERNAL_EXECUTOR = /^(?:1|true|yes)$/i.test(String(process.env.GAME_FACTORY_WORKER_EXTERNAL_EXECUTOR || "").trim());
+const GAME_FACTORY_WORKER_EXTERNAL_BROKER = /^(?:1|true|yes)$/i.test(String(process.env.GAME_FACTORY_WORKER_EXTERNAL_BROKER || "").trim());
 const GAME_FACTORY_WORKER_PROGRAMS = String(process.env.GAME_FACTORY_WORKER_PROGRAMS || "")
   .split(",").map((s) => s.trim()).filter(Boolean);
-const GAME_FACTORY_WORKER_CONCURRENCY = Math.min(Math.max(Number(process.env.GAME_FACTORY_WORKER_CONCURRENCY) || 1, 1), 4);
 function redactGameFactoryError(value, max = 1000) {
   return String(value == null ? "" : value).slice(0, max)
     .replace(/-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-\r\n]*PRIVATE KEY-----|$)/gi, "[redacted-private-key]")
@@ -209,36 +220,34 @@ function redactGameFactoryError(value, max = 1000) {
     .replace(/([?&](?:access_?token|api_?key|key|password|secret|signature)=)[^&#\s]*/gi, "$1[redacted]")
     .replace(/\b(access_?token|api_?key|password|passwd|private_?key|secret|signature)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]");
 }
-const GAME_FACTORY_WORKER_DIR_GUARD = !GAME_FACTORY_WORKER_DIR_RAW
+// The controller never falls back to the historical JavaScript worker/executor. A missing or
+// contradictory static-broker configuration is a hard disabled state, not an invitation to run
+// untrusted project code in this token-bearing process.
+const GAME_FACTORY_SPOOL_GUARD = GAME_FACTORY_WORKER_EXTERNAL_BROKER && !GAME_FACTORY_WORKER_EXTERNAL_EXECUTOR
+  && [GAME_FACTORY_WORKER_COMMAND_DIR_RAW, GAME_FACTORY_WORKER_REPLY_DIR_RAW].every((path) => path
+    && assertNotProtected({ path }).ok && !underAny(path, SELF_PROTECT))
   ? { ok: true }
-  : assertNotProtected({ path: GAME_FACTORY_WORKER_DIR_RAW }).ok && !underAny(GAME_FACTORY_WORKER_DIR_RAW, SELF_PROTECT)
-    ? { ok: true }
-    : { ok: false, reason: "GAME_FACTORY_WORKER_DIR points at a protected or self-protected location" };
+  : { ok: false, reason: "the static broker command/result spools are not exclusively configured" };
 let gameFactoryWorkerPromise = null;
 async function getGameFactoryWorker() {
   if (!gameFactoryWorkerPromise) {
-    gameFactoryWorkerPromise = import("./gamefactory-worker.mjs").then(({ createGameFactoryWorker }) => createGameFactoryWorker({
-      stateDir: GAME_FACTORY_WORKER_DIR_GUARD.ok ? GAME_FACTORY_WORKER_DIR_RAW : "",
-      runtimeDir: GAME_FACTORY_WORKER_RUNTIME_DIR_RAW,
-      isolationAttested: GAME_FACTORY_WORKER_ISOLATION_ATTESTED,
+    if (!GAME_FACTORY_SPOOL_GUARD.ok) throw new Error(GAME_FACTORY_SPOOL_GUARD.reason);
+    gameFactoryWorkerPromise = import("./gamefactory-broker-controller.mjs").then(({ createGameFactoryBrokerController }) => createGameFactoryBrokerController({
+      commandDir: GAME_FACTORY_WORKER_COMMAND_DIR_RAW, resultDir: GAME_FACTORY_WORKER_REPLY_DIR_RAW,
+      node: NODE_NAME, isolationAttested: GAME_FACTORY_WORKER_ISOLATION_ATTESTED,
       toolchainAttested: GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED,
-      node: NODE_NAME,
-      roots: () => ROOTS,
-      stateGuard: (path) => {
-        const protectedPath = assertNotProtected({ path });
-        if (!protectedPath.ok) return protectedPath;
-        if (underAny(path, SELF_PROTECT)) return { ok: false, reason: "worker state is under a self-protected Hands directory" };
-        return { ok: true };
+      expected: {
+        brokerBinarySha256: GAME_FACTORY_BROKER_BINARY_SHA256,
+        nodeGuardSha256: GAME_FACTORY_NODE_GUARD_SHA256,
+        godotGuardSha256: GAME_FACTORY_GODOT_GUARD_SHA256,
+        nodeExecutableSha256: GAME_FACTORY_PAYLOAD_NODE_SHA256,
+        godotExecutableSha256: GAME_FACTORY_PAYLOAD_GODOT_SHA256,
+        nodeFilterSha256: GAME_FACTORY_WORKER_NODE_SECCOMP_SHA256,
+        godotFilterSha256: GAME_FACTORY_WORKER_GODOT_SECCOMP_SHA256,
+        appArmorPolicySha256: GAME_FACTORY_APPARMOR_POLICY_SHA256,
+        outerSeccompSha256: GAME_FACTORY_OUTER_SECCOMP_SHA256,
+        deploymentPolicySha256: GAME_FACTORY_DEPLOYMENT_POLICY_SHA256,
       },
-      pathGuard: (path) => {
-        const root = withinRoots(path);
-        if (!root.ok) return root;
-        if (underAny(path, SELF_PROTECT)) return { ok: false, reason: "workspace is under a self-protected Hands directory" };
-        return { ok: true };
-      },
-      ...(GAME_FACTORY_WORKER_PROGRAMS.length ? { allowedPrograms: GAME_FACTORY_WORKER_PROGRAMS } : {}),
-      maxConcurrent: GAME_FACTORY_WORKER_CONCURRENCY,
-      log: (message) => console.log(`[hands:${NODE_NAME}:game-factory] ${message}`),
     }));
   }
   return gameFactoryWorkerPromise;
@@ -247,7 +256,9 @@ async function gameFactoryWorkerDescription() {
   // Older guest Forge bundles contain only hands.mjs + snapshot.mjs. Keep those nodes bootable:
   // the optional worker module is loaded only when this exact node has been configured for factory
   // duty, while a configured node reports a loud module-load error rather than feigning support.
-  if (!GAME_FACTORY_WORKER_DIR_RAW) return { protocol: "game-factory-worker/1", configured: false, node: NODE_NAME, programs: GAME_FACTORY_WORKER_PROGRAMS, state: "disabled" };
+  if (!GAME_FACTORY_SPOOL_GUARD.ok) {
+    return { protocol: "game-factory-worker/1", configured: false, node: NODE_NAME, programs: GAME_FACTORY_WORKER_PROGRAMS, state: "disabled" };
+  }
   try { return (await getGameFactoryWorker()).describe(); }
   catch (error) { return { protocol: "game-factory-worker/1", configured: false, node: NODE_NAME, state: "error", error: redactGameFactoryError(error && error.message || error, 500) }; }
 }
@@ -301,6 +312,10 @@ function runShell(command, timeoutMs = 60000, jobId = null) {
 
 // ---- the executor: one job in, one result out. Exported so tests hit it directly. -------------
 export async function executeJob(tool, args = {}, meta = {}) {
+  if (process.env.GAME_FACTORY_CONTROLLER_ONLY === "1" && !new Set([
+    "node_info", "game_factory_probe", "game_factory_start", "game_factory_status",
+    "game_factory_cancel", "game_factory_collect", "game_factory_acknowledge",
+  ]).has(String(tool))) return refuse("this token-bearing Hands process is restricted to the game-factory controller protocol");
   // Carve-outs first, on the raw args blob, for every tool that TOUCHES the machine. The Ollama
   // passthrough (fix C, 2026-07-20) is exempt: its args are model I/O — chat messages and prompts —
   // not filesystem paths. Scanning them would falsely refuse a legitimate question that merely
@@ -314,20 +329,23 @@ export async function executeJob(tool, args = {}, meta = {}) {
       case "node_info":
         return { ok: true, node: NODE_NAME, host: hostname(), platform: process.platform, roots: ROOTS, protectedDirs: SELF_PROTECT.length, pid: process.pid, uptimeSec: Math.round(process.uptime()), version: VERSION, gameFactoryWorker: await gameFactoryWorkerDescription() };
       case "game_factory_probe":
-        if (!GAME_FACTORY_WORKER_DIR_GUARD.ok) return refuse(GAME_FACTORY_WORKER_DIR_GUARD.reason);
+        if (!GAME_FACTORY_SPOOL_GUARD.ok) return refuse(GAME_FACTORY_SPOOL_GUARD.reason);
         return (await getGameFactoryWorker()).probe();
       case "game_factory_start":
-        if (!GAME_FACTORY_WORKER_DIR_GUARD.ok) return refuse(GAME_FACTORY_WORKER_DIR_GUARD.reason);
+        if (!GAME_FACTORY_SPOOL_GUARD.ok) return refuse(GAME_FACTORY_SPOOL_GUARD.reason);
         return (await getGameFactoryWorker()).start(args);
       case "game_factory_status":
-        if (!GAME_FACTORY_WORKER_DIR_GUARD.ok) return refuse(GAME_FACTORY_WORKER_DIR_GUARD.reason);
+        if (!GAME_FACTORY_SPOOL_GUARD.ok) return refuse(GAME_FACTORY_SPOOL_GUARD.reason);
         return (await getGameFactoryWorker()).status(args.runId);
       case "game_factory_cancel":
-        if (!GAME_FACTORY_WORKER_DIR_GUARD.ok) return refuse(GAME_FACTORY_WORKER_DIR_GUARD.reason);
+        if (!GAME_FACTORY_SPOOL_GUARD.ok) return refuse(GAME_FACTORY_SPOOL_GUARD.reason);
         return (await getGameFactoryWorker()).cancel(args.runId, { mode: args.mode, reason: args.reason });
       case "game_factory_collect":
-        if (!GAME_FACTORY_WORKER_DIR_GUARD.ok) return refuse(GAME_FACTORY_WORKER_DIR_GUARD.reason);
+        if (!GAME_FACTORY_SPOOL_GUARD.ok) return refuse(GAME_FACTORY_SPOOL_GUARD.reason);
         return (await getGameFactoryWorker()).collect(args.runId);
+      case "game_factory_acknowledge":
+        if (!GAME_FACTORY_SPOOL_GUARD.ok) return refuse(GAME_FACTORY_SPOOL_GUARD.reason);
+        return (await getGameFactoryWorker()).acknowledge(args.runId);
       case "set_roots": {
         // The folder picker sets which folders this node may touch. Carve-outs and self-protect are
         // never overridable: a protected or self-protected path is dropped, not honored.
@@ -915,7 +933,7 @@ async function connectOnce() {
   } finally { clearInterval(lapse); }
 }
 
-async function main() {
+export async function runHands() {
   if (!HANDS_URL || !HANDS_TOKEN) {
     console.error("[hands] HANDS_URL and HANDS_TOKEN are required. Refusing to start without auth (L-017).");
     process.exit(1);
@@ -958,4 +976,4 @@ async function main() {
 }
 
 // Run only when launched directly (tests import the executor without starting the loop).
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) main();
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) runHands();

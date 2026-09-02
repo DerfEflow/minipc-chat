@@ -17,14 +17,15 @@ class Response extends EventEmitter {
   json() { return JSON.parse(this.body || "null"); }
 }
 
-function makeRequest({ method = "GET", path, body, rawBody, headers = {}, tenant, actionHeader = true }) {
+function makeRequest({ method = "GET", path, body, rawBody, headers = {}, tenant, identity, actionHeader = true }) {
   const payload = rawBody == null ? (body == null ? [] : [Buffer.from(JSON.stringify(body))]) : [Buffer.from(rawBody)];
   const req = Readable.from(payload);
   req.method = method;
   req.url = path;
   req.headers = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
-  if (method === "POST" && actionHeader) req.headers["x-dominion-action"] = "game-factory";
+  if (method === "POST" && actionHeader) req.headers["x-dominion-action"] = typeof actionHeader === "string" ? actionHeader : "game-factory";
   req.tenant = tenant;
+  if (identity) req.dominionIdentity = identity;
   return req;
 }
 
@@ -138,6 +139,98 @@ try {
     });
     assert.equal(denied.res.statusCode, 403);
     assert.equal(denied.res.json().code, "trusted_adapter_required");
+  });
+
+  await test("synthetic canary is exact-flag, verified-human-owner only and has a fixed input schema", async () => {
+    const canaryPath = "/api/game-factory/admin/synthetic-canary";
+    const canaryProjectId = store.listProjects(owner.uid)[9].id;
+    assert.equal(store.getProject(owner.uid, canaryProjectId).workspaceRoot, "");
+    const calls = [];
+    const canaryApi = createGameFactoryHttp({
+      store, gate: createGameFactoryGate("owner"), resolveTenant: (req) => req.tenant,
+      syntheticCanary: {
+        enabled: true,
+        run: async (input) => {
+          calls.push(input);
+          return store.queueSyntheticCanary(input);
+        },
+      },
+    });
+    const validIdentity = { source: "jwt", verified: true, email: owner.email };
+    const request = {
+      method: "POST", path: canaryPath, tenant: owner, identity: validIdentity,
+      actionHeader: "game-factory-synthetic-canary",
+      headers: { "Idempotency-Key": "http-synthetic-canary-0001" }, body: { projectId: canaryProjectId },
+    };
+
+    assert.equal((await call(canaryApi, { ...request, tenant: undefined, identity: undefined })).res.statusCode, 401);
+    assert.equal((await call(canaryApi, { ...request, tenant: member, identity: { ...validIdentity, email: member.email } })).res.statusCode, 403);
+    for (const identity of [
+      { source: "service-owner", verified: true, email: owner.email },
+      { source: "jwt", verified: false, email: owner.email },
+      { source: "header", verified: true, email: owner.email },
+      { source: "jwt", verified: true, email: "different@example.com" },
+    ]) {
+      const denied = await call(canaryApi, { ...request, identity });
+      assert.equal(denied.res.statusCode, 403);
+      assert.equal(denied.res.json().code, "human_owner_required");
+    }
+    assert.equal(calls.length, 0);
+
+    const wrongAction = await call(canaryApi, { ...request, actionHeader: true });
+    assert.equal(wrongAction.res.statusCode, 403);
+    assert.equal(wrongAction.res.json().code, "action_header_required");
+    const get = await call(canaryApi, { path: canaryPath, tenant: owner, identity: validIdentity });
+    assert.equal(get.res.statusCode, 405);
+    const disabled = await call(api, request);
+    assert.equal(disabled.res.statusCode, 404);
+    assert.equal(disabled.res.json().code, "synthetic_canary_disabled");
+    const missingKey = await call(canaryApi, { ...request, headers: {} });
+    assert.equal(missingKey.res.statusCode, 400);
+    assert.equal(missingKey.res.json().code, "bad_idempotency_key");
+    const badKey = await call(canaryApi, { ...request, headers: { "Idempotency-Key": "http-canary;node=-e" } });
+    assert.equal(badKey.res.statusCode, 400);
+    assert.equal(badKey.res.json().code, "bad_idempotency_key");
+
+    for (const body of [
+      {},
+      { projectId: canaryProjectId, capability: "release_coordination" },
+      { projectId: canaryProjectId, executable: "powershell" },
+      { projectId: canaryProjectId, argv: ["-Command", "whoami"] },
+      { projectId: canaryProjectId, workspaceRoot: "C:\\" },
+      { projectId: canaryProjectId, buildId: "forged" },
+      { projectId: canaryProjectId, artifact: { key: "00_GAME_BRIEF" } },
+      { projectId: canaryProjectId, release: { status: "RELEASED" } },
+    ]) {
+      const denied = await call(canaryApi, { ...request, body });
+      assert.equal(denied.res.statusCode, 400, JSON.stringify(body));
+      assert.equal(denied.res.json().code, "bad_canary_schema");
+    }
+    assert.equal(calls.length, 0);
+
+    const first = await call(canaryApi, request);
+    assert.equal(first.res.statusCode, 201, first.res.body);
+    assert.equal(first.res.json().capability, "quality_assurance");
+    assert.equal(first.res.json().effects.artifacts, false);
+    assert.equal(calls.length, 1);
+    const canaryTask = store.getProject(owner.uid, canaryProjectId).tasks
+      .find((task) => task.id === first.res.json().taskId);
+    assert.equal(canaryTask.payload.workerPlan.workspaceRoot, "/workspace/system-canary");
+    assert.deepEqual(Object.keys(calls[0]).sort(), ["actor", "email", "key", "projectId", "tenant", "uid"]);
+    assert.equal("node" in calls[0], false);
+    assert.equal("workspaceRoot" in calls[0], false);
+    assert.equal("argv" in calls[0], false);
+    const replay = await call(canaryApi, request);
+    assert.equal(replay.res.statusCode, 201);
+    assert.equal(replay.res.json().replayed, true);
+    assert.equal(replay.res.json().taskId, first.res.json().taskId);
+
+    const genericTask = await call(canaryApi, {
+      method: "POST", path: `/api/game-factory/games/${canaryProjectId}/tasks`, tenant: owner,
+      body: { capability: "quality_assurance", payload: { workerPlan: { steps: [{ program: "node", args: ["--version"] }] } } },
+    });
+    assert.equal(genericTask.res.statusCode, 403);
+    assert.equal(genericTask.res.json().code, "trusted_adapter_required");
   });
 
   await test("commands require concurrency and idempotency evidence", async () => {

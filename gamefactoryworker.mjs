@@ -1,5 +1,5 @@
 /*
- * Server-side adapter for the durable protocol implemented by hands/gamefactory-worker.mjs.
+ * Server-side adapter for the durable protocol implemented by the Hands static-broker controller.
  * The node is explicit and mandatory. This adapter never calls handsHub.pick(), never follows the
  * freshest node, and rejects a response that claims to come from a different machine.
  */
@@ -121,6 +121,11 @@ export function createGameFactoryWorkerAdapter({
     collect(runId) {
       const ref = runReference(runId);
       return ref ? call("game_factory_collect", { runId: ref }, 30_000)
+        : Promise.resolve({ ok: false, refused: true, retryable: false, node: target, error: "invalid game factory runId" });
+    },
+    acknowledge(runId) {
+      const ref = runReference(runId);
+      return ref ? call("game_factory_acknowledge", { runId: ref }, 30_000)
         : Promise.resolve({ ok: false, refused: true, retryable: false, node: target, error: "invalid game factory runId" });
     },
     health() { return { enabled: on, node: target, ...stats }; },

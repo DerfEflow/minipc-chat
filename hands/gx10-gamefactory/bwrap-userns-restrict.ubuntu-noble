@@ -1,0 +1,3 @@
+# RETIRED / INERT — Option C does not use bubblewrap or user namespaces.
+# This preserved provenance file intentionally contains no AppArmor profile definition and
+# must not be copied to /etc/apparmor.d or included in the GX10 game-factory deployment bundle.

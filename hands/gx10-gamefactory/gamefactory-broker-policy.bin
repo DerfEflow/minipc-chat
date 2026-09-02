@@ -1,0 +1,16 @@
+DGF-POLICY-01
+capabilities=quality_assurance,godot
+programs=node,godot
+project_subtree=fixed-portfolio-plus-system-canary
+max_steps=24
+max_timeout_ms=1800000
+max_total_log_bytes=1048576
+node_inline_eval=deny
+node_response_files=deny
+godot_export_preset=Web
+request_generation=exact-broker-instance-and-container
+retention_ack=durable-terminal-only
+retention_unresolved=preserve
+retention_artifacts=verify-before-prune
+android=disabled
+release_writes=disabled

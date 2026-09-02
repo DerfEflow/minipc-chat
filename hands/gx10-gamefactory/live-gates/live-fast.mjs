@@ -1,0 +1,1 @@
+console.log("GX10_GAME_FACTORY_FAST_EXIT_OK");

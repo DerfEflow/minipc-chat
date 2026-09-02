@@ -80,6 +80,18 @@ export function createGameFactoryPlanner({ store, artifactMirror, log = () => {}
         project: { id: before.id, state: before.state, version: before.version },
       });
     }
+    // The project protocol requires an off-box Drive copy for every persistent artifact. Treating
+    // mirroring as optional here would let the owner commit a lifecycle transition that can only
+    // produce a single local copy. Require both write paths before committing START; an individual
+    // upload can still fail afterward, but that remains a loud, idempotently repairable partial
+    // operation rather than a falsely successful one-copy specification.
+    if (storageHealth.driveWritesEnabled !== true) {
+      return result(503, {
+        error: "Google Drive artifact mirroring must be enabled before a game can enter specification.",
+        code: "mirror_writes_disabled",
+        project: { id: before.id, state: before.state, version: before.version },
+      });
+    }
 
     let manifest;
     try { manifest = renderedSpecification(before.slug); }
@@ -108,7 +120,7 @@ export function createGameFactoryPlanner({ store, artifactMirror, log = () => {}
       return result(409, { error: "The durable start command did not leave the game in SPECIFICATION.", code: "specification_state_mismatch" });
     }
 
-    const driveEnabled = storageHealth.driveWritesEnabled === true;
+    const driveEnabled = true;
     const operation = new Map();
     for (const item of manifest) {
       let ingest;
@@ -183,23 +195,33 @@ export function createGameFactoryPlanner({ store, artifactMirror, log = () => {}
 
     const localFailures = artifacts.filter((artifact) => !artifact.deterministicMatch || !artifact.localPrimary.verified);
     const mirrorFailures = artifacts.filter((artifact) => artifact.mirror.attempted && artifact.mirror.status >= 300);
+    const mandatoryCopyFailures = artifacts.filter((artifact) => !artifact.twoCopyReady).map((artifact) => ({
+      artifactKey: artifact.artifactKey,
+      backends: artifact.requiredCopies.filter((copy) => !copy.verified).map((copy) => copy.backend),
+    }));
     const stateMismatch = detail.state !== "SPECIFICATION";
     // A multi-status response is still considered successful by fetch(). Keep partial storage
-    // failures outside 2xx so the owner UI cannot celebrate a start that still needs recovery.
-    const status = stateMismatch ? 409 : localFailures.length ? 500 : mirrorFailures.length ? 502 : 200;
-    if (localFailures.length || mirrorFailures.length || stateMismatch) {
+    // failures outside 2xx so the owner UI cannot celebrate a start that still needs recovery. A
+    // mirror adapter's 2xx is not storage truth: only the re-read store attestations above can prove
+    // every mandatory backend. Missing native-project evidence is therefore a loud 503 even when
+    // the local write and Drive operation themselves succeeded.
+    const status = stateMismatch ? 409 : localFailures.length ? 500 : mirrorFailures.length ? 502
+      : mandatoryCopyFailures.length ? 503 : 200;
+    if (localFailures.length || mirrorFailures.length || mandatoryCopyFailures.length || stateMismatch) {
       try {
         log("game_factory_specification_start_partial", {
           projectId: project,
           localFailures: localFailures.map((item) => item.artifactKey),
           mirrorFailures: mirrorFailures.map((item) => item.artifactKey),
+          mandatoryCopyFailures,
           state: detail.state,
         });
       } catch {}
     }
     return result(status, {
-      ok: !stateMismatch && localFailures.length === 0 && mirrorFailures.length === 0,
-      partial: localFailures.length > 0 || mirrorFailures.length > 0,
+      ...(mandatoryCopyFailures.length ? { code: "mandatory_artifact_copies_incomplete" } : {}),
+      ok: !stateMismatch && localFailures.length === 0 && mirrorFailures.length === 0 && mandatoryCopyFailures.length === 0,
+      partial: localFailures.length > 0 || mirrorFailures.length > 0 || mandatoryCopyFailures.length > 0,
       transitioned: before.state === "IDEA" && started.body?.replayed !== true,
       commandReplayed: started.body?.replayed === true,
       project: { id: detail.id, name: detail.name, slug: detail.slug, state: detail.state, version: detail.version },
@@ -220,6 +242,7 @@ export function createGameFactoryPlanner({ store, artifactMirror, log = () => {}
       failures: {
         local: localFailures.map((item) => item.artifactKey),
         mirror: mirrorFailures.map((item) => item.artifactKey),
+        mandatoryCopies: mandatoryCopyFailures,
       },
       artifacts,
     });
