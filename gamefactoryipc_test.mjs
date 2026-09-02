@@ -12,17 +12,65 @@ import {
 import { createGameFactorySpoolController } from "./hands/gamefactory-controller.mjs";
 
 const uid = process.getuid?.() ?? null;
-const root = mkdtempSync(join(tmpdir(), "dominion-gamefactory-ipc-"));
-let passed = 0;
+const configuredTestRoot = String(process.env.GAME_FACTORY_TEST_ROOT || "").trim();
+if (process.platform === "win32" && !configuredTestRoot) {
+  throw new Error("Set GAME_FACTORY_TEST_ROOT to a persistent non-C: directory before running this Windows filesystem test.");
+}
+if (configuredTestRoot) mkdirSync(configuredTestRoot, { recursive: true });
+const root = configuredTestRoot
+  ? mkdtempSync(join(configuredTestRoot, "dominion-gamefactory-ipc-"))
+  : mkdtempSync(join(tmpdir(), "dominion-gamefactory-ipc-"));
+const retainRoot = !!configuredTestRoot;
+// F:-exFAT on Windows reports EISDIR for a same-directory regular-file hard link. Keep only
+// explicit unsupported-operation results here: EPERM, EXDEV, and ENOSYS can instead expose a
+// permission, mount, or runtime defect that must fail the suite rather than silently skip it.
+const HARD_LINK_UNSUPPORTED_CODES = new Set(["EISDIR", "EOPNOTSUPP", "ENOTSUP"]);
+let passed = 0, skipped = 0;
 async function test(name, fn) {
   try { await fn(); passed++; console.log("ok - " + name); }
   catch (error) { console.error("not ok - " + name); throw error; }
 }
 const directory = (name) => { const path = join(root, name); mkdirSync(path, { recursive: true }); chmodSync(path, 0o750); return path; };
 const publish = (path, value, options = {}) => durableNoReplace(path, value, 0o640, { gid: null, ...options });
+const detectHardLinkCapability = () => {
+  const dir = directory("hard-link-capability"); const source = join(dir, "source"); const target = join(dir, "target");
+  writeFileSync(source, "hard-link capability probe\n", { mode: 0o640 });
+  try {
+    linkSync(source, target);
+    return { available: true, code: "" };
+  } catch (error) {
+    if (HARD_LINK_UNSUPPORTED_CODES.has(error?.code)) return { available: false, code: error.code };
+    throw error;
+  }
+};
+const hardLinks = detectHardLinkCapability();
+console.log(`info - durable hard links: ${hardLinks.available ? "available" : `unavailable (${hardLinks.code})`}`);
+async function durablePublicationTest(name, fn) {
+  if (!hardLinks.available) {
+    skipped++; console.log(`ok - ${name} # SKIP hard links unavailable (${hardLinks.code}); durable publication remains fail-closed`);
+    return;
+  }
+  await test(name, fn);
+}
 
 try {
-  await test("no-replace publication is exact-mode, replay-safe, and leaves no visible temp", () => {
+  await test("hard-link filesystem capability controls durable publication", () => {
+    const dir = directory("hard-link-capability-publication"); const path = join(dir, "command.json");
+    if (!hardLinks.available) {
+      assert.throws(() => publish(path, "must-not-publish\n"), (error) => error?.code === hardLinks.code);
+      assert.equal(existsSync(path), false);
+      assert.throws(() => readTrustedText(path, { ownerUid: uid }), (error) => error?.code === "SPOOL_PUBLICATION_PENDING");
+      assert.equal(readdirSync(dir).filter((name) => /^\.(?:tmp|publish)-/.test(name)).length, 2);
+      recoverDurableTree(dir, { ownerUid: uid, ownerGid: null });
+      assert.equal(existsSync(path), false);
+      assert.deepEqual(readdirSync(dir), []);
+      return;
+    }
+    publish(path, "hard-linked\n");
+    assert.equal(readTrustedText(path, { ownerUid: uid }), "hard-linked\n");
+  });
+
+  await durablePublicationTest("no-replace publication is exact-mode, replay-safe, and leaves no visible temp", () => {
     const dir = directory("basic"); const path = join(dir, "command.json");
     publish(path, "first\n");
     assert.equal(readTrustedText(path, { ownerUid: uid }), "first\n");
@@ -32,7 +80,7 @@ try {
     assert.deepEqual(readdirSync(dir).filter((name) => /^\.(?:tmp|publish)-/.test(name)), []);
   });
 
-  await test("parent-fsync failure remains blocked until startup recovery", () => {
+  await durablePublicationTest("parent-fsync failure remains blocked until startup recovery", () => {
     const dir = directory("fsync-fault"); const path = join(dir, "command.json"); let calls = 0;
     const injected = { fsyncSync(fd) { calls++; if (calls === 4) { const error = new Error("injected parent fsync"); error.code = "EIO"; throw error; } fsyncSync(fd); } };
     assert.throws(() => publish(path, "durable-content\n", { operations: injected }), /injected parent fsync/);
@@ -51,7 +99,7 @@ try {
     assert.deepEqual(readdirSync(dir), []);
   });
 
-  await test("link/unlink crash window is rejected then repaired to one link", () => {
+  await durablePublicationTest("link/unlink crash window is rejected then repaired to one link", () => {
     const dir = directory("link-crash"); const path = join(dir, "command.json"); let unlinks = 0;
     const injected = { unlinkSync(target) { unlinks++; if (unlinks === 1) { const error = new Error("injected unlink crash"); error.code = "EIO"; throw error; } unlinkSync(target); } };
     assert.throws(() => publish(path, "linked\n", { operations: injected }), /injected unlink crash/);
@@ -89,7 +137,7 @@ try {
     }), /unexpected directory/);
   });
 
-  await test("trusted reads reject hardlinks and symlinks", () => {
+  await durablePublicationTest("trusted reads reject hardlinks and symlinks", () => {
     const dir = directory("link-guards"); const path = join(dir, "value.json"); const alias = join(dir, "alias.json");
     publish(path, "{\"ok\":true}\n"); linkSync(path, alias);
     assert.throws(() => readTrustedJson(path, { ownerUid: uid }), /link count/);
@@ -99,7 +147,7 @@ try {
     catch (error) { if (!/privilege|permitted|operation not permitted/i.test(String(error))) throw error; }
   });
 
-  await test("event reader binds protocol, run, request, policy, transitions, and hash chain", () => {
+  await durablePublicationTest("event reader binds protocol, run, request, policy, transitions, and hash chain", () => {
     const replies = directory("events"); const runKey = "a".repeat(32); const runDir = join(replies, `run-${runKey}`); mkdirSync(runDir);
     const requestHash = "b".repeat(64), policyHash = "c".repeat(64); let previousHash = "";
     const add = (sequence, status, checkpoint) => {
@@ -119,7 +167,7 @@ try {
     assert.equal(existsSync(join(replies, `quarantined-${runKey}.json`)), true);
   });
 
-  await test("non-success events cannot advance or regress the completed checkpoint", () => {
+  await durablePublicationTest("non-success events cannot advance or regress the completed checkpoint", () => {
     const replies = directory("checkpoint-events"); const requestHash = "5".repeat(64), policyHash = "6".repeat(64);
     const publishChain = (runKey, secondStatus, secondCompleted) => {
       const runDir = join(replies, `run-${runKey}`); mkdirSync(runDir); let previousHash = "";
@@ -138,7 +186,7 @@ try {
     assert.throws(() => readSpoolEvents(replies, "2".repeat(32), { ownerUid: uid }), /checkpoint is invalid/);
   });
 
-  await test("controller rejects future readiness and preserves run/attempt conflict ordering", () => {
+  await durablePublicationTest("controller rejects future readiness and preserves run/attempt conflict ordering", () => {
     const commands = directory("controller-commands"), replies = directory("controller-replies");
     const sandboxSha = "1".repeat(64), nodeSeccompSha = "2".repeat(64), godotSeccompSha = "3".repeat(64);
     const appArmorPolicySha = "4".repeat(64), outerSeccompSha = "5".repeat(64);
@@ -187,7 +235,8 @@ try {
     assert.equal(controller.probe().ok, false);
   });
 } finally {
-  rmSync(root, { recursive: true, force: true });
+  if (retainRoot) console.log(`info - retained filesystem test root: ${root}`);
+  else rmSync(root, { recursive: true, force: true });
 }
 
-console.log(`\n${passed} game-factory IPC tests passed`);
+console.log(`\n${passed} game-factory IPC tests passed${skipped ? ` (${skipped} skipped)` : ""}`);
