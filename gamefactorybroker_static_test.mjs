@@ -123,7 +123,9 @@ test("controller preflight is credentialed but workspace/toolchain blind", () =>
   assert.match(controller, /GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED:\s*"\$\{GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED:-0\}"/);
   assert.match(envExample, /^GAME_FACTORY_WORKER_ISOLATION_ATTESTED=0$/m);
   assert.match(envExample, /^GAME_FACTORY_WORKER_TOOLCHAIN_ATTESTED=0$/m);
-  for (const procFile of ["status", "attr/current", "mountinfo"]) {
+  assert.match(controllerAppArmor, /owner \/proc\/self\/cgroup r,/,
+    "controller AppArmor must permit its readiness proof to read its own cgroup identity");
+  for (const procFile of ["status", "attr/current", "cgroup", "mountinfo"]) {
     assert.match(controllerAppArmor, new RegExp(`owner /proc/\\[0-9\\]\\*/${procFile.replace("/", "\\/")} r,`),
       `controller AppArmor omits Docker-resolved numeric self ${procFile}`);
   }
