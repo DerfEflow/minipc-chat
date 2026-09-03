@@ -325,21 +325,24 @@
     const build = game.build;
     const playAction = (game.allowedActions || []).find((action) => action.id === "preview" && action.previewUrl);
     const playButton = playAction
-      ? `<div class="dgf-actions"><button class="dgf-action" data-kind="primary" type="button" data-command="preview">${esc(playAction.label)}</button></div>` : "";
+      ? `<div class="dgf-build-play"><button class="dgf-action" data-kind="primary" type="button" data-command="preview">Play current build</button></div>` : "";
     if (!build) {
-      return `<div class="dgf-section-head"><div><h2>Build</h2><p>What the factory produced for the active build.</p></div></div><div class="dgf-empty">No build has been assembled for this game yet.</div>`;
+      return `<section class="dgf-build-card"><div class="dgf-section-head"><div><h2>Build</h2><p>What the factory produced for the active build.</p></div></div><div class="dgf-empty">No build has been assembled for this game yet.</div></section>`;
     }
     const qa = build.qa || {};
     const passed = Number(qa.passed) || 0;
     const failingSuites = Object.entries(qa.suites || {}).filter(([, suite]) => suite?.status === "FAILED").map(([name]) => name);
     const fingerprint = String(build.bundleSha256 || "").slice(0, 12) || "not recorded";
-    return `<div class="dgf-section-head"><div><h2>Build</h2><p>What the factory produced for the active build.</p></div></div>
-      <div class="dgf-cards">
-        <article class="dgf-info"><small>Version</small><b>${esc(build.versionName || "Not created")}</b><p>${esc(human(build.status || "unknown"))}</p></article>
-        <article class="dgf-info"><small>Files</small><b>${Number(build.fileCount) || 0}</b><p>Bundle fingerprint ${esc(fingerprint)}</p></article>
-        <article class="dgf-info"><small>QA</small><b>${passed}/12 passed</b><p>${failingSuites.length ? `Failing: ${esc(failingSuites.join(", "))}` : "All required suites passing."}</p></article>
+    return `<section class="dgf-build-card" data-playtest-ready="${game.state === "PLAYTEST_READY"}">
+      <div class="dgf-section-head"><div><span class="dgf-kicker">Current playable</span><h2>Build</h2><p>What the factory produced for the active build.</p></div></div>
+      <div class="dgf-build-summary">
+        <article class="dgf-build-metric"><small>Version</small><b>${esc(build.versionName || "Not created")}</b></article>
+        <article class="dgf-build-metric"><small>Status</small><b>${esc(human(build.status || "unknown"))}</b></article>
+        <article class="dgf-build-metric"><small>Bundle fingerprint</small><b class="dgf-build-fingerprint">${esc(fingerprint)}</b></article>
+        <article class="dgf-build-metric dgf-build-qa"><small>QA tally</small><b>${passed}/12 passed</b><p class="${failingSuites.length ? "dgf-build-failures" : ""}">${failingSuites.length ? `Failing: ${esc(failingSuites.join(", "))}` : "All required suites passing."}</p></article>
       </div>
-      ${playButton}`;
+      <div class="dgf-build-foot"><span>${Number(build.fileCount) || 0} bundled files</span>${playButton}</div>
+    </section>`;
   }
 
   function overviewMarkup(game) {
@@ -473,7 +476,7 @@
     node.innerHTML = `<header class="dgf-detail-head">
       <div class="dgf-title-row"><div><h2>${esc(game.name)}</h2><p>#${String(Number(game.order) || 0).padStart(2, "0")} · ${esc(game.slug)} · updated ${esc(shortDate(game.updatedAt))}</p></div>${game.autopilot ? `<span class="dgf-chip dgf-autopilot" data-tone="done">Autopilot</span>` : ""}<span class="dgf-chip" data-tone="${stateTone(game)}">${esc(human(game.operation || game.state))}</span></div>
       <div class="dgf-progress-row"><div class="dgf-progress" role="progressbar" aria-label="Lifecycle progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${clamp(game.progress, 0, 100)}"><i style="width:${clamp(game.progress, 0, 100)}%"></i></div><b>${clamp(game.progress, 0, 100)}%</b></div>
-      ${operationNotice(game)}${actionMarkup(game)}
+      <div class="dgf-decision-row" data-playtest-ready="${game.state === "PLAYTEST_READY"}">${operationNotice(game)}${actionMarkup(game)}</div>
     </header>${tabsMarkup()}<section class="dgf-tab-panel" id="dgf-tab-panel" role="tabpanel">${panelMarkup(game)}</section>`;
   }
 
