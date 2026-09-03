@@ -356,9 +356,6 @@ export const MODELS = [
   { id: "gx10/qwen3-coder-30b", name: "Qwen3 Coder 30B (GX10)", origin: "Your GX10 (local)", provider: "gx10", directId: "qwen3-coder:30b",
     category: "Your GX10 (local)", params: "30B (MoE·3B active)", paramsB: 30, inCost: 0, outCost: 0, ctx: 131072, maxOut: 16384, toolCapable: true,
     specialty: "Fast local coder for builds, free on your own machine" },
-  { id: "gx10/gpt-oss-20b", name: "GPT-OSS 20B (GX10)", origin: "Your GX10 (local)", provider: "gx10", directId: "gpt-oss:20b",
-    category: "Your GX10 (local)", params: "21B (MoE·3.6B active)", paramsB: 21, inCost: 0, outCost: 0, ctx: 131072, maxOut: 16384, reasoning: true, toolCapable: true,
-    specialty: "Quick local reasoner for small asks and utility work" },
 ];
 
 /*
@@ -372,6 +369,10 @@ export const MODELS = [
  * job, not in size.
  */
 export const REMOVED_MODEL_FALLBACKS = {
+  // STABILIZE 2026-09-03: the GX10 20B seat is retired. It is the same weights family as the 120B on the
+  // same machine, and keeping a third resident model made Ollama evict the two pinned ones (measured:
+  // 120B + coder + 20B predicted 124 GiB against 117 GiB free), so every GX10 chat cold-loaded for minutes.
+  "gx10/gpt-oss-20b": "gx10/gpt-oss-120b",
   // Free-Thinking (Fred's rule: fall back to a free model)
   "nousresearch/hermes-4-405b": "nvidia/nemotron-3-super-120b-a12b:free",
   "nousresearch/hermes-4-70b": "nvidia/nemotron-3-super-120b-a12b:free",
@@ -557,7 +558,6 @@ export const REASONING_FLOOR = {
   "arcee-ai/trinity-large-thinking": 8192,  // worst observed floor 2048 = the fast cap exactly
   "moonshotai/kimi-k2.6": 4096,             // worst 1024
   "openai/gpt-oss-20b": 4096,               // worst 1024
-  "gx10/gpt-oss-20b": 4096,                 // same weights as the NVIDIA seat above
   "gx10/gpt-oss-120b": 4096,                // same family; reasoning billed against output
   "minimax/minimax-m2.5": 4096,             // worst 1024
   "tencent/hy3-preview": 4096,              // worst 1024
@@ -737,7 +737,6 @@ export const MODEL_FALLBACKS = Object.freeze({
   "openai/gpt-oss-20b": "deepseek/deepseek-v4-flash",
   "gx10/gpt-oss-120b": "deepseek/deepseek-v4-flash",
   "gx10/qwen3-coder-30b": "qwen/qwen3-coder",
-  "gx10/gpt-oss-20b": "deepseek/deepseek-v4-flash",
 });
 // Stamp it onto every model record (same pattern as broadCapable above) so it rides /api/models
 // without a second lookup, and so a caller who already has the record in hand needs no import.
