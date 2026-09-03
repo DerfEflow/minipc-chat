@@ -1193,3 +1193,21 @@ export function createPortfolioSpecificationManifest() {
   }
   return Object.freeze(files);
 }
+
+/*
+ * Lane gfforge (LANE-gfforge.md, additive-only export in this file): the forge's product_planning
+ * and visual_design tasks need the catalog entry for a game (logline, loop, mvp, visual copy,
+ * mechanics, monetization guardrails, store copy) to prompt the design/asset models and to compose
+ * meta.json. GAME_PORTFOLIO_SPECS is already frozen per-entry (line ~581), so these are read-only
+ * lookups, never a mutable copy — a caller that tries to edit the returned object throws in strict
+ * mode instead of silently corrupting the shared catalog singleton.
+ */
+export function portfolioGame(slug) {
+  const clean = String(slug || "").trim().toLowerCase();
+  if (!clean) return null;
+  return GAME_PORTFOLIO_SPECS.find((game) => game.slug === clean) || null;
+}
+
+export function portfolioGames() {
+  return GAME_PORTFOLIO_SPECS;
+}
