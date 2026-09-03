@@ -159,9 +159,18 @@ await check("GET /api/video/ — config responds", async () => {
   return "responded: " + JSON.stringify(j).slice(0, 160);
 });
 
-await check("GET /api/game-factory/config — reachable", async () => {
-  const j = await getJson("/api/game-factory/config");
-  return "responded: " + JSON.stringify(j).slice(0, 160);
+await check("GET /api/game-factory/config — reachable (human-owner gate intact)", async () => {
+  // The Game Factory deliberately admits only a verified HUMAN owner session (a 2026-07-18 hardening in
+  // server.mjs's gameFactoryPrincipalDenial). A service-token identity is refused with 403 by design, so
+  // that refusal is the expected, healthy answer here: the gate is up and the route is alive.
+  try {
+    const j = await getJson("/api/game-factory/config");
+    return "responded: " + JSON.stringify(j).slice(0, 160);
+  } catch (e) {
+    const msg = String(e && e.message || e);
+    if (/HTTP 403/.test(msg) && /human owner/i.test(msg)) return "route alive; service identity refused by the human-owner gate, as designed";
+    throw e;
+  }
 });
 
 console.log(`\nDominion AI production verification — ${HOST}`);
