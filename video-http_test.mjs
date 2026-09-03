@@ -1521,7 +1521,10 @@ test("chat runs DeepSeek director then cached Sonnet liaison and persists both o
   assert.equal(Object.hasOwn(providerCalls[0].body, "chat_template_kwargs"), false, "the DeepSeek-direct rung speaks plain DeepSeek, not NVIDIA's dialect");
   assert.equal(Object.hasOwn(providerCalls[0].body, "extra_body"), false);
   assert.equal(providerCalls[0].body.top_p, .95);
-  assert.equal(providerCalls[0].body.max_tokens, 512);
+  // deepseek-v4-pro is a reasoning model (message.reasoning_content ahead of message.content); the
+  // director's own 512-token default is raised to a reasoning-safe floor for this rung only
+  // (stabilize 2026-09-03 follow-up), never the unladdered NVIDIA/Anthropic rungs' own budgets.
+  assert.equal(providerCalls[0].body.max_tokens, 4096);
   assert.equal(out.body.director.servedBy.provider, "deepseek");
   assert.equal(providerCalls[1].body.model, "nvidia/nemotron-3-super-120b-a12b");
   assert.equal(providerCalls[1].body.stream, false);
@@ -1720,6 +1723,63 @@ test("director ladder skips a retired (410) rung and serves from the next, repor
   assert.equal(out.body.director.servedBy.model, "deepseek-ai/deepseek-v4-pro-0813");
   assert.equal(out.body.routing.path, "quick_clip");
   assert.equal(out.body.sceneDraft.prompt, "A single establishing shot");
+});
+
+/*
+ * Follow-up to the lead's live-rig review (stabilize 2026-09-03): deepseek-v4-pro is a reasoning
+ * model. It writes its scratchpad to message.reasoning_content BEFORE message.content; probed live
+ * against the real key, the director's prior 512-token budget was entirely consumed by
+ * reasoning_content (finish_reason "length", content ""), so rung 1 paid its full latency for
+ * nothing on every real turn before falling through to rung 2. Two things are pinned here: parsing
+ * must ignore reasoning_content and use only content once content exists (openAiText already did
+ * this correctly - this is a permanent regression test for it), and the DeepSeek-direct rung must
+ * request enough budget that reasoning actually finishes and content gets written at all.
+ */
+test("director rung 1 parses a reasoning-model response (reasoning_content plus content) as success, never falling through", async () => {
+  const providerCalls = [];
+  const fetch = async (_url, options) => {
+    const body = JSON.parse(options.body); providerCalls.push(body.model);
+    if (body.model === "deepseek-v4-pro") {
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: routingBlock({ path: "quick_clip", needs_screenwriter: false, needs_storyboard: false, ready_to_generate: true, reason: "One shot.", suggested_recommendation: "generate", scene_draft: { title: "Reasoning-model recovery", prompt: "A single establishing shot of a fox", duration: 5 } }),
+            reasoning_content: "We need to infer the user wants a quick clip... (internal scratchpad text that must never reach the user or the directive)",
+          },
+          finish_reason: "stop",
+        }],
+        usage: { prompt_tokens: 107, completion_tokens: 900, total_tokens: 1007 },
+      }), { status: 200 });
+    }
+    if (body.model === "nvidia/nemotron-3-super-120b-a12b") throw new Error("visual orchestrator must not run for a plain quick_clip turn");
+    return new Response(JSON.stringify({ content: [{ type: "text", text: "Shot's ready when you are." }] }), { status: 200 });
+  };
+  const env = setup({ fetch });
+  const out = await call(env.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, message: "quick clip, one establishing shot of a fox" });
+  assert.equal(out.res.statusCode, 200);
+  assert.deepEqual(providerCalls.slice(0, 1), ["deepseek-v4-pro"], "rung 1 must succeed on the first try - no fallthrough when content is present");
+  assert.equal(out.body.director.servedBy.provider, "deepseek", "a reasoning_content field alongside real content must not be mistaken for an empty/failed rung");
+  assert.equal(out.body.director.servedBy.model, "deepseek-v4-pro");
+  assert.equal(out.body.routing.path, "quick_clip");
+  assert.equal(out.body.sceneDraft.prompt, "A single establishing shot of a fox");
+  assert.ok(!out.body.director.directive.includes("internal scratchpad"), "reasoning_content must never leak into the directive shown to the user");
+});
+
+test("DeepSeek-direct rungs request a reasoning-safe max_tokens floor even when the role's configured budget is smaller", async () => {
+  const providerCalls = [];
+  const fetch = async (_url, options) => {
+    const body = JSON.parse(options.body); providerCalls.push(body);
+    if (body.model === "deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: "Directive: open on the fox." }, finish_reason: "stop" }], usage: { total_tokens: 40 } }), { status: 200 });
+    return new Response(JSON.stringify({ content: [{ type: "text", text: "Good, simple ask." }] }), { status: 200 });
+  };
+  // The director's default budget (no nvidia.directorMaxTokens override) is 512 - below what a
+  // reasoning model needs. The DeepSeek-direct call must still go out with a raised floor.
+  const env = setup({ fetch });
+  const out = await call(env.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, message: "quick clip of a fox" });
+  assert.equal(out.res.statusCode, 200);
+  const directorCall = providerCalls.find((body) => body.model === "deepseek-v4-pro");
+  assert.ok(directorCall, "the director's DeepSeek-direct rung must have been called");
+  assert.ok(directorCall.max_tokens >= 4096, `expected a reasoning-safe max_tokens floor, got ${directorCall.max_tokens}`);
 });
 
 test("a director failure surfaces to the client only after every ladder rung is exhausted", async () => {
