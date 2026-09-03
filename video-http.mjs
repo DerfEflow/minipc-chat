@@ -38,6 +38,29 @@ const NVIDIA_NEMOTRON_SUPER_MODEL = "nvidia/nemotron-3-super-120b-a12b"; // NVID
 const NVIDIA_NEMOTRON_ULTRA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"; // NVIDIA, 50-57s for five tokens; last resort only.
 const SCREENWRITER_CONTEXT_TOKENS = 115_000;
 const SCREENWRITER_MAX_OUTPUT_TOKENS = 16_384;
+/*
+ * REASONING-MODEL TOKEN FLOOR (stabilize 2026-09-03, follow-up to deficiency 20). Probed live
+ * against the real DeepSeek key: deepseek-v4-pro is a reasoning model that writes its scratchpad to
+ * message.reasoning_content BEFORE message.content. At max_tokens 1 (the boot probe) or 512 (the
+ * director's prior budget) the entire budget is consumed by reasoning_content, finish_reason comes
+ * back "length", and content is "" - openAiText() correctly calls that empty_response (it only ever
+ * reads .content, which is right: reasoning_content is scratchpad, not the answer), so the rung
+ * degrades and the ladder falls through, but rung 1's latency was paid for nothing on every single
+ * real turn. Probed at max_tokens 2048 the same prompt finished reasoning at ~1072 tokens and
+ * produced real content (finish_reason "stop"). deepseek-v4-flash (visual orchestrator's and
+ * liaison's other DeepSeek-direct rungs) is far cheaper on reasoning (475 and 396 reasoning tokens
+ * respectively against their real 8192/4096 budgets, both already succeeding) and is NOT the
+ * starved rung in production - only deepseek-v4-pro at a sub-4096 budget was ever observed broken.
+ * This floor is applied only where a real answer is wanted, not the 1-token boot probe: the probe's
+ * job is a liveness/credential check (a 4xx demotes, anything else doesn't), and required behavior
+ * #6 specifies a 1-token request - raising it would change the probe's spec-named shape for a signal
+ * the real-turn floor below already provides better.
+ */
+const DEEPSEEK_REASONING_MIN_TOKENS = { [DEEPSEEK_PRO_MODEL]: 4_096 };
+function reasoningSafeMaxTokens(model, requested) {
+  const floor = DEEPSEEK_REASONING_MIN_TOKENS[model];
+  return floor ? Math.max(Number(requested) || 0, floor) : requested;
+}
 const SCREENWRITER_MIN_OUTPUT_TOKENS = 8_192;
 const LONG_CONTEXT_TOKENS = 1_000_000;
 const DIRECTOR_COMPACT_AT = 700_000;
@@ -380,7 +403,16 @@ async function providerGetJson(fetchImpl, url, { headers, timeoutMs = 30_000, pr
 function openAiText(data, provider) {
   const content = data?.choices?.[0]?.message?.content;
   const text = Array.isArray(content) ? content.map((part) => typeof part === "string" ? part : part?.text || "").join("") : String(content || "");
-  if (!text.trim()) fail(502, `${provider}_empty_response`, `${provider} returned no usable text.`);
+  if (!text.trim()) {
+    // A reasoning model (e.g. deepseek-v4-pro) writes its scratchpad to message.reasoning_content
+    // BEFORE message.content; a starved max_tokens can burn the whole budget there and leave
+    // .content empty with finish_reason "length". That reasoning text is never the answer and is
+    // never substituted here - this is diagnostic only, so the next person to see this in the fault
+    // log knows to raise max_tokens rather than suspect the extraction logic (stabilize 2026-09-03).
+    const reasoning = String(data?.choices?.[0]?.message?.reasoning_content || "");
+    const hint = reasoning.trim() ? ` (the model spent its entire token budget on reasoning_content and never reached content; raise max_tokens)` : "";
+    fail(502, `${provider}_empty_response`, `${provider} returned no usable text.${hint}`);
+  }
   return text.trim();
 }
 
@@ -864,7 +896,7 @@ export function createVideoHttp({
     const anthropicUrl = endpoint(anthropic.baseUrl || "https://api.anthropic.com", "/v1/messages");
     const anthropicMessages = turn.messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: String(m.content || "") }));
     const rungs = [
-      { provider: "deepseek", model: DEEPSEEK_PRO_MODEL, shape: "openai", costForUsage: deepseek.costForUsage, call: () => callOpenAiStyleTransport({ provider: "deepseek_screenwriter", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_PRO_MODEL, messages: turn.messages, maxTokens: turn.maxTokens, temperature: 0.3, topP: 0.8, timeoutMs: deepseek.timeoutMs }) },
+      { provider: "deepseek", model: DEEPSEEK_PRO_MODEL, shape: "openai", costForUsage: deepseek.costForUsage, call: () => callOpenAiStyleTransport({ provider: "deepseek_screenwriter", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_PRO_MODEL, messages: turn.messages, maxTokens: reasoningSafeMaxTokens(DEEPSEEK_PRO_MODEL, turn.maxTokens), temperature: 0.3, topP: 0.8, timeoutMs: deepseek.timeoutMs }) },
       { provider: "anthropic", model: SONNET_MODEL, shape: "anthropic", costForUsage: anthropic.costForUsage, call: () => callAnthropicTransport({ apiKey: credential(anthropic.apiKey), url: anthropicUrl, model: SONNET_MODEL, system: turn.systemContent, messages: anthropicMessages, maxTokens: turn.maxTokens, timeoutMs: anthropic.timeoutMs, version: anthropic.version }) },
     ];
     let lastError = null;
@@ -1094,7 +1126,7 @@ export function createVideoHttp({
     const deepseekUrl = endpoint(deepseek.baseUrl || "https://api.deepseek.com", "/chat/completions");
     const anthropicUrl = endpoint(anthropic.baseUrl || "https://api.anthropic.com", "/v1/messages");
     const ladder = [
-      { provider: "deepseek", model: DEEPSEEK_PRO_MODEL, call: () => callOpenAiStyleTransport({ provider: "deepseek_director", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_PRO_MODEL, messages: openAiMessages, maxTokens, temperature, topP, deadlineAt, timeoutMs: deepseek.timeoutMs }) },
+      { provider: "deepseek", model: DEEPSEEK_PRO_MODEL, call: () => callOpenAiStyleTransport({ provider: "deepseek_director", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_PRO_MODEL, messages: openAiMessages, maxTokens: reasoningSafeMaxTokens(DEEPSEEK_PRO_MODEL, maxTokens), temperature, topP, deadlineAt, timeoutMs: deepseek.timeoutMs }) },
       { provider: "nvidia", model: NVIDIA_DEEPSEEK_MODEL, call: () => callOpenAiStyleTransport({ provider: "nvidia_director", apiKey: credential(nvidia.apiKey), url: nvidiaUrl, model: NVIDIA_DEEPSEEK_MODEL, messages: openAiMessages, maxTokens, temperature, topP, deadlineAt, timeoutMs: nvidia.timeoutMs, extraBody: { chat_template_kwargs: { thinking: false } } }) },
       { provider: "nvidia", model: NVIDIA_NEMOTRON_SUPER_MODEL, call: () => callOpenAiStyleTransport({ provider: "nvidia_director", apiKey: credential(nvidia.apiKey), url: nvidiaUrl, model: NVIDIA_NEMOTRON_SUPER_MODEL, messages: openAiMessages, maxTokens, temperature, topP, deadlineAt, timeoutMs: nvidia.timeoutMs, extraBody: { chat_template_kwargs: { thinking: false } } }) },
       { provider: "anthropic", model: SONNET_MODEL, call: () => callAnthropicTransport({ apiKey: credential(anthropic.apiKey), url: anthropicUrl, model: SONNET_MODEL, system: directorSystem, messages: [{ role: "user", content: userContent }], maxTokens, deadlineAt, timeoutMs: anthropic.timeoutMs, version: anthropic.version }) },
@@ -1227,7 +1259,7 @@ export function createVideoHttp({
     };
     const ladder = [
       { provider: "nvidia", model: NVIDIA_NEMOTRON_SUPER_MODEL, call: nvidiaCall(NVIDIA_NEMOTRON_SUPER_MODEL) },
-      { provider: "deepseek", model: DEEPSEEK_PRO_MODEL, call: async () => { const { text, usage } = await callOpenAiStyleTransport({ provider: "deepseek_visual_orchestrator", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_PRO_MODEL, messages, maxTokens, temperature, topP, deadlineAt, timeoutMs: deepseek.timeoutMs }); return { plan: visualPlanFromText(text), usage }; } },
+      { provider: "deepseek", model: DEEPSEEK_PRO_MODEL, call: async () => { const { text, usage } = await callOpenAiStyleTransport({ provider: "deepseek_visual_orchestrator", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_PRO_MODEL, messages, maxTokens: reasoningSafeMaxTokens(DEEPSEEK_PRO_MODEL, maxTokens), temperature, topP, deadlineAt, timeoutMs: deepseek.timeoutMs }); return { plan: visualPlanFromText(text), usage }; } },
       // Last resort: the 550B planner is slow (50-57s measured), but it is never simply left untried.
       { provider: "nvidia", model: NVIDIA_NEMOTRON_ULTRA_MODEL, call: nvidiaCall(NVIDIA_NEMOTRON_ULTRA_MODEL) },
     ];
