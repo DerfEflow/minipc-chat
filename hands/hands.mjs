@@ -45,7 +45,14 @@ const IS_WIN = process.platform === "win32";
 const HANDS_URL = String(process.env.HANDS_URL || "").replace(/\/$/, "");
 const HANDS_TOKEN = process.env.HANDS_TOKEN || "";
 const NODE_NAME = (process.env.HANDS_NODE || hostname() || "unnamed").toLowerCase();
-const VERSION = "hands/4";   // hands/4: durable, checkpointed game-factory worker protocol
+const VERSION = "hands/5";   // hands/5: instance-token reconnect preemption, /hands/beat, planned graceful re-dial
+// Generated ONCE per process lifetime and resent on every (re)connect (see connectOnce below). This
+// is how the hub tells "my own process redialing after a blip" apart from "a different process that
+// happens to want the same name" — a shared HANDS_TOKEN alone cannot make that distinction, since
+// every owner-scope node presents the identical bearer secret. Streams lane, 2026-09-03: this is
+// what lets a reconnect preempt the hub's old stream immediately instead of racing its DUP lockout,
+// and what makes the planned graceful re-dial below a true zero-gap handover.
+const INSTANCE_TOKEN = randomUUID();
 // Optional Cloudflare Access service token — when the orchestrator sits behind Access, the node
 // presents these so its dial-out passes the Access layer; HANDS_TOKEN still authorizes at the app.
 const CF_ID = process.env.HANDS_CF_CLIENT_ID || "";
@@ -63,6 +70,21 @@ const CF_SECRET = process.env.HANDS_CF_CLIENT_SECRET || "";
  * differently-named nodes on one machine are legitimate (the test suites spawn several), while
  * two clients claiming the same name at the same hub are the exact pathology this kills. The
  * port is derived from that identity; HANDS_SINGLETON_PORT overrides it, and 0 disables.
+ *
+ * WHAT THIS LOCK CANNOT CATCH (measured on Fred's laptop, streams lane, 2026-09-03): a stale
+ * installer copy running OLDER code that predates this lock entirely never binds the port, so it
+ * never collides with a newer copy that does — both dial out and register, and the hub sees two
+ * physical processes claiming the same name. `Get-CimInstance Win32_Process -Filter
+ * "name='node.exe'"` on this machine found exactly that: a hands node running from
+ * C:\Users\rjfla\Downloads\dominion-forge-connect\hands.mjs reporting VERSION "hands/3" (no
+ * SINGLETON_PORT / acquireSingleton in that file at all — this lock landed in hands/4). This lock
+ * is necessary but not sufficient by itself; the hub-side fix (instanceToken preemption +
+ * inbound-evidence staleness, see hands/hub.mjs) is what actually closes the gap a stale installer
+ * leaves open, because it does not depend on every copy in the field being current.
+ * TODO(fred): the laptop is running a stale hands/3 installer from Downloads\dominion-forge-connect
+ * alongside current hands/4-era copies from other worktrees. It was not killed (not a process this
+ * session started, and killing it is destructive). Recommend: replace it with a fresh installer
+ * download (Setup -> Your machine) so the singleton lock actually covers this machine.
  */
 const SINGLETON_PORT = (() => {
   if (process.env.HANDS_SINGLETON_PORT != null) return Number(process.env.HANDS_SINGLETON_PORT) || 0;
@@ -842,14 +864,25 @@ async function localOllamaEmbed(payload) {
 const log = (m) => console.log(`[hands:${NODE_NAME}] ${m}`);
 let backoffMs = 1000;
 let authFails = 0;                  // consecutive 401/403s from the hub; 3 = the token is dead, stop
-const HEARTBEAT_LAPSE_MS = 50000;   // hub beats every 20s; two misses + slack = dead stream
+const HEARTBEAT_LAPSE_MS = 50000;   // hub beats every 10s; several misses + slack = a dead stream
+// Genuine inbound evidence for the hub during an idle stretch (no job to generate a result/chunk
+// POST) — streams lane, deficiency #8/#25. The hub used to infer "the node is alive" from whether
+// its OWN heartbeat write to the local socket succeeded, which stays true through a tunnel flap the
+// node never even saw. This is the node proactively proving it is still there.
+const BEAT_INTERVAL_MS = 20000;
+// Planned graceful re-dial (deficiency #11/#25's 15-minute terminate cycle): open a NEW stream
+// under the SAME instance token — which the hub preempts onto immediately, zero gap — before the
+// old one hits whatever is causing the churn (suspected QUIC/NAT UDP idle-mapping timeout; see
+// start.sh's --protocol http2 change, the primary fix). This is the belt-and-braces workaround the
+// spec calls for even if that primary fix does not fully explain the cycle on some network path.
+const GRACEFUL_REDIAL_MS = 10 * 60 * 1000;
 
 async function postResult(jobId, result) {
   try {
     const r = await fetch(HANDS_URL + "/hands/result", {
       method: "POST",
       headers: authHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ node: NODE_NAME, jobId, result }),
+      body: JSON.stringify({ node: NODE_NAME, jobId, result, instanceToken: INSTANCE_TOKEN }),
     });
     if (!r.ok) log(`result POST for ${jobId} -> HTTP ${r.status}`);
   } catch (e) { log(`result POST for ${jobId} failed: ${e && e.message}`); }
@@ -865,9 +898,26 @@ async function postChunk(jobId, seq, delta) {
     await fetch(HANDS_URL + "/hands/chunk", {
       method: "POST",
       headers: authHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ node: NODE_NAME, jobId, seq, delta }),
+      body: JSON.stringify({ node: NODE_NAME, jobId, seq, delta, instanceToken: INSTANCE_TOKEN }),
     });
   } catch { /* a dropped chunk is not fatal; the final result carries the whole answer */ }
+}
+
+// Fire-and-forget liveness ping. Runs continuously for the life of the process — started once in
+// runHands(), independent of any single connectOnce()/redial cycle, since the node's identity does
+// not change across a reconnect. A failed beat is not fatal: the reactive HEARTBEAT_LAPSE_MS check
+// and the hub's own stale sweep are the backstops if this genuinely cannot reach the hub.
+let beatTimer = null;
+function startBeat() {
+  if (beatTimer) return;
+  beatTimer = setInterval(() => {
+    fetch(HANDS_URL + "/hands/beat", {
+      method: "POST",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ node: NODE_NAME, instanceToken: INSTANCE_TOKEN }),
+    }).catch(() => {});
+  }, BEAT_INTERVAL_MS);
+  if (typeof beatTimer.unref === "function") beatTimer.unref();
 }
 
 async function handleEvent(ev, data) {
@@ -935,26 +985,61 @@ function selfDescription() {
   };
 }
 
-async function connectOnce() {
+// Opens ONE /hands/stream connection and confirms it (HTTP 200 received). Does not read the body —
+// that is connectOnce's job. Split out so a planned graceful re-dial can open the REPLACEMENT
+// stream while the current one is still being read, then hand off.
+async function openStream() {
   const ac = new AbortController();
+  // The profile rides the connect URL as one base64url JSON blob: a single param keeps the query
+  // readable and survives drive letters, backslashes and spaces without per-field escaping games.
+  const info = Buffer.from(JSON.stringify(selfDescription()), "utf8").toString("base64url");
+  const r = await fetch(HANDS_URL + "/hands/stream?node=" + encodeURIComponent(NODE_NAME) + "&info=" + info + "&itok=" + encodeURIComponent(INSTANCE_TOKEN), {
+    headers: authHeaders({ accept: "text/event-stream" }),
+    signal: ac.signal,
+  });
+  if (!r.ok) {
+    const err = new Error("hub refused the stream: HTTP " + r.status);
+    err.status = r.status;
+    throw err;
+  }
+  return { r, ac };
+}
+
+/*
+ * Reads ONE stream to completion. `prewarmed`, when given, is an already-open { r, ac } from a
+ * planned graceful re-dial (openStream() called ahead of time so the NEW stream is confirmed
+ * connected before the OLD one closes — the hub's instanceToken preemption then adopts it with no
+ * gap). Returns { gracefulHandoff } when THIS call itself triggered a planned re-dial and the
+ * replacement is ready for the next connectOnce() call to pick up with zero backoff; throws (the
+ * existing contract) for every other disconnect, which runHands() treats as a real error.
+ */
+async function connectOnce(prewarmed) {
+  const { r, ac } = prewarmed || await openStream();
+  log(prewarmed ? "connected to " + HANDS_URL + " (planned re-dial handover — no gap)" : "connected to " + HANDS_URL);
+  backoffMs = 1000;   // a good connection resets the backoff
+  authFails = 0;      // a good connection proves the token; only consecutive 401/403s count
+
   let lastBeat = Date.now();
   const lapse = setInterval(() => { if (Date.now() - lastBeat > HEARTBEAT_LAPSE_MS) { log("heartbeat lapsed — recycling the stream"); ac.abort(); } }, 5000);
-  try {
-    // The profile rides the connect URL as one base64url JSON blob: a single param keeps the query
-    // readable and survives drive letters, backslashes and spaces without per-field escaping games.
-    const info = Buffer.from(JSON.stringify(selfDescription()), "utf8").toString("base64url");
-    const r = await fetch(HANDS_URL + "/hands/stream?node=" + encodeURIComponent(NODE_NAME) + "&info=" + info, {
-      headers: authHeaders({ accept: "text/event-stream" }),
-      signal: ac.signal,
-    });
-    if (!r.ok) {
-      const err = new Error("hub refused the stream: HTTP " + r.status);
-      err.status = r.status;
-      throw err;
+  // handoff is set (before ac.abort() is called) exactly when the redial below is what ended this
+  // read loop — that is how the catch block tells "we did this on purpose" from a real drop.
+  let handoff = null;
+  const redialTimer = setTimeout(async () => {
+    try {
+      const next = await openStream();
+      handoff = next;
+      log("planned re-dial: replacement stream confirmed, handing over");
+      ac.abort();   // ends the for-await below; the catch block sees `handoff` set and returns it
+    } catch (e) {
+      // The current stream is untouched — just try again on the next scheduled redial. Worst case
+      // this specific cycle falls back to whatever ends the stream naturally (still recoverable,
+      // just with the old reactive gap this feature exists to avoid).
+      log("planned re-dial failed, staying on the current stream: " + (e && e.message));
     }
-    log("connected to " + HANDS_URL);
-    backoffMs = 1000;   // a good connection resets the backoff
-    authFails = 0;      // a good connection proves the token; only consecutive 401/403s count
+  }, GRACEFUL_REDIAL_MS);
+  if (typeof redialTimer.unref === "function") redialTimer.unref();
+
+  try {
     const dec = new TextDecoder();
     let buf = "";
     for await (const chunk of r.body) {
@@ -971,8 +1056,12 @@ async function connectOnce() {
         handleEvent(ev, data);   // fire-and-forget: jobs run concurrently, results POST independently
       }
     }
-    throw new Error("stream ended");
-  } finally { clearInterval(lapse); }
+  } catch (e) {
+    if (handoff) return { gracefulHandoff: handoff };   // our own planned abort, not a real drop
+    throw e;
+  } finally { clearInterval(lapse); clearTimeout(redialTimer); }
+  // The loop drained without us aborting it — the server actually ended the stream.
+  throw new Error("stream ended");
 }
 
 export async function runHands() {
@@ -984,9 +1073,16 @@ export async function runHands() {
   await acquireSingleton();             // a same-identity twin exits here, before it ever dials out
   ELEVATED = await detectElevation();   // once, before the first connect, so the profile is complete
   log(`starting  ·  access=${MAX_ACCESS ? "MAX (all drives minus carve-outs)" : "scoped"}  ·  roots=${ROOTS.join(", ") || "(none)"}  ·  elevated=${ELEVATED}  ·  self-protected dirs=${SELF_PROTECT.length}  ·  platform=${process.platform}`);
+  startBeat();   // runs for the life of the process, independent of any one stream's connect cycle
+  let pending = null;   // a confirmed-open replacement stream from a planned graceful re-dial
   for (;;) {
-    try { await connectOnce(); }
+    try {
+      const result = await connectOnce(pending);
+      pending = null;
+      if (result && result.gracefulHandoff) { pending = result.gracefulHandoff; continue; }   // zero backoff — this was planned, not a failure
+    }
     catch (e) {
+      pending = null;
       log(`disconnected: ${e && e.message}`);
       /*
        * A dead token must not retry forever (guest report, 2026-08-08). Every fresh installer
@@ -1011,10 +1107,10 @@ export async function runHands() {
       } else if (e && e.status !== 409) {
         authFails = 0;   // non-auth trouble (server restart, network) is not evidence against the token
       }
+      const jitter = Math.floor(Math.random() * 500);
+      await new Promise((r) => setTimeout(r, backoffMs + jitter));
+      backoffMs = Math.min(backoffMs * 2, 30000);   // capped, jittered — never a retry storm
     }
-    const jitter = Math.floor(Math.random() * 500);
-    await new Promise((r) => setTimeout(r, backoffMs + jitter));
-    backoffMs = Math.min(backoffMs * 2, 30000);   // capped, jittered — never a retry storm
   }
 }
 

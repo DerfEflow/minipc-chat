@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
 import { GAME_STATES, REQUIRED_GAME_ARTIFACTS, MANDATORY_ARTIFACT_BACKENDS, DEFERRED_ARTIFACT_BACKENDS, QA_REQUIRED_SUITES, APPROVAL_GATES, HOLD_STATES, allowedTransitions, stateProgress } from "./gamefactory.mjs";
+import { startSseHeartbeat } from "./sseheartbeat.mjs";
 
 const MAX_BODY = 1024 * 1024;
 const MAX_ARTIFACT_CONTENT_BYTES = 512 * 1024;
@@ -456,10 +457,15 @@ export function createGameFactoryHttp({
       };
       send();
       const poll = setInterval(send, 1000);
-      const heartbeat = setInterval(() => { try { res.write(": keepalive\n\n"); } catch {} }, 20000);
       if (typeof poll.unref === "function") poll.unref();
-      if (typeof heartbeat.unref === "function") heartbeat.unref();
-      const close = () => { clearInterval(poll); clearInterval(heartbeat); };
+      // Streams lane, deficiency #18: this feed's own 20s keepalive was already inside
+      // Cloudflare's ~100s idle-close window and still showed 14 cancels in the production log
+      // window — the shared 10s cadence (sseheartbeat.mjs, same helper every other stream in this
+      // app uses) narrows that further; the remaining cancels are consistent with ordinary client
+      // navigation away from the Game Factory screen (a fresh EventSource per project view), not a
+      // transport idle-kill, since a keepalive already well under threshold was already running.
+      const stopHeartbeat = startSseHeartbeat(res);
+      const close = () => { clearInterval(poll); stopHeartbeat(); };
       req.on("close", close); res.on("close", close);
       return;
     }

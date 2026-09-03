@@ -169,6 +169,7 @@ import {
 } from "./altana-money.mjs";
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_PROMPT_MAX_CHARS, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs, ledgerFromEvents } from "./idejobs.mjs";
+import { startSseHeartbeat } from "./sseheartbeat.mjs";
 import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, PLANNER_FORMAT_REMINDER, plannerRepairMessages, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages, fitManifestToBudget, manifestBudgetBytes } from "./ideengine.mjs";
 import { createLessonStore, strongerModelFor, failureDossier, brainReportMessages, parseBrainReport, reportLine } from "./idelessons.mjs";
 import { ollamaPayloadFromOpenAI, openAIResultFromOllama, gx10Failure } from "./gx10.mjs";
@@ -2184,10 +2185,16 @@ async function handleIde(req, res, u) {
     if (gateCheck.status !== 200) return send(gateCheck);
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
     const write = (o) => { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch {} };
+    // Idle-stream heartbeat (streams lane, deficiency #11): a tiny rig build measured silent gaps
+    // up to 166s between structural build events, and Cloudflare closes a response idle ~100s —
+    // production's 09-02 build was cut 61 times in 41 minutes for exactly this reason. One shared
+    // helper (sseheartbeat.mjs) writes a comment frame well inside that window on every long-lived
+    // stream this app produces; EventSource ignores comment lines by spec, so onmessage never sees it.
+    const stopHeartbeat = startSseHeartbeat(res);
     const unsubscribe = ideJobs.attach(String(u.searchParams.get("job") || ""),
       u.searchParams.get("from"),
-      (ev) => { if (ev === null) { try { res.end(); } catch {} } else write(ev); });
-    res.on("close", unsubscribe);
+      (ev) => { if (ev === null) { stopHeartbeat(); try { res.end(); } catch {} } else write(ev); });
+    res.on("close", () => { stopHeartbeat(); unsubscribe(); });
     return;
   }
 
@@ -8878,9 +8885,14 @@ function handleChatAttach(req, res, u) {
     write({ type: "cursor", seq: job.eventCount });
   }
   if (job.done) return res.end();
-  const listener = (ev) => { if (ev === null) { try { res.end(); } catch {} } else write(ev); };
+  // Idle-stream heartbeat (streams lane): the live job already pushes a {type:"working"} event
+  // every ~8s while a model call is in flight (handleChat's own working() timer, which also feeds
+  // this attach connection through the same job.listeners bus), but a slow token stream or a gap
+  // between phases is not otherwise covered here. This is belt-and-braces, not the primary fix.
+  const stopHeartbeat = startSseHeartbeat(res);
+  const listener = (ev) => { if (ev === null) { stopHeartbeat(); try { res.end(); } catch {} } else write(ev); };
   job.listeners.push(listener);
-  res.on("close", () => { const i = job.listeners.indexOf(listener); if (i >= 0) job.listeners.splice(i, 1); });
+  res.on("close", () => { stopHeartbeat(); const i = job.listeners.indexOf(listener); if (i >= 0) job.listeners.splice(i, 1); });
 }
 
 // GET /chat/jobs[?chatId=] — the caller's own jobs (running + terminal-uncollected are the ones
@@ -12021,6 +12033,11 @@ const server = http.createServer(async (req, res) => {
     if (path === "/hands/stream" && req.method === "GET") return handsHub.handleStream(req, res, u);
     if (path === "/hands/result" && req.method === "POST") return handsHub.handleResult(req, res, await readJsonBody(req));
     if (path === "/hands/chunk" && req.method === "POST") return handsHub.handleChunk(req, res, await readJsonBody(req));
+    // Genuine inbound evidence a node is alive, even when idle (no job running to generate a
+    // result/chunk POST). Streams lane, deficiency #8/#25: the hub used to treat a successful
+    // write to its OWN local socket as proof the node was alive, which stays "true" through a
+    // tunnel flap the node never saw — this is the node proactively telling the hub it is there.
+    if (path === "/hands/beat" && req.method === "POST") return handsHub.handleBeat(req, res, await readJsonBody(req));
     /*
      * Local-tier self-check (fix C). Bearer-gated (HANDS_TOKEN), so it proves the server->node->Ollama
      * path through the SAME ollamaChat()/embedText() the app uses, without faking owner auth under CF

@@ -6,8 +6,14 @@
  * The orchestrator never reaches into Fred's network — the network path is always node -> hub.
  *
  * Contract:
- *   GET  /hands/stream?node=<name>   (bearer)  long-lived SSE: `job` events + `hb` every 20s
- *   POST /hands/result               (bearer)  { node, jobId, result }
+ *   GET  /hands/stream?node=<name>&itok=<instance>   (bearer)  long-lived SSE: `job` events +
+ *                                                     `hb` every 10s. `itok` is an opaque token the
+ *                                                     node generates once at process start and
+ *                                                     resends on every (re)connect — see below.
+ *   POST /hands/result               (bearer)  { node, jobId, result, instanceToken? }
+ *   POST /hands/chunk                (bearer)  { node, jobId, seq, delta, instanceToken? }
+ *   POST /hands/beat                 (bearer)  { node, instanceToken }  liveness ping, no job
+ *                                     required — the only inbound evidence during an idle stretch
  *   POST /hands/run                  (bearer)  { node, tool, args, timeoutMs } -> the result
  *   GET  /hands/nodes                (bearer)  registry snapshot (no secrets)
  *
@@ -19,8 +25,30 @@
  *     depth in both directions.
  *   - A dispatch to a node that is absent, or that misses its deadline, resolves to an honest
  *     { ok:false, offline:true } — never a hang, never a throw (machines.mjs's contract).
+ *
+ * LIVENESS IS JUDGED BY INBOUND EVIDENCE (streams lane, stabilization 2026-09-03, deficiency
+ * #8/#25). Before this pass, "is this node's stream healthy" was decided by whether the HUB's own
+ * write of its heartbeat frame to the LOCAL socket succeeded — which only proves the socket
+ * between this process and cloudflared is writable, never that the node on the other end of a
+ * tunnel is actually receiving anything. Measured in production: 17-18 minute lockouts on the
+ * GX10 node, 36-38 refusals per episode, because a tunnel flap left a "healthy"-looking dead
+ * stream occupying the node's name. Every node-name entry now tracks `lastInbound`, advanced only
+ * by evidence that actually came FROM the node: the connect itself, a /hands/beat ping, or a
+ * result/chunk POST bearing the SAME instanceToken as the currently registered stream. A stale
+ * sweep actively evicts an entry whose inbound evidence has gone quiet for STALE_EVICT_MS even if
+ * the socket itself never fires "close" (the exact "healthy-looking dead stream" failure mode) —
+ * so a dispatch to that node name goes back to `offline:true` FAST instead of waiting out a job
+ * timeout against a connection nothing is listening on.
+ *
+ * THE SWEEP IS BEAT-CAPABLE-ONLY (lead review, 2026-09-03). It never touches an entry that
+ * connected with no instanceToken at all. Production still runs hands clients that predate `itok`
+ * and /hands/beat entirely — the GX10 containers, customers' installed per-user nodes, and a stale
+ * pre-hands/4 laptop copy — and for those the connect itself plus incidental job traffic is the
+ * ONLY inbound evidence there will ever be. Sweeping a legacy node on the same clock as a
+ * beat-capable one would evict every legacy node once a minute, forever; see sweepStale() below.
  */
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
+import { startSseHeartbeat } from "../sseheartbeat.mjs";
 
 // Carve-outs — same list the node enforces (ported verbatim from tools.mjs).
 const PROTECTED_RE = [
@@ -32,14 +60,31 @@ const PROTECTED_RE = [
 
 const sha = (s) => createHash("sha256").update(String(s)).digest();
 
-// How long a silent stream stays "healthy" before a same-name newcomer may replace it. Two missed
-// heartbeats plus slack, mirroring the client's own HEARTBEAT_LAPSE_MS judgement of the hub.
-const DUP_STALE_MS = 45000;
+// A reconnect presenting the SAME instanceToken as the currently registered stream is, by
+// construction, the same physical node process redialing (a network blip, or its own planned
+// graceful re-dial ahead of the ~15-minute tunnel churn) — it preempts the old stream immediately,
+// no matter how "healthy" that old stream looks. A DIFFERENT token is refused with 409 only while
+// the current stream has proven itself alive within this window; once inbound evidence goes
+// stale, a differently-tokened reconnect is adopted too (better than a permanent lockout).
+const RECENT_INBOUND_MS = 10000;
+// A registered node whose inbound evidence (connect / beat / result / chunk, all instanceToken-
+// matched) goes quiet for this long is actively evicted, even if its socket never fires "close" —
+// the fix for a tunnel flap leaving a dead stream registered as the node's name forever. Sized as
+// 3x the node's own /hands/beat cadence (20s) plus margin for one dropped beat.
+const STALE_EVICT_MS = 60000;
+// How often the stale sweep runs. Independent of heartbeatMs — this is a safety net, not the
+// primary keepalive.
+const SWEEP_MS = 5000;
 
-export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, authNode = null, onConnect = null } = {}) {
+export function createHandsHub({
+  token, heartbeatMs = 10000, log = () => {}, authNode = null, onConnect = null,
+  recentInboundMs = RECENT_INBOUND_MS, staleEvictMs = STALE_EVICT_MS, sweepMs = SWEEP_MS,
+} = {}) {
   const enabled = !!token;
   const tokenDigest = enabled ? sha(token) : null;
-  const nodes = new Map();   // nodeKey -> { res, connectedAt, lastSeen, jobsSent, jobsDone }  (owner: name; user: "user:<uid>")
+  // nodeKey -> { res, info, connectedAt, lastSeen, lastInbound, instanceToken, jobsSent, jobsDone,
+  //              stopBeat }  (owner: name; user: "user:<uid>")
+  const nodes = new Map();
   const dupLogAt = new Map(); // nodeKey -> last time the duplicate-connect refusal was narrated
   const jobs = new Map();    // jobId -> { node, resolve, timer, sentAt }
 
@@ -76,6 +121,11 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     } else {
       name = authKey;   // "user:<uid>"
     }
+    // The node generates this ONCE per process lifetime and resends it on every (re)connect — see
+    // hands.mjs INSTANCE_TOKEN. It is how the hub tells "my own process, redialing" apart from "a
+    // different process that happens to want the same name", which a shared bearer token alone
+    // cannot do (every owner-scope node presents the identical HANDS_TOKEN).
+    const itok = String(u.searchParams.get("itok") || "").slice(0, 128);
     /*
      * One live stream per node — but WHO wins matters. This used to kick the old socket
      * unconditionally, on the theory that a reconnect means the old one is dead or dying. On
@@ -83,16 +133,23 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
      * start) turned that theory into an eviction war: each connect kicked the other, the kicked one
      * reconnected on its 1s post-success backoff, and the hub logged connect/disconnect every ~1.3s
      * for days. Any job dispatched down the stream died with it — Fred saw "workshop cannot be
-     * reached" on adopt. So now: while the current stream is provably healthy (a heartbeat write
-     * landed recently), a same-name newcomer is REFUSED with 409. The client treats that as a
-     * failed connect and backs off toward its 30s cap, harmless. When the old stream really dies,
-     * its close handler clears the entry (or its beats stop landing and it goes stale), and the
-     * next knock is accepted. Worst-case lockout for a genuine fast reconnect is DUP_STALE_MS.
+     * reached" on adopt.
+     *
+     * So now (streams lane, 2026-09-03): a reconnect presenting the SAME instanceToken as the
+     * currently registered stream is provably the same physical node — it PREEMPTS the old stream
+     * immediately, closing it and adopting the new one, with no lockout window at all (this is what
+     * makes a planned graceful re-dial gap-free, and what stops a genuine network-blip reconnect
+     * from ever hitting 409). A DIFFERENT token (a genuinely separate process — including a stale
+     * pre-singleton-lock installer copy that does not know to avoid this) is refused with 409 ONLY
+     * while the current stream has inbound evidence from within the last RECENT_INBOUND_MS; once
+     * that goes stale the newcomer is adopted too, because a "healthy-looking" write to the hub's
+     * own local socket is not evidence the node itself is still there (see file header).
      */
     const prev = nodes.get(name);
     if (prev) {
-      const aliveMs = Date.now() - (prev.lastBeatOk || prev.connectedAt);
-      if (aliveMs < DUP_STALE_MS) {
+      const sameProcess = !!(itok && prev.instanceToken && itok === prev.instanceToken);
+      const recentInbound = (Date.now() - (prev.lastInbound || prev.connectedAt)) < recentInboundMs;
+      if (!sameProcess && recentInbound) {
         /*
          * Log ONCE PER HOUR per node, not once per knock. A stuck twin retries every 30s forever
          * (observed live 2026-09-01: the laptop's orphan filled the entire production log window
@@ -102,11 +159,13 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
         const now = Date.now();
         if (!dupLogAt.has(name) || now - dupLogAt.get(name) > 3600_000) {
           dupLogAt.set(name, now);
-          log(`hands: node "${name}" duplicate connect REFUSED (live stream healthy, last beat ${Math.round(aliveMs / 1000)}s ago) — a second client is running somewhere (repeats suppressed for 1h)`);
+          log(`hands: node "${name}" duplicate connect REFUSED (a DIFFERENT process — instance token mismatch — and the live stream has inbound evidence within the last ${Math.round(recentInboundMs / 1000)}s); repeats suppressed for 1h`);
         }
         return json(res, 409, { error: "a live stream for this node already exists; refusing the duplicate" });
       }
-      try { prev.res.end(); } catch {} clearInterval(prev.beat);
+      log(`hands: node "${name}" ${sameProcess ? "reconnecting (same instance token — preempting the old stream, no gap)" : "adopted (previous stream's inbound evidence was stale)"}`);
+      try { prev.res.end(); } catch {}
+      try { prev.stopBeat(); } catch {}
     }
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
     res.write("event: hb\ndata: {}\n\n");
@@ -129,19 +188,68 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
         };
       }
     } catch { info = null; }
-    const entry = { res, info, connectedAt: Date.now(), lastSeen: Date.now(), lastBeatOk: Date.now(), jobsSent: 0, jobsDone: 0 };
-    // lastBeatOk only advances when the write is ACCEPTED (true = flushed to the socket). A wedged
-    // or dead connection stops advancing it, which is what lets a genuine reconnect through above.
-    entry.beat = setInterval(() => { try { if (res.write("event: hb\ndata: {}\n\n")) entry.lastBeatOk = Date.now(); } catch {} }, heartbeatMs);
+    const now = Date.now();
+    // lastInbound is the CANONICAL liveness signal (see file header): the connect itself counts as
+    // inbound evidence, and it advances again only on a matching /hands/beat, /hands/result, or
+    // /hands/chunk — never on the hub's own outbound heartbeat write succeeding.
+    const entry = { res, info, instanceToken: itok, connectedAt: now, lastSeen: now, lastInbound: now, jobsSent: 0, jobsDone: 0, stopBeat: () => {} };
+    entry.stopBeat = startSseHeartbeat(res, { intervalMs: heartbeatMs, frame: "event: hb\ndata: {}\n\n" });
     nodes.set(name, entry);
     log(`hands: node "${name}" connected`);
     try { if (typeof onConnect === "function") onConnect(name); } catch {}
     req.on("close", () => {
-      clearInterval(entry.beat);
+      entry.stopBeat();
       if (nodes.get(name) === entry) nodes.delete(name);
       log(`hands: node "${name}" disconnected`);
     });
   }
+
+  // Genuine inbound evidence: only a beat whose instanceToken matches the CURRENTLY registered
+  // stream for this name advances lastInbound. A beat from a different (e.g. stale/zombie) process
+  // is acknowledged but ignored for liveness — it must not keep a phantom entry looking alive.
+  async function handleBeat(req, res, body) {
+    if (!enabled) return disabled(res);
+    const authKey = nodeAuthKey(req);
+    if (!authKey) return deny(res);
+    const { node, instanceToken } = body || {};
+    const name = authKey === "owner" ? String(node || "").toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 64) : authKey;
+    const entry = nodes.get(name);
+    const matched = !!(entry && instanceToken && entry.instanceToken === String(instanceToken));
+    if (matched) { entry.lastInbound = Date.now(); entry.lastSeen = Date.now(); }
+    return json(res, 200, { ok: true, counted: matched });
+  }
+
+  // A registered node's inbound evidence going stale for staleEvictMs means the stream is exactly
+  // the failure mode this file exists to close: it still LOOKS connected (no "close" event has
+  // fired — a tunnel flap can leave a socket half-open for a long time) but nothing is actually
+  // proving the node on the other end is still there. Evict it so the next dispatch fails fast
+  // (offline:true) instead of waiting out a job timeout against a dead stream.
+  //
+  // BEAT-CAPABLE ONLY (lead review, 2026-09-03). This sweep must NEVER touch a legacy entry that
+  // registered with no instanceToken at all: production still runs old hands clients that never
+  // send /hands/beat and never mint a token — the GX10 containers (gx10, gx10-gamefactory),
+  // customers' installed nodes (forge-<id>, user:<uid>), and the stale Downloads laptop copy
+  // (hands/3, see hands.mjs's header note). A legacy node's ONLY inbound evidence is the connect
+  // itself plus whatever job result/chunk traffic happens to flow, so it goes quiet for long
+  // stretches by design, not because anything is wrong — sweeping it on the same clock as a
+  // beat-capable node would evict every legacy node once a minute, forever. A legacy entry keeps
+  // the pre-existing contract instead: it lives until its socket fires "close", and the
+  // duplicate-connect rule above already adopts a reconnect for it once ITS OWN inbound evidence
+  // goes stale (recentInboundMs), so there is no lockout either way.
+  function sweepStale() {
+    const now = Date.now();
+    for (const [name, entry] of [...nodes.entries()]) {
+      if (!entry.instanceToken) continue;   // legacy, no beat contract — never actively evicted
+      const age = now - (entry.lastInbound || entry.connectedAt);
+      if (age <= staleEvictMs) continue;
+      try { entry.res.end(); } catch {}
+      try { entry.stopBeat(); } catch {}
+      nodes.delete(name);
+      log(`hands: node "${name}" evicted — no inbound evidence for ${Math.round(age / 1000)}s (the stream looked open but the node stopped proving it is alive)`);
+    }
+  }
+  const staleSweepTimer = setInterval(sweepStale, sweepMs);
+  if (typeof staleSweepTimer.unref === "function") staleSweepTimer.unref();
 
   async function handleResult(req, res, body) {
     if (!enabled) return disabled(res);
@@ -154,8 +262,11 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     if (authKey !== "owner" && j.node !== authKey) return deny(res);
     jobs.delete(jobId);
     clearTimeout(j.timer);
+    // A settled result for THIS jobId is inbound evidence in its own right (the id is unguessable
+    // and was only ever handed to the one node it was dispatched to) — reuses the existing
+    // job/result channel as liveness proof, no separate instanceToken check needed here.
     const entry = nodes.get(j.node);
-    if (entry) { entry.jobsDone++; entry.lastSeen = Date.now(); }
+    if (entry) { entry.jobsDone++; entry.lastSeen = Date.now(); entry.lastInbound = Date.now(); }
     j.resolve({ node: node || j.node, ms: Date.now() - j.sentAt, ...((result && typeof result === "object") ? result : { ok: false, error: "malformed result" }) });
     return json(res, 200, { ok: true });
   }
@@ -178,7 +289,7 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     if (j.onChunk) { try { j.onChunk({ seq: Number(seq) || 0, delta: String(delta || "") }); } catch { /* a sink throw must never break the node */ } }
     // A chunk is liveness: push the deadline out so a long stream is not killed mid-flight.
     if (j.timer && j.capMs) { clearTimeout(j.timer); j.timer = setTimeout(() => j.resolve({ ok: false, offline: true, node: j.node, timedOut: true, error: "node went quiet mid-stream" }), j.capMs); }
-    if (entryFor(j)) { const e = entryFor(j); e.lastSeen = Date.now(); }
+    if (entryFor(j)) { const e = entryFor(j); e.lastSeen = Date.now(); e.lastInbound = Date.now(); }
     return json(res, 200, { ok: true });
   }
   const entryFor = (j) => nodes.get(j.node);
@@ -274,7 +385,10 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     if (!enabled) return disabled(res);
     if (!authed(req)) return deny(res);
     return json(res, 200, {
-      nodes: [...nodes.entries()].map(([name, n]) => ({ name, connectedAt: n.connectedAt, lastSeen: n.lastSeen, jobsSent: n.jobsSent, jobsDone: n.jobsDone, info: n.info || null })),
+      // connected is always true for an entry in this map (a stale one is actively evicted by the
+      // sweep, not merely marked) — included explicitly so a caller never has to infer it from
+      // array membership. lastInbound is the genuine liveness clock (see file header).
+      nodes: [...nodes.entries()].map(([name, n]) => ({ name, connected: true, connectedAt: n.connectedAt, lastSeen: n.lastSeen, lastInbound: n.lastInbound || n.connectedAt, jobsSent: n.jobsSent, jobsDone: n.jobsDone, info: n.info || null })),
       pendingJobs: jobs.size,
     });
   }
@@ -318,5 +432,5 @@ export function createHandsHub({ token, heartbeatMs = 20000, log = () => {}, aut
     return hits.length === 1 ? hits[0] : "";
   }
   const stats = () => ({ enabled, nodes: nodes.size, pendingJobs: jobs.size });
-  return { enabled, handleStream, handleResult, handleChunk, handleRun, handleNodes, dispatch, dispatchStream, cancelJob, cancelAll, pick, nodeNames, nodeInfo, nodeForPath, stats };
+  return { enabled, handleStream, handleResult, handleChunk, handleBeat, handleRun, handleNodes, dispatch, dispatchStream, cancelJob, cancelAll, pick, nodeNames, nodeInfo, nodeForPath, stats };
 }

@@ -39,6 +39,12 @@
     verifyAnnounced: "",    // job whose first recorded check advanced the shared journey
     endedAnnounced: "",     // failed/stopped job whose retryable ending was announced
     autoWorkshop: "",       // job whose completion already flipped the view to the Workshop (once)
+    // Streams lane, 2026-09-03: "live" while the attach SSE connection is open (or has never
+    // dropped), "reconnecting" from the moment a drop is detected until the replacement connects.
+    // Two values only, per contract — the lens root also carries this as a CSS class / data
+    // attribute (paintLink) for later visual treatment; this file only plumbs the state.
+    link: "live",
+    seenRecords: new Set(),  // dedupe key for an incremental reattach: idejobs.mjs's ev._record
   };
 
   // The Crucible's working mode drives how much machinery each lens shows.
@@ -170,6 +176,7 @@
       b.addEventListener("click", () => setLens(b.dataset.lens));
     }
     paintSwitch();
+    paintLink();
     state.mounted = true;
     render();
   }
@@ -192,9 +199,36 @@
     }
   }
 
+  // Streams lane, 2026-09-03: a small, deliberately generic signal for the connection under the
+  // currently followed build — "live" or "reconnecting", nothing finer. Both a data attribute
+  // (`[data-link="reconnecting"]`) and boolean classes land on the lens root itself (#cru) so a
+  // later styling pass has either shape to key off; this file only sets them, it does not style.
+  function setLink(v) {
+    if (state.link === v) return;
+    state.link = v;
+    paintLink();
+  }
+  function paintLink() {
+    const root = $("#cru");
+    if (!root) return;
+    root.dataset.link = state.link;
+    root.classList.toggle("cru-link-live", state.link === "live");
+    root.classList.toggle("cru-link-reconnecting", state.link === "reconnecting");
+  }
+
   /* ---------- following a build --------------------------------------------------------------
    * Attach replays the whole journal from event zero and then live-tails, so opening a build that
    * finished yesterday and watching one that is running right now take the identical path.
+   *
+   * INCREMENTAL REATTACH (streams lane, deficiency #11): a dropped attach connection used to clear
+   * every rendered event and the job id, so the next reconnect replayed the WHOLE journal from
+   * record zero — 331KB by the end of the 09-02 build, cut 61 times in 41 minutes by Cloudflare's
+   * idle-stream close, each cut flashing the panel empty before the replay finished. Now a drop
+   * keeps `state.jobId` and every event already rendered; the reconnect asks the server for
+   * `from=<events already seen>` and only NEW records are appended, deduped by the durable job
+   * spine's own `_record` stamp (idejobs.mjs ownedRecord) in case a boundary resend overlaps what
+   * was already applied. The only thing that still clears the panel is the server explicitly
+   * saying `{type:"gone"}` — an unknown or foreign job, never a transport blip.
    */
   function follow(jobId, opts) {
     if (!jobId || jobId === state.jobId) return;
@@ -205,6 +239,7 @@
     if (state.detach) { try { state.detach(); } catch {} state.detach = null; }
     state.jobId = jobId;
     state.events = [];
+    state.seenRecords = new Set();
     state.openMoves = new Set();
     state.showFullPlan = false;
     state.previewOn = false;
@@ -212,13 +247,37 @@
     state.endedAnnounced = "";
     state.autoWorkshop = "";
     state.terminalWitnessedLive.clear();
+    setLink("live");
     render();
+    attachStream(jobId, 0, replay);
+  }
 
-    const es = new EventSource("/ide/job/attach?job=" + encodeURIComponent(jobId) + "&from=0");
+  // One (re)connect attempt for `jobId`, resuming from `from`. Never clears `state.events` itself —
+  // that only happens in follow() (a genuinely new job) or when the server says `{type:"gone"}`.
+  function attachStream(jobId, from, replay) {
+    if (jobId !== state.jobId) return;   // a newer follow() already superseded this attempt
+    const es = new EventSource("/ide/job/attach?job=" + encodeURIComponent(jobId) + "&from=" + from);
     let closed = false, ended = false;
+    es.onopen = () => setLink("live");
     es.onmessage = (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch { return; }
-      if (ev.type === "gone") { es.close(); return; }
+      if (ev.type === "gone") {
+        // The one case that still means "start over": the server does not recognize this job at
+        // all (foreign or truly expired), so there is nothing left to reattach to.
+        closed = true;
+        es.close();
+        state.jobId = "";
+        setLink("live");
+        render();
+        return;
+      }
+      // Dedupe: a reattach resumes from the count of events already applied, but a boundary resend
+      // (or, in principle, a server-side replay quirk) could repeat one this page already rendered.
+      // An event without a `_record` (should not happen on this spine) is accepted as-is.
+      if (ev._record) {
+        if (state.seenRecords.has(ev._record)) return;
+        state.seenRecords.add(ev._record);
+      }
       const terminal = ev.type === "done" || ev.type === "checkpoint"
         || ev.type === "error" || ev.type === "stopped";
       if (terminal) {
@@ -244,25 +303,19 @@
       }
     };
     /*
-     * On error, close and RESET rather than merely closing. follow() refuses to re-attach to the
-     * job it thinks it is already following, so closing while keeping state.jobId froze the lens
-     * permanently after any transient network blip. Clearing the id lets the retry re-attach, and
-     * re-attaching replays from zero into an emptied event list, so nothing double-counts.
+     * On error, reconnect INCREMENTALLY rather than clearing state. Two very different closes
+     * share this handler: a finished job's stream ends NORMALLY and the browser still reports it
+     * as an error (terminal event already seen means the story is complete — keep it on screen and
+     * stop), and a stream that is still live going quiet, which is a real drop worth retrying from
+     * exactly where the page left off.
      */
     es.onerror = () => {
       if (closed) return;
       closed = true;
       es.close();
-      /*
-       * Two very different closes share this handler. A finished job's stream ends NORMALLY and
-       * the browser still reports it as an error; treating that as a drop put the lens in a
-       * clear-and-reattach loop every two seconds, flashing empty between cycles. So: terminal
-       * event already seen means the story is complete, keep it on screen and stop. Only a close
-       * with the job still live is a real drop worth resetting and retrying.
-       */
       if (ended) return;
-      state.jobId = "";
-      setTimeout(() => { if (document.body.classList.contains("ide-open")) sync(); }, 2000);
+      setLink("reconnecting");
+      setTimeout(() => { if (jobId === state.jobId) attachStream(jobId, state.events.length, replay); }, 2000);
     };
     state.detach = () => { closed = true; es.close(); };
   }
