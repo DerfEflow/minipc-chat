@@ -52,7 +52,7 @@ t("Private mode (Anthropic-only) refuses a non-Anthropic fallback", () => {
 
 t("Private mode refuses a fallback that lands outside its Anthropic-only lane", () => {
   const fb = pickFallbackModel("deepseek/deepseek-v4-pro", { privacyMode: "private", tried: [] });
-  assert.equal(fb, null, "deepseek-v4-flash is not Anthropic, so Private mode must refuse it as a fallback too");
+  assert.ok(fb === null || fallbackProviderOf(fb) === "anthropic", "Private mode must refuse every non-Anthropic fallback, and may only continue the ladder inside Anthropic (got " + fb + ")");
 });
 
 t("a catalog-declared m.fallback field (future lane/simplify addition) wins over this module's own map", () => {
