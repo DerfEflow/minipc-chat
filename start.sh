@@ -38,7 +38,17 @@ trap forward_shutdown TERM INT
 
 if [ -n "${TUNNEL_TOKEN:-}" ]; then
   echo "[start] launching cloudflared tunnel -> localhost:${PORT:-8088}"
-  cloudflared tunnel --no-autoupdate --grace-period 180s run --token "$TUNNEL_TOKEN" &
+  # --protocol http2 (streams lane, stabilization 2026-09-03, deficiency #25): cloudflared's
+  # default transport is QUIC over UDP, and the production log shows QUIC resets ("timeout: no
+  # recent network activity") on the order of 100 times a day, tracking closely with the
+  # gx10-gamefactory node's own measured ~15-minute reconnect cycle. QUIC's idle timeout is
+  # sensitive to UDP path liveness in a way plain TCP is not — a NAT/firewall UDP mapping expiring
+  # on the path (a very common consumer-router/cloud-NAT default is in the 10-20 minute range) can
+  # silently drop a QUIC session's datagrams with no TCP-style RST to notice quickly. HTTP/2 rides
+  # a normal long-lived TCP connection, which does not depend on a UDP mapping staying open and
+  # gets ordinary TCP keepalive/RST behavior on a real drop. This does not change what SIGTERM
+  # does below: the tunnel still drains for its platform grace period on shutdown either way.
+  cloudflared tunnel --no-autoupdate --protocol http2 --grace-period 180s run --token "$TUNNEL_TOKEN" &
   cloudflared_pid=$!
 else
   echo "[start] TUNNEL_TOKEN unset — running app without the tunnel (local/dev mode)"
