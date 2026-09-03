@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>{{NAME}}</title>
+<link rel="manifest" href="./manifest.webmanifest" />
+<link rel="icon" href="./assets/icon-192.png" sizes="192x192" />
+<link rel="apple-touch-icon" href="./assets/icon-192.png" />
+<meta name="theme-color" content="#0b1020" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<style>
+  html, body { margin: 0; padding: 0; background: #0b1020; height: 100%; overflow: hidden; }
+  #gf-boot-error { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    color: #f5f7ff; font: 14px sans-serif; padding: 16px; text-align: center; background: #0b1020; }
+</style>
+</head>
+<body>
+<div id="gf-boot-error"></div>
+<script type="module">
+  import { boot } from "./kit/runtime.js";
+  import * as rules from "./game/rules.js";
+  import * as render from "./game/render.js";
+  import content from "./game/content.js";
+  const theme = {{THEME_JSON}};
+  try {
+    boot({ rules, render, content, meta: { slug: "{{SLUG}}", name: "{{NAME}}" }, theme });
+  } catch (err) {
+    const el = document.getElementById("gf-boot-error");
+    el.style.display = "flex";
+    el.textContent = "This game could not start.";
+    try { console.error("[" + "{{SLUG}}" + "] boot failed:", err); } catch (e) { /* ignore */ }
+  }
+</script>
+</body>
+</html>

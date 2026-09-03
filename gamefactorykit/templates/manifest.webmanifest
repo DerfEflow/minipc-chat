@@ -1,0 +1,12 @@
+{
+  "name": "{{NAME}}",
+  "short_name": "{{NAME}}",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "{{THEME_COLOR}}",
+  "theme_color": "{{THEME_COLOR}}",
+  "icons": [
+    { "src": "./assets/icon-192.png", "sizes": "{{ICON_192_SIZE}}", "type": "image/png" },
+    { "src": "./assets/icon-512.png", "sizes": "{{ICON_512_SIZE}}", "type": "image/png" }
+  ]
+}
