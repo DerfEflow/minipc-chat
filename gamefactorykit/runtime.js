@@ -103,10 +103,48 @@ export function boot({ rules, render, content, meta, theme }) {
     } catch (e) { /* a save failure must never break gameplay */ }
   }
 
+  // The contract exposes progress through rules.status(state) and levels carry `title` (some games
+  // say `name`); reading state.status directly showed "undefined" for every game that kept its status
+  // elsewhere (integration review 2026-09-03).
+  function currentStatus() {
+    try { return typeof rules.status === "function" ? rules.status(state) : (state.status || "playing"); } catch (e) { return state.status || "playing"; }
+  }
   function updateStatusLine() {
     const level = content.levels[state.levelIndex];
-    statusLine.textContent = (level ? level.name : meta.name) + " - " + state.status;
-    nextButton.style.display = (state.status === "won" && state.levelIndex + 1 < content.levels.length) ? "block" : "none";
+    const title = level ? (level.title || level.name || ("Level " + (state.levelIndex + 1))) : meta.name;
+    const status = currentStatus();
+    statusLine.textContent = title + " - " + status;
+    nextButton.style.display = (status === "won" && state.levelIndex + 1 < content.levels.length) ? "block" : "none";
+  }
+
+  // Step controls are drawn by the kit so every game gets visible, 44 px, high-contrast buttons with
+  // labels even when its render.js draws only the board (the accessibility rule: step buttons mirror
+  // gestures). A render.js that also draws its controls paints the same geometry; the kit's pass lands
+  // on top, so the two never disagree about where a control is.
+  function drawControls() {
+    if (!layout || !Array.isArray(layout.controls)) return;
+    const palette = theme.palette || [];
+    const fg = palette[4] || "#ffffff", accent = palette[1] || "#38e8ff", ground = palette[0] || "#000";
+    for (const c of layout.controls) {
+      if (!c || !(c.w > 0) || !(c.h > 0)) continue;
+      ctx.save();
+      ctx.globalAlpha = 0.92;
+      ctx.fillStyle = ground;
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (typeof ctx.roundRect === "function") ctx.roundRect(c.x, c.y, c.w, c.h, 8); else ctx.rect(c.x, c.y, c.w, c.h);
+      ctx.fill();
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = fg;
+      ctx.font = Math.max(12, Math.min(16, Math.floor(c.h * 0.34))) + "px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const label = String(c.label || (c.action && c.action.type) || "").slice(0, 18);
+      ctx.fillText(label, c.x + c.w / 2, c.y + c.h / 2);
+      ctx.restore();
+    }
   }
 
   function dispatch(action) {
@@ -140,10 +178,19 @@ export function boot({ rules, render, content, meta, theme }) {
     return { type, x: src.clientX - rect.left, y: src.clientY - rect.top, dx: 0, dy: 0 };
   }
 
-  function onPointerDown(e) {
-    e.preventDefault();
-    dispatch(rules.actionForPointer(state, layout, pointFromEvent(e, "down")));
+  // Pointer: down, move and up all reach the game (drag gestures need move/up; the contract's pointer
+  // shape carries dx/dy relative to the previous point). A game that only answers to "down" simply
+  // returns null for the others.
+  let lastPoint = null;
+  function pointerEvent(e, type) {
+    const p = pointFromEvent(e, type);
+    if (lastPoint && type !== "down") { p.dx = p.x - lastPoint.x; p.dy = p.y - lastPoint.y; }
+    lastPoint = type === "up" ? null : { x: p.x, y: p.y };
+    return p;
   }
+  function onPointerDown(e) { e.preventDefault(); dispatch(rules.actionForPointer(state, layout, pointerEvent(e, "down"))); }
+  function onPointerMove(e) { if (!lastPoint) return; e.preventDefault(); dispatch(rules.actionForPointer(state, layout, pointerEvent(e, "move"))); }
+  function onPointerUp(e) { if (!lastPoint) return; e.preventDefault(); dispatch(rules.actionForPointer(state, layout, pointerEvent(e, "up"))); }
 
   function onKeyDown(e) {
     const action = rules.actionForKey(state, e.key);
@@ -151,7 +198,11 @@ export function boot({ rules, render, content, meta, theme }) {
   }
 
   canvas.addEventListener("mousedown", onPointerDown);
+  canvas.addEventListener("mousemove", onPointerMove);
+  window.addEventListener("mouseup", onPointerUp);
   canvas.addEventListener("touchstart", onPointerDown, { passive: false });
+  canvas.addEventListener("touchmove", onPointerMove, { passive: false });
+  canvas.addEventListener("touchend", onPointerUp, { passive: false });
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("resize", resize);
   nextButton.addEventListener("click", function () { dispatch({ type: "next" }); });
@@ -176,7 +227,9 @@ export function boot({ rules, render, content, meta, theme }) {
   function frame(t) {
     if (!running) return;
     if (!layout) resize();
-    render.draw(ctx, state, layout, theme, t);
+    try { render.draw(ctx, state, layout, theme, t); }
+    catch (e) { try { console.error("[" + meta.slug + "] draw failed:", e); } catch (e2) { /* ignore */ } }
+    drawControls();
     rafId = requestAnimationFrame(frame);
   }
 
