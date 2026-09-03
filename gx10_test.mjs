@@ -29,7 +29,7 @@ import { squeezeOversizeMessages, isContextOverflowError } from "./contextwindow
     ],
     tools: [{ type: "function", function: { name: "read", parameters: { type: "object" } } }],
     num_predict: 4096,
-    num_ctx: 131072,
+    num_ctx: 32768,
     temperature: 0.2,
   });
   assert.equal(payload.model, "gpt-oss:20b");
@@ -38,7 +38,7 @@ import { squeezeOversizeMessages, isContextOverflowError } from "./contextwindow
   assert.deepEqual(payload.messages[2].tool_calls[0].function.arguments, { path: "a.ts" }, "assistant tool args become objects for Ollama");
   assert.equal(payload.messages[3].role, "tool");
   assert.equal(payload.options.num_predict, 4096);
-  assert.equal(payload.options.num_ctx, 131072, "the catalog window bounds the KV allocation");
+  assert.equal(payload.options.num_ctx, 32768, "the catalog window bounds the KV allocation");
   assert.equal(payload.options.temperature, 0.2);
   assert.equal(payload.tools.length, 1);
 }
@@ -81,7 +81,7 @@ import { squeezeOversizeMessages, isContextOverflowError } from "./contextwindow
     assert.equal(seat.outCost, 0, seat.id + " must be free");
     assert.equal(isToolCapable(seat.id), true, seat.id + " was tool-probed live and must stay marked");
     assert.equal(providerOf(seat.id), "gx10");
-    assert.ok(seat.ctx >= 100_000, seat.id + " carries its measured window");
+    assert.ok(seat.ctx >= 100_000, seat.id + " carries its resident-safe window (32k; 131k evicted the coder, 2026-09-03)");
     for (const mode of ["normal", "trusted", "private"]) {
       assert.equal(modeAllows(mode, seat.id).allowed, true, seat.id + " must be allowed in " + mode + " mode (it never leaves the house)");
     }
