@@ -2412,8 +2412,12 @@
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);
     try {
+      // quality:"low", aspect:"portrait" (2026-09-03, foundry lane, DEFICIENCIES.md #14): this call
+      // used to send no quality/aspect at all, which the Foundry defaults to medium/square --
+      // $0.053 for a throwaway interview preview instead of $0.006, nine times the cost for a
+      // phone mockup that is never kept. "portrait" also actually looks like a phone screen.
       const r = await fetch("/api/images/generate", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "A clean, beautiful mockup of a phone app screen: " + promptText + ". No device frame text, no watermark.", n: 1 }),
+        body: JSON.stringify({ prompt: "A clean, beautiful mockup of a phone app screen: " + promptText + ". No device frame text, no watermark.", n: 1, quality: "low", aspect: "portrait" }),
         signal: controller.signal });
       const j = await r.json();
       const b64 = j && j.images && j.images[0] && j.images[0].b64;

@@ -34,9 +34,20 @@ await new Promise((r) => mockOllama.listen(MOCK_OLLAMA, "127.0.0.1", r));
 
 // ---- mock OpenAI: /v1/images/generations, /v1/files, /v1/batches, batch output download
 // ---- also serves the mock NVIDIA genai draft endpoint (ARSENAL Wave 3) at /nvidia-genai/*
-const seen = { generations: [], edits: [], refines: [], uploadedJsonl: "", batchCreates: [], batchPolls: 0, draftCalls: [] };
+// ---- and the mock DeepSeek (/chat/completions) + Anthropic (/v1/messages) rewrite/fallback
+//      lanes the foundry ladder (2026-09-03) calls on a paid-engine failure.
+const seen = { generations: [], edits: [], refines: [], deepseekRewrites: [], anthropicRewrites: [], uploadedJsonl: "", batchCreates: [], batchPolls: 0, draftCalls: [] };
 let batchStatus = "in_progress";
 let draftFailNth = 0;   // 0 = never fail; N = fail the Nth draft call (1-indexed) once
+// Queue of {status, message} the NEXT N calls to /v1/images/generations or /v1/images/edits
+// return (OpenAI error shape) before falling through to the normal success response. Drives every
+// ladder test below: push one billing failure to prove the fall-through to draft, push a safety
+// failure (with a second queued failure) to prove the rewrite-then-retry-then-draft path, etc.
+let genFailQueue = [];
+let refineFailCount = 0;         // fail this many NEXT primary refine calls (/v1/chat/completions);
+                                  // refinePrompt() retries the primary model twice, so a test that
+                                  // wants the ladder to fall past it entirely must fail BOTH tries
+let deepseekShouldFail = false;  // fail the NEXT DeepSeek call (/chat/completions) once
 const mockOpenAI = http.createServer((req, res) => {
   let b = ""; req.on("data", (d) => b += d);
   req.on("end", () => {
@@ -53,16 +64,34 @@ const mockOpenAI = http.createServer((req, res) => {
     if (req.url === "/v1/images/generations" && req.method === "POST") {
       const body = JSON.parse(b);
       seen.generations.push(body);
+      if (genFailQueue.length) { const f = genFailQueue.shift(); return send({ error: { message: f.message } }, f.status); }
       const n = body.n || 1;
       return send({ created: 1, data: Array.from({ length: n }, () => ({ b64_json: PNG })), usage: { input_tokens: 12, output_tokens: 272 * n } });
     }
     if (req.url === "/v1/images/edits" && req.method === "POST") {
       seen.edits.push({ contentType: req.headers["content-type"] || "", body: b });
+      if (genFailQueue.length) { const f = genFailQueue.shift(); return send({ error: { message: f.message } }, f.status); }
       return send({ created: 1, data: [{ b64_json: PNG }], usage: { input_tokens: 300, input_tokens_details: { text_tokens: 20, image_tokens: 280 }, output_tokens: 272 } });
     }
     if (req.url === "/v1/chat/completions" && req.method === "POST") {
       seen.refines.push(JSON.parse(b));
+      if (refineFailCount > 0) { refineFailCount--; return send({ error: { message: "OpenAI: Your request was rejected by the safety system." } }, 400); }
       return send({ choices: [{ message: { role: "assistant", content: "A refined monumental vision, cinematic lighting, coherent depth." } }], usage: { prompt_tokens: 50, completion_tokens: 30 } });
+    }
+    // DeepSeek direct dialect (AGENT-RULES.md: base api.deepseek.com, no /v1 prefix, model
+    // deepseek-v4-flash) -- the ladder's FIRST rewrite/fallback text engine.
+    if (req.url === "/chat/completions" && req.method === "POST") {
+      const body = JSON.parse(b);
+      seen.deepseekRewrites.push(body);
+      if (deepseekShouldFail) { deepseekShouldFail = false; return send({ error: { message: "DeepSeek: Insufficient Balance" } }, 402); }
+      return send({ choices: [{ message: { role: "assistant", content: "a rewritten prompt via deepseek, subject kept, safe and tasteful" } }] });
+    }
+    // Anthropic Messages dialect -- the ladder's SECOND rewrite/fallback text engine, used only
+    // when DeepSeek is unavailable or fails.
+    if (req.url === "/v1/messages" && req.method === "POST") {
+      const body = JSON.parse(b);
+      seen.anthropicRewrites.push({ body, headers: { hasApiKey: !!req.headers["x-api-key"], version: req.headers["anthropic-version"] } });
+      return send({ content: [{ type: "text", text: "a rewritten prompt via haiku, subject kept, safe and tasteful" }] });
     }
     if (req.url === "/v1/files" && req.method === "POST") {
       seen.uploadedJsonl = b;
@@ -103,7 +132,15 @@ const env = { ...process.env, PORT: String(PORT), OLLAMA_URL: "http://127.0.0.1:
   OPENAI_IMAGES_BASE: "http://127.0.0.1:" + MOCK_OPENAI,
   NVIDIA_API_KEY: "test-nvidia-key-not-real",
   NVIDIA_GENAI_URL: "http://127.0.0.1:" + MOCK_OPENAI + "/nvidia-genai/",
-  OPENROUTER_API_KEY: "", ANTHROPIC_API_KEY: "", STRIPE_SECRET_KEY: "" };
+  // Foundry ladder (2026-09-03): fake keys AND bases redirected to the same mock server, so the
+  // safety-rewrite and refine-fallback tests below exercise the real code path with zero chance of
+  // reaching a real provider even if a real DEEPSEEK/ANTHROPIC key happens to be in this shell's
+  // environment (images.mjs reads these two bases straight from the environment; see the comment
+  // by their defaults in createImagesFeature).
+  DEEPSEEK_AI_DOMINION_UI_APIKEY: "test-deepseek-key-not-real",
+  DEEPSEEK_IMAGES_BASE: "http://127.0.0.1:" + MOCK_OPENAI,
+  ANTHROPIC_IMAGES_BASE: "http://127.0.0.1:" + MOCK_OPENAI,
+  OPENROUTER_API_KEY: "", ANTHROPIC_API_KEY: "test-anthropic-key-not-real", STRIPE_SECRET_KEY: "" };
 const child = spawn(process.execPath, [join(HERE, "server.mjs")], { env, cwd: HERE, stdio: ["ignore", "pipe", "pipe"] });
 let bootLog = ""; child.stdout.on("data", (d) => bootLog += d); child.stderr.on("data", (d) => bootLog += d);
 
@@ -213,6 +250,73 @@ await t("bad reference plates are rejected (mime + count)", async () => {
   if (many.status !== 400) throw new Error("11 refs -> " + many.status);
 });
 
+// ---- The resilience ladder (2026-09-03, foundry lane, LANE-foundry.md item 1) ----
+
+await t("billing error on the paid engine falls through to the free draft engine, with servedBy", async () => {
+  genFailQueue = [{ status: 429, message: "OpenAI: Billing hard limit has been reached." }];
+  const r = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "a copper astrolabe", quality: "low", aspect: "square", n: 1 } });
+  if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
+  if (!r.body.draft || r.body.costUsd !== 0) throw new Error("expected a free draft fallback: " + JSON.stringify(r.body).slice(0, 200));
+  if (!r.body.servedBy || r.body.servedBy.engine !== "draft") throw new Error("servedBy wrong: " + JSON.stringify(r.body.servedBy));
+  if (!/billing hard limit/i.test(r.body.note || "")) throw new Error("note should name the paid failure: " + r.body.note);
+  if (genFailQueue.length) throw new Error("mock queue not drained -- the ladder never even tried the paid engine");
+});
+
+await t("safety rejection triggers one rewrite-and-retry, then falls to draft when the retry also fails", async () => {
+  genFailQueue = [
+    { status: 400, message: "OpenAI: Your request was rejected by the safety system as a result of our safety_violation." },
+    { status: 400, message: "OpenAI: Your request was rejected by the safety system as a result of our safety_violation." },
+  ];
+  const before = seen.deepseekRewrites.length;
+  const r = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "a dramatic battle scene", quality: "low", aspect: "square", n: 1 } });
+  if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
+  if (seen.deepseekRewrites.length !== before + 1) throw new Error("expected exactly one rewrite call to DeepSeek, saw " + (seen.deepseekRewrites.length - before));
+  const retryPayload = seen.generations.at(-1);
+  if (!/rewritten prompt via deepseek/.test(retryPayload.prompt)) throw new Error("the paid retry did not use the rewritten prompt: " + retryPayload.prompt);
+  if (!r.body.servedBy || r.body.servedBy.engine !== "draft") throw new Error("expected the final serve to be draft: " + JSON.stringify(r.body.servedBy));
+  if (!/adjusted by deepseek-v4-flash/.test(r.body.note || "")) throw new Error("note should mention the rewrite: " + r.body.note);
+  if (!/served by the free draft engine/.test(r.body.note || "")) throw new Error("note should mention the draft fallback: " + r.body.note);
+  if (genFailQueue.length) throw new Error("mock queue not drained");
+});
+
+await t("a safety rejection that succeeds on the one retry serves from the paid engine, not draft", async () => {
+  genFailQueue = [{ status: 400, message: "OpenAI: Your request was rejected by the safety system as a result of our safety_violation." }];
+  const r = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "a tense confrontation", quality: "low", aspect: "square", n: 1 } });
+  if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
+  if (!r.body.servedBy || r.body.servedBy.engine !== "paid") throw new Error("expected the retry to succeed on the paid engine: " + JSON.stringify(r.body.servedBy));
+  if (!/adjusted by deepseek-v4-flash/.test(r.body.note || "")) throw new Error("note should mention the rewrite: " + r.body.note);
+  if (!(r.body.costUsd > 0)) throw new Error("a successful paid retry should still be metered: " + r.body.costUsd);
+});
+
+await t("DeepSeek unavailable during a safety rewrite falls to Haiku", async () => {
+  genFailQueue = [{ status: 400, message: "OpenAI: Your request was rejected by the safety system as a result of our safety_violation." }];
+  deepseekShouldFail = true;
+  const beforeAnthropic = seen.anthropicRewrites.length;
+  const r = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "another tense scene", quality: "low", aspect: "square", n: 1 } });
+  if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
+  if (seen.anthropicRewrites.length !== beforeAnthropic + 1) throw new Error("expected Haiku to be called once DeepSeek failed");
+  if (!/adjusted by claude-haiku-4-5/.test(r.body.note || "")) throw new Error("note should name the Haiku rewrite: " + r.body.note);
+  const auth = seen.anthropicRewrites.at(-1).headers;
+  if (!auth.hasApiKey || auth.version !== "2023-06-01") throw new Error("anthropic auth headers wrong: " + JSON.stringify(auth));
+});
+
+await t("reference plates are dropped (with a note) when the ladder falls through to draft", async () => {
+  genFailQueue = [{ status: 500, message: "OpenAI: internal server error" }];
+  const refs = ["data:image/png;base64," + PNG];
+  const r = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "match this look", quality: "low", aspect: "square", n: 1, refs } });
+  if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
+  if (!r.body.servedBy || r.body.servedBy.engine !== "draft") throw new Error("expected draft: " + JSON.stringify(r.body.servedBy));
+  if (!/reference plates were dropped/.test(r.body.note || "")) throw new Error("note should say refs were dropped: " + r.body.note);
+});
+
+await t("an error surfaces to the user only once EVERY engine has failed", async () => {
+  genFailQueue = [{ status: 429, message: "OpenAI: Billing hard limit has been reached." }];
+  draftFailNth = seen.draftCalls.length + 1;   // fail the very next draft call, whatever count it lands on
+  const r = await req("POST", "/api/images/generate", { email: OWNER, body: { prompt: "a hopeless case", quality: "low", aspect: "square", n: 1 } });
+  if (r.status !== 502) throw new Error("expected 502 when every engine failed, got " + r.status + " " + JSON.stringify(r.body));
+  if (!/billing hard limit/i.test(r.body.error) || !/also failed/i.test(r.body.error)) throw new Error("error should name both failures: " + r.body.error);
+});
+
 await t("refine rewrites the directive via the text model and is gated", async () => {
   const anon = await req("POST", "/api/images/refine", { body: { prompt: "a castle" } });
   if (anon.status !== 401) throw new Error("anon -> " + anon.status);
@@ -220,6 +324,19 @@ await t("refine rewrites the directive via the text model and is gated", async (
   if (r.status !== 200 || !/refined/i.test(r.body.prompt)) throw new Error(r.status + " " + JSON.stringify(r.body));
   const call = seen.refines.at(-1);
   if (call.model !== "gpt-5.6-luna" || !call.max_completion_tokens) throw new Error("refine payload wrong: " + JSON.stringify({ m: call.model }));
+  if (!r.body.servedBy || r.body.servedBy.engine !== "paid") throw new Error("servedBy wrong: " + JSON.stringify(r.body.servedBy));
+});
+
+await t("refine falls back through the ladder when the primary model fails", async () => {
+  refineFailCount = 2;   // fail both of refinePrompt()'s primary-model attempts
+  const before = seen.deepseekRewrites.length;
+  const r = await req("POST", "/api/images/refine", { email: OWNER, body: { prompt: "a windswept cliff" } });
+  if (r.status !== 200) throw new Error("HTTP " + r.status + " " + JSON.stringify(r.body));
+  if (seen.deepseekRewrites.length !== before + 1) throw new Error("expected refine to fall to DeepSeek after the primary model failed");
+  if (!/via deepseek/.test(r.body.prompt)) throw new Error("prompt did not come from the DeepSeek fallback: " + r.body.prompt);
+  if (!r.body.servedBy || r.body.servedBy.engine !== "fallback" || r.body.servedBy.model !== "deepseek-v4-flash") throw new Error("servedBy wrong: " + JSON.stringify(r.body.servedBy));
+  if (r.body.costUsd !== 0) throw new Error("a fallback-served refine should not be charged: " + r.body.costUsd);
+  if (!/after the primary refine model failed/.test(r.body.note || "")) throw new Error("note missing: " + r.body.note);
 });
 
 await t("bad inputs are rejected (quality, aspect, empty prompt)", async () => {
@@ -302,13 +419,17 @@ await t("in-progress batch polls honestly (no images yet, no extra charge)", asy
   if ((await balanceOf(USER)) !== before) throw new Error("poll changed the balance");
 });
 
-await t("collection settles ONCE against real usage: overcharge comes back as credits", async () => {
+await t("collection settles ONCE against real usage, overcharge comes back as credits, and the failed batch line is rescued by the free draft engine", async () => {
   batchStatus = "completed";
   const before = await balanceOf(USER);
   const p1 = await req("GET", "/api/images/batch/batch_mock1?offset=0&limit=1", { email: USER });
-  if (p1.status !== 200 || p1.body.total !== 2 || p1.body.failed !== 1) throw new Error("page1 " + JSON.stringify({ s: p1.status, t: p1.body.total, f: p1.body.failed }));
+  // 2 paid successes + 1 line the Batch API itself failed, now RESCUED by the draft-fallback
+  // ladder (LANE-foundry.md item 1: "the same ladder applies to ... /api/images/batch items") --
+  // all 3 items come back, and none of them reads as a true failure to the caller.
+  if (p1.status !== 200 || p1.body.total !== 3 || p1.body.failed !== 0) throw new Error("page1 " + JSON.stringify({ s: p1.status, t: p1.body.total, f: p1.body.failed }));
   if (p1.body.images.length !== 1 || p1.body.done) throw new Error("page1 shape wrong");
-  // actual: 2 ok lines * (10*$5 + 272*$30)/1M * 0.5
+  if (!p1.body.images[0].servedBy || p1.body.images[0].servedBy.engine !== "paid") throw new Error("page1's item should be paid-served: " + JSON.stringify(p1.body.images[0].servedBy));
+  // actual: 2 ok lines * (10*$5 + 272*$30)/1M * 0.5 -- the draft rescue is $0 and never enters this math.
   const expectCost = +((2 * ((10 * 5 + 272 * 30) / 1e6)) * 0.5).toFixed(6);
   if (Math.abs(p1.body.costUsd - expectCost) > 1e-9) throw new Error("costUsd " + p1.body.costUsd + " != " + expectCost);
   const actualCredits = Math.round(expectCost * 100 * 1e6) / 1e6;
@@ -321,7 +442,10 @@ await t("collection settles ONCE against real usage: overcharge comes back as cr
   const movedBack = Math.round((afterFirst - before) * 1e6) / 1e6;
   if (movedBack !== expectRefund) throw new Error(`refund ${before}->${afterFirst}, moved ${movedBack}, expected +${expectRefund}`);
   const p2 = await req("GET", "/api/images/batch/batch_mock1?offset=1&limit=4", { email: USER });
-  if (p2.body.images.length !== 1 || !p2.body.done) throw new Error("page2 shape wrong: " + JSON.stringify({ n: p2.body.images.length, done: p2.body.done }));
+  if (p2.body.images.length !== 2 || !p2.body.done) throw new Error("page2 shape wrong: " + JSON.stringify({ n: p2.body.images.length, done: p2.body.done }));
+  const rescued = p2.body.images[1];
+  if (!rescued || !rescued.servedBy || rescued.servedBy.engine !== "draft") throw new Error("the rescued item should be draft-served: " + JSON.stringify(rescued));
+  if (!/served by the free draft engine after this batch line failed/.test(rescued.note || "")) throw new Error("rescued item missing its note: " + JSON.stringify(rescued));
   if ((await balanceOf(USER)) !== afterFirst) throw new Error("settled twice");
 });
 
