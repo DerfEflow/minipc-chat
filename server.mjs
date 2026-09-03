@@ -173,7 +173,7 @@ import {
 import { createIdeGate, createIdeStore, createIdeFeature, IDE_MODE_DEFAULT, IDE_PROMPT_MAX_CHARS, autoWorkspaceName } from "./ide.mjs";
 import { createIdeJobs, ledgerFromEvents } from "./idejobs.mjs";
 import { startSseHeartbeat } from "./sseheartbeat.mjs";
-import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, PLANNER_FORMAT_REMINDER, plannerRepairMessages, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages, fitManifestToBudget, manifestBudgetBytes } from "./ideengine.mjs";
+import { createIdeEngine, parseBlueprint, isSmallAsk, budgetCheck, estimateMove, PLANNER_SYSTEM, PLANNER_FORMAT_REMINDER, plannerRepairMessages, MAX_MOVES, MAX_FILES_PER_MOVE, parseFileBlocks, fileCoverage, carveOutReport, buildMoveMessages, fitManifestToBudget, manifestBudgetBytes, isEnvironmentFailure } from "./ideengine.mjs";
 import { createLessonStore, strongerModelFor, failureDossier, brainReportMessages, parseBrainReport, reportLine } from "./idelessons.mjs";
 import { ollamaPayloadFromOpenAI, openAIResultFromOllama, gx10Failure } from "./gx10.mjs";
 import { sanitizeAfRows, classifyAfRows, dividerMessages, parseDividerPlan, verifyDisjoint, afAssignFor, adequacyWarning, chunksForPart } from "./ideaf.mjs";
@@ -1598,6 +1598,35 @@ function pathNode(args) {
   } catch { return ""; }
 }
 
+/*
+ * Stabilization follow-up 2026-09-03 (production incident): a workspace registered against a
+ * folder no connected node can reach used to be accepted silently. The build then chose whichever
+ * node CTX.hands.dispatch's own routing fell back to for a path-less call (node_info, planning),
+ * every move failed identically with hands.mjs's own "outside this node's allowed roots (...)"
+ * refusal, and the counsel ladder spent real money diagnosing output that was never the problem.
+ *
+ * This mirrors hands.mjs's withinRoots() exactly (case-insensitive, separator-bounded prefix
+ * match) so "reachable" here means precisely what the node itself will enforce on every fs_read,
+ * fs_write, fs_list, and shell_run call against this workspace - no gap between what this check
+ * allows and what actually works.
+ */
+function rootWithinAny(root, roots) {
+  // Normalizes EVERY separator to "/", not just a trailing one: a workspace root created with
+  // forward slashes (this app's own convention — see /ide/workspace's wantRoot) must still match
+  // a node's roots as reported over HANDS_ROOTS, which are typically backslash paths on Windows.
+  // Caught live on the rig (2026-09-03): "F:/a/b" failed to match root "F:\a" purely because the
+  // internal separator characters differed, rejecting a perfectly reachable folder as unreachable.
+  const norm = (p) => String(p || "").trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const t = norm(root);
+  if (!t) return false;
+  for (const r of Array.isArray(roots) ? roots : []) {
+    const n = norm(r);
+    if (!n) continue;
+    if (t === n || t.startsWith(n + "/")) return true;
+  }
+  return false;
+}
+
 CTX.hands = {
   target: (preferred) => handsHub.pick(preferred || HANDS_DEFAULT_NODE),
   dispatch: (tool, args, opts = {}) => {
@@ -2469,22 +2498,63 @@ async function handleIde(req, res, u) {
     const blocked = ideFeature.wall(T);
     if (blocked) return send(blocked);
     const wantRoot = String(body.root || "").replace(/[\\/]+$/, "");
+    /*
+     * NODE-ROOTS VALIDATION (production incident 2026-09-03, follow-up to lane crucible's
+     * stabilization pass). Before this, a workspace registered against a folder no connected
+     * node could reach was accepted without a word of complaint. The build then landed on
+     * whichever node CTX.hands.dispatch's own per-call routing fell back to (the workspace's own
+     * root plays no part in that fallback), every move failed identically with hands.mjs's own
+     * "outside this node's allowed roots (...)" refusal, and the counsel ladder spent real money
+     * diagnosing model output that was never the actual problem.
+     *
+     * Skipped for the server-side workshop lane (buildLane === "workshop"): that sandbox has no
+     * HANDS_ROOTS concept at all — every workshop project's own root IS its node's only root, by
+     * construction (guestsandbox.mjs's nodeInfo(root)), so the check would be a tautology.
+     */
+    let chosenNode = "";
+    if (wantRoot && buildLane(T, null) !== "workshop") {
+      const info = handsHub.nodeInfo();
+      const uidKey = "user:" + String((T && T.uid) || "").toLowerCase();
+      const candidates = T.isOwner ? Object.keys(info) : (info[uidKey] ? [uidKey] : []);
+      if (candidates.length) {
+        const fits = candidates.filter((n) => rootWithinAny(wantRoot, (info[n] || {}).roots));
+        if (!fits.length) {
+          const allowed = candidates
+            .map((n) => n + ": " + (((info[n] && info[n].roots) || []).join(", ") || "(no roots configured on this node)"))
+            .join("  |  ");
+          return send({ status: 400, body: {
+            error: "That folder is not reachable by any connected machine. Pick a folder under one of these allowed roots instead: " + allowed,
+            code: "root_outside_node_roots",
+          } });
+        }
+        // Prefer whichever fitting node the account's calls already default to (HANDS_DEFAULT_NODE
+        // for the owner), so a build still lands where it always has when more than one node
+        // could legitimately serve this folder; otherwise the first (and, usually, only) fit.
+        chosenNode = fits.includes(HANDS_DEFAULT_NODE) ? HANDS_DEFAULT_NODE : fits[0];
+      }
+      // candidates.length === 0 (no node has ever connected and reported a profile yet) falls
+      // through unvalidated: refusing workspace CREATION before any node has ever connected would
+      // block the very first-run setup flow, and the build-start re-check below still catches it.
+    }
     if (wantRoot && body.existing !== true) {
       const handsFor = ideHandsFor(T);
+      // Pin to the node just validated above, when one was chosen, rather than leaning on
+      // per-call path inference a second time for the exact same folder.
+      const nodeOpts = chosenNode ? { preferred: chosenNode } : {};
       let made = false;
       // The cloud workshop has fs_mkdir and no shell; the installed hands node has a shell and no
       // fs_mkdir. Trying both means no one has to reinstall anything for this to work.
-      try { const r = await handsFor("fs_mkdir", { path: wantRoot }); made = !!(r && r.ok !== false); } catch {}
+      try { const r = await handsFor("fs_mkdir", { path: wantRoot }, nodeOpts); made = !!(r && r.ok !== false); } catch {}
       if (!made) {
         try {
-          await handsFor("shell_run", { command: "New-Item -ItemType Directory -Force -Path '" + wantRoot.replace(/'/g, "''") + "' | Out-Null", timeoutMs: 15000 });
+          await handsFor("shell_run", { command: "New-Item -ItemType Directory -Force -Path '" + wantRoot.replace(/'/g, "''") + "' | Out-Null", timeoutMs: 15000 }, nodeOpts);
           made = true;
         } catch (e) {
           return send({ status: 200, body: { error: "That folder could not be created on your computer (" + String((e && e.message) || e).slice(0, 200) + "). Nothing was saved, so pick another place." } });
         }
       }
     }
-    return send(ideFeature.createWorkspace(T, body));
+    return send(ideFeature.createWorkspace(T, chosenNode ? { ...body, node: chosenNode } : body));
   }
   if (req.method === "POST" && path === "/ide/workspace/auto") {
     const blocked = ideFeature.wall(T);
@@ -4306,7 +4376,21 @@ async function runIdeBuild(job, {
   const ac = new AbortController();
   job.stop = () => { try { ac.abort(); } catch {} };
 
-  const handsFor = ideHandsFor(T, workspace);
+  /*
+   * PIN TO THE VALIDATED NODE (production incident 2026-09-03 follow-up). workspace.node, when
+   * set (POST /ide/workspace validates and records it now), names the exact node this workspace
+   * was confirmed reachable on. Without pinning, CTX.hands.dispatch's own per-call routing falls
+   * back to "most recently active connected node" for any call whose args carry no path it can
+   * infer from (node_info with no args, among others) - which is exactly how a build's opening
+   * probe landed on a machine that had never heard of this workspace's folder. Workspaces created
+   * before this fix (workspace.node unset) fall through unchanged: base's own path-based routing
+   * still applies per call, same as always.
+   */
+  const handsFor = (() => {
+    const base = ideHandsFor(T, workspace);
+    if (!workspace || !workspace.node) return base;
+    return (tool, args, opts = {}) => base(tool, args, { preferred: workspace.node, ...opts });
+  })();
   let workspaceGrounding = "";
   const knownIncomplete = [];
   const expectedFiles = new Set();
@@ -4772,13 +4856,60 @@ async function runIdeBuild(job, {
     } catch {}
   }
 
+  /*
+   * ENVIRONMENT PAUSE (production incident 2026-09-03 follow-up, required behaviors #2 and #3).
+   * A workspace/node mismatch is not a content or logic failure: asking a model to retry, or
+   * asking the counsel ladder to diagnose it, spends money re-discovering the same wall every
+   * single time. "paused" is emitted first (a plain, visible marker naming the reason) and then a
+   * real terminal event follows immediately - "paused" itself stays non-terminal on purpose,
+   * because idejobs.mjs's restart-resume machinery reuses that exact event type and depends on it
+   * NOT sealing the job (see idejobs.mjs's attemptResume). checkpoint is the terminal type that
+   * already means "unfinished, evidence preserved, resumable" everywhere else in this file, so it
+   * is the honest fit here too, distinguished by `paused: true` on the event itself.
+   */
+  const pauseForEnvironment = (reason, message, remaining) => {
+    ideJobs.emit(job.id, { type: "paused", reason });
+    return ideJobs.finish(job.id, {
+      type: "checkpoint", complete: false, paused: true,
+      remaining: Array.isArray(remaining) ? remaining : [remaining],
+      message,
+    });
+  };
+
   try {
     // A machine has to be reachable before anything is planned, so nobody pays for a blueprint
-    // that could never have been executed.
-    const probe = await handsFor("node_info", {});
+    // that could never have been executed. `path: workspace.root` lets the same path-based node
+    // routing the counsel wiring block uses (pathNode()) resolve the CORRECT node even when this
+    // workspace predates node validation and workspace.node is unset.
+    const probe = await handsFor("node_info", { path: workspace.root });
     if (!probe || probe.ok === false || probe.offline) {
       return ideJobs.finish(job.id, { type: "error", code: "no_node",
         message: phrase("no_node", reg) });
+    }
+    /*
+     * BUILD-START ROOTS RE-CHECK (required behavior #2). POST /ide/workspace already validates
+     * this at creation time, but a workspace created before that fix, a node whose roots changed
+     * since, or a stale workspace.node can all still reach here with a root the CHOSEN node
+     * cannot actually serve. The incident this exists to prevent: "workspace inventory -> FAIL
+     * outside this node's allowed roots", followed by every move failing identically while the
+     * counsel ladder burned real money diagnosing model output that was never the problem. Caught
+     * here, before the planner is even called: not one model call has been paid for yet.
+     *
+     * TEST HOOK: IDE_TEST_FORCE_ROOT_MISMATCH forces this branch regardless of the real probe, so
+     * the paused/zero-spend outcome can be proven on the rig without needing to actually run a
+     * misconfigured node. No effect unless the env var is set; never derived from user input.
+     */
+    const forcedRootMismatch = /^(?:1|true|yes)$/i.test(String(process.env.IDE_TEST_FORCE_ROOT_MISMATCH || "").trim());
+    if (forcedRootMismatch || (Array.isArray(probe.roots) && probe.roots.length && !rootWithinAny(workspace.root, probe.roots))) {
+      const knownRoots = (Array.isArray(probe.roots) && probe.roots.length ? probe.roots.join(", ") : "(none reported)");
+      return pauseForEnvironment(
+        "workspace outside node roots",
+        "Paused before any work began: this workspace's folder is outside " + (probe.node || "the connected machine")
+          + "'s reachable folders (" + knownRoots + "). Point Dominion's hands node at this folder, "
+          + "or move the project under one of the roots above, then resume. No model was called; nothing was spent.",
+        "The workspace root (" + workspace.root + ") is outside " + (probe.node || "the connected machine")
+          + "'s allowed roots (" + knownRoots + ").",
+      );
     }
     await cutBuildBranch();
 
@@ -5799,6 +5930,21 @@ async function runIdeBuild(job, {
       const moveElapsedMs = Date.now() - moveStartedAt;
       spend(res && res.costUsd);
       if (res && res.blocked) return ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) });
+      /*
+       * Required behavior #3 (production incident 2026-09-03 follow-up). The engine already
+       * skipped brain/frontier/escalation for this failure and tagged it stage:"environment"; the
+       * build stops HERE, immediately, rather than asking a human to retry (or auto-retrying) a
+       * wall every remaining move would hit identically. Any move-level cost already reflects
+       * only the ONE real model call this move made before its tool call was refused — nothing
+       * further is spent finding that out.
+       */
+      if (res && res.stage === "environment") {
+        return pauseForEnvironment(
+          "workspace outside node roots",
+          "Paused: \"" + move.title + "\" could not reach its files — the workspace is outside the connected machine's allowed roots. This is a machine/folder mismatch, not a coding problem, so the rest of this build was not attempted. Reconnect the right machine, or move the project under one of its allowed roots, then resume.",
+          "\"" + move.title + "\" could not reach its files: the workspace is outside the connected machine's allowed roots.",
+        );
+      }
 
       if (res && !res.ok) {
         /*
@@ -6141,6 +6287,16 @@ async function runIdeBuild(job, {
         let r = await engine.runMove(job, { move: attempt1, workspace, assignments: resolved, goal: prompt, plannedFiles: [...expectedFiles] });
         spend(r && r.costUsd);
         if (r && r.ok) markCovered(r.covered);
+        // Required behavior #3: a machine/folder mismatch discovered here would fail the
+        // dedicated-write retries below identically, so the whole build stops now rather than
+        // spending two more attempts finding that out again.
+        if (r && r.stage === "environment") {
+          return pauseForEnvironment(
+            "workspace outside node roots",
+            "Paused: repairing \"" + file + "\" could not reach the workspace's files — it is outside the connected machine's allowed roots. This is a machine/folder mismatch, not a coding problem, so no further repair was attempted.",
+            "Repairing \"" + file + "\" could not reach the workspace: it is outside the connected machine's allowed roots.",
+          );
+        }
         tried.push("re-ran the step with an explicit return-the-file instruction" + (r && r.ok ? "" : " (failed)"));
         for (let n = 2; n <= 3 && !isCovered(file); n++) {
           const dedicated = { id: "missing-file-" + n + "-" + idSafe(file), title: "Write " + file,

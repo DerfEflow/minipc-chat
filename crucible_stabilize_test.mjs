@@ -18,7 +18,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createIdeEngine } from "./ideengine.mjs";
+import { createIdeEngine, isEnvironmentFailure, ENVIRONMENT_FAILURE_RE } from "./ideengine.mjs";
 import { createLessonStore } from "./idelessons.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -273,6 +273,151 @@ await t("COUNSEL LADDER (reused by every required-behavior-#1 repair move): a fa
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/*
+ * ---------------------------------------------------------------------------------------------
+ * Production incident follow-up, 2026-09-03: a workspace registered on a folder outside every
+ * connected node's HANDS_ROOTS was accepted silently, the build landed on the wrong node, every
+ * move failed identically with hands.mjs's "outside this node's allowed roots (...)" refusal, and
+ * the counsel ladder burned about $1 diagnosing model output that was never the problem.
+ * Required: (1) POST /ide/workspace validates the root against the chosen node's roots and
+ * answers 400 naming the allowed roots; (2) a build-start re-check ends immediately as paused
+ * with zero model spend when the root is outside the build node's roots; (3) a move/tool failure
+ * whose output matches the hands node's own refusal text is classified as an ENVIRONMENT failure
+ * (no brain/frontier/escalation) and pauses the build.
+ * ------------------------------------------------------------------------------------------- */
+
+await t("ENVIRONMENT #3: isEnvironmentFailure matches the EXACT string hands.mjs's withinRoots() actually produces", () => {
+  // Probed directly from hands/hands.mjs, not guessed (rule 8.6): withinRoots() returns
+  // `outside this node's allowed roots (${ROOTS.join(", ")})` on every fs_read/fs_write/fs_list/
+  // shell_run refusal outside HANDS_ROOTS.
+  const handsSrc = readFileSync(new URL("./hands/hands.mjs", import.meta.url), "utf8");
+  assert.match(handsSrc, /outside this node's allowed roots \(\$\{ROOTS\.join\(", "\)\}\)/,
+    "the probed string in hands.mjs must still match what ENVIRONMENT_FAILURE_RE looks for");
+  const real = "outside this node's allowed roots (/work, /models)";
+  assert.match(real, ENVIRONMENT_FAILURE_RE);
+  assert.ok(isEnvironmentFailure({ checkOutput: "npm test failed:\n" + real }));
+  assert.ok(isEnvironmentFailure({ lastReply: "The tool refused: " + real }));
+  assert.ok(isEnvironmentFailure({ pipelineNotes: "format retry, " + real }));
+  assert.ok(!isEnvironmentFailure({ checkOutput: "TypeError: cannot read property 'x' of undefined" }),
+    "an ordinary failure must never be misclassified as an environment failure");
+  assert.ok(!isEnvironmentFailure(null));
+});
+
+await t("ENVIRONMENT #3: a move failure carrying the roots-refusal text skips brain/frontier/escalation entirely and is tagged stage:environment", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crucible-env-lessons-"));
+  try {
+    const lessons = createLessonStore({ dir });
+    const events = [];
+    let chatCalls = 0;
+    // Realistic incident shape: the MODEL behaves perfectly (a well-formed, atomic file-block
+    // reply) - the failure is that the actual filesystem write is refused by the node, because
+    // the workspace sits outside its HANDS_ROOTS. Nothing about this is a coding mistake.
+    const engine = createIdeEngine({
+      jobs: { emit: (_id, ev) => events.push(ev) },
+      chat: async () => { chatCalls++; return { ok: true, content: "```path=server.mjs\nconsole.log('hi');\n```", costUsd: 0.001 }; },
+      hands: async (tool, args) => {
+        if (tool === "fs_read" && String((args && args.path) || "").endsWith("package.json")) return { ok: true, content: "{}" };
+        if (tool === "fs_read") return { ok: false };   // a new file: nothing to read yet
+        if (tool === "shell_run" && /rev-parse/.test((args && args.command) || "")) return { ok: true, code: 0, stdout: "true" };
+        if (tool === "shell_run") return { ok: true, code: 0, stdout: "" };
+        // hands.mjs's OWN refuse() shape for a path outside HANDS_ROOTS: { ok:false, refused:true, reason }.
+        if (tool === "fs_write") return { ok: false, refused: true, reason: "outside this node's allowed roots (/work, /models)" };
+        return { ok: true };
+      },
+      router: () => ({ taskClass: "build_code", model: "openai/gpt-5.6-sol", why: "test" }),
+      lessons,
+      advisors: { brainModel: "gx10/gpt-oss-120b", frontierModel: "anthropic/claude-sonnet-5", minBrainConfidence: 0,
+        frontierCallsLeft: () => 3, noteFrontierCall: () => {} },
+      escalate: () => "anthropic/claude-opus-4-8",
+    });
+
+    const result = await engine.runMove({ id: "ide_env_test" }, {
+      move: { id: "m1", title: "Write the app entrypoint", why: "test", files: ["server.mjs"] },
+      workspace: { root: "/work/some-project", name: "Env Test" },
+      assignments: {}, goal: "Write server.mjs.",
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.stage, "environment", "an environment failure must be tagged so the caller can stop the build, not ask a human to retry");
+    assert.equal(chatCalls, 1, "no model call of any kind beyond the one legitimate coding attempt may fire for an environment failure - that IS the $1 the incident wasted on brain/frontier/escalation");
+    assert.ok(events.some((e) => e.type === "run" && e.command === "environment" && e.ok === false),
+      "exactly one clear status line must be emitted");
+    assert.equal(events.filter((e) => e.command === "brain" || e.command === "frontier" || e.command === "escalation").length, 0,
+      "no counsel-ladder events of any kind may appear for this failure class");
+    assert.equal(lessons.stats().active, 0, "an environment failure teaches nothing about code, so it must never become a lesson");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await t("WORKSPACE VALIDATION #1: POST /ide/workspace rejects a root outside every connected node's roots with 400, naming the allowed roots", () => {
+  assert.match(SRC, /NODE-ROOTS VALIDATION \(production incident 2026-09-03/);
+  assert.match(SRC, /const info = handsHub\.nodeInfo\(\);/);
+  assert.match(SRC, /const candidates = T\.isOwner \? Object\.keys\(info\) : \(info\[uidKey\] \? \[uidKey\] : \[\]\);/);
+  assert.match(SRC, /const fits = candidates\.filter\(\(n\) => rootWithinAny\(wantRoot, \(info\[n\] \|\| \{\}\)\.roots\)\);/);
+  assert.match(SRC, /if \(!fits\.length\) \{[\s\S]{0,400}status: 400, body: \{[\s\S]{0,200}code: "root_outside_node_roots",/);
+  assert.match(SRC, /Pick a folder under one of these allowed roots instead: " \+ allowed,/);
+  // Skipped for the workshop lane, which has no real HANDS_ROOTS concept (its own root IS its
+  // only "node" root by construction) - the check must not misfire there.
+  assert.match(SRC, /if \(wantRoot && buildLane\(T, null\) !== "workshop"\) \{/);
+});
+
+await t("REGRESSION (rig-caught 2026-09-03): rootWithinAny normalizes EVERY separator, not only a trailing one, so a forward-slash workspace root still matches a backslash node root", () => {
+  // Caught live: POST /ide/workspace with root "F:/a/b" (this app's own forward-slash
+  // convention) was rejected as unreachable against a node root reported as "F:\a" (HANDS_ROOTS'
+  // typical Windows form), purely because internal separator CHARACTERS differed — trimming only
+  // a trailing slash before the comparison left every interior backslash mismatched against every
+  // interior forward slash. Fixed by normalizing the whole string, not just its edge.
+  const rootWithinAnyBody = SRC.slice(SRC.indexOf("function rootWithinAny("), SRC.indexOf("function rootWithinAny(") + 700);
+  assert.ok(rootWithinAnyBody.includes('.replace(/\\\\/g, "/")'),
+    "rootWithinAny's norm() must replace every backslash, not merely strip a trailing separator");
+  assert.ok(!rootWithinAnyBody.includes('t.startsWith(n + "\\\\")'),
+    "the old boundary check that only ever matched a literal trailing backslash must be gone");
+});
+
+await t("WORKSPACE VALIDATION #1: the resolved node is recorded on workspace.node, preferring several fits toward the account's usual default", () => {
+  assert.match(SRC, /chosenNode = fits\.includes\(HANDS_DEFAULT_NODE\) \? HANDS_DEFAULT_NODE : fits\[0\];/);
+  assert.match(SRC, /createWorkspace\(T, chosenNode \? \{ \.\.\.body, node: chosenNode \} : body\)/);
+  // create() in ide.mjs already threads body.node through to storeFor(T).create({..., node, ...}),
+  // so setting it here is what actually reaches the durable workspace record.
+  const ideSrc = readFileSync(new URL("./ide.mjs", import.meta.url), "utf8");
+  assert.match(ideSrc, /node: body && body\.node,/);
+});
+
+await t("BUILD-START RE-CHECK #2: a root outside the build node's roots pauses immediately, before the planner is ever called", () => {
+  assert.match(SRC, /BUILD-START ROOTS RE-CHECK \(required behavior #2\)/);
+  // The probe happens BEFORE cutBuildBranch()/the planner - the two must appear in this order in
+  // the source so "no model was called; nothing was spent" is actually true, not just claimed.
+  const probeAt = SRC.indexOf('const probe = await handsFor("node_info", { path: workspace.root });');
+  const gateAt = SRC.indexOf("const forcedRootMismatch = ", probeAt);
+  const branchAt = SRC.indexOf("await cutBuildBranch();", gateAt);
+  assert.ok(probeAt > 0 && gateAt > probeAt && branchAt > gateAt,
+    "the roots gate must sit strictly between the node probe and the first spend-capable step (cutBuildBranch/planning)");
+  assert.match(SRC, /!rootWithinAny\(workspace\.root, probe\.roots\)/);
+  assert.match(SRC, /return pauseForEnvironment\(\s*\n\s*"workspace outside node roots",/);
+});
+
+await t("BUILD-START RE-CHECK #2: pauseForEnvironment emits a non-terminal 'paused' marker followed by a real terminal checkpoint", () => {
+  // paused must stay NON-terminal here (idejobs.mjs's EVENT_TYPES has it outside TERMINAL): the
+  // restart-resume machinery (required behavior #6) reuses the exact same event type and depends
+  // on it never sealing the job on its own.
+  assert.match(SRC, /const pauseForEnvironment = \(reason, message, remaining\) => \{\s*\n\s*ideJobs\.emit\(job\.id, \{ type: "paused", reason \}\);\s*\n\s*return ideJobs\.finish\(job\.id, \{\s*\n\s*type: "checkpoint", complete: false, paused: true,/);
+});
+
+await t("TEST HOOK for the rig: IDE_TEST_FORCE_ROOT_MISMATCH proves the paused/zero-spend outcome without a real misconfigured node", () => {
+  assert.match(SRC, /IDE_TEST_FORCE_ROOT_MISMATCH/);
+  assert.match(SRC, /const forcedRootMismatch = \/\^\(\?:1\|true\|yes\)\$\/i\.test\(String\(process\.env\.IDE_TEST_FORCE_ROOT_MISMATCH \|\| ""\)\.trim\(\)\);/);
+});
+
+await t("ENVIRONMENT #3: the main build queue halts the whole build (not just the one move) the instant an environment failure is tagged", () => {
+  assert.match(SRC, /if \(res && res\.stage === "environment"\) \{\s*\n\s*return pauseForEnvironment\(/);
+  // This check must come BEFORE the normal ask/auto-retry fork, or an environment failure would
+  // still burn an ask()/moveFailAuto() cycle before this ever fires.
+  const stageCheckAt = SRC.indexOf('if (res && res.stage === "environment") {');
+  const askForkAt = SRC.indexOf('const answer = await ask("move-" + move.id,', stageCheckAt);
+  assert.ok(stageCheckAt > 0 && askForkAt > stageCheckAt, "the environment halt must precede the normal failed-move ask/retry fork");
 });
 
 console.log("\n" + passed + " passed, " + failed + " failed");

@@ -96,11 +96,55 @@ plan, an unreadable audit - were never classified as failures in the first place
   re-plan, `moveFailAuto`'s 3-attempt cap, and the resume-plan/resume-ledger wiring.
 - `idejobs_test.mjs`, `crucible_stabilize_test.mjs` (new) - tests for all of the above.
 
+## Follow-up, same day: workspace/node roots mismatch (production incident)
+
+A production build chose the gx10 hands node for a workspace rooted on a different machine
+entirely; every move failed identically with hands.mjs's own "outside this node's allowed roots"
+refusal, and the counsel ladder spent about $1 diagnosing model output that was never the problem.
+Fixed in three layers, plus a bug the fix surfaced:
+
+1. **`POST /ide/workspace` validates the root** against the roots every connected node advertises
+   (`handsHub.nodeInfo()`), rejects with 400 naming the allowed roots when none fits, and records
+   the chosen node on `workspace.node` (preferring the account's usual default node when several
+   fit) so the mkdir call right after it, and every later build against this workspace, dispatch
+   to the SAME validated node instead of leaning on per-call path inference a second time.
+2. **Build start re-checks** (`runIdeBuild`'s opening probe, now `node_info` with `{path:
+   workspace.root}` so path-based routing helps even for older workspaces with no `.node` set):
+   a root outside the resolved node's roots ends the build immediately via `pauseForEnvironment` -
+   a non-terminal `paused` event (reusing required-behavior-#6's event type on purpose, since
+   idejobs.mjs's restart-resume depends on that type never sealing a job) followed immediately by
+   a real terminal `checkpoint`. Not one model call happens first.
+3. **Mid-build environment failures are classified, not diagnosed.** `ideengine.mjs` exports
+   `isEnvironmentFailure()`, matching the EXACT string `hands.mjs`'s `withinRoots()` produces
+   (probed from the file, not guessed). `runMove`'s counsel ladder checks it before brain/frontier/
+   escalation - a failure carrying that text is tagged `stage:"environment"`, gets one clear status
+   line, and skips the entire ladder. `server.mjs`'s queue loop and the missing-file repair loop
+   (required behavior #1) both stop the WHOLE build on that tag via the same `pauseForEnvironment`.
+4. **Bug found while wiring #3**: `writeFiles()` read a refused write's reason from `r.error`, but
+   hands.mjs's own `refuse()` shape is `{ok:false, refused:true, reason}` - the real refusal text
+   was silently replaced by a generic fallback. Fixed to read `r.reason || r.error || ...`.
+5. **Bug found on the rig**: `rootWithinAny()` only trimmed a trailing separator before comparing,
+   so a forward-slash workspace root (`F:/a/b`, this app's own convention) never matched a
+   backslash node root (`F:\a`, HANDS_ROOTS' typical Windows form) even when genuinely nested
+   inside it - every legitimate workspace was rejected as unreachable. Fixed to normalize every
+   separator, not just the edge; caught by live-testing the "inside roots" case, not by a test
+   that only ever exercised the rejection path.
+
+Test hook: `IDE_TEST_FORCE_ROOT_MISMATCH=1` forces the build-start gate regardless of the real
+probe, proving the paused/zero-spend outcome on the rig without a real misconfigured node.
+
+Files touched: `server.mjs` (`rootWithinAny`, the `/ide/workspace` route, `pauseForEnvironment`,
+the build-start gate, the node-pinned `handsFor`, the queue-loop and missing-file-repair halts),
+`ideengine.mjs` (`ENVIRONMENT_FAILURE_RE`/`isEnvironmentFailure`, the `runMove` early-exit, the
+`writeFiles` reason-field fix), `crucible_stabilize_test.mjs` (10 new tests).
+
 ## Env knobs added
 
 - `IDE_TEST_OMIT_FILE=<path>` - test-only. The first time the named planned file would be marked
   covered, its coverage is silently dropped once, reproducing "a step finished without producing a
   file it declared" without needing a real model to misbehave on cue. No effect unless set.
+- `IDE_TEST_FORCE_ROOT_MISMATCH=1` - test-only. Forces the build-start workspace/node roots gate
+  to treat every build as a mismatch, regardless of the real probe. No effect unless set.
 - idejobs.mjs's `resume`/`resumeRetryMs`/`resumeMaxAttempts` are constructor options, not env vars;
   server.mjs wires sensible defaults (30s retry, generous attempt cap) and does not expose them as
   environment knobs in this pass.
