@@ -151,6 +151,23 @@ export function createImagesFeature(deps) {
     nvidiaKey = () => "",
     nvidiaBase = "https://ai.api.nvidia.com/v1/genai",
     draftModel = "black-forest-labs/flux.1-dev",
+    // Safety-rewrite ladder text models (2026-09-03, foundry lane, LANE-foundry.md item 1):
+    // deepseek-v4-flash first (cheap, fast), Haiku if DeepSeek is unavailable or fails. NOT wired
+    // through server.mjs's createImagesFeature() call site (~line 7688, outside this lane's owned
+    // "server.mjs images handler region only" -- see the foundry report for why that line was left
+    // alone). These default straight to process.env, the same place cfgGet ultimately reads
+    // production secrets from on Railway, so the ladder works today with zero further server.mjs
+    // edits; server.mjs may later pass these explicitly for local-.env/admin-panel override parity.
+    // Bases read an env override directly (same reasoning as OPENAI_IMAGES_BASE/NVIDIA_GENAI_URL
+    // above them): with no server.mjs wiring to inject a mock base for this call, the e2e suite
+    // needs its own way to guarantee these never reach the real internet even if a real
+    // DEEPSEEK/ANTHROPIC key happens to be sitting in the host's environment.
+    deepseekKey = () => process.env.DEEPSEEK_AI_DOMINION_UI_APIKEY || process.env.DEEPSEEK_API_KEY || "",
+    deepseekBase = process.env.DEEPSEEK_IMAGES_BASE || "https://api.deepseek.com",
+    deepseekModel = "deepseek-v4-flash",
+    anthropicKey = () => process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_ANTHROPIC_KEY || "",
+    anthropicBase = process.env.ANTHROPIC_IMAGES_BASE || "https://api.anthropic.com",
+    haikuModel = "claude-haiku-4-5-20251001",
     dataDir,                // spool + batch-job records live here
     resolveTenant,          // (req) => T   — the tenancy resolver from server.mjs
     screenContent,          // (text, {isOwner}) => { blocked, reason } — the content wall
@@ -263,6 +280,185 @@ export function createImagesFeature(deps) {
     return { refs };
   }
 
+  /*
+   * ---- The resilience ladder (2026-09-03, foundry lane, LANE-foundry.md item 1) ----
+   *
+   * AGENT-RULES.md's overriding objective, verbatim: "Nothing in the end can be turned to off,
+   * nothing may conclude as a silent or announced error, nothing may fail to produce a viable
+   * result." DEFICIENCIES.md #23 measured the cost of NOT doing this: 10 of 39 production image
+   * turns errored (six OpenAI billing hard-limit, four safety rejections), every one surfaced raw
+   * with no fall-through, even though the free draft engine was sitting right there working the
+   * whole time.
+   *
+   * The ladder: paid engine -> [safety rejection? one prompt rewrite + one paid retry : nothing]
+   * -> free draft engine -> error (only once nothing else could possibly serve the request).
+   * Billing/quota/credit errors, 5xx, timeouts, a missing/dead key, and anything else unclassified
+   * all fall STRAIGHT to draft -- a rewritten prompt cannot fix a billing problem, so the rewrite
+   * step exists only for the one failure class it can actually repair.
+   */
+
+  // One attempt at the paid engine (JSON /v1/images/generations, or multipart /v1/images/edits
+  // when reference plates are present). Used for both the ladder's first try and its one
+  // safety-rewrite retry, so the two call sites cannot drift apart. `timeout` defaults to 60s
+  // (LANE-foundry.md: "timeouts (60 s first byte)") -- Node's socket timeout is the closest honest
+  // proxy for "no first byte" this module has, since apiRequest does not separate TTFB from body.
+  async function callPaidOnce(prompt, item, refs, { timeout = 60000 } = {}) {
+    let r;
+    if (refs.length) {
+      const boundary = "----dominionimages" + randomUUID().replace(/-/g, "");
+      const field = (name, value) => Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`);
+      const parts = [
+        field("model", model), field("prompt", prompt), field("size", item.size),
+        field("quality", item.quality), field("n", String(item.n)),
+      ];
+      refs.forEach((ref, i) => {
+        const ext = ref.mime === "image/png" ? "png" : ref.mime === "image/webp" ? "webp" : "jpg";
+        parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image[]"; filename="ref-${i + 1}.${ext}"\r\nContent-Type: ${ref.mime}\r\n\r\n`));
+        parts.push(ref.buf, Buffer.from("\r\n"));
+      });
+      parts.push(Buffer.from(`--${boundary}--\r\n`));
+      const upBody = Buffer.concat(parts);
+      r = await apiRequest(apiBase, key(), {
+        method: "POST", path: "/v1/images/edits",
+        headers: { "content-type": "multipart/form-data; boundary=" + boundary, "content-length": upBody.length },
+        body: upBody, timeout,
+      });
+    } else {
+      const payload = JSON.stringify({
+        model, prompt, size: item.size, quality: item.quality, n: item.n,
+        output_format: "png", moderation: "auto",
+      });
+      r = await apiRequest(apiBase, key(), {
+        method: "POST", path: "/v1/images/generations",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
+        body: payload, timeout,
+      });
+    }
+    if (r.status !== 200) return { ok: false, status: r.status, msg: apiErrorMessage(r, "Image generation failed") };
+    let out; try { out = JSON.parse(r.buf.toString("utf8")); } catch { return { ok: false, status: r.status, msg: "Unreadable response from OpenAI." }; }
+    const images = (out.data || []).map((d) => d.b64_json).filter(Boolean);
+    if (!images.length) return { ok: false, status: r.status, msg: "OpenAI returned no images." };
+    return { ok: true, images, usage: out.usage || null };
+  }
+
+  // A safety rejection is the ONE paid-engine failure the ladder tries to repair before falling to
+  // draft, because it is the one caused by the prompt itself rather than money, load, or the
+  // network. OpenAI's own wording (DEFICIENCIES.md #23): "rejected by the safety system ...
+  // safety_violation".
+  function isSafetyError(msg) {
+    return /safety|moderation|content[_ ]polic|flagged|rejected.*safety/i.test(String(msg || ""));
+  }
+
+  // Rewrite a safety-rejected prompt with a cheap text model: deepseek-v4-flash first, then Haiku
+  // if DeepSeek is unavailable or fails (AGENT-RULES.md's named model list). Returns
+  // { text, model } on success, or null when neither text engine could produce a rewrite -- in
+  // which case the ladder moves on to the draft engine with the ORIGINAL prompt rather than
+  // stalling on a text model that will not answer.
+  async function rewriteForSafety(prompt) {
+    const sys = "An image prompt was rejected by an automated safety filter, with no detail on "
+      + "which element triggered it. Rewrite the prompt to remove anything that could plausibly be "
+      + "flagged (graphic violence or gore, sexual content, hate symbols, illegal acts, real "
+      + "identifiable people, weapons aimed at a person) while keeping the same subject, setting, "
+      + "and creative intent. Output ONLY the rewritten prompt text, nothing else.";
+    if (deepseekKey()) {
+      const payload = JSON.stringify({ model: deepseekModel, messages: [{ role: "system", content: sys }, { role: "user", content: prompt }], max_tokens: 400 });
+      const r = await apiRequest(deepseekBase, deepseekKey(), {
+        method: "POST", path: "/chat/completions",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
+        body: payload, timeout: 20000,
+      });
+      if (r.status === 200) {
+        try {
+          const text = String(JSON.parse(r.buf.toString("utf8")).choices?.[0]?.message?.content || "").trim();
+          if (text) return { text: text.slice(0, PROMPT_MAX), model: deepseekModel };
+        } catch {}
+      }
+    }
+    if (anthropicKey()) {
+      const payload = JSON.stringify({ model: haikuModel, max_tokens: 400, system: sys, messages: [{ role: "user", content: prompt }] });
+      const r = await apiRequest(anthropicBase, anthropicKey(), {
+        method: "POST", path: "/v1/messages",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload), "x-api-key": anthropicKey(), "anthropic-version": "2023-06-01" },
+        body: payload, timeout: 20000,
+      });
+      if (r.status === 200) {
+        try {
+          const j = JSON.parse(r.buf.toString("utf8"));
+          const text = (Array.isArray(j.content) ? j.content : []).map((b) => (b && b.text) || "").join("").trim();
+          if (text) return { text: text.slice(0, PROMPT_MAX), model: haikuModel };
+        } catch {}
+      }
+    }
+    return null;
+  }
+
+  // Text-refine ladder: the primary refine model (gpt-5.6-luna) first, then deepseek-v4-flash,
+  // then Haiku (LANE-foundry.md item 1: "the same ladder applies to ... /api/images/refine").
+  // Returns { ok:true, text, usage, engine, model } or { ok:false, msg } only once every text
+  // engine failed.
+  async function refinePrompt(prompt) {
+    const sys = "You refine prompts for an image generation engine. Rewrite the user's directive into one vivid, concrete image prompt: subject, composition, lighting, materials, atmosphere, style. Keep the user's intent and subject exactly; add craft, never commentary. Output ONLY the refined prompt text.";
+    let lastErr = "";
+
+    if (key()) {
+      const payload = JSON.stringify({
+        model: refineModel,
+        messages: [{ role: "system", content: sys }, { role: "user", content: prompt }],
+        max_completion_tokens: 2500,
+      });
+      // Two attempts: gpt-5.x models occasionally return an empty message on small completions.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const r = await apiRequest(apiBase, key(), {
+          method: "POST", path: "/v1/chat/completions",
+          headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
+          body: payload, timeout: 60000,
+        });
+        if (r.status !== 200) { lastErr = apiErrorMessage(r, "Refinement failed"); continue; }
+        try {
+          const j = JSON.parse(r.buf.toString("utf8"));
+          const text = String(j.choices?.[0]?.message?.content || "").trim();
+          if (text) return { ok: true, text: text.slice(0, 4000), usage: j.usage || null, engine: "paid", model: refineModel };
+          lastErr = "Refinement returned nothing.";
+        } catch { lastErr = "Unreadable response from OpenAI."; }
+      }
+    } else {
+      lastErr = "Prompt refinement needs the OpenAI key (OPEN_AI_DOMINION_UI_APIKEY).";
+    }
+
+    if (deepseekKey()) {
+      const payload = JSON.stringify({ model: deepseekModel, messages: [{ role: "system", content: sys }, { role: "user", content: prompt }], max_tokens: 800 });
+      const r = await apiRequest(deepseekBase, deepseekKey(), {
+        method: "POST", path: "/chat/completions",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
+        body: payload, timeout: 20000,
+      });
+      if (r.status === 200) {
+        try {
+          const text = String(JSON.parse(r.buf.toString("utf8")).choices?.[0]?.message?.content || "").trim();
+          if (text) return { ok: true, text: text.slice(0, 4000), usage: null, engine: "fallback", model: deepseekModel };
+        } catch {}
+      } else lastErr = apiErrorMessage(r, "Refinement failed (fallback)");
+    }
+
+    if (anthropicKey()) {
+      const payload = JSON.stringify({ model: haikuModel, max_tokens: 800, system: sys, messages: [{ role: "user", content: prompt }] });
+      const r = await apiRequest(anthropicBase, anthropicKey(), {
+        method: "POST", path: "/v1/messages",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload), "x-api-key": anthropicKey(), "anthropic-version": "2023-06-01" },
+        body: payload, timeout: 20000,
+      });
+      if (r.status === 200) {
+        try {
+          const j = JSON.parse(r.buf.toString("utf8"));
+          const text = (Array.isArray(j.content) ? j.content : []).map((b) => (b && b.text) || "").join("").trim();
+          if (text) return { ok: true, text: text.slice(0, 4000), usage: null, engine: "fallback", model: haikuModel };
+        } catch {}
+      } else lastErr = apiErrorMessage(r, "Refinement failed (fallback)");
+    }
+
+    return { ok: false, msg: lastErr || "Refinement failed on every available text engine." };
+  }
+
   // ---- POST /api/images/generate — synchronous generation, 1-4 images. With reference
   // plates the call rides /v1/images/edits (multipart, image[] entries); without, the plain
   // JSON /v1/images/generations. Same response shape either way. body.draft=true routes to the
@@ -272,10 +468,16 @@ export function createImagesFeature(deps) {
     if (raw === null) return json(res, 413, { error: "request too large" });
     let body; try { body = JSON.parse(raw.toString("utf8") || "{}"); } catch { return json(res, 400, { error: "bad json" }); }
     const isDraft = !!body.draft;
-    if (isDraft ? !nvidiaKey() : !key()) {
-      return json(res, 503, { error: isDraft
-        ? "The free draft engine is not configured on this server."
-        : "Image generation needs the OpenAI key (OPEN_AI_DOMINION_UI_APIKEY)." });
+    // An explicit draft request has exactly one engine and no ladder to fall through to (nothing
+    // is cheaper than free): unavailable means unavailable, unchanged from before. A PAID request
+    // is different -- the whole point of the ladder below is that a missing/dead OpenAI key is
+    // just another paid-engine failure mode, so this only 503s here when NEITHER engine could
+    // possibly serve the request at all.
+    if (isDraft && !nvidiaKey()) {
+      return json(res, 503, { error: "The free draft engine is not configured on this server." });
+    }
+    if (!isDraft && !key() && !nvidiaKey()) {
+      return json(res, 503, { error: "Image generation is not configured on this server (no OpenAI or NVIDIA key)." });
     }
 
     const T = gate(req, res, isDraft ? "free draft image generation" : "image generation");
@@ -311,70 +513,84 @@ export function createImagesFeature(deps) {
       return json(res, 200, {
         images, model: draftModel, quality: item.quality, aspect: item.aspect, size: item.size,
         usage: null, costUsd: 0, draft: true, partial: images.length < item.n,
+        servedBy: { engine: "draft", model: draftModel, quality: item.quality },
       });
     }
 
-    let r;
-    if (parsedRefs.refs.length) {
-      const boundary = "----dominionimages" + randomUUID().replace(/-/g, "");
-      const field = (name, value) => Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`);
-      const parts = [
-        field("model", model), field("prompt", item.prompt), field("size", item.size),
-        field("quality", item.quality), field("n", String(item.n)),
-      ];
-      parsedRefs.refs.forEach((ref, i) => {
-        const ext = ref.mime === "image/png" ? "png" : ref.mime === "image/webp" ? "webp" : "jpg";
-        parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image[]"; filename="ref-${i + 1}.${ext}"\r\nContent-Type: ${ref.mime}\r\n\r\n`));
-        parts.push(ref.buf, Buffer.from("\r\n"));
-      });
-      parts.push(Buffer.from(`--${boundary}--\r\n`));
-      const upBody = Buffer.concat(parts);
-      r = await apiRequest(apiBase, key(), {
-        method: "POST", path: "/v1/images/edits",
-        headers: { "content-type": "multipart/form-data; boundary=" + boundary, "content-length": upBody.length },
-        body: upBody,
-      });
-    } else {
-      const payload = JSON.stringify({
-        model, prompt: item.prompt, size: item.size, quality: item.quality, n: item.n,
-        output_format: "png", moderation: "auto",
-      });
-      r = await apiRequest(apiBase, key(), {
-        method: "POST", path: "/v1/images/generations",
-        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
-        body: payload,
-      });
-    }
-    if (r.status !== 200) {
-      const msg = apiErrorMessage(r, "Image generation failed");
-      await logUsage({ ts: startedAt, model, mode: "image", status: "error", error: msg.slice(0, 200), uid: T.uid });
-      return json(res, 502, { error: msg });
-    }
-    let out; try { out = JSON.parse(r.buf.toString("utf8")); } catch { return json(res, 502, { error: "Unreadable response from OpenAI." }); }
-    const images = (out.data || []).map((d) => d.b64_json).filter(Boolean);
-    if (!images.length) return json(res, 502, { error: "OpenAI returned no images." });
+    // ---- Paid request: run the ladder (see the block comment above callPaidOnce).
+    let promptUsed = item.prompt;
+    let rewriteInfo = null;
+    let attempt = key()
+      ? await callPaidOnce(promptUsed, item, parsedRefs.refs, { timeout: 60000 })
+      : { ok: false, status: 0, msg: "Image generation needs the OpenAI key (OPEN_AI_DOMINION_UI_APIKEY)." };
 
-    const costUsd = usageCostUsd(out.usage) ?? +(priceFor(item.quality, item.aspect) * images.length).toFixed(6);
-    meter(T, costUsd);
-    await logUsage({
-      ts: startedAt, model, mode: "image", status: "completed", images: images.length,
-      quality: item.quality, aspect: item.aspect, refs: parsedRefs.refs.length || null,
-      promptTokens: out.usage?.input_tokens ?? null, outputTokens: out.usage?.output_tokens ?? null,
-      costUsd, uid: T.uid,
-    });
-    log(`image gen: ${images.length} ${item.quality}/${item.aspect}${parsedRefs.refs.length ? " +" + parsedRefs.refs.length + " refs" : ""} · $${costUsd} · ${T.isOwner ? "owner" : T.email || T.uid}`);
+    if (!attempt.ok && isSafetyError(attempt.msg)) {
+      const rewritten = await rewriteForSafety(item.prompt);
+      if (rewritten) {
+        rewriteInfo = rewritten;
+        promptUsed = rewritten.text;
+        attempt = await callPaidOnce(promptUsed, item, parsedRefs.refs, { timeout: 60000 }); // retry ONCE
+      }
+    }
+
+    if (attempt.ok) {
+      const costUsd = usageCostUsd(attempt.usage) ?? +(priceFor(item.quality, item.aspect) * attempt.images.length).toFixed(6);
+      meter(T, costUsd);
+      await logUsage({
+        ts: startedAt, model, mode: "image", status: "completed", images: attempt.images.length,
+        quality: item.quality, aspect: item.aspect, refs: parsedRefs.refs.length || null,
+        promptTokens: attempt.usage?.input_tokens ?? null, outputTokens: attempt.usage?.output_tokens ?? null,
+        costUsd, rewritten: !!rewriteInfo, uid: T.uid,
+      });
+      log(`image gen: ${attempt.images.length} ${item.quality}/${item.aspect}${parsedRefs.refs.length ? " +" + parsedRefs.refs.length + " refs" : ""}${rewriteInfo ? " (prompt rewritten by " + rewriteInfo.model + " after a safety rejection)" : ""} · $${costUsd} · ${T.isOwner ? "owner" : T.email || T.uid}`);
+      return json(res, 200, {
+        images: attempt.images.map((b64) => ({ b64, format: "png" })),
+        model, quality: item.quality, aspect: item.aspect, size: item.size,
+        usage: { inputTokens: attempt.usage?.input_tokens ?? null, outputTokens: attempt.usage?.output_tokens ?? null },
+        costUsd,
+        servedBy: { engine: "paid", model, quality: item.quality },
+        note: rewriteInfo ? `the prompt was adjusted by ${rewriteInfo.model} after a safety rejection; the subject was kept` : undefined,
+      });
+    }
+
+    // Paid failed (possibly after the one safety-rewrite retry). AGENT-RULES.md's overriding
+    // objective: nothing may fail to produce a viable result while an alternative exists -- fall
+    // to the free draft engine before ever surfacing the paid engine's raw error to the user.
+    const paidFailureMsg = attempt.msg;
+    if (!nvidiaKey()) {
+      await logUsage({ ts: startedAt, model, mode: "image", status: "error", error: paidFailureMsg.slice(0, 200), uid: T.uid });
+      return json(res, 502, { error: paidFailureMsg + " The free draft engine is not configured on this server either (no NVIDIA key)." });
+    }
+
+    // Requirement #2: the draft engine does not accept reference plates. Generate without them
+    // and say so, rather than silently dropping the user's references with no explanation.
+    const draftPrompt = rewriteInfo ? promptUsed : item.prompt;
+    const draftAttempts = await Promise.all(Array.from({ length: item.n }, () => draftOne(draftPrompt, item.size, item.quality)));
+    const draftImages = draftAttempts.filter((a) => a.b64).map((a) => ({ b64: a.b64, format: "png" }));
+    if (!draftImages.length) {
+      const draftMsg = draftAttempts.find((a) => a.error)?.error || "Draft generation returned no images.";
+      await logUsage({ ts: startedAt, model, mode: "image", status: "error", error: (paidFailureMsg + " | draft: " + draftMsg).slice(0, 200), uid: T.uid });
+      // Every engine failed: this is the one case an `error` is returned (requirement #1).
+      return json(res, 502, { error: paidFailureMsg + " The free draft engine also failed: " + draftMsg });
+    }
+
+    const notes = [`served by the free draft engine after the paid engine failed (${paidFailureMsg})`];
+    if (rewriteInfo) notes.push(`the prompt was first adjusted by ${rewriteInfo.model} for a safety rejection, subject kept`);
+    if (parsedRefs.refs.length) notes.push("reference plates were dropped -- the draft engine does not support them yet");
+    // No meter() call, same as the explicit-draft branch above: the draft engine is $0 transport.
+    await logUsage({ ts: startedAt, model: draftModel, mode: "image_draft", status: "completed", images: draftImages.length, quality: item.quality, aspect: item.aspect, costUsd: 0, fallbackFrom: model, fallbackReason: paidFailureMsg.slice(0, 200), uid: T.uid });
+    log(`image gen fell back to draft: ${draftImages.length}/${item.n} ${item.quality}/${item.aspect} · paid engine failed (${paidFailureMsg}) · ${T.isOwner ? "owner" : T.email || T.uid}`);
     return json(res, 200, {
-      images: images.map((b64) => ({ b64, format: "png" })),
-      model, quality: item.quality, aspect: item.aspect, size: item.size,
-      usage: { inputTokens: out.usage?.input_tokens ?? null, outputTokens: out.usage?.output_tokens ?? null },
-      costUsd,
+      images: draftImages, model: draftModel, quality: item.quality, aspect: item.aspect, size: item.size,
+      usage: null, costUsd: 0, draft: true, partial: draftImages.length < item.n,
+      servedBy: { engine: "draft", model: draftModel, quality: item.quality },
+      note: notes.join("; "),
     });
   }
 
   // ---- POST /api/images/refine — sharpen a creative directive with a cheap text model.
   // Same wall as generation; metered from real usage at the refine model's published rates.
   async function handleRefine(req, res) {
-    if (!key()) return json(res, 503, { error: "Prompt refinement needs the OpenAI key (OPEN_AI_DOMINION_UI_APIKEY)." });
     const raw = await readRawBody(req);
     if (raw === null) return json(res, 413, { error: "request too large" });
     let body; try { body = JSON.parse(raw.toString("utf8") || "{}"); } catch { return json(res, 400, { error: "bad json" }); }
@@ -385,34 +601,22 @@ export function createImagesFeature(deps) {
     const screen = screenContent(prompt, { isOwner: T.isOwner });
     if (screen.blocked) return json(res, 403, { error: screen.reason, code: "content_blocked" });
 
-    const sys = "You refine prompts for an image generation engine. Rewrite the user's directive into one vivid, concrete image prompt: subject, composition, lighting, materials, atmosphere, style. Keep the user's intent and subject exactly; add craft, never commentary. Output ONLY the refined prompt text.";
-    const payload = JSON.stringify({
-      model: refineModel,
-      messages: [{ role: "system", content: sys }, { role: "user", content: prompt }],
-      max_completion_tokens: 2500,
+    // LANE-foundry.md item 1: "the same ladder applies to /api/images/refine" -- primary refine
+    // model first, deepseek-v4-flash then Haiku on failure, an actual `error` only once all three
+    // text engines failed.
+    const r = await refinePrompt(prompt);
+    if (!r.ok) return json(res, 502, { error: r.msg });
+
+    const costUsd = r.usage
+      ? +((((r.usage.prompt_tokens || 0) * REFINE_IN_PER_M + (r.usage.completion_tokens || 0) * REFINE_OUT_PER_M) / 1e6)).toFixed(6)
+      : r.engine === "paid" ? 0.001 : 0; // fell back off the metered model entirely: nothing to charge for
+    if (costUsd) meter(T, costUsd);
+    await logUsage({ ts: new Date().toISOString(), model: r.model, mode: "image_refine", status: "completed", promptTokens: r.usage?.prompt_tokens ?? null, outputTokens: r.usage?.completion_tokens ?? null, costUsd, engine: r.engine, uid: T.uid });
+    return json(res, 200, {
+      prompt: r.text, costUsd,
+      servedBy: { engine: r.engine, model: r.model },
+      note: r.engine !== "paid" ? `refined by ${r.model} after the primary refine model failed` : undefined,
     });
-    // Two attempts: gpt-5.x models occasionally return an empty message on small completions.
-    let text = "", usage = null, lastErr = "";
-    for (let attempt = 0; attempt < 2 && !text; attempt++) {
-      const r = await apiRequest(apiBase, key(), {
-        method: "POST", path: "/v1/chat/completions",
-        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
-        body: payload, timeout: 60000,
-      });
-      if (r.status !== 200) { lastErr = apiErrorMessage(r, "Refinement failed"); continue; }
-      try {
-        const j = JSON.parse(r.buf.toString("utf8"));
-        text = String(j.choices?.[0]?.message?.content || "").trim();
-        usage = j.usage || usage;
-      } catch { lastErr = "Unreadable response from OpenAI."; }
-    }
-    if (!text) return json(res, 502, { error: lastErr || "Refinement returned nothing." });
-    const costUsd = usage
-      ? +((((usage.prompt_tokens || 0) * REFINE_IN_PER_M + (usage.completion_tokens || 0) * REFINE_OUT_PER_M) / 1e6)).toFixed(6)
-      : 0.001;
-    meter(T, costUsd);
-    await logUsage({ ts: new Date().toISOString(), model: refineModel, mode: "image_refine", status: "completed", promptTokens: usage?.prompt_tokens ?? null, outputTokens: usage?.completion_tokens ?? null, costUsd, uid: T.uid });
-    return json(res, 200, { prompt: text.slice(0, 4000), costUsd });
   }
 
   // ---- POST /api/images/batch — submit up to 50/200 generations at 50% token rates.
@@ -576,17 +780,27 @@ export function createImagesFeature(deps) {
 
     const parsed = sp.lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
     const ok = parsed.filter((l) => l.response && l.response.status_code === 200 && l.response.body);
+    const lineIdx = (l) => Number((l.custom_id || "").replace("dfi-", ""));
+    // Lines the paid Batch API itself could not fulfill. LANE-foundry.md item 1: "the same ladder
+    // applies to ... /api/images/batch items" -- each one gets a shot at the free draft engine
+    // before it is counted as a true failure. Unlike the synchronous /generate ladder there is no
+    // safety-rewrite-and-retry step here: a batch line's failure reason is rarely distinguishable
+    // (OpenAI's batch error objects are terse) and resubmitting into the SAME 24h batch job is not
+    // something the Batch API supports, so every batch-line failure goes straight to draft.
+    const okIdx = new Set(ok.map(lineIdx));
+    const failedLines = parsed.filter((l) => !okIdx.has(lineIdx(l)));
 
     // First collection settles submit-charge vs real usage: refund the overage as credits,
-    // charge the (rare) shortfall when actual tokens run above the published table.
+    // charge the (rare) shortfall when actual tokens run above the published table. The draft
+    // rescue below runs in this same once-only block and is persisted on the job, so a later page
+    // request never re-spends a free NVIDIA call it already made.
     if (!job.settled) {
       let cost = 0, sawUsage = false;
       for (const l of ok) {
         const c = usageCostUsd(l.response.body.usage, { batch: true });
         if (c !== null) { cost += c; sawUsage = true; }
         else {
-          const idx = Number((l.custom_id || "").replace("dfi-", ""));
-          const it = job.items[idx];
+          const it = job.items[lineIdx(l)];
           if (it) cost += priceFor(it.quality, it.aspect, { batch: true });
         }
       }
@@ -597,26 +811,56 @@ export function createImagesFeature(deps) {
       else if (delta < 0) creditBack(T, -delta, "batch settle refund " + job.id);
       job.refundedCredits = delta < 0 ? -delta : 0;
       job.extraCredits = delta > 0 ? delta : 0;
+
+      // The batch half of the ladder: one free draft attempt per failed line, run once here and
+      // persisted so pagination never redoes it. $0 transport, same as every other draft path in
+      // this file -- no charge, no settle math, only skipped when the draft engine has no key.
+      job.draftFallback = job.draftFallback || {};
+      if (failedLines.length && nvidiaKey()) {
+        const rescues = await Promise.all(failedLines.map(async (l) => {
+          const idx = lineIdx(l);
+          const it = job.items[idx];
+          if (!it) return null;
+          const d = await draftOne(it.prompt, IMAGE_SIZES[it.aspect] || IMAGE_SIZES.square, it.quality);
+          return { idx, ok: !!d.b64, b64: d.b64 || "" };
+        }));
+        for (const r of rescues) if (r) job.draftFallback[r.idx] = { b64: r.b64, ok: r.ok };
+      }
+
       job.settled = true;
       persistJob(job);
-      await logUsage({ ts: new Date().toISOString(), model, mode: "image_batch", status: "completed", images: ok.length, failed: parsed.length - ok.length, costUsd: job.costUsd, chargedCredits: job.chargedCredits, refundedCredits: job.refundedCredits, extraCredits: job.extraCredits, usageBased: sawUsage, batchId: job.id, uid: T.uid });
-      log(`image batch collected: ${ok.length}/${job.count} ok · $${job.costUsd} actual vs ${job.chargedCredits} credit(s) charged at submit · settle ${job.refundedCredits ? "+" + job.refundedCredits + " back" : job.extraCredits ? "-" + job.extraCredits + " extra" : "even"} · ${T.isOwner ? "owner" : T.email || T.uid}`);
+      const rescuedOk = Object.values(job.draftFallback).filter((d) => d.ok).length;
+      await logUsage({ ts: new Date().toISOString(), model, mode: "image_batch", status: "completed", images: ok.length, draftFallback: rescuedOk, failed: parsed.length - ok.length - rescuedOk, costUsd: job.costUsd, chargedCredits: job.chargedCredits, refundedCredits: job.refundedCredits, extraCredits: job.extraCredits, usageBased: sawUsage, batchId: job.id, uid: T.uid });
+      log(`image batch collected: ${ok.length}/${job.count} ok${rescuedOk ? " +" + rescuedOk + " via draft fallback" : ""} · $${job.costUsd} actual vs ${job.chargedCredits} credit(s) charged at submit · settle ${job.refundedCredits ? "+" + job.refundedCredits + " back" : job.extraCredits ? "-" + job.extraCredits + " extra" : "even"} · ${T.isOwner ? "owner" : T.email || T.uid}`);
     }
+
+    // One combined, index-ordered result list: real paid successes plus any drafted rescue, so
+    // pagination and totals never have to know which engine actually served a given item.
+    const combined = [];
+    for (const l of ok) {
+      const idx = lineIdx(l);
+      const it = job.items[idx] || {};
+      const d = (l.response.body.data || [])[0] || {};
+      if (d.b64_json) combined.push({ idx, b64: d.b64_json, format: "png", prompt: it.prompt || "", quality: it.quality || "", aspect: it.aspect || "", servedBy: { engine: "paid", model, quality: it.quality || "" } });
+    }
+    for (const l of failedLines) {
+      const idx = lineIdx(l);
+      const fb = job.draftFallback && job.draftFallback[idx];
+      if (!fb || !fb.ok) continue;
+      const it = job.items[idx] || {};
+      combined.push({ idx, b64: fb.b64, format: "png", prompt: it.prompt || "", quality: it.quality || "", aspect: it.aspect || "", servedBy: { engine: "draft", model: draftModel, quality: it.quality || "" }, note: "served by the free draft engine after this batch line failed" });
+    }
+    combined.sort((a, b) => a.idx - b.idx);
 
     const offset = Math.max(0, Math.trunc(Number(u.searchParams.get("offset")) || 0));
     const limit = Math.min(COLLECT_PAGE_MAX, Math.max(1, Math.trunc(Number(u.searchParams.get("limit")) || 4)));
-    const page = ok.slice(offset, offset + limit).map((l) => {
-      const idx = Number((l.custom_id || "").replace("dfi-", ""));
-      const it = job.items[idx] || {};
-      const d = (l.response.body.data || [])[0] || {};
-      return { b64: d.b64_json || "", format: "png", prompt: it.prompt || "", quality: it.quality || "", aspect: it.aspect || "" };
-    }).filter((x) => x.b64);
-    const done = offset + limit >= ok.length;
+    const page = combined.slice(offset, offset + limit).map(({ idx, ...rest }) => rest);
+    const done = offset + limit >= combined.length;
     if (done) { try { unlinkSync(spoolPath(job.id)); } catch {} }
     return json(res, 200, {
       ...base, settled: job.settled, costUsd: job.costUsd,
       refundedCredits: job.refundedCredits || 0, extraCredits: job.extraCredits || 0,
-      total: ok.length, failed: parsed.length - ok.length, offset, images: page, done,
+      total: combined.length, failed: job.count - combined.length, offset, images: page, done,
     });
   }
 
