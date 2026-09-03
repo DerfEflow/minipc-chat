@@ -19,7 +19,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const BASE = Number(process.argv[2]) || 8230;
 const APP = BASE + 2;
-const WORKSPACE = process.env.LIVE_RIG_WORKSPACE || "Z:\\dominion-livetest";
+// F: is the standing sandbox drive (Fred, 2026-08-03: Z: died at the hardware level and is
+// permanently retired -- never plan a restore-to-Z: step). This default pointed at the dead drive
+// until 2026-09-03 (foundry lane, DEFICIENCIES.md #27 tooling half), so every rig boot that forgot
+// to set LIVE_RIG_WORKSPACE explicitly failed at mkdirSync below instead of just working.
+const WORKSPACE = process.env.LIVE_RIG_WORKSPACE || "F:\\Claude Sandbox\\dominion-livetest";
 const HANDS_TOKEN = "live-rig-" + BASE + "-token";
 
 mkdirSync(WORKSPACE, { recursive: true });
@@ -40,11 +44,23 @@ function walletEnv() {
 
 const wallet = walletEnv();
 console.log("[live-rig] booting rig on base " + BASE + ", workspace " + WORKSPACE);
+/*
+ * Merge order fix (2026-09-03, foundry lane): this used to be
+ * `{ ...process.env, ...wallet, ... }`, which means the WALLET always won over an explicit
+ * override the caller set before invoking this script -- every key the wallet carries (which is
+ * most of them, including OPEN_AI_DOMINION_UI_APIKEY) silently discarded whatever the shell had
+ * exported. That defeats a deliberately broken-key proof like
+ * `OPEN_AI_DOMINION_UI_APIKEY=bogus node ops/live-rig.mjs 8380` (used to prove the Foundry's
+ * paid-engine-fails-over-to-draft ladder on a real rig, not just against a mock): the rig would
+ * boot with the REAL key regardless, and the fall-through path would never actually fire. Wallet
+ * now supplies DEFAULTS ONLY, filling in anything the invoking shell did not already set;
+ * process.env (this process's own environment, which includes whatever the caller exported) wins.
+ */
 const server = spawn(process.execPath, [join(ROOT, "devboot.mjs"), String(BASE)], {
   cwd: ROOT,
   // IDE_MODE / ENGINEER_PUBLIC mirror PRODUCTION (Railway has IDE_MODE=all), so guest parity is
   // measured against the configuration guests actually meet, not a stricter dev default.
-  env: { ...process.env, ...wallet, DEVBOOT_ALLOW_PAID: "1", HANDS_TOKEN, HANDS_DEFAULT_NODE: "livetest",
+  env: { ...wallet, ...process.env, DEVBOOT_ALLOW_PAID: "1", HANDS_TOKEN, HANDS_DEFAULT_NODE: "livetest",
          IDE_MODE: "all", ENGINEER_PUBLIC: "1" },
   stdio: ["ignore", "inherit", "inherit"],
 });

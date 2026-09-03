@@ -13,14 +13,32 @@ import { createGameFactorySpoolController } from "./hands/gamefactory-controller
 
 const uid = process.getuid?.() ?? null;
 const configuredTestRoot = String(process.env.GAME_FACTORY_TEST_ROOT || "").trim();
-if (process.platform === "win32" && !configuredTestRoot) {
-  throw new Error("Set GAME_FACTORY_TEST_ROOT to a persistent non-C: directory before running this Windows filesystem test.");
+/*
+ * Windows default (2026-09-03, foundry lane, DEFICIENCIES.md #27 tooling half). This suite needs a
+ * real non-C: filesystem to prove hard-link/durable-publication behavior honestly (exFAT/NTFS
+ * quirks on C: cannot be trusted for it), so it used to hard-fail on Windows unless
+ * GAME_FACTORY_TEST_ROOT was set by hand every single run. F: is now the standing sandbox drive
+ * (Z: died at the hardware level 2026-08-03 and is permanently retired -- never restore to it), so
+ * this defaults there instead of demanding the env var. It still refuses to guess when F: itself is
+ * not mounted on this box: that one case skips with a clear message (exit 0, not a thrown error --
+ * run-tests.mjs reads a nonzero exit as a suite FAILURE, and an absent test drive is not a code bug).
+ */
+let effectiveTestRoot = configuredTestRoot;
+let skipReason = "";
+if (process.platform === "win32" && !effectiveTestRoot) {
+  const winDefault = "F:\\Claude Sandbox\\dominion-livetest\\gf-ipc-test";
+  if (existsSync("F:\\")) effectiveTestRoot = winDefault;
+  else skipReason = "GAME_FACTORY_TEST_ROOT is unset and F:\\ is not mounted on this box -- skipping the Windows filesystem suite (set GAME_FACTORY_TEST_ROOT to a persistent non-C: directory to run it here).";
 }
-if (configuredTestRoot) mkdirSync(configuredTestRoot, { recursive: true });
-const root = configuredTestRoot
-  ? mkdtempSync(join(configuredTestRoot, "dominion-gamefactory-ipc-"))
+if (skipReason) {
+  console.log("ok - game-factory IPC suite # SKIP " + skipReason);
+  process.exit(0);
+}
+if (effectiveTestRoot) mkdirSync(effectiveTestRoot, { recursive: true });
+const root = effectiveTestRoot
+  ? mkdtempSync(join(effectiveTestRoot, "dominion-gamefactory-ipc-"))
   : mkdtempSync(join(tmpdir(), "dominion-gamefactory-ipc-"));
-const retainRoot = !!configuredTestRoot;
+const retainRoot = !!effectiveTestRoot;
 // F:-exFAT on Windows reports EISDIR for a same-directory regular-file hard link. Keep only
 // explicit unsupported-operation results here: EPERM, EXDEV, and ENOSYS can instead expose a
 // permission, mount, or runtime defect that must fail the suite rather than silently skip it.

@@ -1,100 +1,90 @@
 # Dominion AI — Session Handoff
 
-_State as of 2026-07-12. Update the date + HEAD when this changes materially._
+_State as of 2026-09-03. Update the date + HEAD when this changes materially. This file described a
+mini-PC deployment until this date; that description was stale by nearly two months (the app moved
+to Railway well before this rewrite) and is corrected below (foundry lane, DEFICIENCIES.md #27
+tooling half)._
 
 ## What it is
-Dominion AI is Fred's self-hosted phone PWA assistant ("Dominion AI / by Frederick Wolfe"). As of
-2026-07-12 it pivoted from a local-Qwen chat app to a **cloud-brain agent**: Fred picks any cloud
-model, and tool-capable models drive his whole box (files, projects, web, code) with a voice
-interface. The local Qwen path still exists as the free default/fallback and is untouched.
+
+Dominion AI is Fred's self-hosted phone PWA assistant ("Dominion AI / by Frederick Wolfe"): a
+cloud-brain agent (any cloud model, tool-capable models drive his whole box) with a local-Qwen
+free/fallback lane, Simplify Chat (a picker-free chatbot surface), The Crucible (an in-app IDE that
+builds real projects), Game Factory, Video Studio, and The Foundry (image generation).
 
 ## Home / infrastructure
-- **Repo:** `DerfEflow/minipc-chat` (private, branch `main`). HEAD = `5b1b866`.
-- **Source working tree (laptop):** `F:\Claude Sandbox\Projects\minipc-chat`
-- **Deployed** on the mini-PC "nucbox-k8-plus" at `C:\minipc-chat`, run by the scheduled task
-  **"MiniPC Chat PWA"** (`node server.mjs`, binds localhost, fronted by Tailscale Serve).
-  Live URL: https://nucbox-k8-plus.tailf9be8f.ts.net/
-- Zero-dependency Node (`node:http`); no build step; no `npm install`.
-- **Keys** live in the box's `C:\minipc-chat\.env` (backup `.env.bak-2026-07-12`):
-  `OPENROUTER_API_KEY`, `OPEN_AI_DOMINION_UI_APIKEY`, `DEEPSEEK_AI_DOMINION_UI_APIKEY`,
-  `SERP_API_KEY`. Same key NAMES are in the laptop wallet `~/.app-secrets.env`.
 
-## Deploy recipe (SSH over Tailscale)
-```
-ssh -i ~/.ssh/id_ed25519 Fred@nucbox-k8-plus
-git -C C:\minipc-chat pull origin main
-Stop task "MiniPC Chat PWA" -> wait 2s (port race) -> Start it
-Verify: port listener present, /api/version returns a new build id.
-```
-Remote PowerShell must be base64 UTF-16LE via `-EncodedCommand`. On "box offline", check the
-phone/tailnet first and confirm power (the box auto-recovers after outages).
+- **Repo:** `DerfEflow/minipc-chat` (private). Deploy branch: `main`.
+- **Production:** Railway project `dominion-ai`, service `dominion`. Docker build (`Dockerfile` at
+  repo root); `cloudflared` runs INSIDE the container and opens an outbound tunnel, so the
+  container holds no public Railway domain and cannot be reached except through that tunnel.
+- **Ingress/auth:** Cloudflare Access sits in front of the tunnel in `enforce` mode — every request
+  needs a verified Cloudflare identity (browser email login, or a Cloudflare Access service token
+  for machine callers) before it reaches the app. Public host: `https://app.dominion.tools`.
+- **Deploy = push to `main`.** Railway builds and redeploys on every push; there is no separate
+  deploy step and no manual promotion.
+- **Source working tree (laptop):** `F:\Claude Sandbox\Projects\minipc-chat` for direct work;
+  during the 2026-09-03 stabilization program each writer lane works in its own git worktree under
+  `F:\Claude Sandbox\Projects\minipc-chat-lanes\<lane>` (branch `lane/<lane>`), merged back by the
+  program lead. See `specs/AGENT-RULES.md` in that tree for the lane rules.
+- Zero-dependency Node 24 (`node:http`), ESM, no build step, no `npm install` for the app itself.
+  Tests: `node run-tests.mjs` runs every `*_test.mjs` in the repo root.
+- **Keys** live in Railway's service environment variables in production, and in the laptop wallet
+  `C:\Users\rjfla\.app-secrets.env` for local/rig work: `OPENROUTER_API_KEY`,
+  `OPEN_AI_DOMINION_UI_APIKEY`, `DEEPSEEK_AI_DOMINION_UI_APIKEY`, `ANTHROPIC_API_KEY`,
+  `NVIDIA_API_KEY`, `SERP_API_KEY`, plus per-feature keys (Stripe, Google, Runware). Never printed,
+  never committed; `server.mjs`'s `cfgGet()` reads env, then a local `.env`, then a shared bridge
+  `.env`, in that order.
 
-## What's new (the 2026-07-12 build, Phases A–D)
+## Verifying production
 
-**A) Live catalog + provider router.** `models.catalog.mjs` is the single source of truth (38
-models), served at `GET /api/models`; the picker builds from it. Each model carries `provider`
-(`openrouter` | `openai` | `deepseek`), `directId` (native id), and `toolCapable` (true = "doing"
-bench gets tools; false = "chatting" bench, chat-only).
-- OpenAI DIRECT: gpt-5.6 Sol/Terra/Luna, gpt-5.5, gpt-4o.
-- DeepSeek DIRECT: deepseek-v4-flash, deepseek-v4-pro (R1 stays on OpenRouter).
-- Everything else via OpenRouter. Claude deliberately absent (Fred uses its own app).
-  `venice/uncensored` removed (Fred: no Venice).
-- Router = `PROVIDER_CFG` table in `server.mjs`; `cloudChatStream()` routes by provider (all
-  OpenAI-compatible SSE), labels errors/usage per provider.
+There is no owner-level automated login into production from outside (Cloudflare Access admits
+only a browser email login, or a service token — see `ops/prod-verify.mjs`, added 2026-09-03,
+which drives an owner-level smoke test from the laptop using a Cloudflare Access service token
+stashed at `C:\Users\rjfla\.dominion-verify-token`). `ops/health-check.mjs` runs its deeper checks
+over `railway ssh` (`railway.exe ssh "sh -c ..."`), executing snippets inside the running
+container rather than calling it over HTTPS — this sidesteps Access entirely for checks that need
+to read the container's own filesystem or environment.
 
-**B) Cloud tool loop.** Doing-bench cloud models run the SAME tool machinery as local (ironclad
-carve-outs, mode gates, confirm gates, 9-state lifecycle, honest logs) with OpenAI `tool_call_id`
-plumbing. `CLOUD_MAX_ROUNDS=8`; the last 2 are "conclusion rounds" (schemas stay attached with
-`tool_choice:"none"`, nudge + retry as user-role messages) so agent models don't go mute;
-reasoning-channel captured as a last resort. Chatting-bench models stream one plain turn.
+## Current architecture notes (durable, live-verified)
 
-**C) Web tools** in `tools.mjs`: `web_search` (SerpApi, `SERP_API_KEY`) + `web_read` (readable page
-text). `read_only`, available to every tool-capable model.
-
-**D) Voice.** `POST /api/voice/transcribe` (OpenAI STT, dependency-free multipart) and
-`POST /api/voice/tts` (gpt-4o-mini-tts, streamed mp3). UI mic button = tap to talk, tap to send; the
-transcript rides the normal `/chat` flow so the PICKED model answers with full tools. Speaker toggle
-reads answers aloud. OpenAI is ears + mouth only; the brain stays Fred's chosen model.
-
-**Plus TRUE FORGET.** Deleting a chat now calls `POST /chatlog/forget {chatId}`, which erases the
-server-side transcript (`chatlog.mjs`) AND any episodic memory distilled from it. Before this,
-sidebar delete only cleared phone localStorage, so cross-chat retrieval could resurrect "deleted"
-chats.
-
-## Durable provider gotchas (all live-verified 2026-07-12)
-1. Native OpenAI rejects `max_tokens` → use `max_completion_tokens` (OpenRouter translates it;
-   DeepSeek accepts `max_tokens`). Only `provider==="openai"` differs.
-2. OpenAI gpt-5.x/o-series reject function tools on `/v1/chat/completions` unless
-   `reasoning_effort:"none"` (applied only on tool turns). GPT-4o + DeepSeek unaffected. Proper fix
-   later = the `/v1/responses` API.
-3. DeepSeek native model ids drop the prefix (`deepseek-v4-flash`, not `deepseek/deepseek-v4-flash`).
-4. Agent-tuned models go MUTE when tool schemas vanish mid-conversation. Fix: keep tools attached
-   with `tool_choice:"none"` and instruct via a user-role message.
+1. Native OpenAI rejects `max_tokens` on newer models → use `max_completion_tokens`; DeepSeek and
+   OpenRouter both accept `max_tokens`. Only `provider==="openai"` differs.
+2. DeepSeek native model ids drop the `deepseek/` catalog prefix (`deepseek-v4-flash`, not
+   `deepseek/deepseek-v4-flash`); its chat endpoint has no `/v1` prefix
+   (`api.deepseek.com/chat/completions`).
+3. Anthropic direct calls use `x-api-key` + `anthropic-version: 2023-06-01` headers, never a Bearer
+   token; model ids carry a dated suffix (`claude-haiku-4-5-20251001`).
+4. The model catalog (`models.catalog.mjs`) is the single source of truth, served at
+   `GET /api/models`. A live catalog audit (`catalogaudit.mjs`) cross-checks every catalog entry
+   against each provider's real model list; providers with no key configured are reported
+   `unchecked`, not failing — which means a dead model on an unchecked provider is invisible to the
+   audit (see DEFICIENCIES.md #5 for a measured case of this).
+5. The Foundry (`images.mjs`) generates through a paid engine (OpenAI `gpt-image-2`) with a free
+   draft fallback (NVIDIA-hosted `black-forest-labs/flux.1-dev`), and, as of 2026-09-03, a
+   resilience ladder: a billing/quota/5xx/timeout failure on the paid engine falls straight to the
+   free draft engine; a safety rejection gets one prompt rewrite (`deepseek-v4-flash`, then Haiku)
+   and one paid retry before falling to draft. See LANE-foundry.md and images_test.mjs.
 
 ## Key files
-`server.mjs` (routing + cloud agent loop + voice endpoints + provider router + `/api/*`),
-`models.catalog.mjs` (catalog + provider/bench fields), `tools.mjs` (tools incl.
-`web_search`/`web_read`), `chatlog.mjs` (transcript index + `remove`/forget), `public/app.js` +
-`public/index.html` (dynamic picker, mic/speaker UI), `persona.mjs`, `memory.mjs`, `mentor.mjs`,
-`flywheel.mjs`, `review.mjs`, `artifacts.mjs`, `routing.mjs`. Repo has test files (`*_test.mjs`)
-run with plain `node`; keep them green before deploy.
+
+`server.mjs` (routing, cloud agent loop, provider router, `/api/*`), `models.catalog.mjs`
+(catalog + provider/bench fields), `images.mjs` (Foundry image generation + ladder), `simplify.mjs`
+(Simplify Chat), `ide.mjs` + `idefurnace.mjs` (The Crucible), `gamefactory*.mjs` (Game Factory),
+`video*.mjs` (Video Studio), `tools.mjs`, `chatlog.mjs`, `persona.mjs`, `memory.mjs`, `mentor.mjs`,
+`flywheel.mjs`, `review.mjs`, `artifacts.mjs`, `routing.mjs`, `public/` (PWA client). Every
+`*_test.mjs` in the repo root runs via plain `node <file>_test.mjs` or the full `run-tests.mjs`
+gate; keep the suite green before deploy.
 
 ## Behavior note (not a bug)
+
 Dominion injects Fred's memory profile + cross-chat retrieval into EVERY turn, including cloud.
 That's why models "know who Fred is"; they can't see their own context assembly and will confabulate
 ("lucky guess") if asked where it came from.
 
-## Open / next
-- Realtime duplex voice (OpenAI `gpt-realtime`) as an optional "natural voice" toggle (this build
-  shipped the turn-based pipeline, option B).
-- Bright Data as a `web_read` fallback if SerpApi/plain fetch hits bot walls (no BD token yet;
-  SerpApi is live and sufficient for now).
-- Field-test the phone mic UX (untested by Fred at handoff time).
-- One As-Fred chat deleted BEFORE the true-forget fix may still sit in the server chatlog
-  (`C:\minipc-chat\chatlog\chats.json`); Fred chose to leave it.
-
 ## Working with Fred
+
 Full autonomy on this project (his standing directive). Reply format = essentials plus numbered next
 steps with a recommendation; he replies with a number. No em dashes, no "not X but Y" constructions.
-`F:\` + sandbox = full access; `C:\Documents` = read-only, never delete. Snapshot/branch before
-risky changes.
+`F:\` + sandbox = full access; `C:\Documents` = read-only except an app's own backup folder, never
+delete without permission. Snapshot/branch before risky changes.
