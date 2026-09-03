@@ -1569,6 +1569,11 @@ export function createVideoHttp({
       const writerState = project?.ai?.screenwriter?.state || {};
       const expectedScreenplaySha256 = createHash("sha256").update(persistedText).digest("hex");
       const expectedScreenwriterGenerationId = cleanText(writerState.generationId, 200) || null;
+      // `project` here is feature.getProject's RAW internal shape (screenplay revisions, provider
+      // attempts, etc. that buildScreenwriterTurn needs to reason about resumption), not the HTTP
+      // layer's client-shaped/cast-hydrated object — so `cast` is hydrated onto it explicitly
+      // right before use (video-characters lane, required behavior #3).
+      project.cast = hydrateCast(tenantId, project.characters);
       const turn = buildScreenwriterTurn(project, prompt);
       let submissionAttempt = null;
       let provisionalAttempt = null;
@@ -1739,6 +1744,19 @@ export function createVideoHttp({
     const priorContext = (project.messages || []).slice(-12).map((m) => `${m.role === "user" ? "User" : "Producer"}: ${cleanText(m.content, 4000)}`).join("\n");
     const brief = priorContext ? `${priorContext}\nUser: ${message}` : message;
 
+    /*
+     * executeScreenwriterTurn is ALSO the dedicated POST /screenwrite route's implementation, and
+     * it refuses (409 video_ai_busy) if `activeAiProjects` already holds this project's key — its
+     * own guard against colliding with an in-flight /chat turn. This function is only ever called
+     * FROM the /chat dispatch handler, which already holds that exact lock for the whole turn
+     * (so a second /chat call cannot race it); release it here before delegating, since
+     * activeScreenwriterProjects (which executeScreenwriterTurn manages itself via
+     * requireProjectScreenwriterIdle) is what actually needs to be exclusive for this call, and
+     * the /chat handler's own top-of-function checks already refused a concurrent call before this
+     * point was ever reached.
+     */
+    const activeKey = screenwriterKey(tenantId, projectId);
+    activeAiProjects.delete(activeKey);
     const screenResult = await executeScreenwriterTurn({ tenant, tenantId, projectId, prompt: brief });
 
     const afterScreenplay = await getProject(tenantId, projectId);
