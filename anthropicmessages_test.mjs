@@ -256,6 +256,31 @@ await t("non-thinking calls keep supported sampling controls", async () => {
   assert(!payload.thinking, "thinking was not disabled");
 });
 
+await t("adaptive models (Opus 4.8, Sonnet 5) reject temperature even with thinking explicitly off", async () => {
+  // lane/chat required behavior #2, live-probed 2026-09-03: claude-opus-4-8 and claude-sonnet-5
+  // return 400 "`temperature` is deprecated for this model" whether or not a thinking block is on
+  // the wire. Every real caller today leaves thinking on for these models, so the old
+  // `!payload.thinking` guard alone happened to match — this locks in the family-based guard
+  // (`family !== "adaptive"`) added alongside it, for the day a caller disables thinking on a
+  // cheap/fast round the way the chat pipeline already does for tool-less conclusion rounds.
+  for (const model of ["claude-opus-4-8", "claude-sonnet-5"]) {
+    const payload = buildAnthropicMessagesPayload(model, [{ role: "user", content: "quick answer" }], {
+      thinking: false,
+      temperature: 0.4,
+    });
+    assert(!payload.thinking, "thinking should be disabled per the request");
+    assert(!("temperature" in payload), `${model} must never receive temperature, even with thinking off`);
+  }
+  // Manual family (Haiku 4.5) has no such unconditional restriction: with thinking off it accepts
+  // temperature fine, per the same probe (only ACTIVE thinking is incompatible with it there).
+  const haiku = buildAnthropicMessagesPayload("claude-haiku-4-5-20251001", [{ role: "user", content: "quick answer" }], {
+    thinking: false,
+    temperature: 0.4,
+  });
+  assert(!haiku.thinking, "thinking should be disabled per the request");
+  assert(haiku.temperature === 0.4, "Haiku 4.5 without an active thinking block should keep a supplied temperature");
+});
+
 await t("legacy compatibility endpoint converts to native Messages", async () => {
   assert(
     anthropicEndpoint("https://api.anthropic.com/v1/chat/completions") === "https://api.anthropic.com/v1/messages",
