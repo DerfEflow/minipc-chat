@@ -1764,6 +1764,38 @@ export function createGameFactoryStore({
     });
   }
 
+  /*
+   * Additive for lane gfsupervisor (specs/LANE-gfsupervisor.md): the build.status column has existed
+   * since the original schema (game_builds.status, default 'PLANNED'); these two functions are the
+   * first callers that read/write it outside createBuild, so no SQL or existing function changes.
+   */
+  function updateBuildStatus({ uid, projectId, buildId, status }) {
+    const who = cleanUid(uid);
+    const state = cleanText(status, 40).toUpperCase();
+    if (!["PLANNED", "BUILT", "TESTED", "FAILED"].includes(state)) return result(400, { error: "Unknown build status.", code: "bad_status" });
+    return tx(() => {
+      const project = q.project.get(cleanText(projectId, 180), who);
+      if (!project) return result(404, { error: "No such game.", code: "not_found" });
+      const build = db.prepare("SELECT * FROM game_builds WHERE id=? AND projectId=? AND uid=?").get(cleanText(buildId, 180), project.id, who);
+      if (!build) return result(404, { error: "No such build.", code: "build_not_found" });
+      const at = timestamp();
+      db.prepare("UPDATE game_builds SET status=?, updatedAt=? WHERE id=? AND projectId=? AND uid=?").run(state, at, build.id, project.id, who);
+      emit(project, "build.updated", { id: build.id, status: state });
+      return result(200, { ok: true, buildId: build.id, status: state });
+    });
+  }
+
+  function listBuilds(uid, projectId) {
+    const who = cleanUid(uid);
+    return db.prepare("SELECT * FROM game_builds WHERE projectId=? AND uid=? ORDER BY createdAt ASC")
+      .all(cleanText(projectId, 180), who)
+      .map((row) => ({
+        id: row.id, projectId: row.projectId, sourceCommit: row.sourceCommit, toolchain: parse(row.toolchain, {}),
+        targets: parse(row.targets, []), status: row.status, versionName: row.versionName, versionCode: row.versionCode,
+        createdAt: row.createdAt, updatedAt: row.updatedAt,
+      }));
+  }
+
   function events(uid, projectId, after = 0, limit = 200) {
     return q.events.all(cleanUid(uid), cleanText(projectId, 180), Math.max(Number(after) || 0, 0), Math.min(Math.max(Number(limit) || 200, 1), 1000)).map((e) => ({
       id: e.id, projectId: e.projectId, type: e.type, actor: e.actor, causationId: e.causationId,
@@ -1986,7 +2018,7 @@ export function createGameFactoryStore({
     seedPortfolio, listProjects, getProject, executeCommand,
     createBuild, queueTask, queueSyntheticCanary, claimNextTask, heartbeatTask, completeTask, failTask, securityStopTask,
     recordArtifact, recordArtifactCopy, artifactCopyComplete, recordOwnerAttestedNativeProjectEvidence,
-    invalidateNativeProjectEvidence, recordTestRun, recordRelease,
+    invalidateNativeProjectEvidence, recordTestRun, recordRelease, updateBuildStatus, listBuilds,
     events, getApprovalSubject, reconcile, drainOutbox, drainOutboxSync, chatgptProjectReconciliationQueue,
     health, stats,
     close() { try { db.close(); } catch {} },
