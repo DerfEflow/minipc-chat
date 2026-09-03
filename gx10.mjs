@@ -21,7 +21,7 @@
 
 // OpenAI-dialect messages -> Ollama /api/chat payload. Content parts flatten to text (the GX10
 // seats are not vision-flagged, so image parts arrive only by defect; flattening is honest).
-export function ollamaPayloadFromOpenAI({ model, messages, tools = null, num_predict = 0, num_ctx = 0, temperature, keepAlive = "30m" } = {}) {
+export function ollamaPayloadFromOpenAI({ model, messages, tools = null, num_predict = 0, num_ctx = 0, temperature, keepAlive = -1 } = {}) {
   const msgs = (Array.isArray(messages) ? messages : []).map((m) => {
     const role = m && m.role === "developer" ? "system" : String((m && m.role) || "user");
     let content = m ? m.content : "";

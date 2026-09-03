@@ -10,7 +10,9 @@ the owner-level Cloudflare Access service token after deploy).
   (the one FAIL was the Game Factory human-owner gate answering a service identity as designed).
 - Deploy 2: main 9f9e6ca, Railway 7e9e8eec, 16:34Z. Owner smoke 7/7.
 - Deploy 3: the Video Studio production tool (characters, chat-driven screenwriting, one-button production),
-  the Crucible workspace-root guard, the GX10 context clamp, and the Codex D7 design pass. SHA recorded below.
+  the Crucible workspace-root guard, the GX10 context clamp, and the Codex D7 design pass: main 5d82b1b, Railway ae6d2a7b, 17:21Z. Owner smoke 7/7. Production probe: a
+  character generated, attached, chat-written two-scene script with the character assigned, reference-mode dry run.
+- Deploy 4: GX10 relay requests pin the model permanently (keep_alive -1) and this ledger.
 - dominion-site: version d5df09c6 (Studio cross-link banner); apex dominion.tools repointed from two stale
   dns-only A records to the dominion-site Worker custom domain (snapshot of the old records kept).
 
