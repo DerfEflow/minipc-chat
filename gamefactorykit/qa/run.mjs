@@ -300,7 +300,11 @@ async function main() {
       const got = rules.actionForPointer(state, layoutInfo, { type: "down", x: cx, y: cy, dx: 0, dy: 0 });
       if (!got || JSON.stringify(got) !== JSON.stringify(c.action)) failures.push(`control ${c.id}: tap at centre yielded ${JSON.stringify(got)}, expected ${JSON.stringify(c.action)}`);
     }
-    const KNOWN_TYPES = new Set(["select_vector", "rotate", "magnitude", "launch", "undo", "restart", "hint", "next", "select_level"]);
+    // A recognized action is one the GAME declares (rules.meta.actions) or one of the contract's
+    // reserved types. Integration review (Fable 2026-09-03): this set was hardcoded to the reference
+    // game's own action names, so every generated game with different names failed the key test.
+    const RESERVED_TYPES = ["undo", "restart", "hint", "next", "select_level"];
+    const KNOWN_TYPES = new Set([...RESERVED_TYPES, ...((rules.meta && Array.isArray(rules.meta.actions)) ? rules.meta.actions.map((a) => a && a.type).filter(Boolean) : [])]);
     const testKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " ", "Enter", "Escape", "u", "r", "h"];
     const freshForKeys = rules.createState({ levelIndex: 0, seed: 1 });
     for (const key of testKeys) {
@@ -308,7 +312,10 @@ async function main() {
       if (!action || !KNOWN_TYPES.has(action.type)) { failures.push(`key "${key}" did not map to a recognized action (got ${JSON.stringify(action)})`); continue; }
       try { rules.applyAction(freshForKeys, action); } catch (e) { failures.push(`key "${key}" -> ${JSON.stringify(action)} threw in applyAction: ${e.message}`); }
     }
-    const nonGesture = new Set(rules.NON_GESTURE_ACTIONS || []);
+    // Reserved actions (undo, restart, hint, next, select_level) are driven by the kit's own chrome and
+    // keys, so a game is not required to give them a board control; everything else the game declares
+    // as an action needs a tappable step control (accessibility: step buttons mirror gestures).
+    const nonGesture = new Set([...(rules.NON_GESTURE_ACTIONS || []), ...RESERVED_TYPES]);
     for (const a of rules.meta.actions) {
       if (nonGesture.has(a.type)) continue;
       const hasControl = layoutInfo.controls.some((c) => c.action.type === a.type);

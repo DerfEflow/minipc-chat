@@ -228,6 +228,17 @@ function buildImplementSystemPrompt({ kit, theme, levels }) {
     `- Palette: ${JSON.stringify(theme.palette)}.`,
     '- Handle the reserved action types on every game: {type:"undo"}, {type:"restart"}, {type:"hint"}, {type:"next"}, {type:"select_level", index}.',
     "- Return complete files every time: never a diff, never a partial snippet, never prose outside the file blocks.",
+    "",
+    "The automated QA harness checks these exactly; a build that misses any of them is rejected:",
+    "- controls: for EVERY control in layout(390, 844), actionForPointer(state, layout, {type:\"down\", x: centreX, y: centreY, dx:0, dy:0}) on a fresh createState({levelIndex:0, seed:1}) must return an action that is JSON-identical to that control's `action` field (same keys, same values, same key order). Board gestures may need drag/up events; step controls must answer on \"down\".",
+    "- controls: actionForKey(state, key) must return a non-null action for every one of: ArrowLeft, ArrowRight, ArrowUp, ArrowDown, \" \" (space), Enter, Escape, u, r, h; each returned action must be a type listed in meta.actions or a reserved type, and applyAction must accept it without throwing.",
+    "- controls: every action type in meta.actions, except the reserved types, must have at least one step control in layout() (a button with `action: {type: ...}`) so the game is playable without gestures.",
+    "- viewport: at 390x844, 768x1024, 1024x768 and 360x640 every control is at least 44x44, no two controls overlap, and every control and the board lie fully inside the viewport.",
+    "- core-loop: for every level, qa/fixtures.json `win` is an ordered list of actions that ends with status(state) === \"won\", and `fail` ends with \"lost\"; {type:\"restart\"} after a loss returns to \"playing\"; {type:\"undo\"} after one action restores the prior serialized state exactly.",
+    "- crash-regression: 2000 random pointer/key/reserved actions per level must never throw and validate(state) must stay true.",
+    "- save-state: deserialize(serialize(state)) equals state; deserialize of \"\", truncated text or random bytes THROWS; a save object missing schemaVersion must throw or migrate, never return an invalid state.",
+    "- analytics: every event name emitted by applyAction must appear in meta.events; props may only be numbers, booleans or short enum strings (<= 32 chars) and no key may match /email|name|phone|address|id$/i except level_id.",
+    "- offline and launch-smoke: no fetch/XMLHttpRequest/WebSocket/importScripts/sendBeacon or http(s):// literals anywhere; render.js uses only the listed Canvas 2D calls (never drawImage or createPattern).",
   ].join("\n");
 }
 
@@ -619,12 +630,33 @@ export function createGameFactoryForge({
     const theme = kit.themeFromVisual((catalogGame && catalogGame.visual) || { palette: (design.theme && design.theme.palette || []).map((hex, i) => [`Color ${i + 1}`, hex]) });
 
     let currentFiles = null, priorServedBy = null;
+    let effectiveKind = kind;
     if (kind !== "implement") {
       currentFiles = readSourceFiles(dir);
-      if (!currentFiles) return failResult(task, `No prior generated source exists for "${slug}" to ${kind}.`, true);
-      priorServedBy = readJsonFile(join(dir, "source", ".servedBy.json"));
-      design.__currentFiles = currentFiles; // prompt-builder convenience only; never written back to design.json
+      if (!currentFiles) {
+        // Integration review (Fable 2026-09-03): a "repair" queued after the very first implement attempt
+        // failed has no source to repair. Treat it as a fresh implement that carries the failure note,
+        // instead of failing the task a second time for a reason the owner cannot act on.
+        effectiveKind = "implement";
+      } else {
+        priorServedBy = readJsonFile(join(dir, "source", ".servedBy.json"));
+        design.__currentFiles = currentFiles; // prompt-builder convenience only; never written back to design.json
+      }
     }
+    // Every round's model output and QA verdict is kept on disk so a failed task can be diagnosed
+    // from the files themselves rather than from a one-line error (attempts/<taskId>/round-N/).
+    const attemptsDir = join(dir, "attempts", String(task.id));
+    const keepRound = (n, model, payload) => {
+      try {
+        const roundDir = join(attemptsDir, `round-${n}`);
+        mkdirSync(roundDir, { recursive: true });
+        for (const [name, text] of Object.entries(payload.files || {})) {
+          const target = join(roundDir, name.replace(/\//g, "__"));
+          writeFileSync(target, String(text));
+        }
+        writeFileSync(join(roundDir, "verdict.json"), JSON.stringify({ model, at: new Date(Number(now()) || Date.now()).toISOString(), ...payload, files: Object.keys(payload.files || {}) }, null, 2));
+      } catch {}
+    };
 
     let ladder = withFreeFirst((models.code && models.code.length) ? models.code : DEFAULT_CODE_MODELS, freeFirst);
     if (kind === "repair" && priorServedBy && priorServedBy.model && ladder.includes(priorServedBy.model)) {
@@ -633,25 +665,37 @@ export function createGameFactoryForge({
     const assets = loadAssetsForBundle(dir);
     const versionName = (project.activeBuild && project.activeBuild.id === buildId && project.activeBuild.versionName) || "0.1.0";
     const cost = makeCostTracker();
-    let totalRounds = 0, lastFailureText = "", referenceUsed = kind !== "implement";
+    let totalRounds = 0, lastFailureText = "", referenceUsed = effectiveKind !== "implement";
+    const failureLog = []; // one line per round: what went wrong, so the final error names causes, not counts
 
     for (const model of ladder) {
       if (await rc.heartbeat("implement", totalRounds, model)) return pauseResult(task, "implement", totalRounds);
+      const reasonText = [task.payload && task.payload.reason, effectiveKind !== kind ? `(the ${kind} was requested but no prior source exists; implementing from the design)` : ""].filter(Boolean).join(" ");
       const messages = [
         { role: "system", content: buildImplementSystemPrompt({ kit, theme, levels }) },
-        { role: "user", content: buildImplementUserPrompt({ kind, design, reason: task.payload && task.payload.reason, failures: task.payload && task.payload.failures, includeReference: !referenceUsed, kit }) },
+        { role: "user", content: buildImplementUserPrompt({ kind: effectiveKind, design, reason: reasonText, failures: task.payload && task.payload.failures, includeReference: !referenceUsed, kit }) },
       ];
       if (!referenceUsed) referenceUsed = true;
 
       for (let round = 1; round <= maxRounds; round++) {
         totalRounds++;
         if (round > 1 && await rc.heartbeat("implement", totalRounds, model)) return pauseResult(task, "implement", totalRounds);
-        const resp = await chat({ model, messages, maxTokens: 8000, temperature: 0.3 });
-        if (!resp || resp.ok === false || !resp.content) { lastFailureText = `${model}: ${safeErr(resp && resp.error) || "no content"}`; break; }
+        // Four complete files run 6-12k output tokens; reasoning models also spend budget thinking. A
+        // budget that cannot hold the answer surfaces as "no content" or a truncated last file, so the
+        // ceiling is generous and a truncated answer is fed back as a missing-file round.
+        const resp = await chat({ model, messages, maxTokens: 32000, temperature: 0.3 });
+        if (!resp || resp.ok === false || !resp.content) {
+          lastFailureText = `${model}: ${safeErr(resp && resp.error) || "no content"}`;
+          failureLog.push(`round ${totalRounds} ${model}: model answer unusable (${safeErr(resp && resp.error) || "empty content"}${resp && resp.finishReason ? ", finish=" + resp.finishReason : ""})`);
+          keepRound(totalRounds, model, { outcome: "no-content", error: safeErr(resp && resp.error) || "empty content", finishReason: resp && resp.finishReason });
+          break;
+        }
         cost.add(resp);
         const parsed = parseFileBlocks(resp.content);
         if (parsed.error) {
           lastFailureText = `${model}: ${parsed.error}`;
+          failureLog.push(`round ${totalRounds} ${model}: ${parsed.error}${resp.finishReason ? " (finish=" + resp.finishReason + ")" : ""}`);
+          keepRound(totalRounds, model, { outcome: "parse-error", error: parsed.error, finishReason: resp.finishReason, files: { "raw-response.txt": resp.content } });
           if (round < maxRounds) {
             messages.push({ role: "assistant", content: resp.content });
             messages.push({ role: "user", content: buildMissingFileFeedback(parsed.missing) });
@@ -684,7 +728,9 @@ export function createGameFactoryForge({
             const lines = (s.failures || []).slice(0, 12);
             return `${name}: ${s.summary || "FAILED"}${lines.length ? `\n  - ${lines.join("\n  - ")}` : ""}`;
           }).join("\n");
-          lastFailureText = `${failed.join(", ")} FAILED`;
+          lastFailureText = failed.map((name) => `${name}: ${String((suites[name] || {}).summary || "FAILED").slice(0, 160)}`).join("; ");
+          failureLog.push(`round ${totalRounds} ${model}: QA failed ${failed.join(", ")}`);
+          keepRound(totalRounds, model, { outcome: "qa-failed", failed, suites: Object.fromEntries(Object.entries(suites).map(([k, v]) => [k, { status: v.status, summary: v.summary, failures: (v.failures || []).slice(0, 20) }])), qaOk: qa && qa.ok, qaStderr: String((qa && qa.stderr) || "").slice(-2000), files: parsed.files });
           if (round < maxRounds) {
             messages.push({ role: "assistant", content: resp.content });
             messages.push({ role: "user", content: buildQaRetryFeedback(details) });
@@ -695,7 +741,8 @@ export function createGameFactoryForge({
       }
       // maxRounds exhausted on this rung without a passing build; try the next model from scratch.
     }
-    return failResult(task, `No model produced a game that passes the local checks after ${totalRounds} round(s) on ${ladder.length} model(s); last failures: ${lastFailureText || "unknown"}.`, false);
+    try { mkdirSync(attemptsDir, { recursive: true }); writeFileSync(join(attemptsDir, "failure-log.json"), JSON.stringify({ taskId: task.id, kind, effectiveKind, rounds: totalRounds, models: ladder, log: failureLog }, null, 2)); } catch {}
+    return failResult(task, `No model produced a game that passes the local checks after ${totalRounds} round(s) on ${ladder.length} model(s). ${failureLog.slice(-4).join(" | ")}. Last failure: ${lastFailureText || "unknown"}.`, false);
   }
 
   // -----------------------------------------------------------------------------------------
