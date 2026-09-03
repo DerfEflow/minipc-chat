@@ -66,6 +66,29 @@ export const MAX_MOVES = 40;
 export const VERIFY_TIMEOUT_MS = 180000;
 
 /*
+ * ENVIRONMENT FAILURE (production incident 2026-09-03: a workspace on a folder no connected node
+ * could reach burned brain/frontier/escalation on every single move, diagnosing model output that
+ * was never the problem). The exact substring hands.mjs's withinRoots() puts on every fs_read,
+ * fs_write, fs_list, and shell_run refusal outside a node's HANDS_ROOTS — probed directly from
+ * that file rather than guessed, per rule 8.6. A failure whose evidence carries this text is not
+ * a coding mistake a stronger model or a diagnosis can fix: it is the same wall every time, and
+ * `runMove` below skips the whole counsel ladder for it rather than spending on it.
+ */
+export const ENVIRONMENT_FAILURE_RE = /outside this node's allowed roots \(/i;
+export function isEnvironmentFailure(result) {
+  // The realistic incident shape: the model's own reply is fine, but the WRITE the node actually
+  // attempted was refused, and that reason lives on writeFiles' own `failed` array (`{path,
+  // reason}`), not in lastReply/checkOutput/pipelineNotes. Both are checked so a refusal at the
+  // manifest-read stage (surfaced through checkOutput/pipelineNotes by whatever caught it) is
+  // caught too.
+  const failedReasons = Array.isArray(result && result.failed)
+    ? result.failed.map((f) => (f && f.reason) || "").join(" \n ") : "";
+  const text = [result && result.lastReply, result && result.checkOutput, result && result.pipelineNotes, failedReasons]
+    .filter(Boolean).join(" \n ");
+  return ENVIRONMENT_FAILURE_RE.test(text);
+}
+
+/*
  * The frozen system block. Changing this text invalidates every provider-side cache entry, so
  * treat edits as a deliberate cost, not a tidy-up. NOTHING per-move goes in here.
  */
@@ -743,7 +766,12 @@ export function createIdeEngine({
     for (const f of files) {
       try {
         const r = await hands("fs_write", { path: root + "/" + f.path, content: f.content });
-        if (r && r.ok === false) failed.push({ path: f.path, reason: r.error || "the node refused the write" });
+        // hands.mjs's own refuse() (a path outside HANDS_ROOTS, a protected carve-out) returns
+        // { ok:false, refused:true, reason }, not `.error` — this read was checking the wrong
+        // field for exactly that shape, discovered while wiring required behavior #3 (a workspace
+        // outside a node's roots must be CLASSIFIED as an environment failure, which depends on
+        // the real refusal text actually reaching this record instead of the generic fallback).
+        if (r && r.ok === false) failed.push({ path: f.path, reason: r.reason || r.error || "the node refused the write" });
         else if (r && r.changed === false) unchanged.push(f.path);
         else { written.push(f.path); jobs.emit(job.id, { type: "file", path: f.path, bytes: f.content.length }); }
       } catch (e) { failed.push({ path: f.path, reason: String(e && e.message || e) }); }
@@ -1342,6 +1370,20 @@ export function createIdeEngine({
     if (first.ok) {
       if (lessons) { try { lessons.noteWinFor({ scope: "move", model: first.model || "" }); } catch {} }
       return first;
+    }
+    /*
+     * ENVIRONMENT (required behavior #3, production incident 2026-09-03 follow-up): a failure
+     * whose evidence names the hands node's own "outside this node's allowed roots" refusal is a
+     * workspace/machine mismatch, never a coding mistake — no amount of brain diagnosis, frontier
+     * correction, or a stronger seat changes which folders a node can reach. One clear status
+     * line replaces the usual counsel spend, and the result is tagged so the caller (server.mjs)
+     * can stop the whole build immediately instead of asking a human to retry a wall that will
+     * fail the identical way every time.
+     */
+    if (isEnvironmentFailure(first)) {
+      jobs.emit(job.id, { type: "run", command: "environment", ok: false,
+        output: (first.model ? first.model + ": " : "") + "this step could not reach its files — the workspace is outside the connected machine's allowed roots. This is a machine/folder mismatch, not something a retry or a stronger model can fix." });
+      return { ...first, stage: "environment" };
     }
     /*
      * Blocked (a carve-out refusal) and snapshot failures are terminal: nothing about the coding
