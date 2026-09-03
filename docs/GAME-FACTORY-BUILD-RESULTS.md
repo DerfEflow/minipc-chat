@@ -25,8 +25,17 @@ verified human-owner identity), PROD (measured against app.dominion.tools after 
   200 ms wall time; five tampering tests flip the right suite; runner timeouts and crashes report honestly.
 - RIG: Run to playtest as a verified human owner: IDEA -> SPECIFICATION with 11 artifacts, every one
   VERIFIED on the owner's real Google Drive; SPECIFICATION and VISUAL_SYSTEM approvals recorded with the
-  Run-to-playtest rationale; supervisor advanced to ARCHITECTURE and the forge claimed the design task.
-  (Continued below as the run progresses.)
+  Run-to-playtest rationale; design (gx10/qwen3-coder-30b, free), assets (gpt-image-2 icon and splash,
+  kit-drawn 192 icon, provenance recorded), then the implement task.
+- RIG: the first implement attempt failed honestly (see fixes 3 to 5 below); the owner's Retry re-queued
+  work on the same build; DeepSeek v4 pro produced a passing game in three rounds (truncated answer,
+  QA-failed round with 4 suites, then pass). Build 0.1.1: INTEGRATION verified, 11 of 12 suites (the
+  bundle still carried the pre-fix harness), supervisor routed the failure into repair build 0.1.2 which
+  passed 12 of 12 and reached PLAYTEST_READY at 21:28Z with a playable bundle served under CSP.
+- RIG: iteration: Request changes with a plain-language note ("make level 1 a pure tutorial ... rename
+  the Launch control to LAUNCH PULSE") -> REVISION -> revise build 0.1.3 -> 12 of 12 -> PLAYTEST_READY
+  at 21:34Z (five minutes end to end), new bundle served, old build's approvals invalidated.
+- RIG: the kit runtime boots the generated bundle through a fake DOM (controls drawn, input dispatched).
 
 ## Fixes found by integration (not by the lanes)
 
