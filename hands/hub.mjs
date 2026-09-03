@@ -39,6 +39,13 @@
  * the socket itself never fires "close" (the exact "healthy-looking dead stream" failure mode) —
  * so a dispatch to that node name goes back to `offline:true` FAST instead of waiting out a job
  * timeout against a connection nothing is listening on.
+ *
+ * THE SWEEP IS BEAT-CAPABLE-ONLY (lead review, 2026-09-03). It never touches an entry that
+ * connected with no instanceToken at all. Production still runs hands clients that predate `itok`
+ * and /hands/beat entirely — the GX10 containers, customers' installed per-user nodes, and a stale
+ * pre-hands/4 laptop copy — and for those the connect itself plus incidental job traffic is the
+ * ONLY inbound evidence there will ever be. Sweeping a legacy node on the same clock as a
+ * beat-capable one would evict every legacy node once a minute, forever; see sweepStale() below.
  */
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { startSseHeartbeat } from "../sseheartbeat.mjs";
@@ -217,9 +224,22 @@ export function createHandsHub({
   // fired — a tunnel flap can leave a socket half-open for a long time) but nothing is actually
   // proving the node on the other end is still there. Evict it so the next dispatch fails fast
   // (offline:true) instead of waiting out a job timeout against a dead stream.
+  //
+  // BEAT-CAPABLE ONLY (lead review, 2026-09-03). This sweep must NEVER touch a legacy entry that
+  // registered with no instanceToken at all: production still runs old hands clients that never
+  // send /hands/beat and never mint a token — the GX10 containers (gx10, gx10-gamefactory),
+  // customers' installed nodes (forge-<id>, user:<uid>), and the stale Downloads laptop copy
+  // (hands/3, see hands.mjs's header note). A legacy node's ONLY inbound evidence is the connect
+  // itself plus whatever job result/chunk traffic happens to flow, so it goes quiet for long
+  // stretches by design, not because anything is wrong — sweeping it on the same clock as a
+  // beat-capable node would evict every legacy node once a minute, forever. A legacy entry keeps
+  // the pre-existing contract instead: it lives until its socket fires "close", and the
+  // duplicate-connect rule above already adopts a reconnect for it once ITS OWN inbound evidence
+  // goes stale (recentInboundMs), so there is no lockout either way.
   function sweepStale() {
     const now = Date.now();
     for (const [name, entry] of [...nodes.entries()]) {
+      if (!entry.instanceToken) continue;   // legacy, no beat contract — never actively evicted
       const age = now - (entry.lastInbound || entry.connectedAt);
       if (age <= staleEvictMs) continue;
       try { entry.res.end(); } catch {}

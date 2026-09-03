@@ -72,6 +72,34 @@ async function beat(node, itok) {
   });
   return r.json();
 }
+// Reads a connection's raw SSE body until it sees the `job` frame the hub writes on dispatch, and
+// returns its parsed { id, tool, args, ... }. Used to simulate a LEGACY node: a real hands.mjs
+// would read this same frame and POST the result back; here the test does that POST by hand so it
+// controls exactly what the body does and does not contain (e.g. no instanceToken).
+async function readJobFrame(bodyStream, timeoutMs = 3000) {
+  // Deliberately does NOT cancel the reader on success: cancelling a fetch Response body reader
+  // aborts the underlying request, which the hub sees as the node's socket closing — exactly the
+  // real disconnect path (req.on("close")). A real hands.mjs keeps its stream open indefinitely
+  // after reading one job frame, so this must too, or the test would evict its own "node" by the
+  // mere act of reading its stream. Only the give-up (timeout) path releases the reader.
+  const reader = bodyStream.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const remaining = Math.max(0, deadline - Date.now());
+    const res = await Promise.race([
+      reader.read(),
+      new Promise((r) => setTimeout(() => r({ __timeout: true }), remaining)),
+    ]);
+    if (res.__timeout || res.done) break;
+    buf += dec.decode(res.value, { stream: true });
+    const m = buf.match(/data: (\{[^\n]*"id"[^\n]*\})/);
+    if (m) return JSON.parse(m[1]);
+  }
+  try { await reader.cancel(); } catch {}
+  return null;
+}
 
 // ---- 1. same-token reconnect preempts immediately, zero 409s ----
 let firstConn, secondConn;
@@ -132,8 +160,9 @@ await t("POST /hands/beat advances lastInbound only for a matching instanceToken
   conn.close();
 });
 
-// ---- 5. stale sweep evicts a node whose inbound evidence goes quiet, even with no "close" ----
-await t("the stale sweep evicts a node with no recent inbound evidence, socket 'close' or not", async () => {
+// ---- 5. stale sweep evicts a BEAT-CAPABLE node whose inbound evidence goes quiet, even with no
+// "close" (a legacy node with no instanceToken is exempt — see test 5b) ----
+await t("the stale sweep evicts a beat-capable node with no recent inbound evidence, socket 'close' or not", async () => {
   const conn = await connect("gamma", "itok-G");
   assert.equal(conn.r.status, 200);
   await sleep(20);
@@ -147,6 +176,62 @@ await t("the stale sweep evicts a node with no recent inbound evidence, socket '
   const dispatched = await hub.dispatch("gamma", "node_info", {}, { timeoutMs: 2000 });
   assert.equal(dispatched.ok, false);
   assert.equal(dispatched.offline, true, "a dispatch to the evicted node must fail FAST as offline, not hang out a timeout");
+  conn.close();
+});
+
+/*
+ * ---- 5b. lead review, 2026-09-03: legacy nodes must be IMMUNE to the stale sweep ----
+ * Production still runs hands clients that predate instanceToken/beat entirely: the GX10
+ * containers (gx10, gx10-gamefactory), customers' installed nodes (forge-<id>, user:<uid>), and a
+ * stale pre-hands/4 laptop copy found running on this machine. None of them will EVER send
+ * /hands/beat or connect with an itok — their only inbound evidence is the connect itself plus
+ * whatever job traffic happens to flow. If the sweep evicted them on the same clock as a
+ * beat-capable node, every legacy node in production would be disconnected once a minute forever.
+ */
+await t("a legacy node (no instanceToken) is NEVER evicted by the stale sweep, while a beat-capable twin with no beats IS", async () => {
+  const legacy = await connect("zeta-legacy", "");             // no itok at all -> legacy contract
+  const beatCapable = await connect("zeta-modern", "itok-Z");  // has itok, but never beats after connect
+  await sleep(20);
+  assert.equal(hub.nodeNames().includes("zeta-legacy"), true);
+  assert.equal(hub.nodeNames().includes("zeta-modern"), true);
+
+  // Neither sends a beat and neither closes its socket. staleEvictMs=400, sweepMs=50 — wait well
+  // past several sweep cycles.
+  await sleep(500);
+
+  assert.equal(hub.nodeNames().includes("zeta-legacy"), true,
+    "a legacy (no-instanceToken) node must NEVER be actively evicted by the stale sweep — its only evidence is the connect itself, by design");
+  assert.equal(hub.nodeNames().includes("zeta-modern"), false,
+    "a beat-capable node that stopped proving liveness must still be evicted");
+
+  legacy.close();
+  beatCapable.close();
+});
+
+// ---- 5c. lead review: a legacy node's own /hands/result (no instanceToken in the body at all)
+// must still advance lastInbound — the job/result channel is inbound evidence in its own right,
+// independent of the instanceToken mechanism entirely (see handleResult in hub.mjs). ----
+await t("a legacy node's /hands/result, with no instanceToken in the body, still advances lastInbound", async () => {
+  const conn = await connect("epsilon", "");   // legacy: connects with no itok
+  await sleep(20);
+  const before = (await nodesSnapshot()).nodes.find((n) => n.name === "epsilon").lastInbound;
+  await sleep(30);
+
+  const dispatchPromise = hub.dispatch("epsilon", "node_info", {}, { timeoutMs: 5000 });
+  const job = await readJobFrame(conn.r.body);
+  assert.ok(job && job.id, "expected a job frame on the legacy node's stream");
+
+  // A real legacy hands.mjs POSTs exactly this shape: no instanceToken field anywhere.
+  const rres = await fetch(BASE + "/hands/result", {
+    method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + TOKEN },
+    body: JSON.stringify({ node: "epsilon", jobId: job.id, result: { ok: true, host: "epsilon" } }),
+  });
+  assert.equal(rres.status, 200);
+  const dispatched = await dispatchPromise;
+  assert.equal(dispatched.ok, true, "the dispatch must resolve normally from the legacy node's result");
+
+  const after = (await nodesSnapshot()).nodes.find((n) => n.name === "epsilon").lastInbound;
+  assert.ok(after > before, "a legacy node's /hands/result must still advance lastInbound: " + before + " -> " + after);
   conn.close();
 });
 
