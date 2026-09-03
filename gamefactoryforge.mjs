@@ -609,13 +609,16 @@ export function createGameFactoryForge({
       toolchain: "web-canvas",
     };
   }
-  function assembleFinal({ finalDir, generated, meta, assets, expectedSha }) {
+  // kit.assembleBundle is async (LANE-gfkit.md); the forge's unit tests used a synchronous fake, so the
+  // missing `await` only showed on the rig: the result carried a Promise's undefined bundleSha256 and the
+  // supervisor never saw a fingerprint (integration review 2026-09-03). Both call sites now await.
+  async function assembleFinal({ finalDir, generated, meta, assets, expectedSha }) {
     if (existsSync(finalDir) && readdirSync(finalDir).length) {
       const existing = readJsonFile(join(finalDir, "build.json"));
       if (existing && existing.bundleSha256 === expectedSha) return existing; // idempotent retry of the same task attempt
       throw new Error(`A build bundle already exists at this build's path with different content than this task just produced (expected ${expectedSha}, found ${existing ? existing.bundleSha256 : "an unreadable build.json"}); refusing to overwrite it.`);
     }
-    return kit.assembleBundle({ outDir: finalDir, generated, meta, assets });
+    return await kit.assembleBundle({ outDir: finalDir, generated, meta, assets });
   }
 
   async function runGameplayTask(task, project, rc) {
@@ -709,12 +712,12 @@ export function createGameFactoryForge({
           const resultsDir = join(tempRoot, "results");
           mkdirSync(resultsDir, { recursive: true });
           const meta = buildMeta({ design, catalogGame, theme, buildId, versionName });
-          const buildDoc = kit.assembleBundle({ outDir: bundleDir, generated: parsed.files, meta, assets });
+          const buildDoc = await kit.assembleBundle({ outDir: bundleDir, generated: parsed.files, meta, assets });
           const qa = await runner.run({ bundleDir, resultsDir });
           const suites = (qa && qa.results && qa.results.suites) || {};
           const failed = MUST_PASS_LOCALLY.filter((name) => !suites[name] || suites[name].status !== "PASSED");
           if (!failed.length) {
-            const finalDoc = assembleFinal({ finalDir: buildsDir(buildId), generated: parsed.files, meta, assets, expectedSha: buildDoc.bundleSha256 });
+            const finalDoc = await assembleFinal({ finalDir: buildsDir(buildId), generated: parsed.files, meta, assets, expectedSha: buildDoc.bundleSha256 });
             const servedBy = resp.servedBy || { model };
             persistSource(dir, buildId, parsed.files, { model, servedBy, at: Number(now()) || Date.now() });
             return completeResult(task, {

@@ -247,10 +247,22 @@ export function createGameFactorySupervisor({
       return doQueueGameplay(detail, sidecar, activeBuildId, kind, reason, failures,
         gameplayTask ? `previous gameplay task ${gameplayTask.id} ended ${gameplayTask.status}; owner retried` : "active build has no gameplay task yet");
     }
-    if (completedGameplay && clean(completedGameplay.result?.bundleSha256, 128)) {
-      return doTransition(detail, "INTEGRATION", "to-integration", "build task completed with a bundle fingerprint");
+    if (completedGameplay) {
+      // The fingerprint normally rides in the task result; the bundle's own build.json is the durable
+      // second source (integration review 2026-09-03: a result without the fingerprint left a finished
+      // bundle sitting at IMPLEMENTATION forever). Either one lets the build move on to verification.
+      const sha = clean(completedGameplay.result?.bundleSha256, 128) || bundleShaFromDisk(activeBuildId);
+      if (sha) return doTransition(detail, "INTEGRATION", "to-integration", `build task completed with bundle ${sha.slice(0, 12)}`);
+      return doBlock(detail, `The build task completed but produced no bundle for build ${activeBuildId}; nothing to verify. Retry re-queues the build.`);
     }
     return { acted: false };
+  }
+
+  function bundleShaFromDisk(buildId) {
+    for (const candidate of [join(dataDir, "game-factory", "builds", buildId, "bundle", "build.json"), join(dataDir, "game-factory", "builds", buildId, "build.json")]) {
+      try { const doc = JSON.parse(readFileSync(candidate, "utf8")); const sha = clean(doc?.bundleSha256, 128); if (sha) return sha; } catch {}
+    }
+    return "";
   }
 
   function doQueueGameplay(detail, sidecar, buildId, kind, reason, failures, why) {

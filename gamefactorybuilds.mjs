@@ -78,7 +78,9 @@ export function createGameFactoryBuilds({ dataDir, store } = {}) {
   function summary({ uid, projectId, buildId } = {}) {
     if (!buildBelongs({ uid, projectId, buildId })) return null;
     const base = join(root, clean(buildId, 120));
-    const build = parseJson(join(base, "build.json"));
+    // The kit's assembleBundle writes build.json INSIDE the bundle it assembles; an older layout kept it
+    // beside the bundle. Read whichever exists so the card never goes blank for a build that is there.
+    const build = parseJson(join(base, "bundle", "build.json")) || parseJson(join(base, "build.json"));
     const results = parseJson(join(base, "qa", "results.json"));
     if (!build && !results) return null;
     const suites = results && results.suites && typeof results.suites === "object" ? results.suites : {};

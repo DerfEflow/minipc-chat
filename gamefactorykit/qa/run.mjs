@@ -501,7 +501,14 @@ async function main() {
           emittedCount++;
           if (!allowed.has(ev.name)) failures.push(`event "${ev.name}" (level ${ids[i]}) is not declared in meta.events`);
           for (const [key, value] of Object.entries(ev.props || {})) {
-            if (key !== "level_id" && idPattern.test(key)) failures.push(`event "${ev.name}" prop key "${key}" looks like a free identifier field`);
+            // Privacy rule, made precise (integration review 2026-09-03): a key ending in "id" is only a
+            // problem when it carries something that could identify a PERSON (an email-shaped string, a
+            // long opaque token). Level and vector indices named vaultId/vectorId are gameplay props and
+            // are allowed; email/name/phone/address keys stay forbidden whatever the value.
+            const personal = /(email|phone|address)$/i.test(key) || (/name$/i.test(key) && key !== "level_name");
+            const opaqueId = /id$/i.test(key) && key !== "level_id" && typeof value === "string"
+              && (value.includes("@") || value.length > 12 || /^[0-9a-f-]{16,}$/i.test(value));
+            if (personal || opaqueId) failures.push(`event "${ev.name}" prop key "${key}" looks like a personal identifier field`);
             if (typeof value === "string" && value.length > 32) failures.push(`event "${ev.name}" prop "${key}" is a ${value.length}-char string, over the 32-char budget`);
           }
         }
@@ -562,9 +569,13 @@ async function main() {
         if (!manifest[field]) failures.push(`manifest.webmanifest missing field: ${field}`);
       }
       const icons = Array.isArray(manifest.icons) ? manifest.icons : [];
+      // The Foundry returns 1024x1024 for the "512" icon and the manifest records the real size, which
+      // is a valid PWA icon for the 512 slot. Accept any entry at least as large as the slot asks for.
+      const dim = (sizes) => Number(String(sizes || "").split("x")[0]) || 0;
       for (const size of ["192x192", "512x512"]) {
-        const entry = icons.find((ic) => ic.sizes === size);
-        if (!entry) failures.push(`manifest.webmanifest missing an icon entry sized ${size}`);
+        const need = dim(size);
+        const entry = icons.find((ic) => ic.sizes === size) || icons.find((ic) => dim(ic.sizes) >= need);
+        if (!entry) failures.push(`manifest.webmanifest missing an icon entry sized ${size} (or larger)`);
         else {
           const rel = entry.src.replace(/^\.?\//, "");
           if (!bundleFiles.includes(rel)) failures.push(`manifest icon ${size} points at missing file: ${entry.src}`);

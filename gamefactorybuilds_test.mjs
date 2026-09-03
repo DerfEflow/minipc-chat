@@ -12,7 +12,8 @@ mkdirSync(join(bundle, "game"), { recursive: true });
 mkdirSync(join(dir, "game-factory", "builds", BUILD, "qa"), { recursive: true });
 writeFileSync(join(bundle, "index.html"), "<title>Vector Vault</title>");
 writeFileSync(join(bundle, "game", "rules.js"), "export const meta = {};");
-writeFileSync(join(dir, "game-factory", "builds", BUILD, "build.json"), JSON.stringify({ buildId: BUILD, versionName: "0.1.1", bundleSha256: "a".repeat(64), files: [{ path: "index.html" }, { path: "game/rules.js" }], toolchain: { lane: "web-canvas" }, createdAt: "2026-09-03T00:00:00.000Z" }));
+// build.json lives inside the bundle, exactly where gamefactorykit's assembleBundle writes it.
+writeFileSync(join(bundle, "build.json"), JSON.stringify({ buildId: BUILD, versionName: "0.1.1", bundleSha256: "a".repeat(64), files: [{ path: "index.html" }, { path: "game/rules.js" }], toolchain: { lane: "web-canvas" }, createdAt: "2026-09-03T00:00:00.000Z" }));
 writeFileSync(join(dir, "game-factory", "builds", BUILD, "qa", "results.json"), JSON.stringify({ schema: "gf-qa/1", runner: "server-qa", suites: { "core-loop": { status: "PASSED", summary: "ok" }, offline: { status: "FAILED", summary: "fetch( found" } } }));
 // A bundle for a build the store does not know about.
 mkdirSync(join(dir, "game-factory", "builds", OTHER, "bundle"), { recursive: true });
