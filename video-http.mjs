@@ -6,7 +6,7 @@
  * video.mjs and the FFmpeg implementation remains in video-media.mjs.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, extname, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -309,6 +309,8 @@ function projectForClient(state) {
     createdAt: state.createdAt,
     updatedAt: state.updatedAt,
     ai: clientAi(state.ai),
+    characters: clone(state.characters || []),
+    productions: clone(state.productions || []),
   };
 }
 
@@ -449,6 +451,10 @@ export function createVideoHttp({
   desktopPresence = null,
   now = Date.now,
   bootProbe = false,
+  // The permanent-character store (videocharacters.mjs), video-characters lane. Optional so every
+  // other test/deployment of this module keeps working unchanged when it is not wired: character
+  // and cast-hydration routes report 501 instead of throwing at construction time.
+  characters = null,
 } = {}) {
   if (!feature || typeof feature !== "object") throw new TypeError("feature is required");
   if (typeof resolveTenant !== "function") throw new TypeError("resolveTenant is required");
@@ -690,10 +696,72 @@ export function createVideoHttp({
     return { allowed: true };
   }
 
+  /*
+   * CAST HYDRATION (video-characters lane, required behavior #2: "GET /projects/:id returns
+   * hydrated cast ... so the storyboard can render chips without a second call"). The project
+   * store only ever holds { id, role } attachment pairs (video.mjs never imports the characters
+   * store); this resolves each id against `characters` into the shape the client actually needs.
+   * A deleted-but-still-attached id is skipped rather than erroring the whole project load.
+   */
+  function characterImageUrl(id, n) { return `${API_ROOT}/characters/${encodeURIComponent(id)}/images/${encodeURIComponent(n)}`; }
+  function hydrateCast(tenantId, attachments) {
+    if (!characters || typeof characters.getCharacter !== "function" || !Array.isArray(attachments) || !attachments.length) return [];
+    const cast = [];
+    for (const entry of attachments) {
+      try {
+        const character = characters.getCharacter(tenantId, entry?.id);
+        const primary = Array.isArray(character.images) ? character.images[0] : null;
+        cast.push({
+          id: character.id, name: character.name, description: character.description,
+          voiceNotes: character.voiceNotes || null, role: cleanText(entry?.role, 200) || null,
+          image: primary ? characterImageUrl(character.id, primary.n) : null,
+          // The primary image's stable sequence number, kept alongside its public URL so
+          // /produce can read the raw bytes for a Runware `referenceImages` data URI without
+          // re-parsing the URL — Runware cannot reach an authenticated Dominion endpoint itself.
+          imageN: primary ? primary.n : null,
+        });
+      } catch { /* A character deleted out from under a project attachment is skipped, not an error. */ }
+    }
+    return cast;
+  }
+  // The prompt block every creative role gets when the project has an attached cast (required
+  // behavior #3: "Screenwriter prompts include a CAST block (names, descriptions, voice notes)").
+  function castBlockText(cast) {
+    if (!Array.isArray(cast) || !cast.length) return "";
+    const lines = cast.map((c) => `- ${c.name}: ${c.description}${c.voiceNotes ? ` (voice: ${c.voiceNotes})` : ""}${c.role ? ` (role: ${c.role})` : ""}`);
+    return `CAST:\n${lines.join("\n")}\n\n`;
+  }
+  // The visual orchestrator names characters per scene (`characterNames`, parsed by
+  // visualPlanFromText below); this resolves those names to the project's actual character ids by
+  // exact case-insensitive name match. Required behavior #3: "Unknown names are kept as plain text
+  // in the scene prompt (never dropped)" — an unmatched name is simply not added to characterIds;
+  // it is never stripped from wherever the model already wrote it (imagePrompt/videoPrompt/etc).
+  function mapCharacterNamesToScenes(scenes, cast) {
+    if (!Array.isArray(cast) || !cast.length || !Array.isArray(scenes)) return scenes;
+    const byName = new Map(cast.map((c) => [String(c.name || "").trim().toLowerCase(), c.id]));
+    return scenes.map((scene) => {
+      const names = Array.isArray(scene.characterNames) ? scene.characterNames : [];
+      const characterIds = [];
+      for (const raw of names) {
+        const id = byName.get(String(raw || "").trim().toLowerCase());
+        if (id && !characterIds.includes(id)) characterIds.push(id);
+      }
+      const { characterNames, ...rest } = scene;
+      return characterIds.length ? { ...rest, characterIds } : rest;
+    });
+  }
+  // A small deterministic matcher for chat-triggered scriptwriting (required behavior #3), tried
+  // before the director's own classification. Kept intentionally narrow (the spec's own phrase
+  // list) so ordinary conversation about a script ("what do you think of the script so far") does
+  // not accidentally fire a paid Trinity turn.
+  const SCREENWRITE_INTENT_RE = /\b(write (?:the |a |our )?(?:script|screenplay)|screenplay|storyboard this|scenes? for)\b/i;
+
   async function getProject(tenantId, projectId) {
     const id = ensureProjectId(projectId);
     const state = typeof feature.getClientProject === "function" ? await feature.getClientProject(tenantId, id) : await feature.getProject(tenantId, id);
-    return projectForClient(state);
+    const shaped = projectForClient(state);
+    shaped.cast = hydrateCast(tenantId, shaped.characters || []);
+    return shaped;
   }
 
   async function findJob(tenantId, jobId, hintedProjectId) {
@@ -709,6 +777,77 @@ export function createVideoHttp({
       if ((project.jobs || []).some((job) => job.id === id)) return { projectId: summary.id, project };
     }
     fail(404, "video_job_missing", "Video job not found.");
+  }
+
+  // GET /jobs/:id's settle + attach-clip-to-timeline body, factored out so /produce/:id's
+  // per-scene status polling (video-characters lane, required behavior #4: "the existing download
+  // path attaches the clip to the timeline at the scene's slot") reuses the EXACT same settlement
+  // and download logic rather than a second copy that could drift from it.
+  async function settleAndDescribeJob(tenant, tenantId, projectId, jobId) {
+    let job = await feature.pollJob(tenantId, projectId, jobId);
+    const settlementCacheKey = `${tenantId}:${jobId}`;
+    if (job.status === "ready" && Number(job.cost) > 0 && job.settlement?.status !== "settled" && !settledJobs.has(settlementCacheKey)) {
+      const settlement = await meterUsage(tenant, Number(job.cost), { kind: "video_generation", provider: "runware", jobId, projectId });
+      job = typeof feature.markJobSettled === "function"
+        ? await feature.markJobSettled(tenantId, projectId, jobId, settlement || {})
+        : { ...job, settlement: { status: "settled", costUsd: Number(job.cost) } };
+      settledJobs.add(settlementCacheKey);
+    }
+    if (job.status === "ready" && job.output && !job.localOutput) {
+      job = await feature.downloadJobOutput(tenantId, projectId, jobId);
+      if (job.downloadError || !job.localOutput) fail(502, "video_download_failed", "The provider finished the video, but Dominion could not save and verify it. The provider URL remains recorded for recovery.");
+    }
+    const mediaUrl = job.localOutput ? `${API_ROOT}/media/${encodeURIComponent(projectId)}/${encodeURIComponent(basename(job.localOutput))}` : null;
+    let clips = Array.isArray(job.clips) ? clone(job.clips) : [];
+    if (!clips.length && job.localOutput) {
+      try { clips = (await getProject(tenantId, projectId)).clips.filter((item) => item.mediaJobId === jobId); } catch { /* The durable job still carries enough data for a recovery response. */ }
+    }
+    clips = clips.map((item) => ({ ...item, mediaFile: item.mediaFile || basename(job.localOutput || ""), ...(item.src ? {} : mediaUrl ? { src: mediaUrl } : {}) }));
+    const clip = clips.find((item) => item.trackId === "v1" || item.type === "video") || null;
+    const audioClip = clips.find((item) => item.trackId === "a1" || item.type === "audio") || null;
+    const projectRevision = Number((await feature.getProject(tenantId, projectId))?.history?.head) || 0;
+    const body = { ...clone(job), jobId, projectId, projectRevision, mediaUrl, hasAudio: !!job.media?.hasAudio, clips, clip, audioClip, retryAfterMs: Number(job.retry?.delayMs) || 3_000, message: job.status === "ready" ? "Video saved and verified." : job.status === "failed" ? cleanText(job.providerError?.message, 800) || "Video generation failed. No completed clip was added." : "Video generation is still running." };
+    return { job, body };
+  }
+
+  // findJob's shape, for productions (video-characters lane, required behavior #4): GET
+  // /produce/:id carries no projectId of its own, so this searches the tenant's projects the same
+  // way findJob already does for jobs.
+  async function findProduction(tenantId, productionId, hintedProjectId) {
+    if (hintedProjectId) {
+      const projectId = ensureProjectId(hintedProjectId);
+      const project = await feature.getProject(tenantId, projectId);
+      if ((project.productions || []).some((p) => p.id === productionId)) return { projectId, project };
+      fail(404, "video_production_missing", "Production not found.");
+    }
+    for (const summary of await feature.listProjects(tenantId)) {
+      const project = await feature.getProject(tenantId, summary.id);
+      if ((project.productions || []).some((p) => p.id === productionId)) return { projectId: summary.id, project };
+    }
+    fail(404, "video_production_missing", "Production not found.");
+  }
+
+  // The character store's own records are internal (file names, nextImageSeq); this is the one
+  // client-facing shape every character route returns.
+  function characterForClient(c) {
+    return {
+      id: c.id, name: c.name, description: c.description, style: c.style || "", voiceNotes: c.voiceNotes || "",
+      createdAt: c.createdAt, updatedAt: c.updatedAt,
+      images: (c.images || []).map((image) => ({ n: image.n, url: characterImageUrl(c.id, image.n), engine: image.engine, model: image.model, quality: image.quality, prompt: image.prompt, createdAt: image.createdAt })),
+    };
+  }
+  function characterHttpFail(error) {
+    if (error?.name === "CharactersFeatureError") fail(error.status || 400, error.code, error.message);
+    throw error;
+  }
+  // Read a character's reference image straight off disk as a base64 data URI for Runware's
+  // `referenceImages` field (video-characters lane, required behavior #4). A public URL is not an
+  // option here: the character image route is tenant-authenticated, and Runware's servers cannot
+  // present Dominion credentials to fetch it.
+  function resolveReferenceDataUri(tenantId, characterId, n) {
+    if (!characters || n == null) return null;
+    try { return `data:image/png;base64,${readFileSync(characters.imagePath(tenantId, characterId, n)).toString("base64")}`; }
+    catch { return null; }
   }
 
   async function meterUsage(tenant, costUsd, metadata) {
@@ -842,10 +981,17 @@ export function createVideoHttp({
     const brief = generatedSections > 0 ? String(writerState.brief || "").slice(0, MAX_SCREENPLAY_CHARS) : prompt;
     const prior = writerState.lastTurn && typeof writerState.lastTurn === "object" ? clone(writerState.lastTurn) : null;
     if (prior && Buffer.byteLength(JSON.stringify(prior), "utf8") > 1_500_000) fail(409, "screenwriter_resume_state_large", "The saved Trinity continuation state is too large to replay safely. Restore an earlier checkpoint; no reasoning or screenplay text was compacted.");
+    // CAST awareness (video-characters lane, required behavior #3): the screenwriter is told the
+    // account's attached characters by their EXACT name so it references them consistently, which
+    // is what lets the visual orchestrator's later name-to-id matching (mapCharacterNamesToScenes)
+    // actually succeed against the prose this call produces.
+    const cast = Array.isArray(project?.cast) ? project.cast : [];
+    const castBlock = castBlockText(cast);
     const userContent = generatedSections > 0
-      ? `Project: ${cleanText(project?.project?.name || project?.name, 300)}\n\nOriginal story brief:\n${brief}\n\nCurrent screenplay (authoritative, including any user edits):\n${prompt}\n\nWrite only the next new screenplay section. Continue directly from the current ending, preserve continuity, and do not repeat or rewrite the existing screenplay.`
-      : `Project: ${cleanText(project?.project?.name || project?.name, 300)}\n\nStory brief:\n${prompt}\n\nWrite only the opening screenplay section. Do not repeat the brief. Return screenplay text only.`;
-    const systemContent = "You are Dominion's principal screenwriter. Think carefully, then write vivid, production-ready screenplay prose with scene headings, action, dialogue, continuity, visual direction, and sound cues. Preserve the user's intent. Each response is one new screenplay section that Dominion saves atomically. Never repeat the existing screenplay, expose private reasoning, or claim a scene was generated or filmed.";
+      ? `${castBlock}Project: ${cleanText(project?.project?.name || project?.name, 300)}\n\nOriginal story brief:\n${brief}\n\nCurrent screenplay (authoritative, including any user edits):\n${prompt}\n\nWrite only the next new screenplay section. Continue directly from the current ending, preserve continuity, and do not repeat or rewrite the existing screenplay.`
+      : `${castBlock}Project: ${cleanText(project?.project?.name || project?.name, 300)}\n\nStory brief:\n${prompt}\n\nWrite only the opening screenplay section. Do not repeat the brief. Return screenplay text only.`;
+    const systemContent = "You are Dominion's principal screenwriter. Think carefully, then write vivid, production-ready screenplay prose with scene headings, action, dialogue, continuity, visual direction, and sound cues. Preserve the user's intent. Each response is one new screenplay section that Dominion saves atomically. Never repeat the existing screenplay, expose private reasoning, or claim a scene was generated or filmed."
+      + (castBlock ? " A CAST block lists this project's established characters; when the story uses one of them, refer to them by their exact listed name so the character stays consistent across scenes." : "");
     const messages = [{ role: "system", content: systemContent }];
     if (prior?.userContent && prior?.content) {
       const assistant = { role: "assistant", content: String(prior.content) };
@@ -1077,7 +1223,7 @@ export function createVideoHttp({
       '```json',
       '{"routing":{"path":"quick_clip|scripted|storyboarded","needs_screenwriter":false,"needs_storyboard":false,',
       '"ready_to_generate":false,"reason":"one short sentence","suggested_recommendation":"screenwriter|storyboard|generate|none",',
-      '"scene_draft":{"title":"","prompt":"","duration":5}}}',
+      '"scene_draft":{"title":"","prompt":"","duration":5}},"action":"screenwrite|none"}',
       '```',
       "How to route, by what the person is actually trying to make:",
       "- quick_clip: one shot, one concrete subject, no story. Phrases like 'quick clip', 'just a shot of', or a plain",
@@ -1089,6 +1235,8 @@ export function createVideoHttp({
       "  matter. needs_screenwriter true AND needs_storyboard true.",
       "Set suggested_recommendation to the ONE next step you would push for. Use none while you still need an answer",
       "from the person. Never set ready_to_generate true without a usable scene_draft.prompt.",
+      "Set the top-level \"action\" to \"screenwrite\" ONLY when the person is explicitly telling you to write the",
+      "script/screenplay RIGHT NOW (not merely a story that could use one). Leave it \"none\" for a recommendation.",
     ].join("\n");
     const makeProjectContext = () => JSON.stringify({ project: project?.project, screenplay: project?.screenplay, scenes: project?.scenes, timeline: { tracks: project?.tracks, clips: project?.clips }, conversationSummary: compactedSummary || null, recentConversation: conversation, requestContext: context || {} });
     const projected = requestTokenEstimate([{ role: "system", content: directorSystem }, { role: "user", content: `${makeProjectContext()}\n\nUser request:\n${message}` }]);
@@ -1147,7 +1295,7 @@ export function createVideoHttp({
   const ROUTING_RECOMMENDATIONS = new Set(["screenwriter", "storyboard", "generate", "none"]);
   const DEFAULT_ROUTING = Object.freeze({
     path: "unknown", needsScreenwriter: false, needsStoryboard: false, readyToGenerate: false,
-    reason: "", recommendation: "none", sceneDraft: null, parseFailed: true,
+    reason: "", recommendation: "none", sceneDraft: null, action: "none", parseFailed: true,
   });
   function routingFromText(text) {
     const source = String(text || "");
@@ -1177,6 +1325,10 @@ export function createVideoHttp({
     const path = ROUTING_PATHS.has(String(r.path)) ? String(r.path) : "unknown";
     const recommendation = ROUTING_RECOMMENDATIONS.has(String(r.suggested_recommendation || r.recommendation))
       ? String(r.suggested_recommendation || r.recommendation) : "none";
+    // Chat-triggered scriptwriting (video-characters lane, required behavior #3): "the director
+    // model's own classification when it answers with a { "action": "screenwrite" } marker". The
+    // marker rides at the top level of the parsed JSON, sibling to "routing" (see directorSystem).
+    const action = String((parsed && typeof parsed === "object" ? parsed.action : null) || "").toLowerCase() === "screenwrite" ? "screenwrite" : "none";
     return {
       directive,
       routing: {
@@ -1188,6 +1340,7 @@ export function createVideoHttp({
         reason: cleanText(r.reason, 500),
         recommendation,
         sceneDraft,
+        action,
         parseFailed: false,
       },
     };
@@ -1232,6 +1385,11 @@ export function createVideoHttp({
           videoPrompt: cleanText(scene?.videoPrompt || scene?.video_prompt, 32_000),
           continuity: cleanText(scene?.continuity, 8_000),
           suggestedVideoModel: cleanText(scene?.suggestedVideoModel || scene?.suggested_video_model, 200),
+          // Character names the orchestrator assigned to this scene (video-characters lane,
+          // required behavior #3). Resolved to characterIds by mapCharacterNamesToScenes once the
+          // caller has the project's cast; kept as plain names here since this parser has no
+          // project context of its own.
+          characterNames: (Array.isArray(scene?.characterNames) ? scene.characterNames : Array.isArray(scene?.character_names) ? scene.character_names : []).slice(0, 20).map((n) => cleanText(n, 160)).filter(Boolean),
         };
       }),
     };
@@ -1239,12 +1397,18 @@ export function createVideoHttp({
 
   async function callVisualOrchestrator(tenant, project, message, director, deadlineAt) {
     const conversation = director.compaction?.summary ? { compactedSummary: director.compaction.summary } : project?.messages || [];
-    const source = JSON.stringify({ screenplay: project?.screenplay, conversation, currentScenes: project?.scenes || [], projectSettings: project?.project, userRequest: message, directorPlan: director.directive });
+    const cast = Array.isArray(project?.cast) ? project.cast : [];
+    const source = JSON.stringify({ screenplay: project?.screenplay, conversation, currentScenes: project?.scenes || [], projectSettings: project?.project, userRequest: message, directorPlan: director.directive, cast: cast.map((c) => ({ name: c.name, description: c.description, voiceNotes: c.voiceNotes || null })) });
     const maxTokens = Math.min(16_384, Math.max(512, Number(nvidia.visualMaxTokens) || 8_192));
     const temperature = Number.isFinite(Number(nvidia.visualTemperature)) ? Number(nvidia.visualTemperature) : 1;
     const topP = Number.isFinite(Number(nvidia.visualTopP)) ? Number(nvidia.visualTopP) : 0.95;
+    // CAST-aware scene assignment (video-characters lane, required behavior #3): when the project
+    // has attached characters, each scene must name which of them appear so the server can map
+    // those names to character ids (mapCharacterNamesToScenes, below) and hydrate consistency
+    // reference images at /produce time.
+    const castInstruction = cast.length ? " The request includes a \"cast\" list of this project's established characters (name, description, voiceNotes). Every scene JSON object must also include \"characterNames\": an array of the exact cast names appearing in that scene (empty array if none). Use the cast's exact names, never a paraphrase." : "";
     const messages = [
-      { role: "system", content: "You are Dominion's visual orchestrator. Read the creative director plan, screenplay, and saved conversation, then produce the images needed in exact story order. Return JSON only in this shape: {\"scenes\":[{\"order\":1,\"sceneId\":\"scene_1\",\"title\":\"\",\"imagePrompt\":\"\",\"videoPrompt\":\"\",\"continuity\":\"\",\"suggestedVideoModel\":\"\"}]}. Use no more than 100 scenes. Image prompts must be specific enough to preserve characters, wardrobe, location, lighting, composition, lens, and continuity. Do not claim any image or video was generated." },
+      { role: "system", content: "You are Dominion's visual orchestrator. Read the creative director plan, screenplay, and saved conversation, then produce the images needed in exact story order. Return JSON only in this shape: {\"scenes\":[{\"order\":1,\"sceneId\":\"scene_1\",\"title\":\"\",\"imagePrompt\":\"\",\"videoPrompt\":\"\",\"continuity\":\"\",\"suggestedVideoModel\":\"\"}]}. Use no more than 100 scenes. Image prompts must be specific enough to preserve characters, wardrobe, location, lighting, composition, lens, and continuity. Do not claim any image or video was generated." + castInstruction },
       { role: "user", content: source },
     ];
     enforceContextWindow("video_visual_context_limit", "The visual-orchestrator request", messages, LONG_CONTEXT_TOKENS, maxTokens);
@@ -1265,7 +1429,10 @@ export function createVideoHttp({
     ];
     const served = await runAgentLadder("visual_orchestrator", ladder);
     await maybeMeterProvider(tenant, PROVIDER_CONFIG_BY_NAME[served.servedBy.provider], served.usage, { kind: "video_visual_orchestration", provider: served.servedBy.provider, model: served.servedBy.model });
-    return { available: true, plan: served.plan, usage: served.usage, model: served.servedBy.model, servedBy: served.servedBy };
+    // Resolve the orchestrator's own character names to this project's actual character ids
+    // (never dropping an unmatched name from wherever it already appears in the prose fields).
+    const plan = { ...served.plan, scenes: mapCharacterNamesToScenes(served.plan.scenes, cast) };
+    return { available: true, plan, usage: served.usage, model: served.servedBy.model, servedBy: served.servedBy };
   }
 
   async function callLiaison(tenant, project, message, director, visual, deadlineAt) {
@@ -1532,6 +1699,74 @@ export function createVideoHttp({
       }
       return { text: result.text, screenplaySha256: createHash("sha256").update(result.text).digest("hex"), model: result.model, projectId, usage: result.usage, finishReason: result.finishReason, truncated: result.truncated, servedBy: result.servedBy || null };
     } finally { activeScreenwriterProjects.delete(activeKey); screenwriterActivityVersion++; }
+  }
+
+  // The chat reply for a screenwrite turn is a deterministic summary of what was ACTUALLY saved,
+  // never a further paid liaison call (disclosed scope decision — see the lane report). It is
+  // built entirely from real state, so it can say what happened without risking a claim that
+  // outruns the checkpoint that was just written.
+  function composeScreenwriteSummary(screenResult, visual) {
+    const words = String(screenResult?.text || "").trim() ? String(screenResult.text).trim().split(/\s+/).length : 0;
+    const sceneCount = visual?.available ? (visual.plan?.scenes?.length || 0) : 0;
+    const sceneLine = visual?.available
+      ? `broke it into ${sceneCount} storyboard scene${sceneCount === 1 ? "" : "s"}`
+      : `the storyboard was not rebuilt this turn${visual?.error?.message ? ` (${visual.error.message})` : ""}`;
+    return `Wrote it. That is ${words.toLocaleString()} word${words === 1 ? "" : "s"} of screenplay saved to the project, and ${sceneLine}.`
+      + (screenResult?.truncated ? " Trinity hit its output limit on this pass; ask again to continue writing from here." : "");
+  }
+
+  /*
+   * CHAT-TRIGGERED SCRIPTWRITING (video-characters lane, required behavior #3): "when the user
+   * asks for a script or the client sends action: 'screenwrite', the server runs the screenwriter
+   * turn with the chat message (plus prior chat context) as the brief, saves the screenplay and
+   * scenes through the normal checkpoint path". This deliberately bypasses callDirector/
+   * callLiaison for this turn (disclosed scope decision, see the lane report): the intent is
+   * already unambiguous by the time this runs, so a further paid director+liaison round trip
+   * would only add cost and latency without changing what happens. It reuses
+   * executeScreenwriterTurn (the SAME durable/reconciliation-safe path the dedicated
+   * POST /screenwrite endpoint uses) for the screenplay, then callVisualOrchestrator + the normal
+   * updateAiState checkpoint for the scenes — both CAST-aware per the edits above.
+   */
+  async function runChatScreenwrite({ tenant, tenantId, projectId, expectedProjectRevision, message, deadlineAt }) {
+    await modelBilling(tenant);
+    const internalProject = await feature.getProject(tenantId, projectId);
+    if (pendingScreenwriterAttempt(internalProject)) fail(409, "screenwriter_reconciliation_required", "This project has Trinity work awaiting reconciliation. Resolve it before writing from chat; no provider calls were made.");
+    const project = await getProject(tenantId, projectId);
+    if (Number(project?.projectRevision) !== expectedProjectRevision) fail(409, "video_project_revision_stale", "The project changed before the screenwriter started. Refresh it and send the request again; no provider calls were made.");
+    // Prior chat context folded into the brief ("chat message plus prior chat context"), capped
+    // the same way the director's own conversationChunks bounds context so a long-running chat
+    // cannot eat the screenwriter's 115k token budget on history alone.
+    const priorContext = (project.messages || []).slice(-12).map((m) => `${m.role === "user" ? "User" : "Producer"}: ${cleanText(m.content, 4000)}`).join("\n");
+    const brief = priorContext ? `${priorContext}\nUser: ${message}` : message;
+
+    const screenResult = await executeScreenwriterTurn({ tenant, tenantId, projectId, prompt: brief });
+
+    const afterScreenplay = await getProject(tenantId, projectId);
+    let visual = { available: false, model: NVIDIA_NEMOTRON_SUPER_MODEL, plan: null, usage: null, error: null, servedBy: null };
+    try {
+      visual = await callVisualOrchestrator(tenant, afterScreenplay, message, { directive: "The screenwriter just wrote the screenplay below from this chat request. Break it into ordered storyboard scenes.", compaction: null }, deadlineAt);
+    } catch (error) {
+      if (!(error instanceof VideoHttpError) || !String(error.code || "").includes("visual_orchestrator")) throw error;
+      visual = { available: false, model: NVIDIA_NEMOTRON_SUPER_MODEL, plan: null, usage: null, error: { code: error.code, message: error.message }, servedBy: null };
+    }
+
+    const conversation = {
+      at: new Date(Number(now())).toISOString(), user: message,
+      reply: composeScreenwriteSummary(screenResult, visual),
+      servedBy: { screenwriter: clone(screenResult.servedBy || null), visualOrchestrator: clone(visual.servedBy || null) },
+    };
+    const saved = await feature.updateAiState(tenantId, projectId, {
+      expectedProjectRevision: Number(afterScreenplay.projectRevision),
+      visualOrchestrator: { model: visual.model, available: visual.available, usage: clone(visual.usage), plan: clone(visual.plan), error: clone(visual.error), servedBy: clone(visual.servedBy || null) },
+      visualPlanScenes: visual.available ? clone(visual.plan.scenes) : null,
+      conversation,
+    });
+    const applyStatus = cleanText(saved?.ai?.visualOrchestrator?.state?.applyStatus, 80) || (visual.available ? "unknown" : "unavailable");
+    return {
+      reply: conversation.reply,
+      visualOrchestrator: { model: visual.model, available: visual.available, applied: applyStatus === "applied", applyStatus, plan: clone(visual.plan), error: clone(visual.error), servedBy: clone(visual.servedBy || null) },
+      screenwriter: { model: screenResult.model, servedBy: clone(screenResult.servedBy || null) },
+    };
   }
 
   async function reconcileScreenwriterTurn(req, context, body) {
@@ -1978,29 +2213,8 @@ export function createVideoHttp({
     if (method === "GET" && jobRoute) {
       const jobId = ensureJobId(decodePart(jobRoute[1]));
       const located = await findJob(tenantId, jobId, parsed.searchParams.get("projectId"));
-      let job = await feature.pollJob(tenantId, located.projectId, jobId);
-      const settlementCacheKey = `${tenantId}:${jobId}`;
-      if (job.status === "ready" && Number(job.cost) > 0 && job.settlement?.status !== "settled" && !settledJobs.has(settlementCacheKey)) {
-        const settlement = await meterUsage(tenant, Number(job.cost), { kind: "video_generation", provider: "runware", jobId, projectId: located.projectId });
-        job = typeof feature.markJobSettled === "function"
-          ? await feature.markJobSettled(tenantId, located.projectId, jobId, settlement || {})
-          : { ...job, settlement: { status: "settled", costUsd: Number(job.cost) } };
-        settledJobs.add(settlementCacheKey);
-      }
-      if (job.status === "ready" && job.output && !job.localOutput) {
-        job = await feature.downloadJobOutput(tenantId, located.projectId, jobId);
-        if (job.downloadError || !job.localOutput) fail(502, "video_download_failed", "The provider finished the video, but Dominion could not save and verify it. The provider URL remains recorded for recovery.");
-      }
-      const mediaUrl = job.localOutput ? `${API_ROOT}/media/${encodeURIComponent(located.projectId)}/${encodeURIComponent(basename(job.localOutput))}` : null;
-      let clips = Array.isArray(job.clips) ? clone(job.clips) : [];
-      if (!clips.length && job.localOutput) {
-        try { clips = (await getProject(tenantId, located.projectId)).clips.filter((item) => item.mediaJobId === jobId); } catch { /* The durable job still carries enough data for a recovery response. */ }
-      }
-      clips = clips.map((item) => ({ ...item, mediaFile: item.mediaFile || basename(job.localOutput || ""), ...(item.src ? {} : mediaUrl ? { src: mediaUrl } : {}) }));
-      const clip = clips.find((item) => item.trackId === "v1" || item.type === "video") || null;
-      const audioClip = clips.find((item) => item.trackId === "a1" || item.type === "audio") || null;
-      const projectRevision = Number((await feature.getProject(tenantId, located.projectId))?.history?.head) || 0;
-      return json(res, 200, { ...clone(job), jobId, projectId: located.projectId, projectRevision, mediaUrl, hasAudio: !!job.media?.hasAudio, clips, clip, audioClip, retryAfterMs: Number(job.retry?.delayMs) || 3_000, message: job.status === "ready" ? "Video saved and verified." : job.status === "failed" ? cleanText(job.providerError?.message, 800) || "Video generation failed. No completed clip was added." : "Video generation is still running." });
+      const described = await settleAndDescribeJob(tenant, tenantId, located.projectId, jobId);
+      return json(res, 200, described.body);
     }
 
     const deliveredRoute = path.match(/^\/jobs\/([^/]+)\/delivered$/);
@@ -2099,7 +2313,43 @@ export function createVideoHttp({
           const project = await getProject(tenantId, projectId);
           if (Number(project?.projectRevision) !== expectedProjectRevision) fail(409, "video_project_revision_stale", "The project changed before the video AI team started. Refresh it and send the request again; no provider calls were made.");
           const deadlineAt = Number(now()) + Math.min(AI_TURN_TIMEOUT_MS, Math.max(30_000, Number(nvidia.aiTurnTimeoutMs) || AI_TURN_TIMEOUT_MS));
+          /*
+           * CHAT-TRIGGERED SCRIPTWRITING, explicit action or deterministic matcher (required
+           * behavior #3, intent detection tier 1 and 2 — "explicit action wins; otherwise a small
+           * deterministic matcher"). This skips the director/liaison round trip entirely: the
+           * intent is already unambiguous. Tier 3 (the director's own "action":"screenwrite"
+           * marker) is checked further below, after the director actually answers.
+           */
+          if (String(body.action || "") === "screenwrite" || SCREENWRITE_INTENT_RE.test(message)) {
+            const result = await runChatScreenwrite({ tenant, tenantId, projectId, expectedProjectRevision, message, deadlineAt });
+            return json(res, 200, {
+              reply: result.reply, projectId,
+              director: { directive: "", model: null, servedBy: null },
+              routing: { ...DEFAULT_ROUTING },
+              chips: [], sceneDraft: null,
+              visualOrchestrator: result.visualOrchestrator,
+              liaison: { model: null, servedBy: null }, saved: true,
+              degraded: result.visualOrchestrator.available ? [] : ["visualOrchestrator"],
+              action: "screenwrite",
+            });
+          }
           const director = await callDirector(tenant, project, message, body.context, deadlineAt);
+          if (director.routing?.action === "screenwrite") {
+            // Tier 3: the director itself, reading the full conversation, decided the user wants
+            // the script written right now. Its directive/routing already cost a provider call;
+            // that call is not wasted (servedBy still reflects it), but the reply the user sees is
+            // the screenwriter's own honest summary, not the director's un-acted-on directive.
+            const result = await runChatScreenwrite({ tenant, tenantId, projectId, expectedProjectRevision, message, deadlineAt });
+            return json(res, 200, {
+              reply: result.reply, projectId,
+              director: { directive: director.directive, model: director.model, servedBy: clone(director.servedBy || null) },
+              routing: clone(director.routing), chips: [], sceneDraft: null,
+              visualOrchestrator: result.visualOrchestrator,
+              liaison: { model: null, servedBy: null }, saved: true,
+              degraded: result.visualOrchestrator.available ? [] : ["visualOrchestrator"],
+              action: "screenwrite",
+            });
+          }
           /*
            * THE ORCHESTRATOR RUNS ONLY WHEN A STORYBOARD IS ACTUALLY WANTED (2026-08-05).
            * Every message used to run a 550-billion-parameter planner AND overwrite the whole
@@ -2166,6 +2416,269 @@ export function createVideoHttp({
       const status = await desktopState(req, context, body);
       if (!status.mobile && !status.desktopSession) fail(409, "desktop_capability_required", "Refresh Dominion Video on this desktop to renew its session capability.");
       return json(res, 200, { ok: true, desktopSession: status.desktopSession !== false, expiresInMs: presenceTtlMs });
+    }
+
+    /*
+     * ===== CHARACTERS (video-characters lane, required behavior #1) =====
+     * Permanent, tenant-scoped, no project relationship in the store itself — owner and credit
+     * users alike, same desktop-capability rule as every other write below.
+     */
+    if (method === "GET" && path === "/characters") {
+      if (!characters) fail(501, "video_characters_unavailable", "Character storage is not configured on this server.");
+      return json(res, 200, { characters: characters.listCharacters(tenantId).map(characterForClient) });
+    }
+    if (method === "POST" && path === "/characters") {
+      if (!characters) fail(501, "video_characters_unavailable", "Character storage is not configured on this server.");
+      const body = await readJson(req);
+      await requireDesktop(req, context, body);
+      const name = cleanText(body.name, 160);
+      if (!name) fail(400, "character_name_required", "A character name is required.");
+      const description = cleanText(body.description, 4000);
+      if (!description) fail(400, "character_description_required", "A character description is required.");
+      const style = cleanText(body.style, 2000);
+      const voiceNotes = cleanText(body.voiceNotes, 2000);
+      screenOrFail(screenContent, tenant, [name, description, style].filter(Boolean).join(". "));
+      // The Foundry's own wall (invite + credits), not video generation's stricter
+      // auto-recharge/card gate — character images ride the SAME Foundry pipeline images.mjs
+      // already gates that way, so this must match it rather than the video-jobs gate.
+      await modelBilling(tenant);
+      const quality = ["low", "medium"].includes(body.quality) ? body.quality : "medium";
+      const count = Math.min(3, Math.max(1, Number.parseInt(body.count, 10) || 1));
+      try {
+        const { character, note } = await characters.createCharacter(tenantId, { name, description, style, voiceNotes, quality, count }, { tenant });
+        return json(res, 201, { character: characterForClient(character), ...(note ? { note } : {}) });
+      } catch (error) { characterHttpFail(error); }
+    }
+
+    const charImagesRoute = path.match(/^\/characters\/([^/]+)\/images$/);
+    if (method === "POST" && charImagesRoute) {
+      if (!characters) fail(501, "video_characters_unavailable", "Character storage is not configured on this server.");
+      const body = await readJson(req);
+      await requireDesktop(req, context, body);
+      const id = decodePart(charImagesRoute[1]);
+      if (!body.prompt && !body.b64) fail(400, "character_image_input_required", "Provide a prompt or an uploaded image.");
+      if (body.prompt) screenOrFail(screenContent, tenant, cleanText(body.prompt, 4000));
+      if (!body.b64) await modelBilling(tenant); // an uploaded image spends nothing; a generated one rides the Foundry wall
+      try {
+        const character = await characters.addImage(tenantId, id, { prompt: body.prompt, b64: body.b64, quality: body.quality }, { tenant });
+        return json(res, 201, { character: characterForClient(character) });
+      } catch (error) { characterHttpFail(error); }
+    }
+
+    const charImageRoute = path.match(/^\/characters\/([^/]+)\/images\/(\d+)$/);
+    if (method === "DELETE" && charImageRoute) {
+      if (!characters) fail(501, "video_characters_unavailable", "Character storage is not configured on this server.");
+      const body = await readJson(req);
+      await requireDesktop(req, context, body);
+      try { return json(res, 200, { character: characterForClient(characters.deleteImage(tenantId, decodePart(charImageRoute[1]), charImageRoute[2])) }); }
+      catch (error) { characterHttpFail(error); }
+    }
+    if ((method === "GET" || method === "HEAD") && charImageRoute) {
+      if (!characters) fail(501, "video_characters_unavailable", "Character storage is not configured on this server.");
+      let filePath;
+      try { filePath = characters.imagePath(tenantId, decodePart(charImageRoute[1]), charImageRoute[2]); }
+      catch (error) { characterHttpFail(error); }
+      const stats = await stat(filePath);
+      res.writeHead(200, { "content-type": "image/png", "content-length": stats.size, "cache-control": "private, max-age=31536000, immutable" });
+      if (method === "HEAD") { res.end(); return true; }
+      await pipeline(createReadStream(filePath), res);
+      return true;
+    }
+
+    const characterRoute = path.match(/^\/characters\/([^/]+)$/);
+    if (characterRoute) {
+      if (!characters) fail(501, "video_characters_unavailable", "Character storage is not configured on this server.");
+      const id = decodePart(characterRoute[1]);
+      if (method === "GET") {
+        try { return json(res, 200, { character: characterForClient(characters.getCharacter(tenantId, id)) }); }
+        catch (error) { characterHttpFail(error); }
+      }
+      const body = method === "PATCH" || method === "DELETE" ? await readJson(req) : {};
+      if (method === "PATCH") {
+        await requireDesktop(req, context, body);
+        const patch = {};
+        if (body.name !== undefined) patch.name = body.name;
+        if (body.description !== undefined) patch.description = body.description;
+        if (body.style !== undefined) patch.style = body.style;
+        if (body.voiceNotes !== undefined) patch.voiceNotes = body.voiceNotes;
+        const screenText = [patch.name, patch.description, patch.style].filter((v) => typeof v === "string" && v.trim()).join(". ");
+        if (screenText) screenOrFail(screenContent, tenant, screenText);
+        try { return json(res, 200, { character: characterForClient(characters.updateCharacter(tenantId, id, patch)) }); }
+        catch (error) { characterHttpFail(error); }
+      }
+      if (method === "DELETE") {
+        await requireDesktop(req, context, body);
+        const force = body.force === true;
+        try {
+          const result = await characters.deleteCharacter(tenantId, id, {
+            force,
+            isAttached: (tid, cid) => (typeof feature.isCharacterAttached === "function" ? feature.isCharacterAttached(tid, cid) : false),
+          });
+          if (force && typeof feature.removeCharacterFromAllProjects === "function") feature.removeCharacterFromAllProjects(tenantId, id);
+          return json(res, 200, result);
+        } catch (error) { characterHttpFail(error); }
+      }
+    }
+
+    /*
+     * ===== PROJECT ATTACHMENT (required behavior #2) =====
+     */
+    const projectCharactersRoute = path.match(/^\/projects\/([^/]+)\/characters$/);
+    if (method === "POST" && projectCharactersRoute) {
+      if (typeof feature.setProjectCharacters !== "function") fail(501, "video_characters_unavailable", "Character attachment is not available.");
+      const body = await readJson(req);
+      await requireDesktop(req, context, body);
+      const projectId = ensureProjectId(decodePart(projectCharactersRoute[1]));
+      requireProjectScreenwriterIdle(tenantId, projectId);
+      const expectedProjectRevision = projectRevisionPrecondition(body);
+      const list = Array.isArray(body.characterIds) ? body.characterIds : [];
+      if (list.length > 50) fail(400, "video_character_limit", "A project can attach at most 50 characters.");
+      if (characters) {
+        for (const entry of list) {
+          const cid = typeof entry === "string" ? entry : entry?.id;
+          try { characters.getCharacter(tenantId, cid); }
+          catch { fail(400, "character_missing", `Character ${cleanText(cid, 80)} not found.`); }
+        }
+      }
+      const current = await feature.getProject(tenantId, projectId);
+      if (Number(current?.history?.head) !== expectedProjectRevision) fail(409, "video_project_revision_stale", "The project changed before this attachment could be saved. Refresh the project; the stale action was not applied.");
+      feature.setProjectCharacters(tenantId, projectId, list);
+      return json(res, 200, await getProject(tenantId, projectId));
+    }
+
+    /*
+     * ===== PRODUCE (required behavior #4): one button, one consistent production =====
+     */
+    if (method === "POST" && path === "/produce") {
+      const body = await readJson(req);
+      await requireDesktop(req, context, body);
+      requireProviderPrivacy(body, { provider: "runware" });
+      const projectId = ensureProjectId(body.projectId);
+      const expectedProjectRevision = projectRevisionPrecondition(body);
+      const dryRun = body.dryRun === true;
+      const project = await getProject(tenantId, projectId);
+      if (Number(project?.projectRevision) !== expectedProjectRevision) fail(409, "video_project_revision_stale", "The project changed before production could start. Refresh the project; nothing was submitted.");
+      if (!Array.isArray(project.scenes) || !project.scenes.length) fail(400, "video_production_no_scenes", "Add at least one storyboard scene before producing.");
+      const model = cleanText(body.model, 200) || project.project?.model || "google:gemini@omni-flash";
+      const capabilities = feature.capabilities?.[model];
+      if (!capabilities) fail(400, "video_model_unsupported", "That video model is not available.");
+      const quality = cleanText(body.quality, 20) || "medium";
+
+      const castById = new Map((project.cast || []).map((c) => [c.id, c]));
+      // "most-used characters first" (required behavior #4) is counted across the WHOLE
+      // production, not just one scene, so a scarce reference-image budget favors the cast's
+      // recurring leads over a one-scene walk-on.
+      const usageCounts = new Map();
+      for (const scene of project.scenes) for (const cid of scene.characterIds || []) usageCounts.set(cid, (usageCounts.get(cid) || 0) + 1);
+
+      const composed = project.scenes.map((scene) => {
+        // Fill defaults, NEVER refuse for a missing/out-of-range duration.
+        const duration = Number.isInteger(scene.duration) && scene.duration >= capabilities.minDuration && scene.duration <= capabilities.maxDuration
+          ? scene.duration
+          : Math.min(capabilities.maxDuration, Math.max(capabilities.minDuration, Number(project.project?.duration) || capabilities.minDuration));
+        const brandBlock = [project.project?.purpose, project.project?.platform].filter(Boolean).join(" for ");
+        const styleBlock = cleanText(project.project?.style, 2000);
+        const sceneCast = (scene.characterIds || []).map((cid) => castById.get(cid)).filter(Boolean)
+          .sort((a, b) => (usageCounts.get(b.id) || 0) - (usageCounts.get(a.id) || 0));
+        const charactersBlock = sceneCast.length
+          ? `CHARACTERS: ${sceneCast.map((c) => `${c.name}: ${c.description}; keep face, hair, wardrobe and proportions identical to the reference images.`).join(" ")}`
+          : "";
+        const prompt = [brandBlock ? `Purpose: ${brandBlock}.` : "", cleanText(scene.prompt, 32_000), charactersBlock, styleBlock ? `Style: ${styleBlock}` : ""].filter(Boolean).join(" ");
+        const referenceCap = Number(capabilities.maxReferenceImages) || 0;
+        const referenceCharacters = capabilities.modes.includes("reference") ? sceneCast.filter((c) => c.imageN != null).slice(0, referenceCap) : [];
+        const mode = referenceCharacters.length ? "reference" : "text";
+        return {
+          sceneId: scene.id, title: scene.title, prompt, duration,
+          ratio: capabilities.ratios.includes(project.project?.ratio) ? project.project.ratio : capabilities.ratios[0],
+          resolution: capabilities.resolutions.includes(project.project?.resolution) ? project.project.resolution : capabilities.resolutions[0],
+          mode, referenceCharacters, characterNames: sceneCast.map((c) => c.name),
+        };
+      });
+
+      if (dryRun) {
+        return json(res, 200, {
+          productionId: null, dryRun: true, model, quality,
+          scenes: composed.map(({ referenceCharacters: refs, ...rest }) => ({
+            ...rest,
+            referencePlan: refs.map((c) => ({ characterId: c.id, name: c.name })),
+          })),
+        });
+      }
+
+      if (!tenant.isOwner) await generationBilling(tenant); // pre-check once before submitting anything
+      const productionId = randomUUID();
+      const results = [];
+      let paused = false;
+      const CONCURRENCY = 2;
+      for (let i = 0; i < composed.length; i += CONCURRENCY) {
+        const batch = composed.slice(i, i + CONCURRENCY);
+        const outcomes = await Promise.all(batch.map(async (scene) => {
+          if (paused) return { sceneId: scene.sceneId, jobId: null, status: "paused: add credits", mode: scene.mode, prompt: scene.prompt, duration: scene.duration, ratio: scene.ratio, resolution: scene.resolution };
+          // Pre-check credit ONCE PER SCENE before submitting (required behavior #4): a mid-
+          // production credit exhaustion pauses the rest rather than failing them.
+          if (!tenant.isOwner) {
+            try { await generationBilling(tenant); }
+            catch { paused = true; return { sceneId: scene.sceneId, jobId: null, status: "paused: add credits", mode: scene.mode, prompt: scene.prompt, duration: scene.duration, ratio: scene.ratio, resolution: scene.resolution }; }
+          }
+          const referenceImages = scene.mode === "reference"
+            ? scene.referenceCharacters.map((c) => resolveReferenceDataUri(tenantId, c.id, c.imageN)).filter(Boolean)
+            : [];
+          const effectiveMode = referenceImages.length ? "reference" : "text";
+          try {
+            const submitted = await feature.submitGeneration(tenantId, projectId, {
+              model, mode: effectiveMode, prompt: scene.prompt, duration: scene.duration, ratio: scene.ratio, resolution: scene.resolution,
+              referenceImages, sceneId: scene.sceneId, idempotencyKey: `produce-${productionId}-${scene.sceneId}`,
+            }, { tenant: plainTenant(tenant) });
+            return { sceneId: scene.sceneId, jobId: submitted.jobId, status: submitted.status || "queued", mode: effectiveMode, prompt: scene.prompt, duration: scene.duration, ratio: scene.ratio, resolution: scene.resolution };
+          } catch (error) {
+            return { sceneId: scene.sceneId, jobId: null, status: "needs attention", error: cleanText(error?.code || error?.message, 200), mode: effectiveMode, prompt: scene.prompt, duration: scene.duration, ratio: scene.ratio, resolution: scene.resolution };
+          }
+        }));
+        results.push(...outcomes);
+      }
+
+      if (typeof feature.createProduction === "function") feature.createProduction(tenantId, projectId, { id: productionId, model, quality, sceneJobs: results });
+      return json(res, 202, { productionId, model, quality, scenes: results.map(({ prompt, duration, ratio, resolution, ...rest }) => rest) });
+    }
+
+    const produceStatusRoute = path.match(/^\/produce\/([^/]+)$/);
+    if (method === "GET" && produceStatusRoute) {
+      const productionId = decodePart(produceStatusRoute[1]);
+      const located = await findProduction(tenantId, productionId, parsed.searchParams.get("projectId"));
+      const production = (located.project.productions || []).find((p) => p.id === productionId);
+      if (!production) fail(404, "video_production_missing", "Production not found.");
+      const scenes = [];
+      for (const entry of production.scenes) {
+        if (!entry.jobId) { scenes.push({ sceneId: entry.sceneId, jobId: null, status: entry.status || "needs attention" }); continue; }
+        const described = await settleAndDescribeJob(tenant, tenantId, located.projectId, entry.jobId);
+        let status = described.job.status, jobId = entry.jobId;
+        if (status === "failed" && entry.mode === "reference" && !entry.textFallbackAttempted) {
+          /*
+           * CONSISTENCY-DEGRADED TEXT RETRY (required behavior #4): "a scene whose job finally
+           * fails is re-submitted once more with the text-only prompt ... before the production
+           * reports that scene as needing attention". The composed prompt already carries the
+           * CHARACTERS description block, so dropping referenceImages and mode:"reference" is the
+           * whole difference; nothing about the prompt text itself changes.
+           */
+          try {
+            const submitted = await feature.submitGeneration(tenantId, located.projectId, {
+              model: production.model, mode: "text", prompt: entry.prompt || "", duration: entry.duration || 5,
+              ratio: entry.ratio || "16:9", resolution: entry.resolution || "720p", sceneId: entry.sceneId,
+              idempotencyKey: `produce-${productionId}-${entry.sceneId}-textfallback`,
+            }, { tenant: plainTenant(tenant) });
+            jobId = submitted.jobId; status = "retrying: consistency degraded";
+            if (typeof feature.updateProductionScene === "function") feature.updateProductionScene(tenantId, located.projectId, productionId, entry.sceneId, { jobId, status, mode: "text", textFallbackAttempted: true });
+          } catch { status = "needs attention"; }
+        } else if (status === "failed") {
+          status = "needs attention";
+        }
+        // Transient statuses (queued/generating/retrying/ready) are read live from the job every
+        // poll and NOT separately persisted onto the production record — the job itself is
+        // already the durable source of truth; writing a second checkpoint on every poll would
+        // double the project's checkpoint volume for no new information.
+        scenes.push({ sceneId: entry.sceneId, jobId, status, mediaUrl: described.body.mediaUrl || null, clip: described.body.clip || null, cost: described.job.cost ?? null });
+      }
+      return json(res, 200, { productionId, projectId: located.projectId, model: production.model, quality: production.quality, scenes });
     }
 
     const mediaRoute = path.match(/^\/media\/([^/]+)\/([^/]+)$/);

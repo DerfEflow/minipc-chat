@@ -719,7 +719,16 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     return mutate(tenantId, id, "production.created", (s) => {
       s.productions = [...(s.productions || []), {
         id: String(record.id), createdAt: iso(now), model: String(record.model || ""), quality: String(record.quality || ""),
-        scenes: (Array.isArray(record.sceneJobs) ? record.sceneJobs : []).map((entry) => ({ sceneId: String(entry.sceneId || ""), jobId: entry.jobId ? String(entry.jobId) : null, mode: entry.mode ? String(entry.mode) : null, status: String(entry.status || "queued").slice(0, 60) })),
+        scenes: (Array.isArray(record.sceneJobs) ? record.sceneJobs : []).map((entry) => ({
+          sceneId: String(entry.sceneId || ""), jobId: entry.jobId ? String(entry.jobId) : null,
+          mode: entry.mode ? String(entry.mode) : null, status: String(entry.status || "queued").slice(0, 60),
+          // The exact composed prompt/duration/ratio/resolution this scene was submitted with, so
+          // the once-only consistency-degraded text retry (required behavior #4) can resubmit
+          // without re-deriving anything from the (possibly since-edited) live storyboard scene.
+          prompt: String(entry.prompt || "").slice(0, 32000), duration: Number.isInteger(Number(entry.duration)) ? Number(entry.duration) : null,
+          ratio: entry.ratio ? String(entry.ratio) : null, resolution: entry.resolution ? String(entry.resolution) : null,
+          textFallbackAttempted: !!entry.textFallbackAttempted,
+        })),
       }].slice(-50);
     }, { productionId: record.id });
   }
@@ -732,6 +741,7 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
       if (patch.jobId !== undefined) scene.jobId = patch.jobId ? String(patch.jobId) : null;
       if (patch.status !== undefined) scene.status = String(patch.status || "").slice(0, 60);
       if (patch.mode !== undefined) scene.mode = patch.mode ? String(patch.mode) : null;
+      if (patch.textFallbackAttempted !== undefined) scene.textFallbackAttempted = !!patch.textFallbackAttempted;
     }, { productionId, sceneId });
   }
   function getProduction(tenantId, id, productionId) {

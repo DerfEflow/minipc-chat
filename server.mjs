@@ -141,6 +141,7 @@ import { createAccessVerifier } from "./accessjwt.mjs";
 import { createImagesFeature } from "./images.mjs";
 import { createVideoFeature } from "./video.mjs";
 import { createVideoHttp, openRouterUsageCost } from "./video-http.mjs";
+import { createCharactersFeature } from "./videocharacters.mjs";
 import { createVideoMediaProcessor } from "./video-media.mjs";
 import { createVideoMeter } from "./video-meter.mjs";
 import { createVideoChargeSettler } from "./video-billing.mjs";
@@ -8156,8 +8157,22 @@ const videoTemporaryCleanupTimer = setInterval(() => {
 }, 60 * 60 * 1000);
 videoTemporaryCleanupTimer.unref?.();
 const videoWorkspace = createVideoWorkspace({ feature: videoFeature, processor: videoMediaProcessor });
+/*
+ * Permanent video characters (video-characters lane, 2026-09-03). videocharacters.mjs never
+ * imports images.mjs or video.mjs itself; the Foundry image ladder and the project-attachment
+ * check are both wired in HERE, the one place server.mjs is allowed to touch for this lane
+ * (LANE-video-characters.md: "images.mjs ONLY to add the programmatic entry point ... server.mjs
+ * ONLY the video wiring block ... and the images feature construction if the entry point must be
+ * passed through"). generateImagesInternal was added to imagesFeature above with no change to
+ * imagesFeature's OWN construction call, so this is purely a wiring addition.
+ */
+const videoCharactersFeature = createCharactersFeature({
+  dataDir: dataPath("video"),
+  generateImages: (args) => imagesFeature.generateImagesInternal(args),
+});
 const videoHttp = createVideoHttp({
   feature: videoFeature,
+  characters: videoCharactersFeature,
   media: videoWorkspace,
   resolveTenant,
   billing: { account: (email) => billing.account(email), canChat: (email) => billing.canChat(email) },
