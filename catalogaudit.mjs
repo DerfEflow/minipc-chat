@@ -1,11 +1,16 @@
 /*
- * Catalog audit core — shared by the CLI (tools_audit.mjs) and the server's weekly self-check.
+ * Catalog audit core — shared by the CLI (tools_audit.mjs) and the server's boot/hourly self-check.
  * Verifies the model catalog against LIVE provider data instead of trusting labels:
  *   - OpenRouter models: id exists, tool support matches toolCapable, context drift.
  *   - Direct models (openai/anthropic/deepseek): the directId exists on that provider's model list.
+ *   - NVIDIA models: BOTH the list check above AND a real chat-completion invocation (see
+ *     probeNvidiaChatLive below) — see that function's header for why presence alone is a lie here.
  * Everything is best-effort per provider: a missing key or a network failure marks that provider
- * "unchecked" rather than failing the audit. Only PROBLEMS (mislabel / dead id) flip ok=false —
- * those are the two classes that throw errors in a guest's face.
+ * "unchecked" rather than failing the audit. PROBLEMS (mislabel / dead id) flip ok=false — those are
+ * the classes that throw errors in a guest's face. Every model that fails EITHER check lands in
+ * `result.unavailable` (id -> reason), which server.mjs hands to models.catalog.mjs's
+ * setUnavailableSeats() so /api/models can hide it and a request-time caller can resolve its
+ * fallback (STABILIZE Step 1, 2026-09-03, deficiency #3-#5).
  */
 import { MODELS, modelById, TENANT_DEFAULT_MODEL, DEFAULT_MODEL, UTILITY_MODEL } from "./models.catalog.mjs";
 
@@ -72,9 +77,95 @@ async function listDirect(provider, keys) {
   return null;
 }
 
-// keys: { openrouter, openai, anthropic, deepseek, nvidia, google } — pass what you have; missing = that check skipped.
-export async function runCatalogAudit(keys = {}) {
-  const result = { checkedAt: new Date().toISOString(), ok: true, problems: [], notes: [], providers: {} };
+/*
+ * NVIDIA LIVE CHAT PROBE (STABILIZE Step 1, 2026-09-03, deficiency #1-#5).
+ *
+ * Presence in NVIDIA's /v1/models list is NOT proof a seat answers — measured fact, not a guess:
+ * three seats (z-ai/glm-5.2, nvidia/nemotron-nano-12b-v2-vl, meta/llama-3.1-70b-instruct) served
+ * HTTP 410 "has reached its end of life" while (at the time) still appearing on the list, and
+ * nvidia/nemotron-3.5-content-safety is STILL on the list today and returns HTTP 200 to an
+ * ordinary chat turn — but the 200 carries "Conversation roles must alternate user/assistant/..."
+ * as the answer, because it is a moderation classifier, not a chat model. A presence check sees
+ * three of those four as fine. Only an actual invocation catches all four, which is why this file
+ * now sends one alongside the list check, for every NVIDIA-provider seat, every audit run.
+ *
+ * Kept to NVIDIA on purpose: it is the one provider with a documented listed-but-dead trap (this
+ * comment, and docs/SIMPLIFY-ROUTING-TABLE.md section 1: "being on that list does NOT mean the
+ * account can invoke it"). OpenAI/Anthropic/DeepSeek/Google have no such history in this codebase;
+ * adding a live-invoke probe for them would be four more live calls a run for a problem nobody has
+ * measured. Revisit if one of them ever shows the same symptom.
+ *
+ * Timeout mirrors simplify.mjs's own first-token budget (20s) rather than a fresh number: the
+ * documented minimax-m3 hang was 150s+, so 20s is already enough to call it dead without the
+ * hourly audit itself hanging for minutes on one bad seat.
+ *
+ * STREAMING, not stream:false (changed same day, live-measured). A non-streaming probe of
+ * nvidia/nemotron-3.5-content-safety came back {ok:true} three times in a row (plain "OK", every
+ * time) while specs/seat_sweep.mjs, run minutes later against the SAME key through the real /chat
+ * pipeline (which streams, temperature:0, exactly like every other Simplify/chat call), hit the
+ * documented "Conversation roles must alternate..." failure on that same seat. Re-probing with
+ * stream:true + temperature:0 reproduces the failure path the real traffic actually takes; a
+ * non-streaming probe was measurably not proof of streaming liveness for this classifier model.
+ * Kept as an SSE reader here (own client, not openAiCompatStream) to avoid pulling a second file
+ * into this lane's ownership boundary for one probe function.
+ */
+const NVIDIA_PROBE_TIMEOUT_MS = 20000;
+const NVIDIA_PROBE_BAD_CONTENT_RE = /must alternate|invalid.{0,20}role|unsupported.{0,20}conversation|content.{0,10}safety.{0,10}(model|classifier)/i;
+
+export async function probeNvidiaChatLive(directId, url, key, timeoutMs = NVIDIA_PROBE_TIMEOUT_MS) {
+  if (!key) return { ok: false, unchecked: true, reason: "no key" };
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + key },
+      body: JSON.stringify({ model: directId, messages: [{ role: "user", content: "Reply with exactly the word OK and nothing else." }], max_tokens: 16, temperature: 0, stream: true }),
+      signal: ac.signal,
+    });
+    if (!r.ok) {
+      let text = ""; try { text = (await r.text()).slice(0, 200); } catch {}
+      return { ok: false, reason: `HTTP ${r.status}${text ? ": " + text : ""}` };
+    }
+    if (!r.body) return { ok: false, reason: "response had no body" };
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "", content = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+        const data = frame.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
+        if (!data || data === "[DONE]") continue;
+        let ev; try { ev = JSON.parse(data); } catch { continue; }
+        if (ev && ev.error) return { ok: false, reason: String((ev.error && ev.error.message) || ev.error).slice(0, 200) };
+        const delta = ev && ev.choices && ev.choices[0] && ev.choices[0].delta && ev.choices[0].delta.content;
+        if (delta) content += delta;
+      }
+    }
+    content = content.trim();
+    if (!content) return { ok: false, reason: "empty response (no content returned)" };
+    if (NVIDIA_PROBE_BAD_CONTENT_RE.test(content)) return { ok: false, reason: content.slice(0, 200) };
+    return { ok: true };
+  } catch (e) {
+    const aborted = e && (e.name === "AbortError" || /abort/i.test(String(e.message || "")));
+    return { ok: false, reason: aborted ? `no response within ${timeoutMs}ms` : String((e && e.message) || e).slice(0, 200) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// keys: { openrouter, openai, anthropic, deepseek, nvidia, google, nvidiaUrl } — pass what you
+// have; missing = that check skipped. nvidiaUrl overrides the live chat-completions endpoint the
+// probe posts to (tests point this at a local mock; production leaves it unset for the real one).
+// opts.skipLiveProbe short-circuits the NVIDIA invocation pass — used by boot-time callers that
+// want the (cheap, list-only) check immediately and the live probe on the next hourly run, and by
+// tests that only care about the list-based checks.
+export async function runCatalogAudit(keys = {}, opts = {}) {
+  const result = { checkedAt: new Date().toISOString(), ok: true, problems: [], notes: [], providers: {}, unavailable: {} };
 
   let orLive = null;
   try { orLive = await listOpenRouter(keys.openrouter); result.providers.openrouter = "checked (" + orLive.size + " live models)"; }
@@ -86,13 +177,16 @@ export async function runCatalogAudit(keys = {}) {
     catch (e) { directSets[p] = null; result.providers[p] = "unchecked: " + (e.message || e); }
   }
 
+  const nvidiaChatUrl = keys.nvidiaUrl || "https://integrate.api.nvidia.com/v1/chat/completions";
+
   for (const raw of MODELS) {
     const m = modelById(raw.id);
     const special = [m.id === TENANT_DEFAULT_MODEL ? "GUEST-DEFAULT" : "", m.id === DEFAULT_MODEL ? "OWNER-DEFAULT" : "", m.id === UTILITY_MODEL ? "UTILITY" : ""].filter(Boolean).join("+");
+    let deadByList = false;
     if (m.provider === "openrouter") {
       if (!orLive) continue;
       const l = orLive.get(m.id);
-      if (!l) { result.ok = false; result.problems.push({ kind: "dead-id", id: m.id, note: "not on OpenRouter; every call 404s" + (special ? " · " + special : "") }); continue; }
+      if (!l) { result.ok = false; result.problems.push({ kind: "dead-id", id: m.id, note: "not on OpenRouter; every call 404s" + (special ? " · " + special : "") }); result.unavailable[m.id] = "not on OpenRouter"; continue; }
       const supportsTools = (l.supported_parameters || []).includes("tools");
       if (m.toolCapable && !supportsTools) { result.ok = false; result.problems.push({ kind: "mislabel", id: m.id, note: "flagged tool-capable but no OpenRouter endpoint supports tools" + (special ? " · " + special : "") }); }
       else if (!m.toolCapable && supportsTools) result.notes.push({ kind: "undersell", id: m.id, note: "supports tools but flagged chat-only" });
@@ -121,8 +215,22 @@ export async function runCatalogAudit(keys = {}) {
       }
     } else {
       const s = directSets[m.provider];
-      if (!s) continue;   // unchecked provider
-      if (!s.has(m.directId)) { result.ok = false; result.problems.push({ kind: "dead-id", id: m.id, note: `directId '${m.directId}' not on ${m.provider}` + (special ? " · " + special : "") }); }
+      if (s && !s.has(m.directId)) {
+        result.ok = false; deadByList = true;
+        result.problems.push({ kind: "dead-id", id: m.id, note: `directId '${m.directId}' not on ${m.provider}` + (special ? " · " + special : "") });
+        result.unavailable[m.id] = `directId '${m.directId}' not on ${m.provider}`;
+      }
+    }
+    // The live invocation pass: NVIDIA only (see probeNvidiaChatLive's header), skipped when the
+    // list check already proved the id dead (no need to spend a second call finding that out
+    // again), when there is no key (nothing to call with), or when the caller asked to skip it.
+    if (m.provider === "nvidia" && keys.nvidia && !deadByList && !opts.skipLiveProbe) {
+      const probe = await probeNvidiaChatLive(m.directId, nvidiaChatUrl, keys.nvidia, opts.nvidiaProbeTimeoutMs || NVIDIA_PROBE_TIMEOUT_MS);
+      if (!probe.unchecked && !probe.ok) {
+        result.ok = false;
+        result.problems.push({ kind: "unavailable", id: m.id, note: `live chat probe failed: ${probe.reason}` + (special ? " · " + special : "") });
+        result.unavailable[m.id] = probe.reason;
+      }
     }
   }
   return result;

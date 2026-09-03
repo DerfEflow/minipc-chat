@@ -12,117 +12,134 @@
  *     deliberately no second complexity scorer here — two routers that disagree is the exact
  *     failure the contract exists to prevent.
  *
- * ROUTING TABLE: built exactly from docs/SIMPLIFY-ROUTING-TABLE.md (measured live against NVIDIA's
- * endpoint 2026-08-03). Two of Fred's named routes (safety, empathetic) point at model ids that
- * are NOT seats in models.catalog.mjs — the routing doc itself flags this (section 1: "Four of his
- * picks cannot serve"; the specific two below were probed alive on NVIDIA but never added to the
- * catalog as a seat). This file does not invent a substitute model of its own choosing: it falls
- * back to the already-established "chat" seat (Claude Haiku 4.5) and says so loudly, in the
- * `blocked` flag `resolveRouteModel` returns and in simplify_test.mjs. Fred can overrule either
- * fallback with a one-line edit to SIMPLIFY_BLOCKED_FALLBACKS.
+ * LADDER REWRITE (STABILIZE Step 1, 2026-09-03, docs/STABILIZE-2026-09-03-DEFICIENCIES.md #1-#3).
+ * Every route used to name exactly ONE model. NVIDIA quietly retired three of those models between
+ * 2026-08-21 and 2026-08-26 (HTTP 410 "end of life"), and this surface had no way to notice: four
+ * probe prompts on the rig all returned `{"type":"error","message":"Provider returned HTTP 410..."}`
+ * with the raw provider string shown to the user — a dead surface for two weeks running. The owner's
+ * standing order ("nothing may fail to produce a viable result") means a single named model is never
+ * again the whole plan. Every route below is now a LADDER of at least three model ids
+ * (SIMPLIFY_ROUTES[route].ladder); resolveLadder() drops any rung that is not a live catalog id or
+ * that the hourly catalog audit (catalogaudit.mjs, via models.catalog.mjs's isSeatUnavailable) has
+ * already proven dead, and runLadder() tries what is left in order, moving to the next rung on ANY
+ * provider failure (4xx/5xx/network/timeout/empty), with a first-token timeout per rung (20s; 12s for
+ * a gx10 rung, since server.mjs's own gx10 doctrine treats it as the fast/local case) and a 120s
+ * total wall-clock budget for the whole ladder. A `served` event names which rung actually answered
+ * — provenance as ordinary metadata, never as an error, per the owner's directive — and the `error`
+ * event fires only once EVERY rung of TWO full ladder passes (a 3s pause, then one retry of the
+ * whole ladder) has failed.
  *
  * PROVIDER TRANSPORT — an honest limitation, read before changing this file: server.mjs's
  * PROVIDER_CFG / resolveProviderCfg (the real, already-built provider dispatch) are module-private
- * consts with no export, and this lane is barred from editing server.mjs. `resolveTransport` below
- * MIRRORS that documented behavior (same env var names, same default URLs, same
- * OpenRouter-fallback provider set) rather than importing it, because there is nothing to import.
- * [verified against server.mjs source, lines 612-663, read-only, 2026-08-03]. If server.mjs ever
- * exports resolveProviderCfg, this duplicate block should be deleted in favor of the real one.
+ * consts with no export, and this lane is barred from editing server.mjs's main chat pipeline.
+ * `resolveTransport` below MIRRORS that documented behavior (same env var names, same default URLs,
+ * same OpenRouter-fallback provider set) rather than importing it, because there is nothing to
+ * import. [verified against server.mjs source, PROVIDER_CFG region, read-only, 2026-09-03]. The one
+ * provider this duplicate cannot fully reach is gx10's HANDS-RELAY wire (server.mjs's
+ * gx10HandsChatStream, which lives deep in the hands-hub machinery this lane does not own): a gx10
+ * rung answers when GX10_LLM_URL (the direct wire) is configured, and is skipped — correctly, as any
+ * unreachable rung is — when it is not. If server.mjs ever exports resolveProviderCfg or a gx10
+ * relay helper, the duplicated pieces below should be deleted in favor of the real ones.
  */
 
-import { modelById, resolveModelId, isCatalogModel, outLimitFor } from "./models.catalog.mjs";
+import { modelById, resolveModelId, isCatalogModel, outLimitFor, isSeatUnavailable } from "./models.catalog.mjs";
 import { askSliceOf } from "./routing.mjs";
 import { runTool } from "./tools.mjs";
 import { anthropicMessagesStream } from "./anthropicmessages.mjs";
 import { classifyComplexity, SEQUENTIAL_THRESHOLD_DEFAULT } from "./sequential.mjs";
 
-// ---- 1. THE ROUTING TABLE (docs/SIMPLIFY-ROUTING-TABLE.md section 3, verbatim) -----------------
+// ---- 1. THE ROUTING TABLE (docs/SIMPLIFY-ROUTING-TABLE.md section 3, ladder rewrite) -----------
 
+/*
+ * Every ladder is Fred's named pick for the route first, then two measured, live-verified
+ * alternates in priority order (see docs/SIMPLIFY-ROUTING-TABLE.md and this STABILIZE pass's rig
+ * proof for what was actually probed). `careFirst: true` on safety swaps the system prompt for
+ * every rung of that route (see CARE_FIRST_SYSTEM_PROMPT below) — a crisis message deserves the
+ * same careful framing regardless of which rung in the ladder ends up answering it, not just the
+ * first one. `tool: "web_search"` on websearch is unchanged from before the rewrite: search is a
+ * TOOL this route turns on, not a model choice, and it is fetched once per turn (see
+ * buildRungSpecs below for exactly how a failed or unconfigured search degrades honestly).
+ */
 export const SIMPLIFY_ROUTES = Object.freeze({
   chat: Object.freeze({
-    label: "Chat", requestedModel: "anthropic/claude-haiku-4-5",
-    note: "Fred's pick, stands — fast, cheap, kept off training data.",
+    label: "Chat",
+    ladder: Object.freeze(["anthropic/claude-haiku-4-5", "deepseek/deepseek-v4-flash", "gx10/gpt-oss-120b"]),
   }),
   science: Object.freeze({
-    label: "Science and math", requestedModel: "deepseek/deepseek-r1",
-    note: "Fred's pick, stands — shows its reasoning step by step; Fred values how it reasons and wants it kept.",
+    label: "Science and math",
+    ladder: Object.freeze(["deepseek/deepseek-r1", "deepseek/deepseek-v4-pro", "nvidia/nemotron-3-super-120b-a12b:free"]),
   }),
   quick: Object.freeze({
-    label: "Quick and dirty", requestedModel: "nvidia/nemotron-nano-12b-v2-vl",
-    note: "Fred's pick, stands — small, fast, free.",
+    label: "Quick and dirty",
+    ladder: Object.freeze(["gx10/gpt-oss-120b", "deepseek/deepseek-v4-flash", "anthropic/claude-haiku-4-5"]),
   }),
   business: Object.freeze({
-    label: "Business", requestedModel: "z-ai/glm-5.2",
-    note: "Fred's pick, stands — long-horizon planning, free via NVIDIA.",
+    label: "Business",
+    ladder: Object.freeze(["deepseek/deepseek-v4-pro", "nvidia/nemotron-3-super-120b-a12b:free", "anthropic/claude-haiku-4-5"]),
   }),
   safety: Object.freeze({
-    label: "Safety", requestedModel: "nvidia/nemotron-3.5-content-safety",
-    note: "Fred's pick — measured ALIVE at 167ms on NVIDIA's endpoint 2026-08-03, but this id is not "
-      + "a seat in models.catalog.mjs. BLOCKED until Fred adds it or approves the fallback.",
+    label: "Safety",
+    ladder: Object.freeze(["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5", "deepseek/deepseek-v4-flash"]),
+    careFirst: true,
+    note: "The content-safety classifier (nvidia/nemotron-3.5-content-safety) is a moderation model, "
+      + "not an answerer — measured 2026-09-03: it replies to an ordinary chat turn with 'Conversation "
+      + "roles must alternate user/assistant/...'. This route never calls it; it answers on the same "
+      + "seats every other route trusts, with a system prompt that asks for care rather than a clinical "
+      + "tone.",
   }),
   empathetic: Object.freeze({
-    label: "Empathetic", requestedModel: "meta/llama-3.1-70b-instruct",
-    note: "SUBSTITUTED for the 3.3 generation (45,581ms to first token, unusable on a chat surface); "
-      + "the 3.1 id measured 238ms but is ALSO not a seat in models.catalog.mjs. BLOCKED until Fred "
-      + "adds it or approves the fallback.",
+    label: "Empathetic",
+    ladder: Object.freeze(["anthropic/claude-haiku-4-5", "nvidia/llama-3.1-nemotron-70b-instruct", "deepseek/deepseek-v4-flash"]),
   }),
   literary: Object.freeze({
-    label: "Literary", requestedModel: "arcee-ai/trinity-large-thinking",
-    note: "SUBSTITUTED — Palmyra (Fred's pick) is not invokable on this account (HTTP 404).",
+    label: "Literary",
+    ladder: Object.freeze(["arcee-ai/trinity-large-thinking", "anthropic/claude-sonnet-5", "deepseek/deepseek-v4-pro"]),
   }),
   creative: Object.freeze({
-    label: "Creative", requestedModel: "arcee-ai/trinity-large-thinking",
-    note: "SUBSTITUTED — Llama 3.1 405B (Fred's pick) does not exist on NVIDIA at all. Creative and "
-      + "literary collapse into one seat rather than inventing a distinction the roster cannot serve.",
+    label: "Creative",
+    // Shares literary's ladder (routing doc ledger item S1, still open, needs Fred): Palmyra and
+    // Llama 3.1 405B (Fred's original picks for these two routes) are both unreachable on this
+    // account, and inventing a distinction the roster cannot serve was rejected in the original
+    // build. Unchanged by this rewrite; revisit together if Fred ever wants them split.
+    ladder: Object.freeze(["arcee-ai/trinity-large-thinking", "anthropic/claude-sonnet-5", "deepseek/deepseek-v4-pro"]),
   }),
   theological: Object.freeze({
-    label: "Theological and philosophical", requestedModel: "nvidia/nemotron-3-super-120b-a12b:free",
-    note: "SUBSTITUTED — Fred's Nemotron 70B pick is not invokable (HTTP 404). This is the largest "
-      + "FREE seat in the roster, 1M context, measured alive at 365ms.",
+    label: "Theological and philosophical",
+    ladder: Object.freeze(["nvidia/nemotron-3-super-120b-a12b:free", "deepseek/deepseek-v4-pro", "anthropic/claude-haiku-4-5"]),
   }),
   websearch: Object.freeze({
-    label: "Web search", requestedModel: "anthropic/claude-haiku-4-5",
-    note: "REDESIGNED — Perplexity is not a seat in this roster and adding one is out of this wave's "
-      + "scope. Search is a TOOL, not a model: this route reuses the chat seat and turns on the app's "
-      + "existing web_search tool (tools.mjs, SerpApi-backed).",
+    label: "Web search",
+    ladder: Object.freeze(["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4-5"]),
     tool: "web_search",
   }),
 });
 
-// The seat every blocked route falls back to, and why. Both point at the "chat" route's own
-// requested model — already verified a catalog member below — so a blocked route degrades to the
-// app's ordinary fast chat model rather than a novel pick. This is Fred's own suggested alternative
-// for "empathetic" (routing doc §4.2: "The alternative is a Claude seat, which is better at
-// emotional register"); for "safety" it is the same seat used honestly until a real moderation
-// model earns a catalog row (this app already screens content elsewhere via safety.mjs; this route
-// is about a user's SUBJECT MATTER, not a moderation gate).
-const SIMPLIFY_BLOCKED_FALLBACKS = Object.freeze({
-  safety: "anthropic/claude-haiku-4-5",
-  empathetic: "anthropic/claude-haiku-4-5",
-});
-
-/**
- * Resolve one named route to a model id that is guaranteed to exist in models.catalog.mjs, or
- * report exactly why it does not and what it fell back to. This is the function
- * simplify_test.mjs calls to catch a dead route before a user finds it.
+/*
+ * Resolve one route's ladder to the model ids actually worth trying right now: a live catalog hit
+ * (via resolveModelId, same "removed id -> its survivor, unknown -> drop" rule the rest of this app
+ * uses) that the live catalog audit has not already proven dead (isSeatUnavailable, fed by
+ * catalogaudit.mjs's hourly run). Dropping a known-dead rung here means the ladder never spends a
+ * live attempt finding out something the audit already knows — the request-time skip in runLadder
+ * below is for failures the audit HASN'T seen yet (a brand-new 410, a timeout), not a second chance
+ * for one it has.
  */
-export function resolveRouteModel(routeKey) {
+export function resolveLadder(routeKey) {
   const route = SIMPLIFY_ROUTES[routeKey];
-  if (!route) return { routeKey, ok: false, blocked: true, modelId: "", error: `Unknown route "${routeKey}".` };
-  const requested = route.requestedModel;
-  // resolveModelId: live catalog id -> itself; a REMOVED_MODEL_FALLBACKS id -> its survivor;
-  // anything else (never on the catalog, never pruned from it) -> "" (models.catalog.mjs's own
-  // rule: "never invent a model").
-  const resolved = resolveModelId(requested);
-  if (resolved && isCatalogModel(resolved)) {
-    return { routeKey, ok: true, blocked: false, modelId: resolved, requestedModel: requested };
+  if (!route) return { routeKey, ok: false, rungs: [], dropped: [], error: `Unknown route "${routeKey}".` };
+  const rungs = [];
+  const dropped = [];
+  for (const requested of route.ladder) {
+    const resolved = resolveModelId(requested);
+    if (resolved && isCatalogModel(resolved) && !isSeatUnavailable(resolved)) {
+      rungs.push(resolved);
+    } else {
+      dropped.push({
+        requested, resolved: resolved || "",
+        reason: !resolved || !isCatalogModel(resolved) ? "not a live catalog id" : "marked unavailable by the live catalog audit",
+      });
+    }
   }
-  const fallback = SIMPLIFY_BLOCKED_FALLBACKS[routeKey] || SIMPLIFY_ROUTES.chat.requestedModel;
-  return {
-    routeKey, ok: true, blocked: true, modelId: fallback, requestedModel: requested,
-    blockReason: `${requested} is not a seat in models.catalog.mjs (docs/SIMPLIFY-ROUTING-TABLE.md `
-      + `section 1). Falling back to ${fallback}.`,
-  };
+  return { routeKey, ok: true, rungs, dropped };
 }
 
 // ---- 2. SUBJECT-MATTER CLASSIFICATION (Lane I's own job) ----------------------------------------
@@ -130,15 +147,27 @@ export function resolveRouteModel(routeKey) {
 // keyword classifier promoted past what it can carry (routing.mjs's own NO_RETRIEVAL_RE comment).
 // This never gates a refusal or a pause — worst case it picks the general "chat" seat, which is
 // itself a competent generalist.
+//
+// WIDENED 2026-09-03 (STABILIZE Step 1, deficiency #3): "three unrelated question types were all
+// classified quick" because these patterns only caught NARROW phrasing ("biology problem", not
+// "photosynthesis"; nothing at all for "LLC" or "S-corp"). A short factual question with no topic
+// match still correctly lands on "quick" (see pickRoute's priority order below) — that path is
+// working as designed. The bug was specialist SUBJECT MATTER falling through to it for lack of a
+// keyword, which is what the additions below close: every addition is a plain subject-matter noun
+// or phrase, not a complexity signal (complexity stays Lane E's job, never duplicated here).
 
 const TOPIC_PATTERNS = Object.freeze([
   // Safety checked FIRST and unconditionally: a crisis message must never be filed under "quick"
   // just because it is short.
   ["safety", /\b(kill myself|suicid\w*|self[- ]?harm|hurt(ing)? myself|want(ed)? to die|end(ing)? my life|cutting myself|overdose|no reason to live)\b/i],
   ["websearch", /\b(latest|breaking news|right now|as of today|current price|stock price|today'?s (date|news|weather)|this week'?s|who won|score of the|weather (in|today|tomorrow|this week)|search for|look up)\b/i],
-  ["science", /\b(equation|derivative|integral|theorem|hypothesis|algorithm complexity|physics|chemistry|biology problem|calculat\w*|solve for [a-z]|prove that|molecul\w*|velocity|acceleration|standard deviation)\b/i],
-  ["business", /\b(business plan|marketing plan|revenue|pricing strategy|startup idea|invoice|negotiat\w*|market analysis|budget forecast|sales pitch|swot analysis|profit margin|cash flow|business proposal)\b/i],
-  ["empathetic", /\b(i feel|i'?m feeling|i'?ve been feeling|feeling (?:so |really |quite )?(?:sad|stressed|anxious|overwhelmed|lonely|hurt|struggling|depressed)|i'?m (so |really |quite )?(sad|stressed|anxious|lonely|overwhelmed|struggling|hurting|depressed)|breakup|broke up with|relationship advice|grief|grieving|i don'?t know what to do about my)\b/i],
+  ["science", /\b(equation|derivative|integral|theorem|hypothesis|algorithm complexity|physics|chemistry|biology|photosynthes\w*|molecul\w*|velocity|acceleration|standard deviation|calculat\w*|solve for [a-z]|prove that|medicine|medical (basics|condition|diagnos\w*)|anatomy|genetics?|dna\b|ecosystem|organism|periodic table|newton'?s (law|laws)|gravity|thermodynamics|atom(ic)?|cell (division|biology)|evolution\w*)\b/i],
+  ["business", /\b(business plan|marketing plan|revenue|pricing strategy|startup idea|invoice|negotiat\w*|market analysis|budget forecast|sales pitch|swot analysis|profit margin|cash flow|business proposal|\bllc\b|s[- ]?corp(oration)?|c[- ]?corp\b|sole proprietor\w*|business entity|incorporat\w*|payroll|hir(e|ing) (an? )?(employee|staff|contractor)|marketing (idea|strategy|campaign)|small business)\b/i],
+  ["empathetic", /\b(i feel|i'?m feeling|i'?ve been feeling|feeling (?:so |really |quite )?(?:sad|stressed|anxious|overwhelmed|lonely|hurt|struggling|depressed)|i'?m (so |really |quite )?(sad|stressed|anxious|lonely|overwhelmed|struggling|hurting|depressed)|breakup|broke up with|relationship advice|grief|grieving|i don'?t know what to do about my|giving up on|ready to give up|thinking about giving up)\b/i],
+  // TODO(fred): "write me a poem" matches; "write me a SHORT poem" or "write me a TWO LINE poem"
+  // does not (the adjective sits between "a" and the noun) and falls through to quick instead —
+  // measured live 2026-09-03 via rig probe, not fixed this pass since widening this without a wider
+  // prompt sample risks new false positives more than the undershoot is worth guessing at.
   ["literary", /\b(write (me |us )?a (poem|short story|screenplay|novel chapter|sonnet)|literary style|prose style|metaphor for|poetry about)\b/i],
   ["creative", /\b(brainstorm|creative idea|invent a|creative concept|design a character|worldbuild\w*|plot twist|story idea)\b/i],
   ["theological", /\b(does god|is there a god|meaning of life|afterlife|my faith|the bible says|religion\w*|theolog\w*|philosoph\w*|existentialis\w*|morality of|the soul)\b/i],
@@ -192,7 +221,9 @@ const SPECIALIST_TOPICS = new Set(["science", "business", "empathetic", "literar
  *      "E judges complexity. You judge subject matter and pick the seat."
  *   3. With no topic match, `band === "trivial"` (measured against sequential.mjs's own scoring:
  *      a short greeting or an arithmetic one-liner scores under 15 with no raiser rules firing)
- *      goes to "quick" — the small, fast, free seat "quick and dirty" was built for.
+ *      goes to "quick" — the small, fast, free seat "quick and dirty" was built for. A short
+ *      DEFINITIONAL question with no specialist subject (e.g. "what is a roofing contractor")
+ *      belongs here too, by design (spec: "quick = short factual or definitional questions only").
  *   4. Everything else (simple/moderate/complex/deep, no specialist topic) lands on "chat", the
  *      general seat. A "simple"-banded but genuinely open-ended question (e.g. "walk me through
  *      the tradeoffs of X in detail") is still a real conversation, not a quick lookup.
@@ -217,6 +248,7 @@ const OPENROUTER_FALLBACK_PROVIDERS = new Set(["moonshot", "nvidia", "google"]);
 export function keysFromEnv(env = process.env) {
   return {
     anthropic: env.ANTHROPIC_API_KEY || env.CLAUDE_ANTHROPIC_KEY || "",
+    anthropicUrl: env.ANTHROPIC_URL || "https://api.anthropic.com/v1/messages",
     openrouter: env.OPENROUTER_API_KEY || "",
     openrouterUrl: env.OPENROUTER_URL || "https://openrouter.ai/api/v1/chat/completions",
     openrouterReferer: env.OPENROUTER_REFERER || env.PUBLIC_URL || "https://dominion.ai",
@@ -225,6 +257,10 @@ export function keysFromEnv(env = process.env) {
     deepseek: env.DEEPSEEK_AI_DOMINION_UI_APIKEY || env.DEEPSEEK_API_KEY || "",
     deepseekUrl: env.DEEPSEEK_URL || "https://api.deepseek.com/chat/completions",
     serp: env.SERP_API_KEY || "",
+    // GX10 direct wire only (see file header): the relay-only path needs the hands hub this lane
+    // does not own, so a rung with no direct URL is left to fail fast and get skipped.
+    gx10Url: env.GX10_LLM_URL || "",
+    gx10Key: env.GX10_LLM_KEY || "",
   };
 }
 
@@ -232,26 +268,39 @@ function resolveTransport(modelId, keys) {
   const rec = modelById(modelId);
   const provider = (rec && rec.provider) || "openrouter";
   const directId = (rec && rec.directId) || modelId;
-  if (provider === "anthropic") return { transport: "anthropic", apiKey: keys.anthropic, directId };
+  if (provider === "anthropic") return { transport: "anthropic", apiKey: keys.anthropic, baseUrl: keys.anthropicUrl, directId, provider };
+  if (provider === "gx10") {
+    if (!keys.gx10Url) {
+      return {
+        transport: "openai", apiKey: "", baseUrl: "", directId, provider, extraHeaders: {},
+        unavailable: true,
+        unavailableReason: "GX10_LLM_URL is not configured on this server (Simplify's isolated transport only reaches the direct wire, not the hands relay)",
+      };
+    }
+    // Ollama's OpenAI-compatible lane does not check the bearer; a placeholder keeps the shared
+    // "no key configured" gate below from refusing a call that genuinely needs no secret.
+    return { transport: "openai", apiKey: keys.gx10Key || "gx10-local", baseUrl: keys.gx10Url, directId, provider, extraHeaders: {} };
+  }
   // Same key-absent-falls-back-to-OpenRouter rule as server.mjs's resolveProviderCfg: a model may
   // prefer a direct provider, but an unkeyed box still answers via OpenRouter under the catalog id.
   if (provider !== "openrouter" && OPENROUTER_FALLBACK_PROVIDERS.has(provider) && !keys[provider]) {
     return {
-      transport: "openai", apiKey: keys.openrouter, baseUrl: keys.openrouterUrl, directId: (rec && rec.id) || modelId,
+      transport: "openai", apiKey: keys.openrouter, baseUrl: keys.openrouterUrl, directId: (rec && rec.id) || modelId, provider: "openrouter",
       extraHeaders: { "http-referer": keys.openrouterReferer, "x-title": "Dominion AI Simplify" }, fellBackToOpenRouter: true,
     };
   }
-  if (provider === "nvidia") return { transport: "openai", apiKey: keys.nvidia, baseUrl: keys.nvidiaUrl, directId, extraHeaders: {} };
-  if (provider === "deepseek") return { transport: "openai", apiKey: keys.deepseek, baseUrl: keys.deepseekUrl, directId, extraHeaders: {} };
+  if (provider === "nvidia") return { transport: "openai", apiKey: keys.nvidia, baseUrl: keys.nvidiaUrl, directId, provider, extraHeaders: {} };
+  if (provider === "deepseek") return { transport: "openai", apiKey: keys.deepseek, baseUrl: keys.deepseekUrl, directId, provider, extraHeaders: {} };
   return {
-    transport: "openai", apiKey: keys.openrouter, baseUrl: keys.openrouterUrl, directId,
+    transport: "openai", apiKey: keys.openrouter, baseUrl: keys.openrouterUrl, directId, provider: "openrouter",
     extraHeaders: { "http-referer": keys.openrouterReferer, "x-title": "Dominion AI Simplify" },
   };
 }
 
-/** Minimal OpenAI-compatible streaming chat completion (OpenRouter, NVIDIA, DeepSeek). */
+/** Minimal OpenAI-compatible streaming chat completion (OpenRouter, NVIDIA, DeepSeek, GX10 direct). */
 async function openAiCompatStream({ baseUrl, apiKey, directId, messages, maxOut, extraHeaders, signal, onDelta }) {
   if (!apiKey) return { ok: false, content: "", error: "No API key configured for this model's provider." };
+  if (!baseUrl) return { ok: false, content: "", error: "No endpoint configured for this model's provider." };
   let res;
   try {
     res = await fetch(baseUrl, {
@@ -295,23 +344,174 @@ async function openAiCompatStream({ baseUrl, apiKey, directId, messages, maxOut,
   return { ok: true, content };
 }
 
-// ---- 5. THE CHAT HANDLER ------------------------------------------------------------------------
+// ---- 5. THE LADDER RUNNER ------------------------------------------------------------------------
+
+// First-token timeout: how long a rung gets to produce its FIRST piece of content before it is
+// abandoned for the next rung. gx10 gets a shorter budget because server.mjs's own gx10 doctrine
+// (gx10.mjs, PROVIDER_CFG) treats it as the fast local case — a cold-load stall there is a signal
+// to move on quickly, not wait as long as a paid cloud round-trip deserves.
+const FIRST_TOKEN_TIMEOUT_MS = 20000;
+const GX10_FIRST_TOKEN_TIMEOUT_MS = 12000;
+// Whole-ladder wall-clock budget for ONE pass (required behavior #1). Once a rung streams its
+// first token it is allowed to keep going past its own first-token timeout, but never past this
+// shared deadline — one slow rung cannot eat every other rung's share of the turn.
+const LADDER_TOTAL_BUDGET_MS = 120000;
+// After a full ladder pass fails end to end, wait this long and try the WHOLE ladder once more
+// before finally telling the user nothing came back (required behavior #1: "even then wait 3s and
+// retry the ladder once before giving up").
+const LADDER_RETRY_DELAY_MS = 3000;
+
+/**
+ * Run one rung: a model call with a first-token abort timer and a hard stop at the ladder's shared
+ * deadline. Returns the same {ok, content, error, usage?} shape callSeat-style transports use.
+ * Partial content already streamed to the user on a mid-stream failure is treated as a completed
+ * answer, not a failure to retry — openAiCompatStream's own read-loop already does this
+ * (`ok: content.length > 0` on a read error), which is exactly the discipline this app's BATTALION
+ * failover tests pin elsewhere: a partially streamed answer is never re-posted from another seat,
+ * or the user reads two answers stacked on top of each other.
+ */
+async function attemptRung({ transport, messages, maxOut, parentSignal, firstTokenTimeoutMs, deadlineAt, onDelta }) {
+  if (transport.unavailable) return { ok: false, content: "", error: transport.unavailableReason || "this rung is not configured on this server" };
+  const remainingBudget = deadlineAt - Date.now();
+  if (remainingBudget <= 0) return { ok: false, content: "", error: "ladder time budget exhausted" };
+
+  const rungAc = new AbortController();
+  const onParentAbort = () => { try { rungAc.abort(); } catch {} };
+  if (parentSignal) {
+    if (parentSignal.aborted) rungAc.abort();
+    else parentSignal.addEventListener("abort", onParentAbort, { once: true });
+  }
+  let gotFirstToken = false;
+  const effectiveFirstTokenMs = Math.max(0, Math.min(firstTokenTimeoutMs, remainingBudget));
+  const firstTokenTimer = setTimeout(() => { if (!gotFirstToken) { try { rungAc.abort(); } catch {} } }, effectiveFirstTokenMs);
+  // The hard ladder-deadline stop. Cleared alongside firstTokenTimer; harmless to fire after the
+  // rung already finished (abort on a settled controller is a no-op).
+  const deadlineTimer = setTimeout(() => { try { rungAc.abort(); } catch {} }, remainingBudget);
+  const wrappedOnDelta = (text) => {
+    if (!gotFirstToken) gotFirstToken = true;
+    if (onDelta) onDelta(text);
+  };
+
+  let result;
+  try {
+    if (transport.transport === "anthropic") {
+      if (!transport.apiKey) {
+        result = { ok: false, content: "", error: "No API key configured for this model's provider." };
+      } else {
+        result = await anthropicMessagesStream(transport.directId, messages, {
+          apiKey: transport.apiKey, endpoint: transport.baseUrl, maxTokens: maxOut, signal: rungAc.signal,
+        }, wrappedOnDelta);
+      }
+    } else {
+      result = await openAiCompatStream({
+        baseUrl: transport.baseUrl, apiKey: transport.apiKey, directId: transport.directId,
+        messages, maxOut, extraHeaders: transport.extraHeaders, signal: rungAc.signal, onDelta: wrappedOnDelta,
+      });
+    }
+  } catch (e) {
+    result = { ok: false, content: "", error: String((e && e.message) || e) };
+  } finally {
+    clearTimeout(firstTokenTimer);
+    clearTimeout(deadlineTimer);
+    if (parentSignal) { try { parentSignal.removeEventListener("abort", onParentAbort); } catch {} }
+  }
+
+  if (!result) return { ok: false, content: "", error: "no response" };
+  if (!result.ok || !String(result.content || "").trim()) {
+    const reason = (result.error && String(result.error).trim())
+      || (!gotFirstToken ? `no response within ${effectiveFirstTokenMs}ms` : "empty response");
+    return { ok: false, content: result.content || "", error: reason };
+  }
+  return result;
+}
+
+/**
+ * Try each rung spec in order over the SAME base messages, stopping at the first one that produces
+ * real content. `systemPromptFor(spec)` lets the caller vary the system prompt per rung (safety's
+ * care-first prompt; websearch's per-rung search context or honest no-search disclosure) without
+ * this function knowing anything about routes. Returns the winning rung's id/provider/usage/content
+ * on success, or the list of every rung's failure reason on total failure.
+ */
+async function runLadder({ rungSpecs, baseMessages, systemPromptFor, keys, parentSignal, onDelta }) {
+  const deadlineAt = Date.now() + LADDER_TOTAL_BUDGET_MS;
+  const failures = [];
+  for (const spec of rungSpecs) {
+    if (parentSignal && parentSignal.aborted) return { ok: false, error: "stopped", failures };
+    if (Date.now() >= deadlineAt) { failures.push({ model: spec.modelId, error: "ladder time budget exhausted" }); break; }
+    const rec = modelById(spec.modelId);
+    if (!rec) { failures.push({ model: spec.modelId, error: "not a catalog model" }); continue; }
+    const firstTokenTimeoutMs = rec.provider === "gx10" ? GX10_FIRST_TOKEN_TIMEOUT_MS : FIRST_TOKEN_TIMEOUT_MS;
+    const transport = resolveTransport(spec.modelId, keys);
+    const messages = [{ role: "system", content: systemPromptFor(spec) }, ...baseMessages];
+    const maxOut = outLimitFor(spec.modelId, "normal");
+    const result = await attemptRung({ transport, messages, maxOut, parentSignal, firstTokenTimeoutMs, deadlineAt, onDelta });
+    if (result.ok && String(result.content || "").trim()) {
+      return { ok: true, modelId: spec.modelId, provider: transport.provider, usage: result.usage || null, content: result.content, failures };
+    }
+    failures.push({ model: spec.modelId, error: result.error || "no answer" });
+  }
+  return { ok: false, error: failures.length ? failures[failures.length - 1].error : "no live rungs available", failures };
+}
+
+// ---- 6. THE CHAT HANDLER ------------------------------------------------------------------------
 
 const SYSTEM_PROMPT = "You are Dominion, answering in Simplify mode: a plain chat and search surface "
   + "for someone who wants a straight answer, not a tool. Keep replies direct and easy to read. Never "
   + "mention which model is answering, and never offer settings, modes, or model choices; this surface "
   + "has none.";
 
-async function buildMessages({ history, userMessage, searchContext }) {
-  const messages = [{ role: "system", content: SYSTEM_PROMPT }];
-  if (searchContext) {
-    messages.push({
-      role: "system",
-      content: "Live web search results for the user's question:\n\n" + searchContext
-        + "\n\nUse these if they are relevant. Name the source when you rely on one. If they are not "
-        + "relevant, answer from what you already know.",
-    });
-  }
+// Used for every rung of the "safety" route (SIMPLIFY_ROUTES.safety.careFirst). A crisis message is
+// defined by the fact that it needs care, not by which model in the ladder happens to answer it.
+const CARE_FIRST_SYSTEM_PROMPT = "You are Dominion, answering in Simplify mode. This message may come "
+  + "from someone in distress or crisis. Take it seriously, respond with warmth, and do not minimize "
+  + "what they said. If there is any sign of risk of self-harm or suicide, gently encourage reaching "
+  + "out to a crisis line (in the US: call or text 988) or a trusted person, while staying supportive "
+  + "rather than clinical. Keep replies direct and easy to read. Never mention which model is "
+  + "answering, and never offer settings, modes, or model choices; this surface has none.";
+
+const WEBSEARCH_CONTEXT_HEADER = "\n\nLive web search results for the user's question:\n\n";
+const WEBSEARCH_CONTEXT_FOOTER = "\n\nUse these if they are relevant. Name the source when you rely on "
+  + "one. If they are not relevant, answer from what you already know.";
+const WEBSEARCH_UNAVAILABLE_NOTE = "\n\nLive web search was not available for this reply. If the "
+  + "question depends on current events, prices, or anything that changes over time, say so plainly "
+  + "and briefly before answering, then answer as well as you can from what you already know.";
+
+/**
+ * Build one rung's system prompt: the route's base prompt (care-first for safety), plus the
+ * websearch route's per-rung search behavior. Every other route ignores spec.useSearch/disclose —
+ * they are only ever set by buildRungSpecs for the websearch route.
+ */
+function systemPromptFor(route, spec, searchContext) {
+  let prompt = SIMPLIFY_ROUTES[route] && SIMPLIFY_ROUTES[route].careFirst ? CARE_FIRST_SYSTEM_PROMPT : SYSTEM_PROMPT;
+  if (spec.useSearch && searchContext) prompt += WEBSEARCH_CONTEXT_HEADER + searchContext + WEBSEARCH_CONTEXT_FOOTER;
+  if (spec.disclose) prompt += WEBSEARCH_UNAVAILABLE_NOTE;
+  return prompt;
+}
+
+/*
+ * Turn a resolved rung list into per-rung specs. For every route except websearch this is a
+ * pass-through (each rung just names a model). Websearch is the one route whose BEHAVIOR, not just
+ * its model, changes per rung (required behavior: "keep haiku + web_search; fallback ... + "
+ * "web_search; then answer without search on haiku and say plainly ... that live search was "
+ * "unavailable"):
+ *   - `searchOk` true (the tool answered something usable): every rung but the LAST carries the
+ *     search context; the last rung is the explicit no-search-and-say-so fallback.
+ *   - `searchOk` false (no SERP key, or the tool call failed/came back empty): EVERY rung skips
+ *     search and discloses it, because we already know before trying a single model that no rung
+ *     is going to have live results — no point pretending otherwise on rung 1.
+ * Either way the ladder still tries every live model in order; only the search behavior changes.
+ */
+function buildRungSpecs(route, liveRungs, searchOk) {
+  if (route !== "websearch") return liveRungs.map((modelId) => ({ modelId }));
+  return liveRungs.map((modelId, i) => {
+    const isLast = i === liveRungs.length - 1;
+    const useSearch = searchOk && !isLast;
+    return { modelId, useSearch, disclose: !useSearch };
+  });
+}
+
+async function buildBaseMessages({ history, userMessage }) {
+  const messages = [];
   for (const h of Array.isArray(history) ? history : []) {
     if (!h || typeof h.content !== "string") continue;
     if (h.role !== "user" && h.role !== "assistant") continue;
@@ -338,6 +538,8 @@ function readCappedBody(req, capBytes) {
     req.on("error", reject);
   });
 }
+
+const CALM_FAILURE_MESSAGE = "I couldn't get an answer just now. Please try again in a moment.";
 
 /**
  * Build the Simplify chat route handler. `env` defaults to process.env; pass an explicit one in
@@ -381,73 +583,69 @@ export function createSimplifyChatHandler({ env = process.env } = {}) {
 
     let picked;
     try { picked = pickRoute(userMessage, { env }); } catch { picked = { route: "chat", topic: "", complexity: DEGRADED_COMPLEXITY }; }
-    const resolved = resolveRouteModel(picked.route);
-    // Diagnostic frame only — dominion-simplify.js never renders a model name or route to the user.
-    sse({ type: "route", route: picked.route, blocked: resolved.blocked || false });
+    const route = picked.route;
+    // Diagnostic frame only — dominion-simplify.js never renders a route or model name to the user.
+    sse({ type: "route", route });
 
-    let searchContext = "";
-    if (picked.route === "websearch") {
+    let searchOk = false, searchContext = "";
+    if (route === "websearch") {
       if (!keys.serp) {
         sse({ type: "notice", text: "Web search isn't configured on this server right now. Answering from what the model already knows." });
       } else {
         try {
           const r = await runTool("web_search", { query: userMessage, num: 6 }, { serpKey: keys.serp }, ac.signal);
           searchContext = String(r || "").slice(0, 6000);
+          searchOk = !!searchContext.trim();
+          if (!searchOk) sse({ type: "notice", text: "Web search returned nothing useful just now. Answering from what the model already knows." });
         } catch {
           sse({ type: "notice", text: "Web search failed just now. Answering from what the model already knows." });
         }
       }
     }
 
-    const messages = await buildMessages({ history, userMessage, searchContext });
-    const maxOut = outLimitFor(resolved.modelId, "normal");
-    const transport = resolveTransport(resolved.modelId, keys);
+    const { rungs: liveRungs } = resolveLadder(route);
+    const rungSpecs = buildRungSpecs(route, liveRungs, searchOk);
+    const baseMessages = await buildBaseMessages({ history, userMessage });
 
-    let result;
-    try {
-      if (transport.transport === "anthropic") {
-        result = await anthropicMessagesStream(transport.directId, messages, {
-          apiKey: transport.apiKey, maxTokens: maxOut, signal: ac.signal,
-        }, (delta) => sse({ type: "delta", text: delta }));
-      } else {
-        result = await openAiCompatStream({
-          baseUrl: transport.baseUrl, apiKey: transport.apiKey, directId: transport.directId,
-          messages, maxOut, extraHeaders: transport.extraHeaders, signal: ac.signal,
-          onDelta: (delta) => sse({ type: "delta", text: delta }),
-        });
-      }
-    } catch (e) {
-      result = { ok: false, content: "", error: String((e && e.message) || e) };
+    const attemptFullLadder = () => runLadder({
+      rungSpecs, baseMessages,
+      systemPromptFor: (spec) => systemPromptFor(route, spec, searchContext),
+      keys, parentSignal: ac.signal,
+      onDelta: (text) => sse({ type: "delta", text }),
+    });
+
+    let outcome = await attemptFullLadder();
+    if (!outcome.ok && !ac.signal.aborted) {
+      await new Promise((r) => setTimeout(r, LADDER_RETRY_DELAY_MS));
+      if (!ac.signal.aborted) outcome = await attemptFullLadder();
     }
 
-    if (!result || !result.ok) {
-      sse({ type: "error", message: (result && result.error) || "The model didn't answer that time. Try again." });
+    if (outcome.ok) {
+      sse({ type: "served", model: outcome.modelId, provider: outcome.provider, route });
+    } else if (!ac.signal.aborted) {
+      sse({ type: "error", message: CALM_FAILURE_MESSAGE });
     }
 
     /*
      * PAY FOR WHAT YOU USE, WITH NO CAP (Fred, 2026-08-03).
      *
-     * This surface shipped UNMETERED. It had no meterTurn, no cost calculation and no credit
-     * deduction anywhere, while the route gate checked that a guest HAS credits and then never
-     * spent any. Several Simplify routes are free provider lanes, but chat and websearch both land
-     * on Claude Haiku, which Dominion pays for on every turn. So every one of those turns was
-     * served free, and the leak was invisible because the gate LOOKED like billing.
-     *
      * Metering happens through a callback the server supplies rather than here, because billing
      * belongs in server.mjs next to meterTurn and the ledger. A second copy of the cost math living
      * in this file is a copy that drifts.
      *
-     * A FAILED TURN IS NOT CHARGED. `result.ok` false means the provider never answered, and
-     * charging for silence is the surprise this app refuses. Usage is passed through exactly as the
-     * provider reported it, so a turn with no usage row bills nothing rather than bills a guess.
+     * A FAILED TURN IS NOT CHARGED — unchanged by the ladder rewrite. `outcome.ok` false means
+     * every rung in both ladder passes failed to produce content, and charging for silence is the
+     * surprise this app refuses. Usage is passed through exactly as the WINNING rung's provider
+     * reported it; any rung that failed before the winner never appears in the bill, the same
+     * honesty the single-model version had.
      */
-    if (result && result.ok && typeof onTurnBilled === "function") {
+    if (outcome.ok && typeof onTurnBilled === "function") {
       try {
         await onTurnBilled({
-          modelId: resolved.modelId,
-          usage: result.usage || null,
+          modelId: outcome.modelId,
+          usage: outcome.usage || null,
           question: userMessage,
-          answer: result.content || "",
+          answer: outcome.content || "",
         });
       } catch (e) {
         // Metering must never take the user's answer down with it. They already have their reply.

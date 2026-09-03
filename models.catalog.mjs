@@ -203,12 +203,15 @@ export const MODELS = [
   { id: "google/gemini-3.5-flash-lite", name: "Gemini 3.5 Flash-Lite", origin: "Google (AI Studio direct)", provider: "google", directId: "gemini-3.5-flash-lite",
     category: "Frontier / Flagship", vision: true, params: "undisclosed", paramsB: null, inCost: 0.30, outCost: 2.50, cacheHitCost: 0.03, ctx: 1048576, maxOut: 65536, reasoning: true,
     specialty: "Cheapest Google model for simple, high-volume tasks" },
-  // FREE LANE (ARSENAL Wave 2, live-probed 2026-07-29): NVIDIA's developer endpoint serves this
-  // exact id with tool calls verified. With NVIDIA_API_KEY present the call rides free and bills
-  // $0 (transport-aware cost math); without it, OpenRouter at the prices below, unchanged.
-  { id: "z-ai/glm-5.2", name: "GLM 5.2", origin: "Zhipu AI (Tsinghua spinout)", provider: "nvidia", directId: "z-ai/glm-5.2",
-    category: "Frontier / Flagship", params: "355B (MoE)", paramsB: 355, inCost: 0.45, outCost: 3.31, ctx: 1048576,
-    specialty: "Strong free coder for planning and building" },
+  /*
+   * z-ai/glm-5.2 REMOVED 2026-09-03 (STABILIZE Step 1, deficiency #2 and #4): NVIDIA retired it
+   * 2026-08-21, every call now returns HTTP 410 "has reached its end of life". Confirmed dead
+   * again against specs/nvidia_models.txt (2026-09-03 live NVIDIA model list): no glm entry at
+   * all. It will never come back on this id; a live replacement would be a new seat, not a
+   * resurrection. Every internal reference (UTILITY_MODEL, BATTALION_ROSTER, BATTALION_FAILOVER,
+   * WILDFIRE_ROSTER, REMOVED_MODEL_FALLBACKS) was repointed in the same pass — grep the ids below
+   * if you're looking for where its jobs went.
+   */
 
   // ---- Reasoning & Math ---------------------------------------------------------------------
   /*
@@ -269,12 +272,14 @@ export const MODELS = [
   { id: "minimax/minimax-m3", name: "MiniMax M3", origin: "MiniMax (Shanghai)", provider: "nvidia", directId: "minimaxai/minimax-m3",
     category: "Vision / Multimodal", vision: true, params: "undisclosed (MoE)", paramsB: null, inCost: 0.10, outCost: 1.21, ctx: 1048576,
     specialty: "Best free option for understanding images and video" },
-  // Quick free vision seat (probed 2026-08-03 on Fred's NVIDIA key: answers, real tool call, and
-  // NAMED the red swatch). Seated for the Simplify quick-and-dirty route; earns its place as the
-  // only small fast vision model on the free lane.
-  { id: "nvidia/nemotron-nano-12b-v2-vl", name: "Nemotron Nano 12B VL", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-nano-12b-v2-vl",
-    category: "Vision / Multimodal", vision: true, params: "12B", paramsB: 12, inCost: 0, outCost: 0, ctx: 131072,
-    specialty: "Small, fast, and free for quick looks at images" },
+  /*
+   * nvidia/nemotron-nano-12b-v2-vl REMOVED 2026-09-03 (STABILIZE Step 1, deficiency #1/#2/#4):
+   * NVIDIA retired it 2026-08-26, every call returns HTTP 410 "has reached its end of life" —
+   * this was the Simplify "quick" route's model and the reason that route went dark for two
+   * weeks. Confirmed absent from specs/nvidia_models.txt's current live list. It held the only
+   * small fast free vision seat; REMOVED_MODEL_FALLBACKS below sends saved picks to the next
+   * smallest free vision model (nemotron-3-nano-omni-30b-a3b) instead.
+   */
 
   // ---- Open & Trainable ---------------------------------------------------------------------
   // OLMo 3 32B Think REMOVED 2026-07-30 (listed but unserved: every pick was a dead turn).
@@ -285,21 +290,31 @@ export const MODELS = [
     category: "Open & Trainable", params: "120B (MoE·12B active)", paramsB: 120, inCost: 0, outCost: 0, ctx: 1000000,
     specialty: "The biggest free model here, with a 1M-token memory" },
   /*
-   * TWO SEATS ADDED 2026-08-03 FOR THE SIMPLIFY ROUTER, both live-probed the same day against
-   * integrate.api.nvidia.com with the production key, first-token latency recorded:
+   * meta/llama-3.1-70b-instruct REMOVED 2026-09-03 (STABILIZE Step 1, deficiency #1/#2/#4): NVIDIA
+   * retired it 2026-08-26 (HTTP 410 "end of life"), confirmed absent from the current
+   * specs/nvidia_models.txt live list. It held the Simplify "empathetic" route.
    *
-   *   llama-3.1-70b-instruct       238ms    the empathetic route
-   *   nemotron-3.5-content-safety  167ms    the safety route
-   *
-   * Fred picked "meta llama 70b" for the empathetic route. The 3.3 generation of that model is
-   * invokable on this account and takes 45.6 SECONDS to produce a first token, which no chat
-   * surface can carry, so the 3.1 generation of the same family and size holds the seat instead.
-   * Recorded here rather than in the router, because a router that names a model the catalog does
-   * not contain is a route that fails at the moment a user needs it.
+   * REPLACEMENT: nvidia/llama-3.1-nemotron-70b-instruct below. This exact id was probed DEAD
+   * (HTTP 404 "Not found for account") on 2026-08-03 per docs/SIMPLIFY-ROUTING-TABLE.md section 1
+   * — that earlier probe was for the THEOLOGICAL route, a different NVIDIA endpoint slice, over a
+   * month before this pass. It IS present in the current specs/nvidia_models.txt live catalog
+   * (2026-09-03), and simplify.mjs's empathetic ladder tries it as rung 2 with two more rungs
+   * behind it, so a repeat 404 here degrades to the next rung rather than failing the route — see
+   * the rig proof in the STABILIZE report for whether it actually answered this time.
    */
-  { id: "meta/llama-3.1-70b-instruct", name: "Llama 3.1 70B", origin: "NVIDIA (direct)", provider: "nvidia", directId: "meta/llama-3.1-70b-instruct",
+  { id: "nvidia/llama-3.1-nemotron-70b-instruct", name: "Nemotron 70B Instruct", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/llama-3.1-nemotron-70b-instruct",
     category: "Open & Trainable", params: "70B", paramsB: 70, inCost: 0, outCost: 0, ctx: 131072,
     specialty: "Warm, plain-spoken answers when the question is personal" },
+  /*
+   * nvidia/nemotron-3.5-content-safety KEPT as a catalog row (still listed on NVIDIA, per
+   * specs/nvidia_models.txt) but no longer used as an ANSWERING seat anywhere in this app
+   * (STABILIZE Step 1, deficiency #2): it is a moderation classifier, not a chat model, and
+   * rejects an ordinary chat turn with "Conversation roles must alternate user/assistant/...".
+   * simplify.mjs's safety route now answers on claude-haiku-4-5 with a care-first system prompt.
+   * toolCapable:false is unchanged; catalogaudit.mjs's new live chat-probe (added this pass) marks
+   * this seat "unavailable" on every run so the general picker hides it too, with its `fallback`
+   * field (below) pointing at claude-haiku-4-5 for any code that still resolves it by id.
+   */
   { id: "nvidia/nemotron-3.5-content-safety", name: "Nemotron Content Safety", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3.5-content-safety",
     category: "Open & Trainable", params: "undisclosed", paramsB: null, inCost: 0, outCost: 0, ctx: 131072, toolCapable: false,
     specialty: "Handles sensitive and safety questions carefully" },
@@ -362,6 +377,10 @@ export const REMOVED_MODEL_FALLBACKS = {
   "microsoft/wizardlm-2-8x22b": "nvidia/nemotron-3-super-120b-a12b:free",
   "thedrummer/cydonia-24b-v4.1": "nvidia/nemotron-3-super-120b-a12b:free",
   "cognitivecomputations/dolphin-mistral-24b-venice-edition": "nvidia/nemotron-3-super-120b-a12b:free",
+  // STABILIZE Step 1, 2026-09-03 prune (three confirmed-410 NVIDIA seats removed for good)
+  "z-ai/glm-5.2": "nvidia/nemotron-3-super-120b-a12b:free",           // UTILITY_MODEL's new home
+  "nvidia/nemotron-nano-12b-v2-vl": "nvidia/nemotron-3-nano-omni-30b-a3b",  // next smallest free vision seat
+  "meta/llama-3.1-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct", // same job, live NVIDIA id
   // Creative & Writing -> the surviving creative seat
   "anthracite-org/magnum-v4-72b": "arcee-ai/trinity-large-thinking",
   "sao10k/l3.3-euryale-70b": "arcee-ai/trinity-large-thinking",
@@ -381,7 +400,7 @@ export const REMOVED_MODEL_FALLBACKS = {
   "qwen/qwen3-vl-8b-instruct": "nvidia/nemotron-nano-12b-v2-vl",              // small cheap vision
   "perplexity/sonar-pro": "google/gemini-3.6-flash",       // any model can call web_search
   "meta-llama/llama-4-maverick": "minimax/minimax-m3",     // cheap 1M-ctx vision
-  "mistralai/mistral-nemo": "z-ai/glm-5.2",                // utility work moved with UTILITY_MODEL
+  "mistralai/mistral-nemo": "nvidia/nemotron-3-super-120b-a12b:free", // utility work moved with UTILITY_MODEL
   "google/gemma-4-31b-it:free": "nvidia/nemotron-3-super-120b-a12b:free",  // free stays free
 };
 // Live id -> itself. Removed id -> its mapped survivor. Unknown -> "" (never invent a model).
@@ -481,13 +500,12 @@ const WILDFIRE_ROSTER = new Set([
   "deepseek/deepseek-v4-pro",
   "deepseek/deepseek-r1",
   "qwen/qwen3-coder",
-  "z-ai/glm-5.2",
   "openai/gpt-4o",
   "nvidia/nemotron-3-ultra-550b-a55b",
   // Gemini seats joined 2026-08-03 with the lane: tools live-probed on the wire Dominion uses.
   "google/gemini-3.6-flash",
   "google/gemini-3.1-pro-preview",
-]);   // qwen3-235b and grok-4.20 left with the 2026-08-03 prune
+]);   // qwen3-235b and grok-4.20 left with the 2026-08-03 prune; z-ai/glm-5.2 left 2026-09-03 (410, EOL)
 
 // Stamp it onto every model record so it rides the /api/models payload to the picker without a
 // second lookup. Runs AFTER finalize(), so toolCapable is already resolved.
@@ -557,9 +575,12 @@ export function outLimitFor(id, mode) {
 }
 
 // Cheap fast model for internal utility calls (chat titles, short summaries) so they never block.
-// Was mistral-nemo until the 2026-08-03 prune; GLM 5.2 took the job because it is free on the
-// NVIDIA lane, probed clean (answers, tools, no starvation), and needs no reasoning headroom.
-export const UTILITY_MODEL = "z-ai/glm-5.2";
+// Was mistral-nemo until the 2026-08-03 prune, then GLM 5.2 (free on the NVIDIA lane, no
+// reasoning headroom) until NVIDIA retired it 2026-08-21 (STABILIZE Step 1, 2026-09-03): every
+// call 410'd, so utility calls were silently failing. Nemotron 3 Super takes the job: same $0
+// NVIDIA lane, not flagged `reasoning` (no starvation risk), already the most heavily used free
+// seat in this catalog (Simplify's business/theological rungs, BATTALION's single seat).
+export const UTILITY_MODEL = "nvidia/nemotron-3-super-120b-a12b:free";
 
 /* BATTALION (ARSENAL Wave 6, docs/BATTALION-SOW.md). Fred's copy, verbatim, no quality
  * qualifier. The roster is the "handpicked" in his sentence: free-lane seats ONLY, each admitted
@@ -573,7 +594,7 @@ export const BATTALION_ROSTER = {
   single: "nvidia/nemotron-3-super-120b-a12b:free",      // simple turns: one strong fast seat
   workers: [                                             // the parallel bench, round-robin
     "nvidia/nemotron-3-super-120b-a12b:free",            //   reasoning
-    "z-ai/glm-5.2",                                      //   code (355B coder, free lane)
+    "nvidia/llama-3.1-nemotron-70b-instruct",            //   warm, plain-spoken (replaced glm-5.2, EOL 08-21)
     "openai/gpt-oss-20b",                                //   fast general
     "minimax/minimax-m3",                                //   long-context + vision seat
   ],
@@ -601,18 +622,24 @@ export const battalionRosterIds = () => [BATTALION_ROSTER.assess, BATTALION_ROST
  * assumed, because the obvious version of this fix quietly starts billing. Probed against OpenRouter
  * 2026-08-09 from the same container:
  *
- *   openai/gpt-oss-20b                      PAID bare ($0.03/$0.13), :free exists  -> :free
- *   nvidia/nemotron-3-ultra-550b-a55b       PAID bare ($0.60/$3.60), :free exists  -> :free
- *   nvidia/nemotron-3-super-120b-a12b:free  already a $0 route                     -> itself
- *   z-ai/glm-5.2                            NO $0 route on OpenRouter at all       -> the free 120B
- *   minimax/minimax-m3                      NO $0 route on OpenRouter at all       -> the free 120B
+ *   openai/gpt-oss-20b                        PAID bare ($0.03/$0.13), :free exists  -> :free
+ *   nvidia/nemotron-3-ultra-550b-a55b         PAID bare ($0.60/$3.60), :free exists  -> :free
+ *   nvidia/nemotron-3-super-120b-a12b:free    already a $0 route                     -> itself
+ *   nvidia/llama-3.1-nemotron-70b-instruct    NO $0 route on OpenRouter at all       -> the free 120B
+ *   minimax/minimax-m3                        NO $0 route on OpenRouter at all       -> the free 120B
+ *
+ * (z-ai/glm-5.2's row here was removed with it from MODELS 2026-09-03, STABILIZE Step 1 — NVIDIA
+ * retired the seat 2026-08-21 and it took its BATTALION worker slot with it; see the roster above.)
  *
  * FOUR OF THE FIVE ARE PAID under their bare ids, so a plain __forceProvider reroute would have
  * charged Fred on a lane whose own failure message says "Nothing was billed". Every value below is a
- * $0 route, each live-probed HTTP 200. The two seats with no free twin fall to the free 120B: that
- * loses the coder and the long-context specialist, which is a real downgrade and is announced in the
- * manifest rather than swallowed. Vision is not among the losses — the swarm refuses picture turns
- * outright, so the minimax seat's vision never runs here.
+ * $0 route, each live-probed HTTP 200 (nemotron-70b-instruct is UNVERIFIED on this specific point —
+ * it has no OpenRouter-native row in this catalog to probe a :free twin against, so it takes the
+ * same no-free-twin fallback as minimax-m3 on the same reasoning, not a fresh probe). The two seats
+ * with no free twin fall to the free 120B: that loses the coder and the long-context specialist,
+ * which is a real downgrade and is announced in the manifest rather than swallowed. Vision is not
+ * among the losses — the swarm refuses picture turns outright, so the minimax seat's vision never
+ * runs here.
  *
  * The $0 invariant is enforced by battalion_failover_test, not by this comment.
  */
@@ -620,7 +647,7 @@ export const BATTALION_FAILOVER = {
   "openai/gpt-oss-20b": "openai/gpt-oss-20b:free",
   "nvidia/nemotron-3-ultra-550b-a55b": "nvidia/nemotron-3-ultra-550b-a55b:free",
   "nvidia/nemotron-3-super-120b-a12b:free": "nvidia/nemotron-3-super-120b-a12b:free",
-  "z-ai/glm-5.2": "nvidia/nemotron-3-super-120b-a12b:free",
+  "nvidia/llama-3.1-nemotron-70b-instruct": "nvidia/nemotron-3-super-120b-a12b:free",
   "minimax/minimax-m3": "nvidia/nemotron-3-super-120b-a12b:free",
 };
 
@@ -663,6 +690,92 @@ export const ORCHESTRATOR_FALLBACKS = [
   "moonshotai/kimi-k2.6", "google/gemini-3.6-flash",   // gemini took qwen3-235b's slot in the prune
 ];
 
+/*
+ * PER-SEAT FALLBACK (STABILIZE Step 1, 2026-09-03, deficiency #3-#5). "Model picker offers seats
+ * that cannot answer" and "boot-time audit reports CLEAN while seats are dead" are two faces of
+ * one gap: nothing ever recorded WHAT a hidden or dead seat should serve instead. Every current
+ * catalog id gets exactly one, chosen for a similar job at the next price/latency step down (a
+ * paid flagship falls to a cheaper sibling in the same family before it falls to a free seat; a
+ * free NVIDIA seat falls to another free NVIDIA seat or the cheapest DeepSeek lane). Verified by
+ * models_catalog_test.mjs: every key is a live id, every value is a live id, no id maps to itself.
+ */
+export const MODEL_FALLBACKS = Object.freeze({
+  "openai/gpt-5.6-sol": "openai/gpt-5.6-terra",
+  "openai/gpt-5.6-terra": "openai/gpt-5.6-luna",
+  "openai/gpt-5.6-luna": "deepseek/deepseek-v4-flash",
+  "openai/gpt-5.5": "openai/gpt-5.6-terra",
+  "openai/gpt-4o": "openai/gpt-5.6-luna",
+  "moonshotai/kimi-k3": "moonshotai/kimi-k2.6",
+  "moonshotai/kimi-k2.6": "deepseek/deepseek-v4-pro",
+  "anthropic/claude-opus-4-8": "anthropic/claude-sonnet-5",
+  "anthropic/claude-sonnet-5": "anthropic/claude-haiku-4-5",
+  "anthropic/claude-haiku-4-5": "deepseek/deepseek-v4-flash",
+  "deepseek/deepseek-v4-pro": "deepseek/deepseek-v4-flash",
+  "google/gemini-3.6-flash": "deepseek/deepseek-v4-flash",
+  "google/gemini-3.1-pro-preview": "google/gemini-3.6-flash",
+  "google/gemini-3.5-flash-lite": "deepseek/deepseek-v4-flash",
+  "deepseek/deepseek-r1": "deepseek/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b": "deepseek/deepseek-v4-pro",
+  "deepseek/deepseek-v4-flash": "anthropic/claude-haiku-4-5",
+  "qwen/qwen3-coder": "deepseek/deepseek-v4-pro",
+  "arcee-ai/trinity-large-thinking": "anthropic/claude-sonnet-5",
+  "minimax/minimax-m3": "nvidia/nemotron-3-super-120b-a12b:free",
+  "nvidia/nemotron-3-nano-omni-30b-a3b": "minimax/minimax-m3",
+  "nvidia/nemotron-3-super-120b-a12b:free": "deepseek/deepseek-v4-flash",
+  "nvidia/llama-3.1-nemotron-70b-instruct": "anthropic/claude-haiku-4-5",
+  "nvidia/nemotron-3.5-content-safety": "anthropic/claude-haiku-4-5",
+  "openai/gpt-oss-20b": "deepseek/deepseek-v4-flash",
+  "gx10/gpt-oss-120b": "deepseek/deepseek-v4-flash",
+  "gx10/qwen3-coder-30b": "qwen/qwen3-coder",
+  "gx10/gpt-oss-20b": "deepseek/deepseek-v4-flash",
+});
+// Stamp it onto every model record (same pattern as broadCapable above) so it rides /api/models
+// without a second lookup, and so a caller who already has the record in hand needs no import.
+for (const m of MODELS) m.fallback = MODEL_FALLBACKS[m.id] || "";
+export const fallbackFor = (id) => MODEL_FALLBACKS[id] || "";
+
+/*
+ * LIVE-AUDIT UNAVAILABLE STATE (STABILIZE Step 1, deficiency #3-#5). catalogaudit.mjs's boot/hourly
+ * run (server.mjs) calls setUnavailableSeats() with what it could not verify live; this module
+ * holds that as the single place both /api/models (catalogPayload, below) and any request-time
+ * caller (resolveServingModel, below) read it from. Module-scope mutable state, on purpose: the
+ * audit result is process-wide truth about what NVIDIA will currently answer, not a per-request
+ * value, and every consumer needs the SAME snapshot without threading it through every call site.
+ * Empty object at boot (nothing known-dead yet) is the safe default: nothing is hidden until the
+ * first audit actually proves it should be.
+ */
+let unavailableSeats = {};   // { [modelId]: reason }
+export function setUnavailableSeats(map) { unavailableSeats = (map && typeof map === "object") ? { ...map } : {}; }
+export function getUnavailableSeats() { return { ...unavailableSeats }; }
+export const isSeatUnavailable = (id) => Object.prototype.hasOwnProperty.call(unavailableSeats, id);
+export const unavailableReason = (id) => unavailableSeats[id] || "";
+
+/*
+ * Resolve what a chat request for `id` should actually be served by: itself if it is live, its
+ * `fallback` (recursing once more if THAT is also unavailable, capped so a fallback cycle can
+ * never spin) otherwise. Every consumer that substitutes a seat gets the same answer from the same
+ * place, and the `substituted`/`reason` fields are exactly what a `served` metadata event needs —
+ * this is the data half of "a chat request for a hidden or unavailable seat is served by its
+ * fallback and the response carries served metadata"; simplify.mjs's ladder implements the request
+ * half for Simplify's own routes, and the main /chat picker (lane/chat) is the other caller this
+ * was built for.
+ */
+export function resolveServingModel(id) {
+  let cur = id, hops = 0;
+  const chain = [];
+  while (cur && isSeatUnavailable(cur) && hops < 4) {
+    chain.push({ id: cur, reason: unavailableReason(cur) });
+    const next = fallbackFor(cur);
+    if (!next || next === cur || chain.some((c) => c.id === next)) break;   // no route, self-loop, or a cycle
+    cur = next; hops++;
+  }
+  const servedId = cur && isCatalogModel(cur) ? cur : (isCatalogModel(id) ? id : "");
+  // "substituted" means a DIFFERENT live seat is serving this request, not "we found nothing at
+  // all" (an id that was never a catalog member in the first place is not a substitution — there
+  // was nothing to substitute FROM).
+  return { requestedId: id, servedId, substituted: !!servedId && servedId !== id, chain };
+}
+
 export function catalogByCategory() {
   return CATEGORIES.map((cat) => ({
     category: cat,
@@ -671,7 +784,20 @@ export function catalogByCategory() {
   })).filter((g) => g.models.length);
 }
 
-// The full payload served at /api/models.
+/*
+ * The full payload served at /api/models. Hides any seat the live audit could not verify
+ * (deficiency #4/#5: "the model picker offers seats that cannot answer") rather than greying it
+ * out client-side — a hidden dead seat cannot be picked at all, which is the actual requirement
+ * ("nothing may fail to produce a viable result" reads, for a picker, as "never offer a choice
+ * that fails"). `count` and each group's models reflect the filtered set; nothing downstream needs
+ * to know a seat was ever hidden. MODEL_IDS (the security allow-list) is untouched: a seat that
+ * comes back alive on the next hourly audit is immediately pickable again with no redeploy.
+ */
 export function catalogPayload() {
-  return { updated: CATALOG_UPDATED, default: DEFAULT_MODEL, categories: CATEGORIES, groups: catalogByCategory(), count: MODELS.length };
+  const hiddenCount = Object.keys(unavailableSeats).length;
+  const groups = catalogByCategory()
+    .map((g) => ({ ...g, models: g.models.filter((m) => !isSeatUnavailable(m.id)) }))
+    .filter((g) => g.models.length);
+  const count = groups.reduce((n, g) => n + g.models.length, 0);
+  return { updated: CATALOG_UPDATED, default: DEFAULT_MODEL, categories: CATEGORIES, groups, count, hiddenCount };
 }

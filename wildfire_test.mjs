@@ -12,13 +12,17 @@ let passed = 0;
 const ok = (n) => { console.log("  PASS  " + n); passed++; };
 
 // 2026-08-03: qwen3-235b and grok-4.20 left with the Phase 1 prune (Fred cut Grok by name); the
-// two probed Gemini seats joined with the AI Studio lane. 16 seats then, 16 seats now.
+// two probed Gemini seats joined with the AI Studio lane. 16 seats then.
+// 2026-09-03 (STABILIZE Step 1, minimal out-of-lane edit — see the simplify lane's final report):
+// z-ai/glm-5.2 left too. NVIDIA retired it 2026-08-21 (confirmed HTTP 410 "end of life") and it was
+// removed from models.catalog.mjs entirely; a dead roster entry cannot arm, so keeping it here would
+// just make this test fail for a reason unrelated to what it checks. 15 seats now.
 const EXPECTED = [
   "openai/gpt-5.6-sol", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna",
   "anthropic/claude-opus-4-8", "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4-5",
   "moonshotai/kimi-k3", "moonshotai/kimi-k2.6",
   "deepseek/deepseek-v4-pro", "deepseek/deepseek-r1",
-  "qwen/qwen3-coder", "z-ai/glm-5.2", "openai/gpt-4o",
+  "qwen/qwen3-coder", "openai/gpt-4o",
   "nvidia/nemotron-3-ultra-550b-a55b",
   "google/gemini-3.6-flash", "google/gemini-3.1-pro-preview",
 ];
@@ -28,15 +32,15 @@ const EXPECTED = [
   const all = new Set(MODELS.map((m) => m.id));
   const missing = EXPECTED.filter((id) => !all.has(id));
   assert.deepEqual(missing, [], "rostered ids missing from the catalog: " + missing.join(", "));
-  ok("all 16 rostered ids exist in the catalog");
+  ok("all 15 rostered ids exist in the catalog");
 }
 
-// 2. all 16 actually arm
+// 2. all 15 actually arm
 {
   const armed = broadCapableIds();
-  assert.equal(armed.length, 16, "expected 16 armed, got " + armed.length + ": " + armed.join(", "));
+  assert.equal(armed.length, 15, "expected 15 armed, got " + armed.length + ": " + armed.join(", "));
   for (const id of EXPECTED) assert.equal(isBroadCapable(id), true, id + " should be broad-capable");
-  ok("all 16 resolve as broad-capable");
+  ok("all 15 resolve as broad-capable");
 }
 
 // 3. tool capability is a hard prerequisite
@@ -75,9 +79,9 @@ const EXPECTED = [
 // 7. the names list is usable in the refusal message
 {
   const names = broadCapableNames();
-  assert.equal(names.length, 16);
+  assert.equal(names.length, 15);
   assert.ok(names.every((n) => typeof n === "string" && n.length), "names must be human-facing");
-  ok("broadCapableNames returns 16 usable display names");
+  ok("broadCapableNames returns 15 usable display names");
 }
 
 console.log(`\n${passed}/7 checks passed - Wildfire roster verified against the live catalog`);

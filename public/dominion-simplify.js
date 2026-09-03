@@ -149,6 +149,19 @@
                   assistantEl.classList.add("simplify-error");
                   assistantEl.textContent = evt.message || "The model didn't answer that time. Try again.";
                 }
+              } else if (evt.type === "served") {
+                /*
+                 * The server ladder-routes every turn now (STABILIZE Step 1, 2026-09-03): a route
+                 * can try several models before one answers, and `served` names the one that did.
+                 * This surface still never shows a model name or route to the user — that rule is
+                 * unchanged and pinned by simplify_test.mjs — so this is recorded as data attributes
+                 * on the existing assistant turn element (the same element `simplify-error` and
+                 * `simplify-notice` already attach to) rather than any new visible text. No CSS rule
+                 * reads these today; they exist as a status hook for whoever styles this surface
+                 * next, without this pass doing a redesign of its own.
+                 */
+                assistantEl.dataset.servedRoute = evt.route || "";
+                assistantEl.dataset.servedProvider = evt.provider || "";
               }
               // {type:"route",...} is diagnostic only and deliberately never rendered — the surface
               // never shows which model answered.

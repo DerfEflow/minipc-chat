@@ -6163,27 +6163,40 @@ async function handleStripeWebhook(req, res) {
   return sjson(res, 200, { received: true });
 }
 
-// Weekly catalog self-audit (Fred, 2026-07-17): the server verifies its OWN model catalog against
-// live provider data — on boot after every deploy, then every 7 days. Problems (mislabels/dead ids,
-// the classes that error in a guest's face) are stored and shown in the owner console; the runtime
-// tools-fallback keeps chat alive meanwhile. CATALOG_AUDIT=0 disables (tests).
+// Catalog self-audit (Fred, 2026-07-17; frequency and NVIDIA coverage fixed 2026-09-03, STABILIZE
+// Step 1 deficiency #5): the server verifies its OWN model catalog against live provider data — on
+// boot after every deploy, then HOURLY (was every 7 days: a seat retired mid-week sat unaudited,
+// reported CLEAN, for up to six days). Problems (mislabels/dead ids, the classes that error in a
+// guest's face) are stored and shown in the owner console; the runtime tools-fallback keeps chat
+// alive meanwhile. CATALOG_AUDIT=0 disables (tests).
+//
+// NVIDIA_KEY was MISSING from the keys object below (deficiency #5, PROD DATA: production logged
+// "nvidia: unchecked: no key" while NVIDIA_API_KEY was set the whole time) — the audit's own NVIDIA
+// branch was silently skipped, so the free NVIDIA fleet (a third of the catalog) shipped unaudited.
+// Added here. setUnavailableSeats() below feeds catalogaudit's per-seat findings straight into
+// models.catalog.mjs's module state, which /api/models (catalogPayload) and any request-time
+// fallback lookup (resolveServingModel) read from — this is the wiring half of "the model picker
+// offers seats that cannot answer" (deficiency #4): the data now reaches the picker.
 import { runCatalogAudit } from "./catalogaudit.mjs";
+import { setUnavailableSeats } from "./models.catalog.mjs";
 const AUDIT_FILE = dataPath("catalog-audit.json");
 let lastAudit = null;
 try { lastAudit = JSON.parse(await readFile(AUDIT_FILE, "utf8")); } catch {}
+if (lastAudit && lastAudit.unavailable) setUnavailableSeats(lastAudit.unavailable);   // survive a restart without a blank slate
 async function runAuditAndStore(trigger) {
   try {
-    const r = await runCatalogAudit({ openrouter: OPENROUTER_KEY, openai: OPENAI_KEY, anthropic: ANTHROPIC_KEY, deepseek: DEEPSEEK_KEY });
+    const r = await runCatalogAudit({ openrouter: OPENROUTER_KEY, openai: OPENAI_KEY, anthropic: ANTHROPIC_KEY, deepseek: DEEPSEEK_KEY, nvidia: NVIDIA_KEY, google: GOOGLE_AISTUDIO_KEY });
     r.trigger = trigger;
     lastAudit = r;
+    setUnavailableSeats(r.unavailable || {});
     try { await writeFile(AUDIT_FILE, JSON.stringify(r, null, 1)); } catch {}
-    console.log(`[dominion-ai] catalog audit (${trigger}): ${r.ok ? "CLEAN" : r.problems.length + " PROBLEM(S)"} · ${r.notes.length} note(s)`);
+    console.log(`[dominion-ai] catalog audit (${trigger}): ${r.ok ? "CLEAN" : r.problems.length + " PROBLEM(S)"} · ${r.notes.length} note(s) · ${Object.keys(r.unavailable || {}).length} seat(s) hidden`);
     return r;
   } catch (e) { console.log("[dominion-ai] catalog audit failed:", String(e && e.message || e)); return lastAudit; }
 }
 if (String(cfgGet("CATALOG_AUDIT", "1")) === "1") {
   setTimeout(() => runAuditAndStore("boot"), 90 * 1000);
-  setInterval(() => runAuditAndStore("weekly"), 7 * 24 * 3600 * 1000);
+  setInterval(() => runAuditAndStore("hourly"), 3600 * 1000);
 }
 
 // Door-list automation: when the owner mints a code for a specific email, add that email to the
