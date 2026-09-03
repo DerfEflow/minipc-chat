@@ -81,7 +81,7 @@ import { squeezeOversizeMessages, isContextOverflowError } from "./contextwindow
     assert.equal(seat.outCost, 0, seat.id + " must be free");
     assert.equal(isToolCapable(seat.id), true, seat.id + " was tool-probed live and must stay marked");
     assert.equal(providerOf(seat.id), "gx10");
-    assert.ok(seat.ctx >= 100_000, seat.id + " carries its resident-safe window (32k; 131k evicted the coder, 2026-09-03)");
+    assert.ok(seat.ctx >= 32_000, seat.id + " carries its resident-safe window (32k; 131k evicted the coder, 2026-09-03)");
     for (const mode of ["normal", "trusted", "private"]) {
       assert.equal(modeAllows(mode, seat.id).allowed, true, seat.id + " must be allowed in " + mode + " mode (it never leaves the house)");
     }
