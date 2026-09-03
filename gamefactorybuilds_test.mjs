@@ -49,6 +49,7 @@ test("resolveFile serves bundle files with the right MIME and refuses escapes", 
 test("summary tallies the QA results against the build record", () => {
   const s = builds.summary(ctx);
   assert.equal(s.versionName, "0.1.1");
+  assert.equal(s.status, "TESTED", "QA results on disk outrank a PLANNED store status");
   assert.equal(s.fileCount, 2);
   assert.equal(s.playable, true);
   assert.deepEqual([s.qa.passed, s.qa.failed, s.qa.total], [1, 1, 2]);

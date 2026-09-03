@@ -85,8 +85,17 @@ export function createGameFactoryBuilds({ dataDir, store } = {}) {
     const names = Object.keys(suites);
     const passed = names.filter((name) => suites[name] && suites[name].status === "PASSED");
     const failed = names.filter((name) => suites[name] && suites[name].status !== "PASSED");
+    // The store's own build status wins when it knows this build (the supervisor marks BUILT/TESTED);
+    // otherwise the evidence on disk speaks: QA recorded -> TESTED, bundle present -> BUILT, else PLANNED.
+    let status = "";
+    try {
+      const detail = store.getProject(uid, projectId, { eventLimit: 1 });
+      if (detail && detail.activeBuild && detail.activeBuild.id === clean(buildId, 120)) status = clean(detail.activeBuild.status, 40);
+    } catch {}
+    if (!status || status === "PLANNED") status = results ? "TESTED" : existsSync(join(base, "bundle", "index.html")) ? "BUILT" : status || "PLANNED";
     return {
       buildId: clean(buildId, 120),
+      status,
       versionName: build ? clean(build.versionName, 40) : "",
       bundleSha256: build ? clean(build.bundleSha256, 64) : "",
       fileCount: build && Array.isArray(build.files) ? build.files.length : 0,
