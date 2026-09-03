@@ -351,10 +351,10 @@ export const MODELS = [
    * these seats, they run at 3-6 tok/s and make the hardware look broken.
    */
   { id: "gx10/gpt-oss-120b", name: "GPT-OSS 120B (GX10)", origin: "Your GX10 (local)", provider: "gx10", directId: "gpt-oss:120b",
-    category: "Your GX10 (local)", params: "117B (MoE·5B active)", paramsB: 117, inCost: 0, outCost: 0, ctx: 131072, maxOut: 16384, reasoning: true, toolCapable: true,
+    category: "Your GX10 (local)", params: "117B (MoE·5B active)", paramsB: 117, inCost: 0, outCost: 0, ctx: 32768, /* was 131072: at 131k the 120B needs 67 GiB and evicts the coder; 32k keeps both resident on the GX10 (measured 2026-09-03) */ maxOut: 16384, reasoning: true, toolCapable: true,
     specialty: "The house workhorse: strong reasoning on your own hardware, free" },
   { id: "gx10/qwen3-coder-30b", name: "Qwen3 Coder 30B (GX10)", origin: "Your GX10 (local)", provider: "gx10", directId: "qwen3-coder:30b",
-    category: "Your GX10 (local)", params: "30B (MoE·3B active)", paramsB: 30, inCost: 0, outCost: 0, ctx: 131072, maxOut: 16384, toolCapable: true,
+    category: "Your GX10 (local)", params: "30B (MoE·3B active)", paramsB: 30, inCost: 0, outCost: 0, ctx: 32768, /* was 131072: at 131k the 120B needs 67 GiB and evicts the coder; 32k keeps both resident on the GX10 (measured 2026-09-03) */ maxOut: 16384, toolCapable: true,
     specialty: "Fast local coder for builds, free on your own machine" },
 ];
 
