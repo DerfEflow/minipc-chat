@@ -169,11 +169,9 @@ const TOPIC_PATTERNS = Object.freeze([
   ["science", /\b(equation|derivative|integral|theorem|hypothesis|algorithm complexity|physics|chemistry|biology|photosynthes\w*|molecul\w*|velocity|acceleration|standard deviation|calculat\w*|solve for [a-z]|prove that|medicine|medical (basics|condition|diagnos\w*)|anatomy|genetics?|dna\b|ecosystem|organism|periodic table|newton'?s (law|laws)|gravity|thermodynamics|atom(ic)?|cell (division|biology)|evolution\w*)\b/i],
   ["business", /\b(business plan|marketing plan|revenue|pricing strategy|startup idea|invoice|negotiat\w*|market analysis|budget forecast|sales pitch|swot analysis|profit margin|cash flow|business proposal|\bllc\b|s[- ]?corp(oration)?|c[- ]?corp\b|sole proprietor\w*|business entity|incorporat\w*|payroll|hir(e|ing) (an? )?(employee|staff|contractor)|marketing (idea|strategy|campaign)|small business)\b/i],
   ["empathetic", /\b(i feel|i'?m feeling|i'?ve been feeling|feeling (?:so |really |quite )?(?:sad|stressed|anxious|overwhelmed|lonely|hurt|struggling|depressed)|i'?m (so |really |quite )?(sad|stressed|anxious|lonely|overwhelmed|struggling|hurting|depressed)|breakup|broke up with|relationship advice|grief|grieving|i don'?t know what to do about my|giving up on|ready to give up|thinking about giving up)\b/i],
-  // TODO(fred): "write me a poem" matches; "write me a SHORT poem" or "write me a TWO LINE poem"
-  // does not (the adjective sits between "a" and the noun) and falls through to quick instead —
-  // measured live 2026-09-03 via rig probe, not fixed this pass since widening this without a wider
-  // prompt sample risks new false positives more than the undershoot is worth guessing at.
-  ["literary", /\b(write (me |us )?a (poem|short story|screenplay|novel chapter|sonnet)|literary style|prose style|metaphor for|poetry about)\b/i],
+  // Adjectives between the article and the noun are allowed (up to three words), so "write me a short poem"
+  // and "write me a two line poem" route to literary as well (closed 2026-09-03 after a production probe).
+  ["literary", /\b(write (me |us )?(a|an|some) (?:[\w-]+ ){0,3}(poem|poems|short story|story|screenplay|novel chapter|sonnet|haiku|limerick|verse|monologue)|literary style|prose style|metaphor for|poetry about|poem about)\b/i],
   ["creative", /\b(brainstorm|creative idea|invent a|creative concept|design a character|worldbuild\w*|plot twist|story idea)\b/i],
   ["theological", /\b(does god|is there a god|meaning of life|afterlife|my faith|the bible says|religion\w*|theolog\w*|philosoph\w*|existentialis\w*|morality of|the soul)\b/i],
 ]);
