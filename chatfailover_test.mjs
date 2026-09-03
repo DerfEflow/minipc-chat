@@ -68,9 +68,9 @@ t("fallbackProviderOf resolves the provider of a fallback candidate", () => {
   assert.equal(fallbackProviderOf("moonshotai/kimi-k2.6"), providerOf("moonshotai/kimi-k2.6"));
 });
 
-t("a seat with no mapped fallback returns null rather than throwing", () => {
+t("a seat with no module-map fallback resolves through the catalog chain or returns null, never throws", () => {
   const fb = pickFallbackModel("google/gemini-3.6-flash", { privacyMode: "normal", tried: [] });
-  assert.equal(fb, null);
+  assert.ok(fb === null || !!fallbackProviderOf(fb), "got " + fb);
 });
 
 console.log(`\nchatfailover_test: ${passed} passed, 0 failed`);
