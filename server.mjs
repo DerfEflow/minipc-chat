@@ -1753,13 +1753,69 @@ function ideEscalate(job, event) {
   }).catch(() => {});
 }
 
-const ideJobs = createIdeJobs({ dir: dataPath("ide"), log: (m) => console.log(m), onEvent: ideEscalate });
-// Restart recovery. Jobs whose journal has no terminal event were being driven by a process that
-// no longer exists, so they are sealed as interrupted rather than left looking alive. Saying
-// "interrupted, work up to here is on disk" is honest; showing a spinner forever is not.
+/*
+ * Stabilization 2026-09-03 (deficiency #12 context, required behavior #6): "no build is lost to a
+ * deploy." Before this, EVERY job whose journal had no terminal event was sealed as "interrupted"
+ * at boot, unconditionally — the 09-02 Speak-Easy-class build and every deploy that lands mid-build
+ * simply lost the work and told the owner to start over. resumeIdeBuild is idejobs.mjs's resume()
+ * hook: it is handed the job's own journal (the original request, the last full plan, the ledger
+ * of what already finished, and whichever move was actually in flight) and relaunches runIdeBuild
+ * against the SAME job id, skipping the moves that already landed. Only a build that recorded its
+ * own request (via ideJobs.recordRequest, added to the top of runIdeBuild below) is resumable; an
+ * older journal or a probe job has nothing to relaunch and reports that honestly rather than
+ * guessing at a prompt nobody wrote down.
+ *
+ * Scope, said out loud: this drives the standard-crew (single move-list) pipeline. The AF-crew and
+ * task-graph pipelines (parallel divider/worker/reviewer relays) do not yet carry enough state in
+ * the journal to resume mid-relay; a restart during one of those still seals honestly as
+ * interrupted rather than silently resuming into a half-built relay it cannot reconstruct.
+ * TODO(fred): extend the journal/resume contract to the AF and task-graph pipelines once the
+ * standard-crew path has proven itself in production.
+ */
+async function resumeIdeBuild(job, info) {
+  const req = info && info.request;
+  if (!req || !req.prompt || !req.workspaceId) {
+    console.log("[ide] job " + job.id + " cannot be resumed (no recorded request); sealing as interrupted.");
+    return { ok: false };
+  }
+  const T = job.isOwner ? OWNER_T : { isOwner: false, uid: job.uid, role: "credit" };
+  let workspace = null;
+  try { workspace = ideStoreFor(T).get(req.workspaceId); } catch {}
+  if (!workspace) {
+    console.log("[ide] job " + job.id + " cannot be resumed: workspace " + req.workspaceId + " no longer exists.");
+    return { ok: false };
+  }
+  // Confirm the build machine actually answers before spending anything: an offline owner machine
+  // is not a failure to report, it is exactly the "park it, resume when the node reconnects" case
+  // Fred asked for. Same probe runIdeBuild itself opens with, run here first so a still-offline
+  // node parks quietly instead of burning a relaunch that would immediately hit the same wall.
+  try {
+    const probe = await ideHandsFor(T, workspace)("node_info", {});
+    if (!probe || probe.ok === false || probe.offline) {
+      return { ok: false, paused: true, reason: "The build machine is offline; this build resumes automatically once it reconnects." };
+    }
+  } catch (e) {
+    return { ok: false, paused: true, reason: "Could not reach the build machine: " + String((e && e.message) || e).slice(0, 200) };
+  }
+  console.log("[ide] job " + job.id + " resuming after a server restart"
+    + (info.inFlightMove ? " (in flight: " + (info.inFlightMove.title || info.inFlightMove.id) + ")" : ""));
+  runIdeBuild(job, {
+    T, workspace, prompt: req.prompt, assignments: req.assignments || {}, register: req.register,
+    mode: req.mode, forgeTier: req.forgeTier, forgeMode: !!req.forgeMode,
+    resumePlan: info.plan, resumeLedger: info.ledger,
+  }).catch((e) => { try { ideJobs.finish(job.id, { type: "error", message: String((e && e.message) || e) }); } catch {} });
+  return { ok: true };
+}
+
+const ideJobs = createIdeJobs({ dir: dataPath("ide"), log: (m) => console.log(m), onEvent: ideEscalate, resume: resumeIdeBuild });
+// Restart recovery. A job whose journal has no terminal event was being driven by a process that
+// no longer exists. resumeIdeBuild (above) relaunches it in place when it can; only a job with no
+// recorded request (predating this feature, or a probe) or a hard resume failure still gets sealed
+// as interrupted. Saying "interrupted, work up to here is on disk" is honest; showing a spinner
+// forever is not, and neither is silently discarding thirty minutes of somebody's build.
 {
   const rec = ideJobs.loadFromDisk();
-  if (rec.recovered) console.log(`[dominion-ai] ide jobs: recovered ${rec.recovered}, sealed ${rec.interrupted} as interrupted`);
+  if (rec.recovered) console.log(`[dominion-ai] ide jobs: recovered ${rec.recovered}, resuming ${rec.resuming || 0}, sealed ${rec.interrupted} as interrupted`);
 }
 
 /*
@@ -4185,7 +4241,16 @@ async function handleIdeReduce(req, res, T, body) {
 
 async function runIdeBuild(job, {
   T, workspace, prompt, assignments, register, mode, forgeTier = "ember", forgeMode = false,
+  resumePlan = null, resumeLedger = null,
 }) {
+  // Snapshot what this build was actually asked to do, so a server restart can resume it instead
+  // of only ever sealing it as lost work (required behavior #6). Best-effort: a failed write here
+  // degrades to "this particular build is not resumable", never a thrown error. Skipped entirely
+  // on a resume itself (resumePlan/resumeLedger present): the original request is already durable
+  // from the first attempt, and re-recording it would just be a second identical private line.
+  if (!resumePlan && !resumeLedger) {
+    try { ideJobs.recordRequest(job.id, { prompt, workspaceId: workspace && workspace.id, assignments, register, mode, forgeTier, forgeMode }); } catch {}
+  }
   const reg = normalizeRegister(register);
   const persona = personaVoice(normalizeCrucibleMode(mode));
   let selectedForgeTier = "ember";
@@ -4215,14 +4280,30 @@ async function runIdeBuild(job, {
   let workspaceGrounding = "";
   const knownIncomplete = [];
   const expectedFiles = new Set();
+  /*
+   * TEST HOOK for required behavior #1 (deficiency #10: a planned file never returned by its
+   * assigned step ended the 09-02 Speak-Easy build with no repair attempted at all). There is no
+   * reliable way to MAKE a real model omit a file on demand to prove the repair path live on the
+   * rig, so IDE_TEST_OMIT_FILE names one planned path whose coverage is silently dropped exactly
+   * once, the first time it would be marked covered - reproducing the observed bug precisely
+   * (the step ran, reported success, and simply never returned that one file) without touching
+   * any model call. No effect unless the env var is set; never derived from any user input.
+   */
+  let testOmitPending = String(process.env.IDE_TEST_OMIT_FILE || "").trim().replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase();
   const coveredFiles = new Set();
   const markCovered = (files) => {
     for (const file of files || []) {
       const normalized = String(typeof file === "string" ? file : file && file.path || "")
         .trim().replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase();
-      if (normalized) coveredFiles.add(normalized);
+      if (!normalized) continue;
+      if (testOmitPending && normalized === testOmitPending) { testOmitPending = ""; continue; }
+      coveredFiles.add(normalized);
     }
   };
+  // Restart resume (required behavior #6): a move already marked done before the process died
+  // wrote real files that are still on the user's own machine; count them covered so the
+  // completion gate does not wrongly call them "never returned" a second time.
+  if (resumeLedger && Array.isArray(resumeLedger.files)) markCovered(resumeLedger.files);
 
   const executionPolicyFor = (model) => {
     const rec = modelById(model) || {};
@@ -4337,6 +4418,32 @@ async function runIdeBuild(job, {
     },
   };
 
+  /*
+   * Required behavior #5 (second half): "while a model call is in flight, emit a status event
+   * every 30s so the stream shows life." Required behavior #7 (first half): "a model call that
+   * produces no bytes for 180s is retried (next rung)." Neither ideChatOnce nor
+   * ideChatWithWorkspaceTools (the chat pipeline's transport, not this lane's to touch) exposes
+   * per-chunk byte arrival to this layer, so "no bytes for 180s" is honestly approximated here as
+   * "no COMPLETE answer for 180s" - the finest grain observable from outside the transport - and
+   * turned into a transport-shaped failure ("no answer") that the existing dead-seat rerouting
+   * just below already knows how to retry on another keyed model. The original call is not
+   * force-aborted (no cancellation hook crosses that boundary either); losing the race, this
+   * layer simply stops waiting on it and its eventual result is discarded.
+   */
+  const STATUS_HEARTBEAT_MS = 30_000;
+  const STALL_MS = 180_000;
+  const withLiveness = async (promise, label) => {
+    const timer = setInterval(() => {
+      try { ideJobs.emit(job.id, { type: "status", label }); } catch {}
+    }, STATUS_HEARTBEAT_MS);
+    if (timer.unref) timer.unref();
+    const stalled = new Promise((resolve) => {
+      const t = setTimeout(() => resolve({ ok: false, error: "The model produced no answer within " + Math.round(STALL_MS / 1000) + " seconds.", stalled: true }), STALL_MS);
+      if (t.unref) t.unref();
+    });
+    try { return await Promise.race([promise, stalled]); } finally { clearInterval(timer); }
+  };
+
   // Every Crucible role gets the same durable contract and provider-native policy. Planning,
   // review, and audit turns can inspect the live workspace; file-writing remains centralized in
   // the engine so custom crews keep their ownership boundaries and no model writes concurrently.
@@ -4350,8 +4457,10 @@ async function runIdeBuild(job, {
      * model's full attention on the format contract, not more apparatus.
      */
     if (bare) {
-      return ideChatOnce(model, (Array.isArray(messages) ? messages : []).map((m) => ({ ...m })),
-        { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
+      return withLiveness(
+        ideChatOnce(model, (Array.isArray(messages) ? messages : []).map((m) => ({ ...m })),
+          { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard }),
+        "waiting on " + model + " (bare)");
     }
     const policy = executionPolicyFor(model);
     const managed = (Array.isArray(messages) ? messages : []).map((m) => ({ ...m }));
@@ -4390,7 +4499,7 @@ async function runIdeBuild(job, {
       budgetGuard: ideBudgetGuard,
       resumeState,
     };
-    const first = await ideChatWithWorkspaceTools(model, managed, opts);
+    const first = await withLiveness(ideChatWithWorkspaceTools(model, managed, opts), "waiting on " + model);
     /*
      * A DEAD SEAT HANDS ITS STEP TO ANOTHER ENGINE instead of dying on it. Two distinct deaths:
      *
@@ -4425,7 +4534,7 @@ async function runIdeBuild(job, {
                          : " could not be reached (" + String(first.error || "no answer").slice(0, 140) + "), so this step continues on ")
                 + ((modelById(alt) || {}).name || alt) + ". The build did not stop." });
           } catch {}
-          const second = await ideChatWithWorkspaceTools(alt, managed, opts);
+          const second = await withLiveness(ideChatWithWorkspaceTools(alt, managed, opts), "waiting on " + alt);
           if (second) second.costUsd = (Number(second.costUsd) || 0) + (Number(first.costUsd) || 0);
           return second;
         }
@@ -4478,6 +4587,10 @@ async function runIdeBuild(job, {
     } catch {}
   }
 
+  // Shared with the planner's own escalation loop below (required behavior #2): one definition of
+  // "the next stronger keyed seat" for the whole build, not a second copy that could drift from it.
+  const escalateModel = (model) => strongerModelFor(model, { catalog: CATALOG_MODELS, keyed: keyForModel, fallbacks: ORCHESTRATOR_FALLBACKS });
+
   const engine = createIdeEngine({
     jobs: ideJobs,
     chat,
@@ -4488,7 +4601,7 @@ async function runIdeBuild(job, {
     modelInfo: (id) => modelById(id),
     lessons: ideLessons,
     advisors,
-    escalate: (model) => strongerModelFor(model, { catalog: CATALOG_MODELS, keyed: keyForModel, fallbacks: ORCHESTRATOR_FALLBACKS }),
+    escalate: escalateModel,
     report: reportCrucibleCounsel,
   });
 
@@ -4724,14 +4837,22 @@ async function runIdeBuild(job, {
       if (timer) clearTimeout(timer);
       return ans ? String(ans.answer || "") : null;    // null = the job was sealed while waiting
     };
-    // Unattended builds keep moving: a failed move auto-retries once, then auto-skips, never
-    // auto-stops. The map remembers which moves already burned their auto-retry.
+    /*
+     * Unattended builds keep moving (required behavior #5: "never park on need_input for the
+     * owner"; the owner's own overriding directive that nothing may sit waiting). A failed move
+     * auto-retries up to 3 attempts (matching the counsel ladder's own "up to 3 attempts" wording
+     * used elsewhere in this file), THEN auto-skips with a note - never auto-stops, and never
+     * parks indefinitely on a question nobody is there to answer. The map remembers how many
+     * auto-retries each move has already burned.
+     */
     const IDE_ASK_AUTO_MS = Math.max(30_000, Number(process.env.IDE_ASK_AUTO_MS) || 180_000);
-    const autoRetried = new Set();
+    const autoRetried = new Map();
+    const MOVE_AUTO_RETRY_LIMIT = 3;
     const moveFailAuto = (moveId) => {
-      const first = !autoRetried.has(moveId);
-      autoRetried.add(moveId);
-      return { afterMs: IDE_ASK_AUTO_MS, answer: first ? phrase("move_retry", reg) : phrase("move_skip", reg) };
+      const soFar = autoRetried.get(moveId) || 0;
+      autoRetried.set(moveId, soFar + 1);
+      const retrying = soFar < MOVE_AUTO_RETRY_LIMIT;
+      return { afterMs: IDE_ASK_AUTO_MS, answer: retrying ? phrase("move_retry", reg) : phrase("move_skip", reg) };
     };
     const capOriginal = budget.capUsd;
     // Money for humans. toFixed(2) turned a deliberately tiny test cap into "limit of $0.00,
@@ -5466,7 +5587,20 @@ async function runIdeBuild(job, {
     }
 
     if (!afRan) {
-    if (small.small) {
+    /*
+     * RESTART RESUME (required behavior #6): a plan already exists on this job's own journal from
+     * before the process died. Reuse it verbatim rather than paying for a fresh planning call and
+     * risking a differently-worded plan whose move ids no longer line up with what the ledger says
+     * already finished. Only for a plain (non-AF) plan: an AF/task-graph relay's plan shape does
+     * not carry enough to resume mid-relay (see the scope note on resumeIdeBuild above).
+     */
+    if (resumePlan && Array.isArray(resumePlan.moves) && resumePlan.moves.length && !resumePlan.af) {
+      moves = resumePlan.moves;
+      for (const move of moves) for (const file of move.files || []) expectedFiles.add(file);
+      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, resumed: true });
+      ideJobs.emit(job.id, { type: "run", command: "resume", ok: true,
+        output: "Reusing the plan from before the restart; " + (resumeLedger && resumeLedger.done ? resumeLedger.done.length : 0) + " step(s) already finished are not repeated." });
+    } else if (small.small) {
       moves = [{ id: "m1", title: prompt.slice(0, 140), why: small.why, files: [], verify: "" }];
       ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, single: true });
     } else {
@@ -5490,96 +5624,127 @@ async function runIdeBuild(job, {
       ];
       if (plannerPolicies) plannerMessages.push({ role: "user", content: plannerPolicies });
       plannerMessages.push({ role: "user", content: PLANNER_FORMAT_REMINDER });
-      const planned = await chat({ model: planModel, messages: plannerMessages });
-      spend(planned.costUsd);
-      await meterTurn(T, planned.costUsd, prompt, "");
-      if (planned.costUsd) ideJobs.emit(job.id, { type: "cost", usd: planned.costUsd, move: "plan" });
-      if (!planned.ok) {
-        return ideJobs.finish(job.id, { type: "error", message: planned.error || "The planner could not be reached." });
-      }
-      let parsed = parseBlueprint(planned.content);
-      if (!parsed.ok) {
-        /*
-         * The plan is in there, in words. One repair call sends the model its OWN prose back with
-         * the format demand as the last word — a minimal bare call through ideChatOnce, deliberately
-         * outside the chat() wrapper whose added prompts caused the prose in the first place. Only
-         * when the second answer also parses to nothing does the job die, and then it quotes what
-         * the model actually said, because "did not return a usable plan" with the reply thrown
-         * away cost a day of guessing.
-         */
+
+      /*
+       * REQUIRED BEHAVIOR #2: "a build never fails on plan format." Before, a second parse
+       * failure ended the whole build with a hard error - the owner's own overriding directive
+       * ("nothing may fail to produce a viable result") forbids exactly that. Up to three
+       * attempts now, escalating to a stronger keyed model each time the strict-JSON contract is
+       * violated (prose, a truncated fragment, anything parseBlueprint cannot read): attempt 1 is
+       * the ordinary planner call; every attempt after it is a bare repair carrying the model's
+       * own prior reply and the format demand as the last word (deliberately outside chat()'s
+       * wrapper, which is what caused the prose in the first place). Each failed attempt is
+       * classified as a failure for required behavior #4: the brain reads a real dossier and a
+       * lesson is recorded, same as a failed move, so the counsel actually learns from this. Only
+       * once all three attempts are exhausted does the build fall back to a single self-planned
+       * move built straight from the raw prompt - the SAME honest degrade a trivial ask already
+       * uses - instead of ending the build on a format problem the counsel could not fix.
+       */
+      let parsed = { ok: false, error: "no planning attempt made yet" };
+      let lastRawReply = "";
+      let plannerModelUsed = planModel;
+      for (let attempt = 1; attempt <= 3 && !parsed.ok; attempt++) {
+        if (attempt > 1) plannerModelUsed = escalateModel(plannerModelUsed) || plannerModelUsed;
+        const r = attempt === 1
+          ? await chat({ model: plannerModelUsed, messages: plannerMessages })
+          : await ideChatOnce(plannerModelUsed, plannerRepairMessages({ userPrompt: plannerAsk, badReply: lastRawReply }),
+              { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
+        spend(r.costUsd);
+        await meterTurn(T, r.costUsd, prompt, "");
+        if (r.costUsd) ideJobs.emit(job.id, { type: "cost", usd: r.costUsd, move: "plan" });
+        if (r.ok) { lastRawReply = r.content; parsed = parseBlueprint(r.content); }
+        else lastRawReply = r.error || lastRawReply;
+        if (parsed.ok) break;
+
         ideJobs.emit(job.id, { type: "run", command: "plan", ok: false,
-          output: "The planner answered in prose instead of a move list, so it is being asked once more for the list itself." });
-        const repair = await ideChatOnce(planModel,
-          plannerRepairMessages({ userPrompt: plannerAsk, badReply: planned.content }),
-          { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
-        spend(repair.costUsd);
-        await meterTurn(T, repair.costUsd, prompt, "");
-        if (repair.costUsd) ideJobs.emit(job.id, { type: "cost", usd: repair.costUsd, move: "plan" });
-        if (repair.ok) parsed = parseBlueprint(repair.content);
-        if (!parsed.ok) {
-          /*
-           * The planner failed twice in a row, which is exactly the kind of failure the brain
-           * exists to look at. It gets a real dossier (stage "planner"), and whatever it learns
-           * becomes a policy line every future planner call reads. This is a diagnosis for the
-           * record and the lessons store only. The build is already ending honestly below, and
-           * nothing here may change that or delay it past one call.
-           */
-          try {
-            if (brainModel) {
-              const plannerDossier = failureDossier({
-                move: { title: "plan the build", files: [] },
-                model: planModel,
-                taskClass: "build_code",
-                stage: "planner",
-                attempt: 2,
-                reply: repair.ok ? repair.content : planned.content,
-                checkOutput: "",
-                pipelineNotes: "format reminder as last turn, one bare repair call",
-                goal: prompt,
-              });
-              const brainPolicies = ideLessons.policiesBlock({ scope: "planner", model: brainModel });
-              const br = await ideChatOnce(brainModel, brainReportMessages(plannerDossier, { policies: brainPolicies }),
-                { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
-              spend(br.costUsd);
-              await meterTurn(T, br.costUsd, prompt, "");
-              if (br.costUsd) ideJobs.emit(job.id, { type: "cost", usd: br.costUsd, move: "plan" });
-              if (br.ok) {
-                const parsedBrain = parseBrainReport(br.content);
-                ideJobs.emit(job.id, { type: "run", command: "brain", ok: parsedBrain.ok,
-                  output: parsedBrain.ok
-                    ? reportLine(parsedBrain.report, { source: "brain", model: brainModel })
-                    : "The brain's reply could not be read as a diagnosis: " + parsedBrain.error });
-                if (parsedBrain.ok) {
-                  if (parsedBrain.report.lesson) {
-                    try { ideLessons.record({ text: parsedBrain.report.lesson, scope: "planner", source: "brain", model: planModel, tags: [parsedBrain.report.rootCause] }); } catch {}
-                  }
-                  try { ideLessons.bumpReports(); } catch {}
-                  try { await reportCrucibleCounsel(job, { source: "brain", model: planModel, stage: "planner", dossier: plannerDossier, report: parsedBrain.report }); } catch {}
+          output: "Planning attempt " + attempt + " of 3 (" + plannerModelUsed + "): "
+            + (r.ok ? "the planner answered in prose instead of a move list" : "the planner could not be reached (" + String(r.error || "").slice(0, 140) + ")")
+            + (attempt < 3 ? ". Escalating to a stronger model and asking once more." : ". Falling back to a single-step plan rather than failing the build.") });
+        /*
+         * Same brain-diagnosis discipline the old single-repair branch already had, now firing on
+         * EVERY failed attempt (required behavior #4) instead of only the second. A diagnosis
+         * failure here is swallowed on purpose: it is a lessons-store side effect, never allowed
+         * to delay or change the planning outcome itself.
+         */
+        try {
+          if (brainModel) {
+            const plannerDossier = failureDossier({
+              move: { title: "plan the build", files: [] }, model: plannerModelUsed, taskClass: "build_code",
+              stage: "planner", attempt, reply: lastRawReply, checkOutput: "",
+              pipelineNotes: "attempt " + attempt + " of 3, escalating model on format failure", goal: prompt,
+            });
+            const brainPolicies = ideLessons.policiesBlock({ scope: "planner", model: brainModel });
+            const br = await ideChatOnce(brainModel, brainReportMessages(plannerDossier, { policies: brainPolicies }),
+              { signal: ac.signal, sessionId: job.id, budgetGuard: ideBudgetGuard });
+            spend(br.costUsd);
+            await meterTurn(T, br.costUsd, prompt, "");
+            if (br.costUsd) ideJobs.emit(job.id, { type: "cost", usd: br.costUsd, move: "plan" });
+            if (br.ok) {
+              const parsedBrain = parseBrainReport(br.content);
+              ideJobs.emit(job.id, { type: "run", command: "brain", ok: parsedBrain.ok,
+                output: parsedBrain.ok
+                  ? reportLine(parsedBrain.report, { source: "brain", model: brainModel })
+                  : "The brain's reply could not be read as a diagnosis: " + parsedBrain.error });
+              if (parsedBrain.ok) {
+                if (parsedBrain.report.lesson) {
+                  try { ideLessons.record({ text: parsedBrain.report.lesson, scope: "planner", source: "brain", model: plannerModelUsed, tags: [parsedBrain.report.rootCause] }); } catch {}
                 }
+                try { ideLessons.bumpReports(); } catch {}
+                try { await reportCrucibleCounsel(job, { source: "brain", model: plannerModelUsed, stage: "planner", dossier: plannerDossier, report: parsedBrain.report }); } catch {}
               }
             }
-          } catch {}
-          const said = String((repair.ok ? repair.content : planned.content) || "").replace(/\s+/g, " ").slice(0, 220);
-          return ideJobs.finish(job.id, { type: "error",
-            message: parsed.error + (said ? " The model said: “" + said + "…”" : "") });
-        }
+          }
+        } catch {}
       }
-      moves = parsed.moves;
-      for (const move of moves) for (const file of move.files || []) expectedFiles.add(file);
-      /*
-       * SAY WHOSE PLAN THIS IS (Fred, 2026-08-01). These steps were written by the builder just
-       * now, from the goal. They are not the numbered task plan anyone approved on the planning
-       * screen, and a run that looks identical to one is how two accounts of the same build come
-       * to disagree. `selfPlanned` marks it, and the line says it in words.
-       */
-      ideJobs.emit(job.id, { type: "run", command: "plan", ok: true,
-        output: "No approved task plan came with this build, so the builder planned its own "
-          + moves.length + " steps from your description. To choose the steps and the model for each one, use Plan the tasks before pressing Begin Building." });
-      ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, selfPlanned: true });
+
+      if (!parsed.ok) {
+        const said = String(lastRawReply || "").replace(/\s+/g, " ").slice(0, 220);
+        moves = [{ id: "m1", title: prompt.slice(0, 140),
+          why: "Fallback plan: the planner could not produce a usable move list after 3 escalating attempts, so this build proceeds as one self-contained step built directly from the request.",
+          files: [], verify: "" }];
+        ideJobs.emit(job.id, { type: "run", command: "plan", ok: false,
+          output: "The planner could not produce a usable move list after 3 escalating attempts"
+            + (said ? " (it last said: “" + said + "…”)" : "") + ". Proceeding as a single self-contained step instead of failing the build." });
+        ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, single: true, degraded: true });
+      } else {
+        moves = parsed.moves;
+        for (const move of moves) for (const file of move.files || []) expectedFiles.add(file);
+        /*
+         * SAY WHOSE PLAN THIS IS (Fred, 2026-08-01). These steps were written by the builder just
+         * now, from the goal. They are not the numbered task plan anyone approved on the planning
+         * screen, and a run that looks identical to one is how two accounts of the same build come
+         * to disagree. `selfPlanned` marks it, and the line says it in words.
+         */
+        ideJobs.emit(job.id, { type: "run", command: "plan", ok: true,
+          output: "No approved task plan came with this build, so the builder planned its own "
+            + moves.length + " steps from your description. To choose the steps and the model for each one, use Plan the tasks before pressing Begin Building." });
+        ideJobs.emit(job.id, { type: "plan", title: prompt.slice(0, 140), moves, selfPlanned: true });
+      }
     }
     }   // end of the standard-crew path; the AF relay above already planned and built its own way
 
-    const queue = afRan ? [] : moves.slice(0, MAX_MOVES);
+    let standardQueue = moves.slice(0, MAX_MOVES);
+    if (resumeLedger && !afRan) {
+      // A move already marked done before the restart wrote real files that are still on disk;
+      // running it again would be wasted spend at best and a second, different answer at worst.
+      // Anything NOT already done - including whatever was still "running" when the process died -
+      // stays in the queue and runs in its normal order, which is what actually re-runs the move
+      // that was in flight rather than requiring it to be special-cased.
+      const alreadyDone = new Set([...(resumeLedger.done || [])].map((t) => String(t)));
+      const before = standardQueue.length;
+      standardQueue = standardQueue.filter((m) => !alreadyDone.has(m.title) && !alreadyDone.has(m.id));
+      if (before !== standardQueue.length) {
+        ideJobs.emit(job.id, { type: "run", command: "resume", ok: true,
+          output: "Skipping " + (before - standardQueue.length) + " step(s) already finished before the restart; "
+            + standardQueue.length + " remain." });
+      }
+    }
+    // Required behavior #7 (second half): "a move exceeding 20 minutes total is re-planned into
+    // smaller moves once." One-shot per move id, tracked here rather than inside the engine (which
+    // has no concept of a whole build's queue to splice a replacement into).
+    const MOVE_TIME_BUDGET_MS = 20 * 60 * 1000;
+    const replannedForTime = new Set();
+    const queue = afRan ? [] : standardQueue;
     for (let i = 0; i < queue.length; i++) {
       let move = queue[i];
       if (ac.signal.aborted) return;
@@ -5599,11 +5764,34 @@ async function runIdeBuild(job, {
         budget.capUsd += Math.max(capOriginal, 0.5);
       }
 
+      const moveStartedAt = Date.now();
       const res = await engine.runMove(job, { move, workspace, assignments: resolved, goal: prompt, plannedFiles: [...expectedFiles] });
+      const moveElapsedMs = Date.now() - moveStartedAt;
       spend(res && res.costUsd);
       if (res && res.blocked) return ideJobs.finish(job.id, { type: "error", message: phrase("carveout_stop", reg) });
 
       if (res && !res.ok) {
+        /*
+         * Required behavior #7 (second half). A move that burned the full 20-minute budget AND
+         * still failed is not asked about as one oversized unit again (an auto-retry would just
+         * spend another 20 minutes the same way): it is halved into two smaller moves, ONCE per
+         * move id, and re-queued in its place. Only when there is something left to split (more
+         * than one file) - a single-file move that ran long and failed genuinely cannot be made
+         * smaller, and falls through to the normal ask/auto-retry path below.
+         */
+        if (moveElapsedMs >= MOVE_TIME_BUDGET_MS && (move.files || []).length > 1 && !replannedForTime.has(move.id)) {
+          replannedForTime.add(move.id);
+          const mid = Math.ceil(move.files.length / 2);
+          const halves = [move.files.slice(0, mid), move.files.slice(mid)];
+          const replacement = halves.map((files, h) => ({ ...move, id: move.id + "-retimed" + (h + 1), files,
+            title: move.title + " (part " + (h + 1) + " of " + halves.length + ", re-planned after running past 20 minutes)" }));
+          ideJobs.emit(job.id, { type: "run", command: "re-plan", ok: true,
+            output: "\"" + move.title + "\" ran past the 20-minute move budget and failed, so it is being re-planned into "
+              + halves.length + " smaller steps instead of retried as one oversized unit." });
+          queue.splice(i, 1, ...replacement);
+          i--;
+          continue;
+        }
         /*
          * A failed move is a fork in the road, never a dead end. The user picks, from any device,
          * and free text is treated as GUIDANCE: "use sqlite instead" retries the move with that
@@ -5695,19 +5883,67 @@ async function runIdeBuild(job, {
         const vision = visionFromPrompt(prompt);
         if (vision) {
           const auditModel = resolved.review || resolved.build_code || defaultModelFor(!!T.isOwner);
-          const audited = await chat({ model: auditModel, messages: fidelityMessages({ vision, files: texts, register: reg }) });
-          spend(audited.costUsd);
-          if (audited.costUsd) { await meterTurn(T, audited.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: audited.costUsd, move: "furnace" }); }
-          if (audited.ok) {
-            const fid = parseFidelity(audited.content);
+          const askAudit = async (model) => {
+            const r = await chat({ model, messages: fidelityMessages({ vision, files: texts, register: reg }) });
+            spend(r.costUsd);
+            if (r.costUsd) { await meterTurn(T, r.costUsd, prompt, ""); ideJobs.emit(job.id, { type: "cost", usd: r.costUsd, move: "furnace" }); }
+            return r;
+          };
+          let audited = await askAudit(auditModel);
+          let fid = audited.ok ? parseFidelity(audited.content) : { ok: [], gaps: [] };
+          /*
+           * REQUIRED BEHAVIOR #3: "unaudited" is not an acceptable end state (deficiency #12: the
+           * 09-02 build's own audit returned nothing readable and the build simply shipped that
+           * label). A reply with zero OK/GAP lines - the model answered, but not in the demanded
+           * protocol - is retried ONCE on the next counsel model before falling back further.
+           */
+          const nothingReadable = audited.ok && !fid.ok.length && !fid.gaps.length;
+          if (nothingReadable) {
+            const nextModel = escalateModel(auditModel) || auditModel;
+            ideJobs.emit(job.id, { type: "run", command: "furnace audit", ok: false,
+              output: "The audit returned nothing readable from " + auditModel + "; asking " + nextModel + " once more before falling back to concrete checks." });
+            if (nextModel !== auditModel) {
+              audited = await askAudit(nextModel);
+              fid = audited.ok ? parseFidelity(audited.content) : { ok: [], gaps: [] };
+            }
+          }
+          const stillUnreadable = !audited.ok || (!fid.ok.length && !fid.gaps.length);
+          if (!stillUnreadable) {
             gaps = fid.gaps;
             ideJobs.emit(job.id, { type: "run", command: "furnace audit", ok: gaps.length === 0,
               output: fid.ok.map((b) => "Delivered: " + b)
-                .concat(gaps.map((g) => "Missing: " + g.bullet + (g.why ? " (" + g.why + ")" : ""))).join("\n")
-                || "The audit returned nothing readable; treat the build as unaudited." });
+                .concat(gaps.map((g) => "Missing: " + g.bullet + (g.why ? " (" + g.why + ")" : ""))).join("\n") });
           } else {
-            ideJobs.emit(job.id, { type: "run", skipped: true, message: "The vision audit could not run: " + (audited.error || "model unavailable") + ". The sweep above still stands." });
-            knownIncomplete.push("The requested visual fidelity audit could not run: " + String(audited.error || "model unavailable").slice(0, 300));
+            /*
+             * Both the model call itself and its retry on a stronger seat failed to produce a
+             * readable verdict. Fall back to the concrete checks that actually exist rather than
+             * shipping "unaudited": the discovered project checks (package.json scripts, already
+             * how engine.verify() works), plus a deterministic node --check syntax pass on every
+             * written JS/MJS file, which needs no model call and cannot itself hallucinate a gap.
+             * The combined result becomes the furnace audit's answer, honestly labeled as such.
+             */
+            ideJobs.emit(job.id, { type: "run", command: "furnace audit", ok: false,
+              output: "The vision audit could not produce a readable verdict from either model ("
+                + (audited.error || "no OK/GAP lines in the reply") + "). Falling back to concrete checks: declared project checks and a syntax pass on every written script." });
+            const concreteFindings = [];
+            try {
+              const cv = await engine.verify(job, workspace);
+              if (cv.ran && !cv.ok) concreteFindings.push({ bullet: "Declared project checks", why: String(cv.output || "").slice(-800) });
+            } catch (e) { concreteFindings.push({ bullet: "Declared project checks", why: "could not run: " + String((e && e.message) || e).slice(0, 200) }); }
+            const scriptFiles = texts.filter((f) => /\.(?:m?js)$/i.test(f.path));
+            for (const f of scriptFiles.slice(0, 30)) {
+              try {
+                const rootPath2 = String(workspace.root || "").replace(/[\\/]+$/, "");
+                const r = await handsFor("shell_run", { command: 'node --check "' + rootPath2 + "/" + f.path.replace(/"/g, "") + '"', timeoutMs: 15000 });
+                const ok = !!r && r.ok !== false && (typeof r.code !== "number" || r.code === 0);
+                if (!ok) concreteFindings.push({ bullet: "node --check " + f.path, why: String((r && (r.stderr || r.output || r.error)) || "syntax check failed").slice(0, 400) });
+              } catch (e) { concreteFindings.push({ bullet: "node --check " + f.path, why: "could not run: " + String((e && e.message) || e).slice(0, 200) }); }
+            }
+            gaps = concreteFindings;
+            ideJobs.emit(job.id, { type: "run", command: "furnace audit (concrete fallback)", ok: concreteFindings.length === 0,
+              output: concreteFindings.length
+                ? concreteFindings.map((g) => "Failed: " + g.bullet + " :: " + g.why).join("\n")
+                : "Declared project checks pass and every written script parses; recorded as the audit result since the vision model could not answer legibly." });
           }
         }
 
@@ -5840,10 +6076,56 @@ async function runIdeBuild(job, {
     writtenAtGate = [...new Set((ideJobs.get(job.id) || { events: [] }).events
       .filter((event) => event.type === "file" && event.path).map((event) => event.path))];
     for (const file of writtenAtGate) expectedFiles.add(file);
+    /*
+     * MISSING PLANNED FILE REPAIR (required behavior #1; deficiency #10, the 09-02 Speak-Easy
+     * build: WavEncoder.kt was declared, never returned, and NOTHING was ever tried before it
+     * became a checkpoint bullet). A file whose coverage never landed is now a repair target, not
+     * an immediate write-off: (a) the step that owned it is re-asked with an explicit "return the
+     * complete contents" instruction, then (b) up to two dedicated "write this file" moves,
+     * carrying the build goal and (when found) the original step's own reasoning. Each attempt
+     * goes through engine.runMove, which is where the brain/frontier counsel ladder already lives
+     * (required behavior #4: this is exactly what makes "missing planned file" a classified
+     * failure that fires it), so a repair that itself fails is diagnosed and lessoned like any
+     * other failed move, not a special silent path. Only when all three attempts still leave the
+     * file uncovered does the checkpoint text name what was tried, per the spec's own wording.
+     */
+    const missingPlanned = [];
     for (const file of expectedFiles) {
       const normalized = String(file || "").trim().replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase();
-      if (normalized && !coveredFiles.has(normalized)) {
-        knownIncomplete.push("Planned file was never returned by its assigned implementation step: " + file + ".");
+      if (normalized && !coveredFiles.has(normalized)) missingPlanned.push(file);
+    }
+    if (missingPlanned.length) {
+      const planEvents = (ideJobs.get(job.id) || { events: [] }).events.filter((e) => e.type === "plan");
+      const isCovered = (file) => coveredFiles.has(String(file || "").trim().replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase());
+      const idSafe = (file) => String(file || "file").replace(/[^A-Za-z0-9_.-]/g, "_").slice(-48);
+      for (const file of missingPlanned) {
+        let originalWhy = "";
+        for (const pe of planEvents) {
+          const hit = (pe.moves || []).find((m) => (m.files || []).some((f) => String(f) === file));
+          if (hit) { originalWhy = hit.why || ""; break; }
+        }
+        const tried = [];
+        const attempt1 = { id: "missing-file-1-" + idSafe(file), title: "Return the complete contents of " + file,
+          why: (originalWhy ? originalWhy + " " : "") + "This file was declared for this build but was never returned by its assigned step. Return the COMPLETE, current contents of exactly this one file.",
+          files: [file] };
+        let r = await engine.runMove(job, { move: attempt1, workspace, assignments: resolved, goal: prompt, plannedFiles: [...expectedFiles] });
+        spend(r && r.costUsd);
+        if (r && r.ok) markCovered(r.covered);
+        tried.push("re-ran the step with an explicit return-the-file instruction" + (r && r.ok ? "" : " (failed)"));
+        for (let n = 2; n <= 3 && !isCovered(file); n++) {
+          const dedicated = { id: "missing-file-" + n + "-" + idSafe(file), title: "Write " + file,
+            why: "BUILD GOAL: " + prompt.slice(0, 600) + (originalWhy ? "\nThis file's purpose in the plan: " + originalWhy : "")
+              + "\nThis file is required by the plan and still does not exist or was not produced after a prior repair attempt. Write it now, complete and self-contained.",
+            files: [file] };
+          r = await engine.runMove(job, { move: dedicated, workspace, assignments: resolved, goal: prompt, plannedFiles: [...expectedFiles] });
+          spend(r && r.costUsd);
+          if (r && r.ok) markCovered(r.covered);
+          tried.push("a dedicated write move (attempt " + n + " of 3" + (r && r.model ? ", " + r.model : "") + ")" + (r && r.ok ? "" : " (failed)"));
+        }
+        if (!isCovered(file)) {
+          knownIncomplete.push("Planned file was never returned by its assigned implementation step: " + file
+            + ". Tried: " + tried.join("; ") + ".");
+        }
       }
     }
 

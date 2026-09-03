@@ -40,6 +40,11 @@ export const EVENT_TYPES = new Set([
   "snapshot",   // a snapshot was taken before a write batch
   "need_input", // frozen, waiting on a human (zero spend from here)
   "answer",     // a human answered; the freeze lifts
+  // Stabilization 2026-09-03 (deficiency #12/owner directive: nothing may fail silently).
+  "status",     // a model call is in flight and the run is still alive; heartbeat only, no state change
+  "paused",     // non-terminal: the runner could not be resumed right now (workspace unreachable) and
+                // will retry; distinct from "interrupted" (a hard error) because the work is not lost,
+                // only waiting on the machine to come back.
   "done",       // terminal: finished
   "checkpoint", // terminal: unfinished, work/evidence preserved for a resumable follow-up
   "error",      // terminal: failed
@@ -94,6 +99,17 @@ const DEPLOY_GRACE_MS = 120000;
 const RECONCILE_INTERVAL_MS = 1000;
 const LEASE_EVENT = "_lease";
 const MAX_READ_FAILURES = 3;
+// The private record of what a build was actually asked to do (prompt, assignments, tier...),
+// written once by the caller right after create() so a genuine restart (not a rolling-deploy
+// handoff) has enough to relaunch the SAME build instead of only ever sealing it as lost work.
+// Filtered from the public journal exactly like _lease: it is plumbing, not a build event.
+const REQUEST_EVENT = "_request";
+// Stabilization 2026-09-03 (deficiency #12, required behavior #6: "no build is lost to a
+// deploy"). Defaults chosen to be patient without being silent forever: a machine that stays
+// offline for the owner's whole workday (about 8 hours at 30s apart) is genuinely gone, not just
+// between reconnects, and the job seals honestly at that point instead of retrying forever.
+const RESUME_RETRY_MS = 30000;
+const RESUME_MAX_ATTEMPTS = 960;
 
 export function createIdeJobs({
   dir,
@@ -104,6 +120,24 @@ export function createIdeJobs({
   deployGraceMs = DEPLOY_GRACE_MS,
   reconcileIntervalMs = RECONCILE_INTERVAL_MS,
   heartbeatIntervalMs = null,
+  /*
+   * resume(job, info): called instead of sealInterrupted() when a job's journal has no terminal
+   * event and its process is genuinely gone (boot recovery, or a rolling-deploy lease that
+   * expired with no foreign activity at all). `info` is { request, ledger, plan, inFlightMove,
+   * attempt }. Return/resolve one of:
+   *   { ok: true }                        - the caller relaunched the build; idejobs steps back.
+   *   { ok: false, paused: true, reason }  - not resumable RIGHT NOW (e.g. the build machine is
+   *                                          offline); a "paused" event is recorded and resume()
+   *                                          is retried on resumeRetryMs until it succeeds or the
+   *                                          attempt cap is reached, at which point it seals
+   *                                          honestly as interrupted rather than hanging forever.
+   *   { ok: false }, a throw, or omitted   - sealed as interrupted immediately, exactly as when no
+   *                                          resume() is configured at all (the pre-2026-09-03
+   *                                          behavior every existing caller still gets by default).
+   */
+  resume = null,
+  resumeRetryMs = RESUME_RETRY_MS,
+  resumeMaxAttempts = RESUME_MAX_ATTEMPTS,
 } = {}) {
   if (!dir) throw new Error("createIdeJobs needs a dir");
   const jobsDir = join(dir, "jobs");
@@ -171,13 +205,44 @@ export function createIdeJobs({
   function publicEvents(records) {
     const events = [];
     for (const ev of records) {
-      if (ev.type === LEASE_EVENT) continue;
+      if (ev.type === LEASE_EVENT || ev.type === REQUEST_EVENT) continue;
       // A terminal event seals the stream even if a stale writer managed to append afterward.
       // That keeps every process on the same durable outcome.
       if (events.length && isTerminal(events[events.length - 1].type)) continue;
       events.push(ev);
     }
     return events;
+  }
+
+  // The most recent private request snapshot in a raw (unfiltered) record list, or null when the
+  // caller never recorded one (an older job, or a probe that has no request to resume). Raw, not
+  // publicEvents(), because REQUEST_EVENT is exactly what publicEvents strips.
+  function lastRequest(rawRecords) {
+    for (let i = rawRecords.length - 1; i >= 0; i--) {
+      if (rawRecords[i] && rawRecords[i].type === REQUEST_EVENT) return rawRecords[i].request || null;
+    }
+    return null;
+  }
+
+  // The most recent "plan" event, full shape (moves with their files/why), for a resume to
+  // reuse instead of paying for a whole new planning call and losing the original move list.
+  function lastPlanEvent(events) {
+    for (let i = events.length - 1; i >= 0; i--) if (events[i] && events[i].type === "plan") return events[i];
+    return null;
+  }
+
+  // The move that was still "running" or "repairing" when the journal went cold, i.e. genuinely
+  // in flight rather than merely planned-but-not-started or already settled. Only the LATEST
+  // event per move id decides its final state, so an id that later reached done/failed/skipped is
+  // correctly excluded even if it also has an earlier "running" line.
+  function lastInFlightMove(events) {
+    const latest = new Map();
+    for (const ev of events) if (ev && ev.type === "move" && ev.id) latest.set(ev.id, ev);
+    let found = null;
+    for (const ev of latest.values()) {
+      if (ev.state === "running" || ev.state === "repairing") found = ev;
+    }
+    return found;
   }
 
   function stopHeartbeat(id) {
@@ -228,6 +293,71 @@ export function createIdeJobs({
     append(job.id, ev);
     publish(job, ev);
     return true;
+  }
+
+  /*
+   * Server restart recovery, required behavior #6 (owner's directive: "no build is lost to a
+   * deploy"). Called instead of sealInterrupted() whenever resume() is configured and a job's
+   * process is genuinely gone. Builds an honest dossier from the job's own journal (the original
+   * request if one was recorded, the last full plan, the ledger of done/failed/unstarted moves,
+   * and whichever move was actually in flight) and hands it to the caller's resume() to relaunch.
+   *
+   * Fire-and-forget by design: loadFromDisk() and reconcileOne() are both synchronous call sites
+   * (boot must not block on every recovered job finishing), so this schedules the retry loop and
+   * returns immediately. A job stays non-terminal (and so keeps showing as alive/waiting rather
+   * than failed) for as long as resume() keeps reporting "paused", up to resumeMaxAttempts; only
+   * then, or on a hard (non-paused) failure, does it fall back to the same honest seal every
+   * caller without resume() configured has always gotten.
+   */
+  function attemptResume(job, rawRecords, attempt = 1) {
+    if (disposed || !job || job.done) return;
+    if (!resume) { sealInterrupted(job); return; }
+    stopFollowing(job.id);
+    const events = publicEvents(rawRecords);
+    const info = {
+      request: lastRequest(rawRecords),
+      ledger: ledgerFromEvents(events),
+      plan: lastPlanEvent(events),
+      inFlightMove: lastInFlightMove(events),
+      attempt,
+    };
+    let outcome;
+    try { outcome = resume(job, info); } catch (e) { outcome = { ok: false, error: String((e && e.message) || e) }; }
+    Promise.resolve(outcome).then((r) => {
+      if (disposed || job.done) return;
+      if (r && r.ok) {
+        // The caller (server.mjs) has relaunched the build against the SAME job id; it will drive
+        // the job to its own terminal event from here. idejobs' only remaining job is to say so.
+        try { emit(job.id, { type: "run", command: "resume", ok: true,
+          output: "Server restart recovered: this build resumes in the new process." + (info.inFlightMove
+            ? " (" + (info.inFlightMove.title || info.inFlightMove.id) + " was in flight and runs again.)" : "") }); } catch {}
+        return;
+      }
+      if (r && r.paused && attempt < resumeMaxAttempts) {
+        try { emit(job.id, { type: "paused",
+          reason: String((r && r.reason) || "The build machine is unreachable right now."),
+          attempt, nextRetryMs: resumeRetryMs }); } catch {}
+        const timer = setTimeout(() => {
+          const fresh = readJournal(job.id);
+          attemptResume(job, fresh ? fresh.records : rawRecords, attempt + 1);
+        }, resumeRetryMs);
+        if (typeof timer.unref === "function") timer.unref();
+        return;
+      }
+      // Either resume() gave a hard "no" (not just "not yet"), or it never gave up on offline
+      // long enough to matter: either way a job must never be left silently un-terminaled
+      // forever, so it falls back to the exact same honest seal every non-resume caller gets.
+      sealInterrupted(job);
+    }).catch(() => { if (!job.done) sealInterrupted(job); });
+  }
+
+  // The caller records what a build was actually asked to do, right after create(), so a later
+  // restart's resume() has enough to relaunch it. Best-effort and non-blocking of the caller: a
+  // failed write here degrades to "this build cannot be resumed automatically", never a thrown
+  // error the caller has to handle.
+  function recordRequest(id, request) {
+    try { append(id, { type: REQUEST_EVENT, at: clockNow(), request: request || {} }); return true; }
+    catch { return false; }
   }
 
   function scheduleHeartbeat(job) {
@@ -318,7 +448,13 @@ export function createIdeJobs({
       stopFollowing(id);
       return true;
     }
-    if (allowInterrupt && clockNow() >= follower.leaseUntil) return sealInterrupted(job);
+    if (allowInterrupt && clockNow() >= follower.leaseUntil) {
+      // The lease expired with zero foreign activity the whole window: this was never a
+      // rolling-deploy handoff (the old instance would have kept heartbeating), it is a genuine
+      // restart. resume(), when configured, gets first say; the honest seal is still the fallback.
+      if (resume) { attemptResume(job, snapshot.records, 1); return true; }
+      return sealInterrupted(job);
+    }
     scheduleFollower(id);
     return foreignActivity;
   }
@@ -332,9 +468,9 @@ export function createIdeJobs({
   // process tails the outgoing instance's journal. If that instance finishes, its terminal event
   // is adopted here; if its heartbeats disappear, this process seals the job after the grace.
   function loadFromDisk() {
-    let recovered = 0, interrupted = 0;
+    let recovered = 0, interrupted = 0, resuming = 0;
     let names = [];
-    try { names = readdirSync(jobsDir).filter((n) => n.endsWith(".jsonl")); } catch { return { recovered, interrupted }; }
+    try { names = readdirSync(jobsDir).filter((n) => n.endsWith(".jsonl")); } catch { return { recovered, interrupted, resuming }; }
     for (const name of names) {
       const id = name.slice(0, -6);
       const snapshot = readJournal(id);
@@ -370,6 +506,13 @@ export function createIdeJobs({
         const remainingGrace = Math.max(0, graceMs - Math.min(graceMs, age));
         if (remainingGrace > 0) {
           startFollowing(job, snapshot, remainingGrace);
+        } else if (resume) {
+          // No rolling-deploy grace left, and resume() is configured: this is required behavior
+          // #6, "at boot, resume in-progress jobs from their journals... instead of sealing them
+          // as errors." attemptResume is fire-and-forget (boot must not block on it); the job
+          // stays non-terminal in the index in the meantime, exactly as a live job would.
+          resuming++;
+          attemptResume(job, snapshot.records, 1);
         } else if (sealInterrupted(job)) {
           interrupted++;
         }
@@ -377,7 +520,7 @@ export function createIdeJobs({
       recovered++;
     }
     gc();
-    return { recovered, interrupted };
+    return { recovered, interrupted, resuming };
   }
 
   // ---- lifecycle ----------------------------------------------------------------------------
@@ -564,6 +707,6 @@ export function createIdeJobs({
   const runningCount = () => { let n = 0; for (const j of INDEX.values()) if (!j.done) n++; return n; };
 
   return { create, emit, finish, stop, get, listFor, activeFor, attach, loadFromDisk, summarize, waitForAnswer, dispose,
-           runningCount,
+           runningCount, recordRequest,
            get size() { return INDEX.size; } };
 }

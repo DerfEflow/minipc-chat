@@ -391,5 +391,131 @@ await t("ledgerFromEvents summarizes what a job really did: done, failed, skippe
   assert.deepEqual(ledger.files, ["src/types.ts"]);
 });
 
+/*
+ * Stabilization 2026-09-03, lane crucible, required behavior #6: "at boot, resume in-progress
+ * jobs from their journals (re-run the move that was in flight) instead of sealing them as
+ * errors; if the workspace is unreachable, park the job as paused with the reason, resume when
+ * the node reconnects. No build is lost to a deploy." (DEFICIENCIES.md #12 context.)
+ */
+
+await t("status and paused are recognized non-terminal event types", () => {
+  assert.ok(EVENT_TYPES.has("status"), "status must be a recognized event so a heartbeat is never refused");
+  assert.ok(EVENT_TYPES.has("paused"), "paused must be a recognized event");
+  assert.ok(!TERMINAL.has("status") && !TERMINAL.has("paused"), "neither seals the job");
+});
+
+await t("recordRequest snapshots the build request privately, invisible to normal replay", () => {
+  const dir = freshDir();
+  const jobs = createIdeJobs({ dir });
+  const job = jobs.create({ uid: "u1", workspaceId: "ws_a" });
+  jobs.recordRequest(job.id, { prompt: "Build a todo API", workspaceId: "ws_a", forgeTier: "ember" });
+  jobs.emit(job.id, { type: "plan", title: "P", moves: [{ id: "m1", title: "One", files: ["a.mjs"] }] });
+  const seen = [];
+  jobs.attach(job.id, 0, (ev) => { if (ev) seen.push(ev.type); });
+  assert.ok(!seen.includes("_request"), "the private request record must never reach a public replay");
+  const raw = readFileSync(join(dir, "jobs", job.id + ".jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const reqLine = raw.find((r) => r.type === "_request");
+  assert.ok(reqLine, "the request must actually be durable on disk");
+  assert.equal(reqLine.request.prompt, "Build a todo API");
+});
+
+await t("RESTART with resume() configured: an orphaned job is handed to resume(), not sealed", async () => {
+  const dir = freshDir();
+  const first = createIdeJobs({ dir, now: () => 1000 });
+  const job = first.create({ uid: "u1", workspaceId: "ws_a" });
+  first.recordRequest(job.id, { prompt: "Build a todo API", workspaceId: "ws_a" });
+  first.emit(job.id, { type: "plan", title: "P", moves: [
+    { id: "m1", title: "Write server.mjs", files: ["server.mjs"] },
+    { id: "m2", title: "Write routes.mjs", files: ["routes.mjs"] },
+  ] });
+  first.emit(job.id, { type: "move", id: "m1", title: "Write server.mjs", state: "done" });
+  first.emit(job.id, { type: "move", id: "m2", title: "Write routes.mjs", state: "running" });
+  // then the container dies, mid-move, no terminal event ever written
+
+  let calledWith = null;
+  const resume = (resumedJob, info) => { calledWith = { id: resumedJob.id, info }; return { ok: true }; };
+  const second = createIdeJobs({ dir, now: () => 1000 + 5 * 60000, resume });   // 5 min later, a real restart
+  const rec = second.loadFromDisk();
+  assert.equal(rec.interrupted, 0, "resume() was configured, so nothing should be sealed as a hard error");
+  assert.equal(rec.resuming, 1, "loadFromDisk must report the job it handed to resume()");
+  await new Promise((r) => setTimeout(r, 20));   // attemptResume resolves its promise on a microtask/macrotask
+  assert.ok(calledWith, "resume() must actually be invoked");
+  assert.equal(calledWith.id, job.id);
+  assert.equal(calledWith.info.request.prompt, "Build a todo API", "the original request must reach resume()");
+  assert.equal(calledWith.info.inFlightMove.id, "m2", "the move that was still running must be identified");
+  assert.deepEqual(calledWith.info.ledger.done, ["Write server.mjs"]);
+  assert.equal(calledWith.info.plan.moves.length, 2, "the full original plan (with files) must reach resume()");
+  const back = second.get(job.id);
+  assert.equal(back.done, false, "a resumed job is not sealed; it stays alive for the relaunch to drive");
+});
+
+await t("RESTART: resume() reporting 'paused' parks the job and retries, never sealing it as lost", async () => {
+  const dir = freshDir();
+  const clock = { t: 1000 };
+  const first = createIdeJobs({ dir, now: () => clock.t });
+  const job = first.create({ uid: "u1", workspaceId: "ws_a" });
+  first.recordRequest(job.id, { prompt: "Build a todo API", workspaceId: "ws_a" });
+  first.emit(job.id, { type: "move", id: "m1", title: "One", state: "running" });
+
+  let calls = 0;
+  const resume = () => {
+    calls++;
+    if (calls < 2) return { ok: false, paused: true, reason: "The build machine is offline." };
+    return { ok: true };
+  };
+  clock.t += 5 * 60000;
+  const second = createIdeJobs({ dir, now: () => clock.t, resume, resumeRetryMs: 5, resumeMaxAttempts: 10 });
+  const rec = second.loadFromDisk();
+  assert.equal(rec.interrupted, 0);
+  assert.equal(rec.resuming, 1);
+
+  const seen = [];
+  second.attach(job.id, second.get(job.id).events.length, (ev) => { if (ev) seen.push(ev); });
+  await new Promise((resolve) => {
+    const check = () => {
+      if (seen.some((e) => e.type === "run" && e.command === "resume")) return resolve();
+      setTimeout(check, 5);
+    };
+    check();
+  });
+  assert.ok(calls >= 2, "resume() must be retried after reporting paused, not given up on after one try");
+  assert.ok(seen.some((e) => e.type === "paused" && /offline/i.test(e.reason)),
+    "a paused event must be recorded with the reason, visible to anyone watching the job");
+  const back = second.get(job.id);
+  assert.equal(back.done, false, "the eventual successful resume must leave the job non-terminal, not sealed");
+});
+
+await t("RESTART: resume() unconfigured keeps the exact pre-existing sealed-interrupted behavior", () => {
+  const dir = freshDir();
+  const first = createIdeJobs({ dir, now: () => 1000 });
+  const job = first.create({ uid: "u1" });
+  first.emit(job.id, { type: "move", id: "m1", state: "running" });
+  const second = createIdeJobs({ dir, now: () => 1000 + 5 * 60000 });   // no resume passed
+  const rec = second.loadFromDisk();
+  assert.equal(rec.interrupted, 1);
+  assert.equal(rec.resuming, 0);
+  assert.equal(second.get(job.id).done, true);
+});
+
+await t("RESTART: resume() exhausting its retry budget still seals honestly, never hangs forever", async () => {
+  const dir = freshDir();
+  const clock = { t: 1000 };
+  const first = createIdeJobs({ dir, now: () => clock.t });
+  const job = first.create({ uid: "u1" });
+  first.emit(job.id, { type: "move", id: "m1", state: "running" });
+
+  const resume = () => ({ ok: false, paused: true, reason: "still offline" });
+  clock.t += 5 * 60000;
+  const second = createIdeJobs({ dir, now: () => clock.t, resume, resumeRetryMs: 5, resumeMaxAttempts: 3 });
+  second.loadFromDisk();
+  await new Promise((resolve) => {
+    const check = () => { if (second.get(job.id).done) return resolve(); setTimeout(check, 5); };
+    check();
+  });
+  const back = second.get(job.id);
+  assert.equal(back.interrupted, true, "a resume that never succeeds must still end in the honest seal");
+  assert.equal(back.outcome, "error");
+});
+
 console.log("\n" + passed + " passed, " + failed + " failed");
 process.exit(failed ? 1 : 0);
