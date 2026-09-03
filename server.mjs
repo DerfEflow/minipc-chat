@@ -211,6 +211,11 @@ import { createGameFactoryReleaseReadiness, gameFactoryReleaseFlags } from "./ga
 import { createGameFactoryWorkerAdapter } from "./gamefactoryworker.mjs";
 import { createGameFactoryOrchestrator } from "./gamefactoryorchestrator.mjs";
 import { createGameFactoryPlanner } from "./gamefactoryplanner.mjs";
+import { createGameFactorySupervisor } from "./gamefactorysupervisor.mjs"; // GF-BUILD-IMPORTS
+import { createGameFactoryForge } from "./gamefactoryforge.mjs";
+import { createServerQaRunner } from "./gamefactoryqa.mjs";
+import { createGameFactoryBuilds } from "./gamefactorybuilds.mjs";
+import * as gameFactoryKit from "./gamefactorykit/kit.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -2057,6 +2062,82 @@ const gameFactoryPlanner = createGameFactoryPlanner({
   log: (event, detail) => console.log("[dominion-ai] game-factory planner: " + String(event || "") + (detail ? " " + JSON.stringify(detail) : "")),
 });
 
+/*
+ * ---- GAME FACTORY BUILD (owner order 2026-09-03: "produce games that can be previewed natively and
+ * then iterated"). Spec: docs/GAME-FACTORY-BUILD.md. Three server-side pieces join the durable control
+ * plane: a stage supervisor that turns approvals and evidence into the next transition, a forge that
+ * claims product_planning / visual_design / gameplay_engineering tasks from the same queue the GX10
+ * orchestrator drains and writes web-canvas game bundles, and a server QA runner that executes the
+ * kit's 12-suite harness in a permission-sandboxed child process. Each is fail-closed behind its own
+ * flag AND the owner exposure rule the orchestrator already uses.
+ */
+const gameFactorySupervisorRequested = String(cfgGet("GAME_FACTORY_SUPERVISOR", "0")) === "1"; // GF-BUILD-WIRING
+const gameFactoryForgeRequested = String(cfgGet("GAME_FACTORY_FORGE", "0")) === "1";
+const gameFactorySupervisorEnabled = gameFactorySupervisorRequested && gameFactoryExposed;
+const gameFactoryForgeEnabled = gameFactoryForgeRequested && gameFactoryExposed;
+let gameFactorySupervisorStarted = false, gameFactorySupervisorStartError = "";
+let gameFactoryForgeStarted = false, gameFactoryForgeStartError = "";
+const gameFactoryQaRunner = createServerQaRunner({
+  timeoutMs: Number(cfgGet("GAME_FACTORY_QA_TIMEOUT_MS", "180000")) || 180000,
+  log: (message) => console.log("[dominion-ai] game-factory qa: " + String(message || "")),
+});
+const gameFactoryBuilds = createGameFactoryBuilds({ dataDir: DATA_DIR, store: gameFactoryStore });
+const splitModels = (value, fallback) => String(value || fallback).split(",").map((v) => v.trim()).filter(Boolean);
+async function gameFactoryChat({ model, messages, maxTokens = 16000, temperature = 0.2, signal } = {}) {
+  try {
+    const r = await cloudChatStream(model, messages, { temperature, num_predict: maxTokens, signal }, null);
+    if (!r || !r.ok) return { ok: false, error: String((r && r.error) || "model unreachable").slice(0, 400), model };
+    let costUsd = Number(r.costUsd) || 0;
+    if (!costUsd && r.usage && typeof r.usage.cost === "number") costUsd = r.usage.cost;
+    return { ok: true, content: String(r.content || ""), usage: r.usage || null, costUsd, model, finishReason: r.finishReason || "" };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e).slice(0, 400), model }; }
+}
+async function gameFactoryReadArtifact({ uid, projectId, artifactKey } = {}) {
+  try {
+    const detail = gameFactoryStore.getProject(uid, projectId, { eventLimit: 1 });
+    const artifact = ((detail && detail.artifacts) || []).find((a) => a.artifactKey === String(artifactKey || "").toUpperCase());
+    if (!artifact) return { error: "no such artifact: " + artifactKey };
+    const r = await gameFactoryArtifacts.readArtifactContent({ uid, projectId, artifact });
+    return r && r.data ? { content: r.data.toString("utf8") } : { error: "artifact unreadable" };
+  } catch (e) { return { error: String((e && e.message) || e).slice(0, 300) }; }
+}
+const gameFactoryForge = createGameFactoryForge({
+  store: gameFactoryStore,
+  chat: gameFactoryChat,
+  generateImages: (args) => imagesFeature.generateImagesInternal(args),
+  readArtifact: gameFactoryReadArtifact,
+  kit: gameFactoryKit,
+  qaRunner: gameFactoryQaRunner,
+  dataDir: DATA_DIR,
+  ownerTenant: OWNER_T,
+  models: {
+    design: splitModels(cfgGet("GAME_FACTORY_DESIGN_MODELS", ""), "gx10/qwen3-coder-30b,deepseek/deepseek-v4-pro,anthropic/claude-sonnet-5"),
+    code: splitModels(cfgGet("GAME_FACTORY_FORGE_MODELS", ""), "deepseek/deepseek-v4-pro,anthropic/claude-sonnet-5,openai/gpt-5.6-terra"),
+  },
+  freeFirst: String(cfgGet("GAME_FACTORY_FORGE_FREE_FIRST", "0")) === "1",
+  levels: Number(cfgGet("GAME_FACTORY_LEVELS", "12")) || 12,
+  log: (message) => console.log("[dominion-ai] " + String(message || "")),
+});
+const gameFactorySupervisor = createGameFactorySupervisor({
+  store: gameFactoryStore,
+  planner: gameFactoryPlanner,
+  qaRunner: gameFactoryQaRunner,
+  kit: gameFactoryKit,
+  dataDir: DATA_DIR,
+  ownerUid: OWNER_T.uid,
+  ownerEmail: OWNER_EMAIL,
+  maxRepairs: Number(cfgGet("GAME_FACTORY_MAX_REPAIRS", "3")) || 3,
+  log: (message) => console.log("[dominion-ai] " + String(message || "")),
+});
+function gameFactorySupervisorHealth(T) {
+  const common = { enabled: gameFactorySupervisorEnabled, started: gameFactorySupervisorStarted, state: !gameFactorySupervisorEnabled ? "disabled" : gameFactorySupervisorStartError ? "degraded" : gameFactorySupervisorStarted ? "running" : "starting" };
+  return T && T.isOwner ? { ...gameFactorySupervisor.health(), ...common, lastError: gameFactorySupervisorStartError || (gameFactorySupervisor.health().lastError || "") } : common;
+}
+function gameFactoryForgeHealth(T) {
+  const common = { enabled: gameFactoryForgeEnabled, started: gameFactoryForgeStarted, state: !gameFactoryForgeEnabled ? "disabled" : gameFactoryForgeStartError ? "degraded" : gameFactoryForgeStarted ? "running" : "starting" };
+  return T && T.isOwner ? { ...gameFactoryForge.health(), ...common, lastError: gameFactoryForgeStartError || (gameFactoryForge.health().lastError || "") } : common;
+}
+
 const gameFactoryReleaseConfig = gameFactoryReleaseFlags({
   GAME_FACTORY_RELEASE_WRITES: cfgGet("GAME_FACTORY_RELEASE_WRITES", "0"),
 });
@@ -2120,6 +2201,10 @@ async function runGameFactorySyntheticCanary(input) {
 
 const gameFactoryHttp = createGameFactoryHttp({
   store: gameFactoryStore,
+  supervisor: gameFactorySupervisorEnabled ? gameFactorySupervisor : null, // GF-BUILD-HTTP
+  supervisorHealth: gameFactorySupervisorHealth,
+  forgeHealth: gameFactoryForgeHealth,
+  builds: gameFactoryBuilds,
   gate: gameFactoryGate,
   resolveTenant,
   workerHealth: gameFactoryWorkerHealth,
@@ -12428,7 +12513,7 @@ const server = http.createServer(async (req, res) => {
       let runningFactoryTasks = 0;
       try { runningFactoryTasks = gameFactoryStore.stats().runningTasks; } catch {}
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ build: BUILD_ID, commit: COMMIT_SHA, runner, runnerApp, runningChatJobs, runningBuilds, runningFactoryTasks }));
+      return res.end(JSON.stringify({ build: BUILD_ID, commit: COMMIT_SHA, runner, runnerApp, runningChatJobs, runningBuilds, runningFactoryTasks, factorySupervisor: gameFactorySupervisorStarted, factoryForge: gameFactoryForgeStarted })); // GF-BUILD-VERSION
     }
 
     // The handler owns the authenticated tenant/entitlement wall and the protected POST header.
@@ -12973,6 +13058,27 @@ server.listen(PORT, HOST, () => {
       console.log("[dominion-ai] game-factory reconciler failed to start: " + gameFactoryOrchestratorStartError);
     });
   }
+  console.log(`[dominion-ai] game-factory build: supervisor=${gameFactorySupervisorEnabled ? "starting" : "disabled"}  ·  forge=${gameFactoryForgeEnabled ? "starting" : "disabled"}  ·  qa-runner=server (${gameFactoryQaRunner.health ? "ready" : "?"})`); // GF-BUILD-START
+  if (gameFactorySupervisorEnabled) {
+    gameFactorySupervisor.start().then(() => {
+      if (gameFactoryShutdownStarted) return gameFactorySupervisor.stop();
+      gameFactorySupervisorStarted = true;
+      console.log("[dominion-ai] game-factory supervisor: running");
+    }).catch((error) => {
+      gameFactorySupervisorStartError = String((error && error.message) || error || "start failed").slice(0, 500);
+      console.log("[dominion-ai] game-factory supervisor failed to start: " + gameFactorySupervisorStartError);
+    });
+  }
+  if (gameFactoryForgeEnabled) {
+    gameFactoryForge.start().then(() => {
+      if (gameFactoryShutdownStarted) return gameFactoryForge.stop();
+      gameFactoryForgeStarted = true;
+      console.log("[dominion-ai] game-factory forge: running");
+    }).catch((error) => {
+      gameFactoryForgeStartError = String((error && error.message) || error || "start failed").slice(0, 500);
+      console.log("[dominion-ai] game-factory forge failed to start: " + gameFactoryForgeStartError);
+    });
+  }
   // runware joined this line 2026-08-05: it was the one keyed provider the banner never named,
   // so a missing video key was invisible until a user pressed Generate and got a five-second toast.
   console.log(`[dominion-ai] privacy: modes ${PRIVACY_MODES.join("/")} (default ${DEFAULT_PRIVACY_MODE})  ·  trusted providers: local+${[...TRUSTED_PROVIDERS].join("+")}  ·  refuse-not-substitute  ·  providers keyed: openrouter=${!!OPENROUTER_KEY} openai=${!!OPENAI_KEY} deepseek=${!!DEEPSEEK_KEY} anthropic=${!!ANTHROPIC_KEY} moonshot=${!!MOONSHOT_KEY} nvidia=${!!NVIDIA_KEY} runware=${!!cfgGet("RUNWARE_VIDEO_GEN_DOMINION_API_KEY", "")}`);
@@ -13036,6 +13142,8 @@ server.listen(PORT, HOST, () => {
     try {
       // Stop claiming work before draining HTTP. Detached jobs keep their deterministic run ids and
       // the next container reconciles them from the dispatch journal; no success is guessed here.
+      try { await gameFactorySupervisor.stop(); } catch (e) { console.log("[dominion-ai] SIGTERM game-factory supervisor stop failed: " + String(e && e.message || e).slice(0, 200)); } // GF-BUILD-STOP
+      try { await gameFactoryForge.stop(); } catch (e) { console.log("[dominion-ai] SIGTERM game-factory forge stop failed: " + String(e && e.message || e).slice(0, 200)); }
       await gameFactoryOrchestrator.stop();
       console.log(`[dominion-ai] SIGTERM: game-factory reconciler stopped with ${gameFactoryStore.stats().runningTasks} running task(s) preserved for recovery`);
     } catch (e) { console.log("[dominion-ai] SIGTERM game-factory stop failed: " + String(e && e.message || e).slice(0, 200)); }
