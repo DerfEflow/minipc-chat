@@ -111,8 +111,8 @@ source of the ROUTING, the report is the source of the PROOF):
 | science | `deepseek/deepseek-r1` -> `deepseek/deepseek-v4-pro` -> `nvidia/nemotron-3-super-120b-a12b:free` | Fred's pick still rung 1 |
 | quick | `gx10/gpt-oss-120b` -> `deepseek/deepseek-v4-flash` -> `anthropic/claude-haiku-4-5` | free/local first, since "quick" turns are the highest volume |
 | business | `deepseek/deepseek-v4-pro` -> `nvidia/nemotron-3-super-120b-a12b:free` -> `anthropic/claude-haiku-4-5` | `z-ai/glm-5.2` (Fred's original pick) removed from the catalog entirely 2026-09-03: confirmed HTTP 410, will never come back on this id |
-| safety | `anthropic/claude-haiku-4-5` -> `anthropic/claude-sonnet-5` -> `deepseek/deepseek-v4-flash` | care-first system prompt on every rung; `nvidia/nemotron-3.5-content-safety` (Fred's original pick) is a moderation classifier, not an answerer — measured 2026-09-03: HTTP 200 but the content is "Conversation roles must alternate...". It never answers a chat turn on this route again |
-| empathetic | `anthropic/claude-haiku-4-5` -> `nvidia/llama-3.1-nemotron-70b-instruct` -> `deepseek/deepseek-v4-flash` | rung 2 replaces the removed `meta/llama-3.1-70b-instruct` (410, gone from the catalog); this exact id was probed DEAD on 2026-08-03 for the THEOLOGICAL route's own pick, a different probe over a month earlier — re-verified for THIS job by the STABILIZE rig proof |
+| safety | `anthropic/claude-haiku-4-5` -> `anthropic/claude-sonnet-5` -> `deepseek/deepseek-v4-flash` | care-first system prompt on every rung; `nvidia/nemotron-3.5-content-safety` (Fred's original pick) is a moderation classifier, not an answerer — measured 2026-09-03: HTTP 200 but the content is "Conversation roles must alternate...". It never answered a chat turn on this route, and was REMOVED FROM THE CATALOG ENTIRELY the same day (lead review follow-up) once it was confirmed nothing else calls it as a classifier either |
+| empathetic | `anthropic/claude-haiku-4-5` -> `nvidia/nemotron-3-super-120b-a12b:free` -> `deepseek/deepseek-v4-flash` | rung 2 history: `meta/llama-3.1-70b-instruct` (410) -> `nvidia/llama-3.1-nemotron-70b-instruct` (looked live, then measured HTTP 404 "Not found for account" on lead review's own rig sweep) -> the suggested next pick `nvidia/llama-3.1-nemotron-ultra-253b-v1` (live-probed before adding, ALSO 404 on this account, never added) -> settled on the free NVIDIA seat already proven live elsewhere in this catalog. Three names for one job in one day; see models.catalog.mjs's removal comment for the measurements |
 | literary | `arcee-ai/trinity-large-thinking` -> `anthropic/claude-sonnet-5` -> `deepseek/deepseek-v4-pro` | ledger S1 still open |
 | creative | `arcee-ai/trinity-large-thinking` -> `anthropic/claude-sonnet-5` -> `deepseek/deepseek-v4-pro` | shares literary's ladder, ledger S1 still open |
 | theological | `nvidia/nemotron-3-super-120b-a12b:free` -> `deepseek/deepseek-v4-pro` -> `anthropic/claude-haiku-4-5` | Fred's substitute pick still rung 1 |
@@ -121,14 +121,27 @@ source of the ROUTING, the report is the source of the PROOF):
 **Catalog changes made alongside the ladder** (models.catalog.mjs, all deficiency #3-#5):
 - Removed for good (confirmed HTTP 410, absent from `specs/nvidia_models.txt`'s current live list):
   `z-ai/glm-5.2`, `nvidia/nemotron-nano-12b-v2-vl`, `meta/llama-3.1-70b-instruct`.
-- Added: `nvidia/llama-3.1-nemotron-70b-instruct` (empathetic route rung 2).
+- Added, then REMOVED THE SAME DAY (lead review follow-up on the first rig sweep): `nvidia/
+  llama-3.1-nemotron-70b-instruct` — HTTP 404 "Not found for account" on this NVIDIA account, and
+  chasing its OpenRouter fallback answered "No endpoints found" too. The suggested replacement,
+  `nvidia/llama-3.1-nemotron-ultra-253b-v1`, was live-probed before being added and is ALSO 404 on
+  this account (245ms) — never added to the catalog at all. Empathetic rung 2 now goes straight to
+  `nvidia/nemotron-3-super-120b-a12b:free`.
+- Removed the same day: `nvidia/nemotron-3.5-content-safety` — a moderation classifier, not a chat
+  model (every ordinary turn gets "Conversation roles must alternate..." back), never wired as an
+  answering seat anywhere in this app, and nothing in this codebase calls it as a classifier either,
+  so there was no reason to keep the id in the catalog once it was confirmed unused.
+- BATTALION_ROSTER's worker slot and BATTALION_FAILOVER entry for the removed nemotron-70b-instruct
+  seat were repointed to `nvidia/nemotron-3-nano-omni-30b-a3b` (a real, free, already-cataloged
+  NVIDIA-lane seat) — battalion_test.mjs/battalion_failover_test.mjs are dynamic against these
+  tables and needed no direct edits, only re-verified green.
 - `minimax/minimax-m3`'s `directId` was already `minimaxai/minimax-m3` (the live NVIDIA id) when this
   pass started — re-verified live rather than re-fixed; see the STABILIZE build report for whether it
   answered within 60s on the rig, since deficiency #4 measured it hanging past 150s in production.
-- Every remaining catalog seat (28 of them) gained a `fallback` id (`models.catalog.mjs`'s
-  `MODEL_FALLBACKS`), and `catalogPayload()` (the `/api/models` payload) now hides any seat the hourly
-  audit marks unavailable — this is deficiency #4's fix for the general Chat picker's model list, not
-  only Simplify's own routes.
+- Every remaining catalog seat (26 of them, after both rounds of removal) gained a `fallback` id
+  (`models.catalog.mjs`'s `MODEL_FALLBACKS`), and `catalogPayload()` (the `/api/models` payload) now
+  hides any seat the hourly audit marks unavailable — this is deficiency #4's fix for the general
+  Chat picker's model list, not only Simplify's own routes.
 
 **What did NOT change:** no session budget on Simplify (section 4 of `simplify.mjs`'s own header,
 Fred 2026-08-03, unaffected); the websearch route is still a tool turned on for the chat seat, not a
@@ -152,3 +165,46 @@ Perplexity integration (ledger S2, still deferred); creative and literary still 
   me a poem" matches. `TODO(fred):` loosen this regex (e.g. allow 0-2 words between "a" and the noun)
   if this undershoot matters in practice — left as-is this pass since widening a keyword regex without
   a wider prompt sample risks new false positives more than it's worth guessing at.
+
+## 7. LEAD REVIEW FOLLOW-UP (2026-09-03, same day as section 6): DEBOUNCE + THE TWO EMPATHETIC/SAFETY REMOVALS
+
+Merged into `stabilize` as-is on the first pass; two things came back from a rig sweep on the merged
+branch. Both fixed the same day, second commit on `lane/simplify`.
+
+**(1) The live probe was hiding seats it shouldn't.** Two live-measured false positives:
+`nvidia/nemotron-3-nano-omni-30b-a3b` hidden on one transient HTTP 503 "ResourceExhausted", and
+`nvidia/nemotron-3-ultra-550b-a55b` (a 550B reasoning model that legitimately answers in 50-57s)
+timed out at the flat 20s budget. Fixed in `catalogaudit.mjs` (see its header comment for the full
+account): a seat now needs 2 CONSECUTIVE failed probes to hide (one failure, including a 5xx
+"resource exhausted" — deliberately not special-cased — lands as a `probe-warn` note, not
+`result.unavailable`); one success restores it immediately, no debounce on the way up; the
+consecutive-failure count persists in `catalog-audit.json` (server.mjs) so a restart doesn't reset
+it; the probe budget is 60s for a catalog seat flagged `slow: true` (added to
+`nvidia/nemotron-3-ultra-550b-a55b`, `deepseek/deepseek-r1`, `arcee-ai/trinity-large-thinking` in
+`models.catalog.mjs`) and 20s otherwise; and a hidden seat no longer waits out the full hourly cycle
+to be re-checked — `server.mjs` runs a second interval every 10 minutes that reprobes only the
+currently-unavailable NVIDIA seats (`catalogaudit.mjs`'s `opts.onlyIds`), leaving every id it does
+not visit exactly as it found it.
+
+**(2) Two rig-sweep facts, asked to confirm from the log, no code change unless the log showed a
+bug.** `runLadder` (simplify.mjs) had no per-rung logging at all before this — the honest answer to
+"why did rung X get skipped" was "there is no log line for that," so a `[simplify] ladder
+served/skip route=... model=... elapsed=...ms budget=...ms reason=...` line was added around every
+rung attempt (additive only, no behavior change) and a fresh rig was booted to capture real evidence
+rather than reconstruct what an old run's line "would have said":
+
+- **quick route served DeepSeek instead of gx10, with GX10_LLM_URL pointed at the real endpoint.**
+  Confirmed the lead's own hypothesis — the 12s first-token budget tripped:
+  `[simplify] ladder skip route=quick model=gx10/gpt-oss-120b elapsed=12008ms budget=12000ms
+  reason=Couldn't reach the model provider: This operation was aborted`. Reproduced identically on
+  two more probes in the same rig session (12010ms, 12006ms) — GX10 was consistently unreachable
+  within budget for the whole session, consistent with the shared dev box's GX10 being saturated by
+  another lane at that moment, not a Simplify-side bug.
+- **business served the free NVIDIA seat instead of rung 1 (deepseek/deepseek-v4-pro).** Could NOT
+  reproduce this on a fresh rig boot: rung 1 answered cleanly on every attempt this session (three
+  business-route probes, all served by `deepseek/deepseek-v4-pro` — one in 20.7s, one in 9.7s, no
+  skip at all). No historical log line exists to paste for the original event, because the logging
+  that would have captured it did not exist yet at the time — said plainly rather than invented. The
+  most likely explanation, consistent with the ladder's own "any provider failure" philosophy, is a
+  transient DeepSeek-side hiccup during that specific rig session that has since cleared; the new
+  logging means any recurrence is now captured automatically, live, without needing to ask again.

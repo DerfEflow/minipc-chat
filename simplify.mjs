@@ -83,13 +83,18 @@ export const SIMPLIFY_ROUTES = Object.freeze({
     careFirst: true,
     note: "The content-safety classifier (nvidia/nemotron-3.5-content-safety) is a moderation model, "
       + "not an answerer — measured 2026-09-03: it replies to an ordinary chat turn with 'Conversation "
-      + "roles must alternate user/assistant/...'. This route never calls it; it answers on the same "
-      + "seats every other route trusts, with a system prompt that asks for care rather than a clinical "
-      + "tone.",
+      + "roles must alternate user/assistant/...'. Removed from the catalog entirely the same day "
+      + "(lead review follow-up); this route never called it. It answers on the same seats every "
+      + "other route trusts, with a system prompt that asks for care rather than a clinical tone.",
   }),
+  // Rung 2 was nvidia/llama-3.1-nemotron-70b-instruct, then the lead's suggested next pick
+  // nvidia/llama-3.1-nemotron-ultra-253b-v1 (live-probed before being ruled out) — BOTH measured
+  // dead on this NVIDIA account (HTTP 404 "Not found for account") the same day, and neither was
+  // ever added to or kept in the catalog. Per the standing instruction for exactly this case, rung
+  // 2 goes straight to the free NVIDIA seat rather than naming a dead-end id here.
   empathetic: Object.freeze({
     label: "Empathetic",
-    ladder: Object.freeze(["anthropic/claude-haiku-4-5", "nvidia/llama-3.1-nemotron-70b-instruct", "deepseek/deepseek-v4-flash"]),
+    ladder: Object.freeze(["anthropic/claude-haiku-4-5", "nvidia/nemotron-3-super-120b-a12b:free", "deepseek/deepseek-v4-flash"]),
   }),
   literary: Object.freeze({
     label: "Literary",
@@ -432,7 +437,7 @@ async function attemptRung({ transport, messages, maxOut, parentSignal, firstTok
  * this function knowing anything about routes. Returns the winning rung's id/provider/usage/content
  * on success, or the list of every rung's failure reason on total failure.
  */
-async function runLadder({ rungSpecs, baseMessages, systemPromptFor, keys, parentSignal, onDelta }) {
+async function runLadder({ routeKey, rungSpecs, baseMessages, systemPromptFor, keys, parentSignal, onDelta }) {
   const deadlineAt = Date.now() + LADDER_TOTAL_BUDGET_MS;
   const failures = [];
   for (const spec of rungSpecs) {
@@ -444,10 +449,18 @@ async function runLadder({ rungSpecs, baseMessages, systemPromptFor, keys, paren
     const transport = resolveTransport(spec.modelId, keys);
     const messages = [{ role: "system", content: systemPromptFor(spec) }, ...baseMessages];
     const maxOut = outLimitFor(spec.modelId, "normal");
+    const rungT0 = Date.now();
     const result = await attemptRung({ transport, messages, maxOut, parentSignal, firstTokenTimeoutMs, deadlineAt, onDelta });
+    const rungMs = Date.now() - rungT0;
     if (result.ok && String(result.content || "").trim()) {
+      console.log(`[simplify] ladder served route=${routeKey || "?"} model=${spec.modelId} elapsed=${rungMs}ms budget=${firstTokenTimeoutMs}ms`);
       return { ok: true, modelId: spec.modelId, provider: transport.provider, usage: result.usage || null, content: result.content, failures };
     }
+    // Observability for exactly the class of question a lead asks after a rig proof: which rung
+    // was tried, how long it actually took, its own timeout budget, and why it was abandoned.
+    // Added STABILIZE Step 1 follow-up (2026-09-03) after being unable to answer that question
+    // from application logs the first time around -- there were none.
+    console.log(`[simplify] ladder skip route=${routeKey || "?"} model=${spec.modelId} elapsed=${rungMs}ms budget=${firstTokenTimeoutMs}ms reason=${String(result.error || "no answer").slice(0, 200)}`);
     failures.push({ model: spec.modelId, error: result.error || "no answer" });
   }
   return { ok: false, error: failures.length ? failures[failures.length - 1].error : "no live rungs available", failures };
@@ -608,7 +621,7 @@ export function createSimplifyChatHandler({ env = process.env } = {}) {
     const baseMessages = await buildBaseMessages({ history, userMessage });
 
     const attemptFullLadder = () => runLadder({
-      rungSpecs, baseMessages,
+      routeKey: route, rungSpecs, baseMessages,
       systemPromptFor: (spec) => systemPromptFor(route, spec, searchContext),
       keys, parentSignal: ac.signal,
       onDelta: (text) => sse({ type: "delta", text }),

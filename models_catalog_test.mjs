@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import {
   MODELS, MODEL_IDS, isCatalogModel, MODEL_FALLBACKS, fallbackFor,
   setUnavailableSeats, getUnavailableSeats, isSeatUnavailable, unavailableReason, resolveServingModel,
-  catalogPayload, modelById,
+  catalogPayload, modelById, resolveModelId,
 } from "./models.catalog.mjs";
 
 let passed = 0, failed = 0;
@@ -38,11 +38,20 @@ await t("the three confirmed-410 EOL seats are removed from the catalog for good
   }
 });
 
-await t("the empathetic route's replacement seat (nvidia/llama-3.1-nemotron-70b-instruct) exists and is well-formed", () => {
-  const m = modelById("nvidia/llama-3.1-nemotron-70b-instruct");
-  assert.ok(m, "replacement seat missing from the catalog");
+await t("nvidia/llama-3.1-nemotron-70b-instruct and nvidia/nemotron-3.5-content-safety are removed (lead review follow-up, both measured dead ends the same day) and forward to a live id", () => {
+  for (const dead of ["nvidia/llama-3.1-nemotron-70b-instruct", "nvidia/nemotron-3.5-content-safety", "nvidia/llama-3.1-nemotron-ultra-253b-v1"]) {
+    assert.ok(!MODEL_IDS.has(dead), `"${dead}" is still in the catalog`);
+    assert.ok(!modelById(dead), `modelById still resolves "${dead}"`);
+    const resolved = resolveModelId(dead);
+    assert.ok(resolved, `resolveModelId("${dead}") returned nothing -- a stale reference to this id would now invent no model at all`);
+    assert.ok(isCatalogModel(resolved), `resolveModelId("${dead}") -> "${resolved}", which is not itself a live catalog id`);
+  }
+});
+
+await t("the empathetic ladder's rung 2 (nvidia/nemotron-3-super-120b-a12b:free) exists and is well-formed", () => {
+  const m = modelById("nvidia/nemotron-3-super-120b-a12b:free");
+  assert.ok(m, "empathetic rung 2 seat missing from the catalog");
   assert.equal(m.provider, "nvidia");
-  assert.equal(m.directId, "nvidia/llama-3.1-nemotron-70b-instruct");
   assert.equal(m.inCost, 0);
   assert.equal(m.outCost, 0);
 });
