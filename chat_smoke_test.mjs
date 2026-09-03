@@ -70,6 +70,7 @@ const env = {
   LOG_DIR: join(dataDir, "logs"), SANDBOX_DIR: join(dataDir, "sandbox"),
   CHATJOBS_DIR: join(dataDir, "chatjobs"),
   AUTO_MENTOR: "0", PERIODIC_MENTOR: "0", WATCHDOG_ENABLED: "0", CLOUD_BACKUP_ENABLED: "0", BILLING_RETRY_ENABLED: "0",
+  OPENROUTER_CAPS_WARM_ENABLED: "0",
   MULTI_TENANT: "1", OWNER_EMAIL: OWNER, ACCESS_JWT: "prefer",
   OPENROUTER_API_KEY: "", OPEN_AI_DOMINION_UI_APIKEY: "", ANTHROPIC_API_KEY: "",
   DEEPSEEK_AI_DOMINION_UI_APIKEY: "", STRIPE_SECRET_KEY: "", HANDS_TOKEN: "",
@@ -214,6 +215,28 @@ const TERMINAL = (evs) => evs.some((e) => e === "done" || e === "stopped" || e =
   assert.match(String(t.detail.answer || ""), /first bounded piece continued to the real end/);
   assert.ok(t.events.includes("done"), "the resumed local turn did not reach its natural completion");
   ok("local output limits preserve partial text and continue the same model");
+}
+
+// 7b. lane/chat required behavior #4 (DEFICIENCIES item 6, PROD DATA): a production usage log
+//     recorded "Cannot access 'opts' before initialization" on the local qwen3:30b-a3b path. Root
+//     cause traced to server.mjs's ollamaChat(): `const { mod, opts } = ollamaReq(...)` destructured
+//     INTO a binding named `opts`, shadowing the function's own `opts` parameter for the rest of
+//     that scope — every earlier `opts.signal`/`opts.temperature` read in the same block then hit
+//     the shadow's temporal dead zone instead of the real parameter. That destructure is already
+//     renamed to `opts: reqOpts` in this checkout (see the comment at its call site), and a
+//     file-wide search found no other place that destructures a property literally named `opts`
+//     into a same-named local — so there is no live instance of this bug left to fix. This block is
+//     the dedicated regression lock: a second, independent local-model turn (ordinary, not the
+//     length-continuation case above) must complete cleanly through ollamaChat/buildOllamaPayload
+//     with no ReferenceError, so a reintroduction of the shadow is caught here by name, not only by
+//     the generic log grep in check 8 below.
+{
+  const t = await turn({ messages: [{ role: "user", content: "what is two plus two" }], model: "local", mode: "normal" }, { email: OWNER });
+  assert.equal(t.streamError, null, "local turn stream error: " + t.streamError);
+  assert.ok(TERMINAL(t.events), "local turn never reached a terminal event: " + t.events.join(","));
+  assert.ok(t.events.includes("done"), "expected the local turn to finish cleanly, got: " + t.events.join(","));
+  assert.ok(!/opts.*before initialization|Cannot access 'opts'/i.test(serverLog), "the opts TDZ crash reappeared on the local path");
+  ok("local model path (ollamaChat/buildOllamaPayload) runs end to end with no opts TDZ crash");
 }
 
 // 8. THE LOAD-BEARING CHECK. A crash inside handleChat killed the process outright. If the server
