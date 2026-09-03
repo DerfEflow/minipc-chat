@@ -104,7 +104,7 @@
     const link = document.createElement("link");
     link.id = "dominion-game-factory-style";
     link.rel = "stylesheet";
-    link.href = "/dominion-game-factory.css?v=1";
+    link.href = "/dominion-game-factory.css?v=3";
     document.head.append(link);
   }
 
