@@ -75,7 +75,7 @@ import { squeezeOversizeMessages, isContextOverflowError } from "./contextwindow
 // ---- 2. catalog seats -------------------------------------------------------------------------
 {
   const seats = MODELS.filter((m) => m.provider === "gx10");
-  assert.ok(seats.length >= 3, "the GX10 category has its three seats");
+  assert.ok(seats.length >= 2, "the GX10 category has its two seats (120B and the coder; the 20B was retired 2026-09-03 to stop eviction thrash)");
   for (const seat of seats) {
     assert.equal(seat.inCost, 0, seat.id + " must be free");
     assert.equal(seat.outCost, 0, seat.id + " must be free");

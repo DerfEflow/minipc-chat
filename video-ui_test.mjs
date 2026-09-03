@@ -36,11 +36,11 @@ function hasCssDeclaration(selector, property, expected, label = `${selector} ${
 }
 
 test("versioned video assets match the offline shell", () => {
-  for (const asset of ["/dominion-video.css?v=8", "/dominion-video.js?v=14"]) {
+  for (const asset of ["/dominion-video.css?v=9", "/dominion-video.js?v=15"]) {
     includes(html, asset, `${asset} in index`);
     includes(sw, `"${asset}"`, `${asset} in service worker`);
   }
-  includes(js, "l.href='/dominion-video.css?v=8'", "dynamic stylesheet fallback version");
+  includes(js, "l.href='/dominion-video.css?v=9'", "dynamic stylesheet fallback version");
 });
 
 test("the editor exposes the promised models and seven media layers", () => {

@@ -20,7 +20,7 @@ const includes = (source, value, label = value) => assert.ok(source.includes(val
 
 test("the classic owner surface parses and its versioned assets ship in the shell", () => {
   assert.doesNotThrow(() => new Script(js));
-  for (const asset of ["/dominion-game-factory.css?v=2", "/dominion-game-factory.js?v=2"]) {
+  for (const asset of ["/dominion-game-factory.css?v=3", "/dominion-game-factory.js?v=3"]) {
     includes(html, asset, `${asset} in index.html`);
     includes(sw, `"${asset}"`, `${asset} in the service-worker shell`);
   }
@@ -132,7 +132,7 @@ test("the overlay isolates the shell, traps focus, and restores it on close", ()
   includes(js, 'event.target.closest?.("dialog")', "nested dialogs retain their own focus and Escape behavior");
   includes(js, "moveTabFocus(event)", "ARIA tab keyboard navigation");
   includes(js, "focus?.focus?.()", "return focus");
-  includes(html, "dominion-game-factory.css?v=2", "factory style link");
+  includes(html, "dominion-game-factory.css?v=3", "factory style link");
   const styles = [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="\/([^"?]+\.css)/g)].map((match) => match[1]);
   assert.equal(styles.at(-1), "dominion-mobile.css", "the established touch correction sheet must remain last");
 });
