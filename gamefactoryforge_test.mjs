@@ -105,7 +105,9 @@ function makeFakeKit() {
     fallbackIconPng({ size = 64, palette = ["#000000", "#ffffff"], glyph = "G" } = {}) {
       return Buffer.from(`FAKEPNG:${size}:${palette.join(",")}:${glyph}`);
     },
-    assembleBundle({ outDir, generated, meta, assets }) {
+    // async like the real kit's assembleBundle (LANE-gfkit.md): a synchronous fake hid a missing
+    // await in the forge until the first rig run (integration review 2026-09-03).
+    async assembleBundle({ outDir, generated, meta, assets }) {
       if (existsSync(outDir) && readdirSync(outDir).length) throw new Error("assembleBundle: outDir is not empty");
       mkdirSync(outDir, { recursive: true });
       const files = [];
