@@ -55,6 +55,7 @@ const dir = mkdtempSync(join(tmpdir(), "dominion-chatjobs-test-"));
 const env = {
   ...process.env,
   PORT: String(PORT),
+  DATA_DIR: join(dir, "data"), // isolate: without this the server opens the shared default data dir (a sibling worktree left a newer Game Factory journal there)
   OLLAMA_URL: "http://127.0.0.1:" + MOCK_PORT,
   MEMORY_DIR: join(dir, "memory"), CHATLOG_DIR: join(dir, "chatlog"), ARTIFACT_DIR: join(dir, "artifacts"),
   PERSONA_DIR: join(dir, "corpus"), PERSONA_STAGING: join(dir, "staging"), FLYWHEEL_DIR: join(dir, "flywheel"),
