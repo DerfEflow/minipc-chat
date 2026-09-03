@@ -486,6 +486,115 @@ function checkDenials() {
   }
 }
 
+// 9. Catalog-audit unavailable-seat visibility (2026-09-03, foundry lane, DEFICIENCIES.md #5,
+//    LANE-foundry.md item 4). checkCatalog() above only reports the audit's own pass/fail. This
+//    separately surfaces two distinct things the audit's ok/fail flag can hide: how many seats it
+//    PROVED dead (kind:"dead-id"), and which providers it could not check AT ALL. #5 is precisely
+//    that NVIDIA's seats were invisible to the audit ("unchecked: no key") while NVIDIA_API_KEY was
+//    in fact set in production -- so a provider showing "unchecked" here is itself the finding,
+//    independent of whether any of ITS seats turn out to be dead.
+function checkCatalogUnavailableSeats() {
+  try {
+    const a = JSON.parse(inContainer(`
+      const fs=require('fs');const d=process.env.DATA_DIR||'/data';
+      console.log(fs.readFileSync(d+'/catalog-audit.json','utf8'));`).trim().split("\n").slice(-40).join("\n").match(/\{[\s\S]*\}/)[0]);
+    const dead = (a.problems || []).filter((p) => p.kind === "dead-id");
+    const unchecked = Object.entries(a.providers || {}).filter(([, v]) => String(v).startsWith("unchecked")).map(([k]) => k);
+
+    dead.length === 0
+      ? ok("feature", "catalog unavailable seats", "0 dead-id seats reported")
+      : fail("feature", "catalog unavailable seats", `${dead.length} seat(s) confirmed dead: ${dead.map((p) => p.id).join(", ").slice(0, 200)}`);
+
+    unchecked.length === 0
+      ? ok("feature", "catalog provider coverage", "every configured provider was checked this run")
+      : warn("feature", "catalog provider coverage", `${unchecked.join(", ")} unchecked this run -- any dead seat on ${unchecked.length === 1 ? "that provider" : "those providers"} is invisible to the audit even if it holds a live key. Confirm the key is actually configured in production (DEFICIENCIES.md #5).`);
+  } catch (e) {
+    warn("feature", "catalog unavailable seats", "UNCHECKED — " + String(e.message).slice(0, 80));
+  }
+}
+
+// 10. Image engine reachability (2026-09-03, foundry lane, LANE-foundry.md item 4). A lightweight
+//     GET against each engine the Foundry's resilience ladder (images.mjs) depends on, straight
+//     against the provider -- independent of Dominion's own wrapper, same discipline as checkStripe
+//     talking to Stripe directly rather than trusting the app's account of its own webhook.
+async function checkImageEngines(w) {
+  const openaiKey = w.OPEN_AI_DOMINION_UI_APIKEY || w.OPENAI_API_KEY || "";
+  if (!openaiKey) {
+    warn("feature", "image engine: OpenAI (paid)", "UNCHECKED — no OpenAI key in wallet");
+  } else {
+    try {
+      const r = await fetch("https://api.openai.com/v1/models", { headers: { authorization: "Bearer " + openaiKey }, signal: AbortSignal.timeout(15000) });
+      r.ok ? ok("feature", "image engine: OpenAI (paid)", "GET /v1/models reachable, HTTP " + r.status)
+           : fail("feature", "image engine: OpenAI (paid)", "GET /v1/models -> HTTP " + r.status + " — the paid engine is unreachable; the ladder has nothing to fall through FROM.");
+    } catch (e) {
+      fail("feature", "image engine: OpenAI (paid)", "unreachable: " + String(e.message).slice(0, 80));
+    }
+  }
+
+  // Re-uses the same integrate.api.nvidia.com/v1/models endpoint catalogaudit.mjs already probes,
+  // as a key-validity/API-liveness proxy: NVIDIA's genai (image) surface at
+  // ai.api.nvidia.com/v1/genai, where the draft engine actually lives, has no documented
+  // models-list GET of its own to check directly. TODO(fred): if NVIDIA ever publishes one, point
+  // this at it instead for a closer match to what the draft engine actually calls.
+  const nvidiaKey = w.NVIDIA_API_KEY || w.NVIDIA_API_KEY_6_MONTHS || "";
+  if (!nvidiaKey) {
+    warn("feature", "image engine: NVIDIA (free draft)", "UNCHECKED — no NVIDIA key in wallet");
+  } else {
+    try {
+      const r = await fetch("https://integrate.api.nvidia.com/v1/models", { headers: { authorization: "Bearer " + nvidiaKey }, signal: AbortSignal.timeout(15000) });
+      r.ok ? ok("feature", "image engine: NVIDIA (free draft)", "GET /v1/models reachable, HTTP " + r.status)
+           : fail("feature", "image engine: NVIDIA (free draft)", "GET /v1/models -> HTTP " + r.status + " — the free draft fallback is unreachable; the ladder has nothing to fall through TO.");
+    } catch (e) {
+      fail("feature", "image engine: NVIDIA (free draft)", "unreachable: " + String(e.message).slice(0, 80));
+    }
+  }
+}
+
+// 11. Simplify smoke (2026-09-03, foundry lane, LANE-foundry.md item 4). A real Simplify turn, run
+//     from INSIDE the container against its own loopback -- Cloudflare Access never enters the
+//     picture there, same as every other inContainer probe in this file, and it means this check
+//     works whether or not a Cloudflare Access service token has been wired up yet (DEFICIENCIES.md
+//     #26). It looks for an SSE `served` event; lane/simplify (a SIBLING lane in this same
+//     stabilization program) is expected to add that event type, and until it lands this check is
+//     TOLERANT of its absence -- it only fails on an actual `error` frame or no reply at all.
+async function checkSimplifySmoke() {
+  try {
+    const out = JSON.parse(inContainerMjs(`
+      const port = process.env.PORT || 8088;
+      const owner = process.env.OWNER_EMAIL || '';
+      const body = JSON.stringify({ message: 'What is 2+2? Answer in one short sentence.' });
+      const r = await fetch('http://127.0.0.1:' + port + '/api/simplify/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'cf-access-authenticated-user-email': owner },
+        body,
+        signal: AbortSignal.timeout(45000),
+      });
+      const text = await r.text();
+      const frames = text.split('\\n\\n').map(l => l.replace(/^data:\\s?/, '').trim()).filter(Boolean)
+        .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+      console.log(JSON.stringify({
+        status: r.status,
+        sawServed: frames.some(f => f.type === 'served'),
+        sawError: frames.some(f => f.type === 'error'),
+        sawDelta: frames.some(f => f.type === 'delta'),
+        errorMsg: (frames.find(f => f.type === 'error') || {}).message || '',
+        frameTypes: frames.map(f => f.type),
+      }));
+    `).trim().split("\n").pop());
+
+    if (out.status !== 200) return fail("feature", "Simplify smoke", `HTTP ${out.status} from /api/simplify/chat inside the container.`);
+    if (out.sawError) return fail("feature", "Simplify smoke", `provider error: ${String(out.errorMsg).slice(0, 160)}`);
+    if (!out.sawDelta) return warn("feature", "Simplify smoke", `no delta or error frame — got ${JSON.stringify(out.frameTypes)}. Cannot tell if it answered.`);
+    ok("feature", "Simplify smoke", "answered with no error frame");
+
+    out.sawServed
+      ? ok("feature", "Simplify served-by metadata", "a `served` event is present")
+      : warn("feature", "Simplify served-by metadata", "no `served` event seen yet (lane/simplify may not have shipped it) — tolerated, not a failure");
+  } catch (e) {
+    warn("feature", "Simplify smoke", "UNCHECKED — " + String(e.message).slice(0, 100));
+  }
+}
+
 // ---------------------------------------------------------------- report
 
 const W = wallet();
@@ -500,6 +609,9 @@ await checkStripe(W);
 checkBackups();
 checkPerimeterLog();
 checkDenials();
+checkCatalogUnavailableSeats();
+await checkImageEngines(W);
+await checkSimplifySmoke();
 
 const fails = results.filter((r) => r.level === "FAIL");
 const warns = results.filter((r) => r.level === "WARN");
