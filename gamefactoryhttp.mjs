@@ -1,5 +1,6 @@
 /* SD Tech Mobile Game Factory — authenticated HTTP and durable SSE transport. */
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { TextDecoder } from "node:util";
 import { GAME_STATES, REQUIRED_GAME_ARTIFACTS, MANDATORY_ARTIFACT_BACKENDS, DEFERRED_ARTIFACT_BACKENDS, QA_REQUIRED_SUITES, APPROVAL_GATES, HOLD_STATES, allowedTransitions, stateProgress } from "./gamefactory.mjs";
 import { startSseHeartbeat } from "./sseheartbeat.mjs";
@@ -10,6 +11,16 @@ const REVIEWABLE_ARTIFACT_MIMES = new Set(["text/markdown", "text/plain"]);
 const ARTIFACT_CONTENT_ROUTE = /^\/api\/game-factory\/games\/([^/]+)\/artifacts\/([^/]+)\/content$/;
 const SYNTHETIC_CANARY_ROUTE = "/api/game-factory/admin/synthetic-canary";
 const SYNTHETIC_CANARY_ACTION = "game-factory-synthetic-canary";
+// Native preview (D5): GET .../builds/:buildId/play or .../play/<relPath inside the bundle>.
+// The trailing `path.replace(/\/$/, "")` in handle() means a bare "/play/" arrives here as "/play".
+const PLAY_ROUTE = /^\/api\/game-factory\/games\/([^/]+)\/builds\/([^/]+)\/play(\/.*)?$/;
+const PLAY_CONTENT_SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; worker-src 'self'; frame-ancestors 'self'";
+const PLAY_MIME_BY_EXT = Object.freeze({
+  html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8",
+  json: "application/json; charset=utf-8", webmanifest: "application/manifest+json", css: "text/css; charset=utf-8",
+  png: "image/png", svg: "image/svg+xml", ico: "image/x-icon", txt: "text/plain; charset=utf-8",
+});
+const PREVIEWABLE_BUILD_STATES = Object.freeze(["IMPLEMENTATION", "INTEGRATION", "AUTOMATED_TESTING", "PLAYTEST_READY", "REVISION", "RELEASE_CANDIDATE", "APPROVED", "STORE_PREP", "DEPLOYED"]);
 
 export function verifiedHumanFactoryOwner(req, tenant, mode = "") {
   const identity = req && req.dominionIdentity && typeof req.dominionIdentity === "object" ? req.dominionIdentity : {};
@@ -115,13 +126,26 @@ function ownerGateStatus(detail) {
   return { gate, ready: !blocker, blocker, subject: blocker ? null : subject };
 }
 
-function allowedActions(detail) {
+function allowedActions(detail, { builds, uid } = {}) {
   if (!detail) return [];
   const out = [{ id: "attach_workspace", label: detail.workspaceId || detail.workspaceRoot ? "Change workspace" : "Attach workspace", kind: "secondary" }];
-  const previewable = !!detail.workspaceId && !!detail.activeBuild?.id
-    && ["IMPLEMENTATION", "INTEGRATION", "AUTOMATED_TESTING", "PLAYTEST_READY", "REVISION", "RELEASE_CANDIDATE", "APPROVED", "STORE_PREP", "DEPLOYED"].includes(detail.state)
-    && !detail.operation;
-  if (previewable) out.unshift({ id: "preview", label: "Try current workspace build", kind: "secondary", clientAction: "preview" });
+  const buildId = detail.activeBuild?.id || "";
+  const inPreviewState = !!buildId && PREVIEWABLE_BUILD_STATES.includes(detail.state);
+  // D5: the server-served bundle build takes priority over the old hands-node tunnel. The tunnel
+  // branch is kept only for a build that has no assembled bundle yet (builds.exists false), so
+  // existing preview behavior is unchanged wherever no bundle backend is wired in.
+  const hasBundle = inPreviewState && !!uid && typeof builds?.exists === "function" && builds.exists({ uid, projectId: detail.id, buildId });
+  if (hasBundle) {
+    out.unshift({
+      id: "preview", label: "Play current build",
+      kind: detail.state === "PLAYTEST_READY" ? "primary" : "secondary",
+      clientAction: "preview",
+      previewUrl: `/api/game-factory/games/${encodeURIComponent(detail.id)}/builds/${encodeURIComponent(buildId)}/play/index.html`,
+    });
+  } else {
+    const previewable = !!detail.workspaceId && inPreviewState && !detail.operation;
+    if (previewable) out.unshift({ id: "preview", label: "Try current workspace build", kind: "secondary", clientAction: "preview" });
+  }
   if (detail.operation === "PAUSE_REQUESTED" || detail.operation === "STOP_REQUESTED") return out;
   if (detail.state === "PAUSED") return [{ id: "resume", label: "Resume", kind: "primary" }, { id: "stop", label: "Stop", kind: "danger" }, ...out];
   if (detail.state === "BLOCKED" || detail.state === "FAILED") return [{ id: "retry", label: "Retry", kind: "primary" }, ...out];
@@ -153,7 +177,18 @@ function allowedActions(detail) {
   }
   // The owner starts the plan and explicitly enters store preparation. Intermediate lifecycle
   // progress belongs to the evidence-validating reconciler, not a browser button.
-  if (detail.state === "IDEA") out.unshift({ id: "start", label: "Start game plan", kind: "primary" });
+  if (detail.state === "IDEA") {
+    // D6: one tap to a playable build. The manual path (Start game plan, then approve each gate by
+    // hand) stays available and unchanged; Run to playtest additionally pre-records the owner's
+    // approval of the two planning gates so the supervisor can drive straight to PLAYTEST_READY.
+    out.unshift(
+      {
+        id: "run_to_playtest", label: "Run to playtest", kind: "primary", requiresConfirmation: true,
+        confirmNote: "Starts the plan and records your approval of the specification and visual system in advance. You still preview and approve the playtest build yourself.",
+      },
+      { id: "start", label: "Start game plan", kind: "secondary" },
+    );
+  }
   else if (detail.state === "APPROVED" && detail.evidence?.artifactsComplete && detail.evidence?.legalAndPrivacyApproved) {
     out.unshift({ id: "advance", label: "Prepare store release", kind: "primary", toState: "STORE_PREP", requiresConfirmation: true });
   } else if (detail.state === "STORE_PREP" && detail.evidence?.storeSubmissionApproved && detail.evidence?.productionReleaseApproved && detail.evidence?.releaseReady) {
@@ -163,7 +198,7 @@ function allowedActions(detail) {
   return out;
 }
 
-function projectCard(detail) {
+function projectCard(detail, options) {
   const running = (detail.tasks || []).find((task) => task.status === "RUNNING") || null;
   const queued = (detail.tasks || []).find((task) => task.status === "QUEUED") || null;
   const gateStatus = ownerGateStatus(detail);
@@ -188,23 +223,23 @@ function projectCard(detail) {
       preflightReady: [...releases.values()].filter((release) => release.status === "READY").length,
       released: [...releases.values()].filter((release) => release.status === "RELEASED").length,
     },
-    allowedActions: allowedActions(detail), updatedAt: detail.updatedAt,
+    allowedActions: allowedActions(detail, options), updatedAt: detail.updatedAt,
   };
 }
 
-function ownerCommand(detail, body) {
+function ownerCommand(detail, body, options) {
   const command = one(body?.command, 80).toLowerCase();
-  const supported = new Set(["start", "advance", "pause", "resume", "stop", "retry", "revise", "approve", "reject"]);
+  const supported = new Set(["start", "run_to_playtest", "advance", "pause", "resume", "stop", "retry", "revise", "approve", "reject"]);
   if (!supported.has(command)) {
     return { error: "That command is reserved for the trusted factory control plane.", code: "owner_command_not_allowed", status: 403 };
   }
-  const action = allowedActions(detail).find((item) => !item.clientAction && (item.command || item.id) === command);
+  const action = allowedActions(detail, options).find((item) => !item.clientAction && (item.command || item.id) === command);
   if (!action) {
     return { error: "That owner action is not available at the current durable checkpoint.", code: "owner_action_not_available", status: 409 };
   }
   const supplied = body?.payload && typeof body.payload === "object" && !Array.isArray(body.payload) ? body.payload : {};
   let payload = {};
-  if (command === "start") payload = {};
+  if (command === "start" || command === "run_to_playtest") payload = {};
   else if (command === "advance") {
     if (one(supplied.toState, 80).toUpperCase() !== action.toState) {
       return { error: "The requested next stage does not match the server-provided owner action.", code: "owner_action_mismatch", status: 409 };
@@ -304,6 +339,14 @@ export function createGameFactoryHttp({
   planner = null,
   readArtifactContent = null,
   syntheticCanary = null,
+  // D2/D3/D5/D6: the supervisor, forge and served-bundle deps this lane's owner surface reads and
+  // drives. All optional and fail-closed: with none injected, Run to playtest 503s, the build card
+  // and autopilot badge stay absent, health reads "Not configured", and the play route 404s instead
+  // of ever reading a file. Integration (Fable) wires the real adapters in server.mjs.
+  supervisor = null,
+  forgeHealth = () => ({ enabled: false }),
+  supervisorHealth = () => ({ enabled: false }),
+  builds = { resolveFile: () => null, summary: () => null, exists: () => false },
   // Builds, worker tasks, artifact attestations, QA evidence and store status are machine facts.
   // A signed-in browser must not be able to manufacture them. Production therefore fails closed;
   // a trusted in-process adapter may opt in with an explicit authorizer.
@@ -330,7 +373,8 @@ export function createGameFactoryHttp({
     const artifactContentMatch = path.match(ARTIFACT_CONTENT_ROUTE);
     const isSyntheticCanary = path === SYNTHETIC_CANARY_ROUTE;
     const isChatgptReconciliation = path === "/api/game-factory/admin/chatgpt-reconciliation";
-    const check = wall(req, { ownerOnly: path === "/api/game-factory/health" || !!artifactContentMatch || isSyntheticCanary || isChatgptReconciliation });
+    const playMatch = path.match(PLAY_ROUTE);
+    const check = wall(req, { ownerOnly: path === "/api/game-factory/health" || !!artifactContentMatch || isSyntheticCanary || isChatgptReconciliation || !!playMatch });
     if (check.response) return json(res, check.response.status, check.response.body);
     const T = check.T, uid = T.uid || "owner";
     const expectedAction = isSyntheticCanary ? SYNTHETIC_CANARY_ACTION : "game-factory";
@@ -388,6 +432,9 @@ export function createGameFactoryHttp({
         states: [...GAME_STATES], requiredArtifacts: [...REQUIRED_GAME_ARTIFACTS], requiredArtifactBackends: [...MANDATORY_ARTIFACT_BACKENDS],
         deferredArtifactBackends: [...DEFERRED_ARTIFACT_BACKENDS],
         qaRequiredSuites: [...QA_REQUIRED_SUITES], approvalGates: [...APPROVAL_GATES],
+        // D1: the admitted toolchain is dependency-free HTML5 canvas games, not the Godot candidate
+        // the artifact templates describe. A fixed string, not a knob: the client has nothing to pick.
+        toolchain: "web-canvas",
         artifactViewer: {
           enabled: !!T.isOwner && typeof readArtifactContent === "function",
           maxBytes: MAX_ARTIFACT_CONTENT_BYTES,
@@ -401,7 +448,7 @@ export function createGameFactoryHttp({
     if (req.method === "GET" && path === "/api/game-factory/bootstrap") {
       seed(T);
       const details = store.listProjects(uid).map((project) => store.getProject(uid, project.id));
-      const games = details.map(projectCard);
+      const games = details.map((detail) => projectCard(detail, { builds, uid }));
       return json(res, 200, {
         games,
         summary: {
@@ -412,7 +459,7 @@ export function createGameFactoryHttp({
           runningTasks: games.filter((game) => game.currentTask).length,
           mirrored: games.filter((game) => game.artifacts.complete).length,
         },
-        health: { worker: workerHealth(T), mirror: mirrorHealth(T), release: releaseHealth(T) },
+        health: { worker: workerHealth(T), mirror: mirrorHealth(T), release: releaseHealth(T), supervisor: supervisorHealth(T), forge: forgeHealth(T) },
       });
     }
 
@@ -528,6 +575,63 @@ export function createGameFactoryHttp({
       });
     }
 
+    if (playMatch) {
+      // D5: native preview. This is the exact immutable bundle a build produced, served to the
+      // sandboxed iframe. It is a build artifact, not a durable project record, so it earns its own
+      // human-owner check (mirrors the synthetic canary's verifiedHumanFactoryOwner gate) rather than
+      // just riding the ordinary tenant wall: a forged or service-principal session must not be able
+      // to load generated game code into the owner's browser.
+      if (req.method !== "GET") return json(res, 405, { error: "A build preview can only be read.", code: "method_not_allowed" });
+      if (!verifiedHumanFactoryOwner(req, T, gate.mode)) {
+        return json(res, 403, { error: "Playing a build requires a verified human owner session.", code: "human_owner_required" });
+      }
+      let projectId, buildId, relPath;
+      try {
+        projectId = decodeURIComponent(playMatch[1]);
+        buildId = decodeURIComponent(playMatch[2]);
+        relPath = playMatch[3] ? decodeURIComponent(playMatch[3].slice(1)) : "index.html";
+      } catch {
+        return json(res, 400, { error: "The build preview path is malformed.", code: "bad_play_path" });
+      }
+      if (!relPath) relPath = "index.html";
+      // The builds.resolveFile adapter is the actual guarantee against reading outside the bundle
+      // (D5, LANE-gfhttp.md #4), but this route never trusts an injected dependency alone for a
+      // path-traversal class of bug: any ".." segment, a leading slash (an absolute path once
+      // decoded), a backslash, or a Windows drive letter is refused before the resolver is ever
+      // called, so a resolver bug elsewhere can only ever narrow what is reachable, never widen it.
+      if (relPath.includes("..") || relPath.startsWith("/") || relPath.includes("\\") || /^[a-zA-Z]:/.test(relPath)) {
+        return json(res, 400, { error: "That build path is not allowed.", code: "bad_play_path" });
+      }
+      if (typeof builds?.resolveFile !== "function") {
+        return json(res, 503, { error: "Build preview is not configured on this Dominion runtime.", code: "builds_unavailable" });
+      }
+      let resolved = null;
+      try { resolved = builds.resolveFile({ uid, projectId, buildId, relPath }); } catch { resolved = null; }
+      if (!resolved || !resolved.absolute) return json(res, 404, { error: "That build file was not found.", code: "not_found" });
+      const ext = String(relPath.split(".").pop() || "").toLowerCase();
+      const contentType = PLAY_MIME_BY_EXT[ext] || resolved.mime || "application/octet-stream";
+      res.writeHead(200, {
+        "content-type": contentType,
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "content-security-policy": PLAY_CONTENT_SECURITY_POLICY,
+      });
+      try {
+        // Awaited so the handler's own promise only resolves once the bytes are actually flushed —
+        // harmless for a real http.ServerResponse (nothing else is waiting on this handler call) and
+        // it makes the route's behavior deterministic for anything that awaits handle() directly.
+        await new Promise((resolve) => {
+          const stream = createReadStream(resolved.absolute);
+          stream.on("error", () => { try { res.end(); } catch {} resolve(); });
+          res.once("finish", resolve);
+          stream.pipe(res);
+        });
+      } catch {
+        try { res.end(); } catch {}
+      }
+      return;
+    }
+
     const gameMatch = path.match(/^\/api\/game-factory\/games\/([^/]+)(?:\/(commands|builds|tasks|artifacts|tests|releases))?$/);
     if (gameMatch) {
       const projectId = decodeURIComponent(gameMatch[1]);
@@ -541,7 +645,9 @@ export function createGameFactoryHttp({
             ...detail,
             artifacts: artifactsForReview(detail, { configured: typeof readArtifactContent === "function", owner: !!T.isOwner }),
             progress: durableProgress(detail),
-            allowedActions: allowedActions(detail),
+            allowedActions: allowedActions(detail, { builds, uid }),
+            build: detail.activeBuild?.id && typeof builds?.summary === "function" ? builds.summary({ uid, projectId, buildId: detail.activeBuild.id }) : null,
+            autopilot: typeof supervisor?.getAutopilot === "function" && supervisor.getAutopilot(projectId) === true,
             approvalNeeded: gateStatus.ready ? gateStatus.gate : "",
             approvalBlocked: gateStatus.blocker,
             approvalSubject: gateStatus.subject,
@@ -562,7 +668,7 @@ export function createGameFactoryHttp({
         // A mismatched version cannot mutate the project; allowing it through preserves the
         // store's durable idempotent replay response for a command that already committed.
         if (Number(body.expectedVersion) === Number(detail.version)) {
-          const checked = ownerCommand(detail, body);
+          const checked = ownerCommand(detail, body, { builds, uid });
           if (checked.error) return json(res, checked.status, { error: checked.error, code: checked.code });
           type = checked.command;
           payload = checked.payload;
@@ -571,7 +677,11 @@ export function createGameFactoryHttp({
           ? typeof planner?.startSpecification === "function"
             ? await planner.startSpecification({ uid, email: T.email, projectId, key, expectedVersion: body.expectedVersion, actor: T.email || uid, tenant: T })
             : { status: 503, body: { error: "The trusted game planner is not configured.", code: "planner_unavailable" } }
-          : store.executeCommand({ uid, email: T.email, projectId, key, expectedVersion: body.expectedVersion, type, payload, actor: T.email || uid });
+          : type === "run_to_playtest"
+            ? typeof supervisor?.runToPlaytest === "function"
+              ? await supervisor.runToPlaytest({ uid, email: T.email, projectId, key, expectedVersion: body.expectedVersion, actor: T.email || uid, tenant: T })
+              : { status: 503, body: { error: "The trusted factory supervisor is not configured.", code: "supervisor_unavailable" } }
+            : store.executeCommand({ uid, email: T.email, projectId, key, expectedVersion: body.expectedVersion, type, payload, actor: T.email || uid });
         return json(res, result.status, result.body);
       }
       if (req.method === "POST" && child === "builds") {

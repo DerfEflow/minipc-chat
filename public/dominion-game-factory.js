@@ -104,7 +104,7 @@
     const link = document.createElement("link");
     link.id = "dominion-game-factory-style";
     link.rel = "stylesheet";
-    link.href = "/dominion-game-factory.css?v=3";
+    link.href = "/dominion-game-factory.css?v=4";
     document.head.append(link);
   }
 
@@ -270,7 +270,8 @@
     if (game.approvalBlocked) return `<div class="dgf-alert" data-tone="danger"><b>Evidence gate:</b> ${esc(game.approvalBlocked)}</div>`;
     if (game.approvalNeeded) {
       const subject = game.approvalSubject?.hash ? ` Evidence ${esc(game.approvalSubject.hash.slice(0, 12))}…` : "";
-      return `<div class="dgf-alert"><b>Owner gate:</b> ${esc(human(game.approvalNeeded))} approval is required for ${esc(game.approvalSubject?.label || "the current evidence")}.${subject}</div>`;
+      const playNote = game.state === "PLAYTEST_READY" ? `<p>Play the build, then approve it or request changes.</p>` : "";
+      return `<div class="dgf-alert"><b>Owner gate:</b> ${esc(human(game.approvalNeeded))} approval is required for ${esc(game.approvalSubject?.label || "the current evidence")}.${subject}</div>${playNote}`;
     }
     const ownerProgress = (game.allowedActions || []).some((action) => ["advance", "approve", "resume", "retry"].includes(action.id));
     if (!ownerProgress && !HOLD_STATES.has(game.state) && game.state !== "DEPLOYED") {
@@ -290,14 +291,19 @@
   function healthMarkup() {
     const health = bootstrap?.health || {};
     const worker = health.worker || {}, mirror = health.mirror || {}, release = health.release || {};
+    const forge = health.forge || {}, supervisor = health.supervisor || {};
     const workerReady = worker.configured === true && !worker.lastError
       && (worker.state === "running" || worker.available === true || worker.healthy === true);
     const mirrorReady = mirror.complete === true || mirror.healthy === true || mirror.ready === true;
     const releaseReady = release.storeUploadsEnabled === true;
+    const forgeReady = forge.enabled === true && !forge.lastError;
+    const supervisorReady = supervisor.enabled === true;
     return `<div class="dgf-health-grid" aria-label="Factory capability health">
       ${healthCard("Build worker", workerReady, workerReady ? "Configured and reachable" : worker.configured ? "Unavailable or unverified" : "Not configured")}
       ${healthCard("Artifact mirrors", mirrorReady, mirrorReady ? "Verified" : mirror.configured ? "Incomplete verification" : "Not configured")}
       ${healthCard("Store release", releaseReady, releaseReady ? "Gated upload capability enabled" : release.assessmentWritesEnabled || release.writesEnabled ? "Readiness recording only" : "Readiness only")}
+      ${healthCard("Game forge", forgeReady, forgeReady ? "Ready" : forge.enabled ? forge.lastError : "Not configured")}
+      ${healthCard("Supervisor", supervisorReady, supervisorReady ? "Running" : "Not configured")}
     </div>`;
   }
 
@@ -311,6 +317,31 @@
     }).join("")}</div>`;
   }
 
+  // D5/D6: the Build card is the owner's read on what the factory actually produced for the active
+  // build (version, status, file count, bundle fingerprint, QA pass count), independent of the
+  // lifecycle-state cards above it. `game.build` is null until the server has a builds adapter wired
+  // in and an active build to summarize; the card then reads honestly as "no build yet".
+  function buildCardMarkup(game) {
+    const build = game.build;
+    const playAction = (game.allowedActions || []).find((action) => action.id === "preview" && action.previewUrl);
+    const playButton = playAction
+      ? `<div class="dgf-actions"><button class="dgf-action" data-kind="primary" type="button" data-command="preview">${esc(playAction.label)}</button></div>` : "";
+    if (!build) {
+      return `<div class="dgf-section-head"><div><h2>Build</h2><p>What the factory produced for the active build.</p></div></div><div class="dgf-empty">No build has been assembled for this game yet.</div>`;
+    }
+    const qa = build.qa || {};
+    const passed = Number(qa.passed) || 0;
+    const failingSuites = Object.entries(qa.suites || {}).filter(([, suite]) => suite?.status === "FAILED").map(([name]) => name);
+    const fingerprint = String(build.bundleSha256 || "").slice(0, 12) || "not recorded";
+    return `<div class="dgf-section-head"><div><h2>Build</h2><p>What the factory produced for the active build.</p></div></div>
+      <div class="dgf-cards">
+        <article class="dgf-info"><small>Version</small><b>${esc(build.versionName || "Not created")}</b><p>${esc(human(build.status || "unknown"))}</p></article>
+        <article class="dgf-info"><small>Files</small><b>${Number(build.fileCount) || 0}</b><p>Bundle fingerprint ${esc(fingerprint)}</p></article>
+        <article class="dgf-info"><small>QA</small><b>${passed}/12 passed</b><p>${failingSuites.length ? `Failing: ${esc(failingSuites.join(", "))}` : "All required suites passing."}</p></article>
+      </div>
+      ${playButton}`;
+  }
+
   function overviewMarkup(game) {
     const task = game.tasks?.find((item) => item.status === "RUNNING") || null;
     const next = game.tasks?.find((item) => item.status === "QUEUED") || null;
@@ -321,6 +352,7 @@
         <article class="dgf-info"><small>Active build</small><b>${esc(game.activeBuild?.versionName || game.activeBuildId || "Not created")}</b><p>${game.activeBuild ? `${esc(game.activeBuild.status)} · ${Number(game.activeBuild.versionCode) || 0}` : "Release evidence is bound to an immutable build when one exists."}</p></article>
         <article class="dgf-info"><small>Required artifacts</small><b>${game.complete ? "11 of 11 complete" : `${Math.max(0, (game.required?.length || 11) - (game.missing?.length || 0))} of ${game.required?.length || 11} complete`}</b><p>Completion requires a byte-verified Drive copy for every required artifact. Native ChatGPT Project evidence is deferred, not required, and can be completed by the owner later without blocking progress.</p></article>
       </div>
+      ${buildCardMarkup(game)}
       ${healthMarkup()}
       ${lifecycleMarkup(game)}`;
   }
@@ -439,7 +471,7 @@
       return;
     }
     node.innerHTML = `<header class="dgf-detail-head">
-      <div class="dgf-title-row"><div><h2>${esc(game.name)}</h2><p>#${String(Number(game.order) || 0).padStart(2, "0")} · ${esc(game.slug)} · updated ${esc(shortDate(game.updatedAt))}</p></div><span class="dgf-chip" data-tone="${stateTone(game)}">${esc(human(game.operation || game.state))}</span></div>
+      <div class="dgf-title-row"><div><h2>${esc(game.name)}</h2><p>#${String(Number(game.order) || 0).padStart(2, "0")} · ${esc(game.slug)} · updated ${esc(shortDate(game.updatedAt))}</p></div>${game.autopilot ? `<span class="dgf-chip dgf-autopilot" data-tone="done">Autopilot</span>` : ""}<span class="dgf-chip" data-tone="${stateTone(game)}">${esc(human(game.operation || game.state))}</span></div>
       <div class="dgf-progress-row"><div class="dgf-progress" role="progressbar" aria-label="Lifecycle progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${clamp(game.progress, 0, 100)}"><i style="width:${clamp(game.progress, 0, 100)}%"></i></div><b>${clamp(game.progress, 0, 100)}%</b></div>
       ${operationNotice(game)}${actionMarkup(game)}
     </header>${tabsMarkup()}<section class="dgf-tab-panel" id="dgf-tab-panel" role="tabpanel">${panelMarkup(game)}</section>`;
@@ -562,9 +594,42 @@
   }
 
   function openWorkspacePreview(action) {
-    const attempt = previewQueue.then(() => startWorkspacePreview(action));
+    // D5: the server-served bundle build (previewUrl) takes priority over the hands-node tunnel.
+    // The tunnel path (startWorkspacePreview) is kept only for an action with no previewUrl, so a
+    // game with no assembled bundle yet still gets its existing preview behavior unchanged.
+    const attempt = previewQueue.then(() => (action?.previewUrl ? startBundlePreview(action) : startWorkspacePreview(action)));
     previewQueue = attempt.catch(() => {});
     return attempt;
+  }
+
+  async function startBundlePreview(action) {
+    if (previewDialog) { previewDialog.focus(); return; }
+    if (action?.clientAction !== "preview" || typeof action.previewUrl !== "string" || !action.previewUrl) {
+      setStatus("A built bundle is required before preview can start.", "error");
+      return;
+    }
+    const versionName = detail?.build?.versionName || detail?.activeBuild?.versionName || "current";
+    const dialog = document.createElement("dialog");
+    previewDialog = dialog;
+    dialog.className = "dgf-input-dialog dgf-preview-dialog";
+    dialog.setAttribute("aria-labelledby", "dgf-preview-title");
+    dialog.setAttribute("aria-describedby", "dgf-preview-note");
+    dialog.innerHTML = `<div class="dgf-preview-head"><div><span class="dgf-kicker">Playable build</span><h2 id="dgf-preview-title">${esc(detail.name)} preview</h2><p id="dgf-preview-note">This runs the exact build ${esc(versionName)}. Saves inside this preview do not persist; they do in the installed app. It is not QA, approval, store, or release evidence.</p></div><button class="dgf-icon-button" type="button" data-preview-close aria-label="Close game preview">×</button></div><div class="dgf-preview-status" role="status" aria-live="polite">Loading the playable build…</div><iframe title="${esc(detail.name)} playable build preview" sandbox="allow-scripts allow-forms allow-pointer-lock" referrerpolicy="no-referrer" src="${esc(action.previewUrl)}"></iframe>`;
+    root.append(dialog);
+    const frame = dialog.querySelector("iframe");
+    const status = dialog.querySelector("[role='status']");
+    dialog.querySelector("[data-preview-close]").addEventListener("click", () => dialog.close());
+    dialog.addEventListener("cancel", () => { dialog.returnValue = "cancel"; });
+    // Nothing was started against the hands-node workspace for a bundle preview, so closing it never
+    // stops anything there either: the server already served an immutable, already-built file and
+    // there is no live tunnel to tear down.
+    dialog.addEventListener("close", () => {
+      if (previewDialog === dialog) previewDialog = null;
+      dialog.remove();
+    }, { once: true });
+    dialog.showModal();
+    dialog.querySelector("[data-preview-close]")?.focus();
+    frame.addEventListener("load", () => { if (previewDialog === dialog) status.textContent = "Build loaded. Closing this window does not affect the saved build."; }, { once: true });
   }
 
   async function startWorkspacePreview(action) {
@@ -690,7 +755,8 @@
       dialog.className = "dgf-input-dialog";
       dialog.setAttribute("aria-labelledby", "dgf-confirm-title");
       const subject = action.subjectHash ? ` This decision is bound to ${esc(action.subjectLabel || "the current evidence")} (${esc(action.subjectHash.slice(0, 12))}…).` : "";
-      dialog.innerHTML = `<form method="dialog"><span class="dgf-kicker">Confirm owner action</span><h2 id="dgf-confirm-title">${esc(action.label || human(action.id))}</h2><p>This changes the durable factory record.${subject} The resulting checkpoint and audit history will remain visible.</p><div class="dgf-actions"><button class="dgf-action" type="submit" value="cancel">Keep current state</button><button class="dgf-action" data-kind="${action.kind === "primary" ? "primary" : "danger"}" type="submit" value="confirm">${esc(action.label || human(action.id))}</button></div></form>`;
+      const confirmNote = action.confirmNote ? `<p class="dgf-confirm-note">${esc(action.confirmNote)}</p>` : "";
+      dialog.innerHTML = `<form method="dialog"><span class="dgf-kicker">Confirm owner action</span><h2 id="dgf-confirm-title">${esc(action.label || human(action.id))}</h2>${confirmNote}<p>This changes the durable factory record.${subject} The resulting checkpoint and audit history will remain visible.</p><div class="dgf-actions"><button class="dgf-action" type="submit" value="cancel">Keep current state</button><button class="dgf-action" data-kind="${action.kind === "primary" ? "primary" : "danger"}" type="submit" value="confirm">${esc(action.label || human(action.id))}</button></div></form>`;
       root.append(dialog);
       dialog.addEventListener("cancel", () => { dialog.returnValue = "cancel"; });
       dialog.addEventListener("close", () => {

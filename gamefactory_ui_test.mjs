@@ -20,13 +20,13 @@ const includes = (source, value, label = value) => assert.ok(source.includes(val
 
 test("the classic owner surface parses and its versioned assets ship in the shell", () => {
   assert.doesNotThrow(() => new Script(js));
-  for (const asset of ["/dominion-game-factory.css?v=3", "/dominion-game-factory.js?v=3"]) {
+  for (const asset of ["/dominion-game-factory.css?v=4", "/dominion-game-factory.js?v=4"]) {
     includes(html, asset, `${asset} in index.html`);
     includes(sw, `"${asset}"`, `${asset} in the service-worker shell`);
   }
   includes(js, "window.DominionGameFactory", "stable surface global");
   includes(sw, '"/games"', "offline-capable deep route");
-  assert.match(sw, /dominion-ai-v186-stabilize-video/, "asset changes must advance the PWA cache");
+  assert.match(sw, /dominion-ai-v187-game-factory/, "asset changes must advance the PWA cache");
 });
 
 test("owner navigation stays hidden until the server account capability arrives", () => {
@@ -132,7 +132,7 @@ test("the overlay isolates the shell, traps focus, and restores it on close", ()
   includes(js, 'event.target.closest?.("dialog")', "nested dialogs retain their own focus and Escape behavior");
   includes(js, "moveTabFocus(event)", "ARIA tab keyboard navigation");
   includes(js, "focus?.focus?.()", "return focus");
-  includes(html, "dominion-game-factory.css?v=3", "factory style link");
+  includes(html, "dominion-game-factory.css?v=4", "factory style link");
   const styles = [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="\/([^"?]+\.css)/g)].map((match) => match[1]);
   assert.equal(styles.at(-1), "dominion-mobile.css", "the established touch correction sheet must remain last");
 });
@@ -168,6 +168,52 @@ test("release and artifact claims remain evidence-based", () => {
   assert.doesNotMatch(js, /worker\.available\s*!==\s*false|worker\.healthy\s*!==\s*false/, "missing worker-health evidence must fail closed");
   includes(js, "· stale", "historical test and release evidence is visibly stale");
   includes(js, "action.subjectHash.slice(0, 12)", "owner confirmation names its immutable evidence subject");
+});
+
+test("a bundle build preview is set directly on the iframe and never touches the workspace tunnel", () => {
+  includes(js, "action?.previewUrl ? startBundlePreview(action) : startWorkspacePreview(action)", "previewUrl takes priority over the tunnel path");
+  const start = js.indexOf("async function startBundlePreview(action) {");
+  const end = js.indexOf("async function startWorkspacePreview(action) {");
+  assert.ok(start > -1 && end > start, "startBundlePreview must exist ahead of the tunnel preview");
+  const body = js.slice(start, end);
+  includes(body, 'src="${esc(action.previewUrl)}"', "the served bundle URL is set directly as the iframe src");
+  includes(body, "This runs the exact build", "truthful build-pinned preview copy");
+  includes(body, "It is not QA, approval, store, or release evidence.", "truthful preview boundary carries into the bundle dialog too");
+  includes(body, 'sandbox="allow-scripts allow-forms allow-pointer-lock"', "the bundle preview iframe keeps the opaque-origin sandbox");
+  assert.doesNotMatch(body, /\/ide\/preview\/start|\/ide\/preview\/stop/, "a bundle preview must never call the workspace tunnel");
+});
+
+test("the overview Build card shows version, files, QA pass count and a play button when the action exists", () => {
+  includes(js, "function buildCardMarkup(game)", "dedicated build card renderer");
+  includes(js, "${buildCardMarkup(game)}", "the build card renders inside the Overview tab");
+  includes(js, "No build has been assembled for this game yet.", "truthful no-build-yet state");
+  includes(js, "Bundle fingerprint", "bundle fingerprint surfaced");
+  includes(js, "${passed}/12 passed", "QA pass count out of the fixed 12 required suites");
+  includes(js, "Failing: ${esc(failingSuites.join", "failing suite names are named, not just counted");
+  includes(js, 'action.id === "preview" && action.previewUrl', "the play button appears only for a server-derived bundle action");
+});
+
+test("the confirmation dialog surfaces the server-provided confirmNote under the action title", () => {
+  includes(js, "const confirmNote = action.confirmNote", "confirmNote read from the server action");
+  includes(js, '<h2 id="dgf-confirm-title">${esc(action.label || human(action.id))}</h2>${confirmNote}<p>This changes the durable factory record.', "confirmNote is placed directly under the confirmation title");
+  includes(js, 'class="dgf-confirm-note"', "confirmNote gets its own scoped, styled element");
+  includes(css, ".dgf-confirm-note", "confirmNote has a defined style, not inherited plain text");
+});
+
+test("the health grid reports game forge and supervisor readiness from the bootstrap payload", () => {
+  includes(js, "const forge = health.forge || {}, supervisor = health.supervisor || {};", "forge and supervisor read from bootstrap health, not invented client state");
+  includes(js, 'healthCard("Game forge", forgeReady, forgeReady ? "Ready" : forge.enabled ? forge.lastError : "Not configured")', "forge health card wording matches the lane contract");
+  includes(js, 'healthCard("Supervisor", supervisorReady, supervisorReady ? "Running" : "Not configured")', "supervisor health card wording matches the lane contract");
+});
+
+test("Run to playtest is a confirmed owner action and PLAYTEST_READY carries an explicit play-then-decide note", () => {
+  includes(js, "Play the build, then approve it or request changes.", "explicit play-then-decide notice");
+  includes(js, 'game.state === "PLAYTEST_READY" ? `<p>Play the build, then approve it or request changes.</p>` : ""', "the note is conditional on PLAYTEST_READY, not shown at every gate");
+});
+
+test("an autopilot badge appears on the detail header only when the server reports autopilot", () => {
+  includes(js, "game.autopilot ?", "autopilot badge is conditional on server-reported state, never inferred client-side");
+  includes(js, "dgf-autopilot", "autopilot badge carries its own scoped class");
 });
 
 if (!process.exitCode) console.log(`\n${passed} Game Factory UI tests passed.`);
