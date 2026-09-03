@@ -67,15 +67,24 @@ export const CHAT_SEAT_FALLBACKS = {
  */
 export function pickFallbackModel(requestedId, { privacyMode = "normal", tried = [] } = {}) {
   const seen = new Set([requestedId, ...tried].filter(Boolean));
-  const rec = modelById(requestedId);
-  // Prefer a catalog-declared fallback (lane/simplify's future field) over this module's own map,
-  // per the spec: "if m.fallback is absent use your own map."
-  const candidate = (rec && typeof rec.fallback === "string" && rec.fallback) || CHAT_SEAT_FALLBACKS[requestedId] || "";
-  if (!candidate || seen.has(candidate)) return null;
-  if (!isCatalogModel(candidate)) return null;   // never invent a model id
-  const gate = modeAllows(privacyMode, candidate);
-  if (!gate.allowed) return null;                // privacy mode is enforced in the fallback too, never bypassed
-  return candidate;
+  // Build the ladder: the catalog-declared fallback chain first (lane/simplify gives every seat a
+  // `fallback`; walk it up to four hops), then this module's own map for the requested seat and for
+  // each hop. A rung refused by the privacy mode or already tried this turn must not end the ladder
+  // while another allowed, untried, real seat exists (stabilize 2026-09-03; the old single-candidate
+  // version returned null the moment its one idea was unusable).
+  const candidates = [];
+  const push = (id) => { if (id && typeof id === "string" && id !== requestedId && !candidates.includes(id)) candidates.push(id); };
+  let cur = requestedId;
+  for (let hop = 0; hop < 4 && cur; hop++) { const rec = modelById(cur); const next = rec && typeof rec.fallback === "string" ? rec.fallback : ""; if (!next || next === requestedId || candidates.includes(next)) break; push(next); cur = next; }
+  push(CHAT_SEAT_FALLBACKS[requestedId]);
+  for (const c of [...candidates]) push(CHAT_SEAT_FALLBACKS[c]);
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;                    // never re-offer a seat this turn already burned
+    if (!isCatalogModel(candidate)) continue;             // never invent a model id
+    if (!modeAllows(privacyMode, candidate).allowed) continue;   // privacy mode is enforced in the fallback too, never bypassed
+    return candidate;
+  }
+  return null;
 }
 
 // Convenience for callers that want to know the fallback's provider without a second catalog hit.

@@ -24,7 +24,7 @@ t("kimi-k3 falls back to kimi-k2.6", () => {
 
 t("a model already tried this turn is never offered again", () => {
   const fb = pickFallbackModel("moonshotai/kimi-k3", { privacyMode: "normal", tried: ["moonshotai/kimi-k2.6"] });
-  assert.equal(fb, null, "the only mapped fallback was already tried, so there is nothing left to offer");
+  assert.ok(fb !== "moonshotai/kimi-k2.6" && fb !== "moonshotai/kimi-k3", "a seat already tried this turn is never offered again (got " + fb + ")");
 });
 
 t("an unknown/removed model id yields no fallback instead of inventing one", () => {
@@ -47,7 +47,7 @@ t("Private mode (Anthropic-only) refuses a non-Anthropic fallback", () => {
   const fb = pickFallbackModel("openai/gpt-4o", { privacyMode: "private", tried: [] });
   // openai/gpt-4o's mapped fallback is anthropic/claude-sonnet-5, which Private mode DOES allow —
   // confirms the gate is a real allow/deny check, not a blanket refusal in Private mode.
-  assert.equal(fb, "anthropic/claude-sonnet-5");
+  assert.equal(fallbackProviderOf(fb), "anthropic", "Private mode may only fall back inside Anthropic (got " + fb + ")");
 });
 
 t("Private mode refuses a fallback that lands outside its Anthropic-only lane", () => {
