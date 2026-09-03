@@ -7670,19 +7670,77 @@ async function gx10HandsChatStream(rec, catalogId, messages, opts = {}, onDelta)
     num_ctx: (rec && rec.ctx) || 0,
     temperature: shaped.temperature,
   });
-  let r;
-  try {
-    r = await handsHub.dispatchStream(GX10_NODE, "ollama_chat", { payload }, {
-      timeoutMs: 590000,
-      signal: opts.signal,
-      onChunk: (c) => { try { if (onDelta && c && c.delta) onDelta(c.delta); } catch { /* UI sink throws must not kill the stream */ } },
-    });
-  } catch (e) {
-    return gx10Failure(String((e && e.message) || e));
+
+  /*
+   * First-token watchdog (lane/chat follow-up, 2026-09-03 production evidence): a GX10 busy
+   * serving a Crucible brain call produced ZERO tokens for 150s while the client waited and gave
+   * up, because the hub's own dispatch deadline runs up to 10 minutes and carries no interim
+   * "queued" signal -- this function had no timeout of its own at all, unlike cloudChatStream's
+   * generic branch. Armed only when the caller opts in (handleChat sets firstTokenTimeoutMs while
+   * nothing has streamed yet THIS TURN, same as the generic lane), but capped to 10s for THIS
+   * transport specifically: there is no signal available here that tells "generating slowly" apart
+   * from "queued behind another job", so any silence past 10s is treated as the queued case and
+   * handed to the fallback ladder immediately -- retryable:false, so the round loop skips re-queuing
+   * behind the same busy box and goes straight to rung-3 instead of wasting the same-seat retry
+   * schedule on a node that is not going anywhere. A "not connected" node is detected by the hub
+   * itself, synchronously, well inside this ceiling (see the `offline` check below).
+   */
+  const watchdogMs = opts.firstTokenTimeoutMs > 0 ? Math.min(opts.firstTokenTimeoutMs, 10000) : 0;
+  const watchdogAbort = watchdogMs > 0 ? new AbortController() : null;
+  let dispatchSignal = opts.signal;
+  if (watchdogAbort) {
+    dispatchSignal = watchdogAbort.signal;
+    if (opts.signal) {
+      if (opts.signal.aborted) watchdogAbort.abort();
+      else opts.signal.addEventListener("abort", () => watchdogAbort.abort(), { once: true });
+    }
   }
-  if (opts.signal && opts.signal.aborted) return { ok: false, aborted: true, error: "stopped" };
-  if (!r || r.ok === false || !r.response) return gx10Failure((r && r.error) || "the GX10 node did not answer");
-  return openAIResultFromOllama(r.response, { transport: "gx10" });
+
+  let settled = false, gotChunk = false, partialText = "";
+  return new Promise((resolve) => {
+    let watchdogTimer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+      resolve(result);
+    };
+    if (watchdogMs > 0) {
+      watchdogTimer = setTimeout(() => {
+        if (settled || gotChunk) return;   // real output arrived -- this is a healthy slow stream, not a stuck one
+        console.log(`[dominion-ai] gx10 first-token watchdog: no token from "${GX10_NODE}" within ${Math.round(watchdogMs / 1000)}s -- treating as queued/unreachable, handing this turn to the fallback ladder`);
+        try { watchdogAbort.abort(); } catch {}   // tells the node to kill the job so it frees up for other work
+        finish(gx10Failure(`no response from node "${GX10_NODE}" within ${Math.round(watchdogMs / 1000)}s (queued behind another job, or unreachable)`, { retryable: false }));
+      }, watchdogMs);
+    }
+    (async () => {
+      let r;
+      try {
+        r = await handsHub.dispatchStream(GX10_NODE, "ollama_chat", { payload }, {
+          timeoutMs: 590000,
+          signal: dispatchSignal,
+          onChunk: (c) => {
+            try {
+              if (c && c.delta) { gotChunk = true; partialText += c.delta; if (onDelta) onDelta(c.delta); }
+            } catch { /* UI sink throws must not kill the stream */ }
+          },
+        });
+      } catch (e) {
+        return finish(gx10Failure(String((e && e.message) || e), gotChunk ? { content: partialText } : undefined));
+      }
+      if (settled) return;   // the watchdog already answered for this call; the node's own cancel is already on the wire
+      if (opts.signal && opts.signal.aborted) return finish({ ok: false, aborted: true, error: "stopped" });
+      if (!r || r.ok === false || !r.response) {
+        // `offline` covers BOTH an instant "not connected" (the hub's synchronous entry check) and
+        // the hub's own long dispatch deadline -- neither recovers by asking the same node again
+        // right away, so both skip the same-seat retry schedule and go straight to rung-3.
+        const notWorthRetrying = !!(r && r.offline);
+        return finish(gx10Failure((r && r.error) || "the GX10 node did not answer",
+          { retryable: !notWorthRetrying, ...(gotChunk ? { content: partialText } : {}) }));
+      }
+      finish(openAIResultFromOllama(r.response, { transport: "gx10" }));
+    })();
+  });
 }
 
 function buildOllamaPayload(model, messages, opts, stream) {

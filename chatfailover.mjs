@@ -55,6 +55,13 @@ export const CHAT_SEAT_FALLBACKS = {
   "openai/gpt-5.6-terra": "anthropic/claude-sonnet-5",
   "anthropic/claude-sonnet-5": "openai/gpt-4o",
   "anthropic/claude-opus-4-8": "anthropic/claude-sonnet-5",
+  // GX10 relay seats (lane/chat follow-up, 2026-09-03 production evidence: a busy GX10 produced no
+  // first token for 150s while the client waited). The relay's own first-token watchdog now hands
+  // off here the same way any cloud seat does when it goes quiet -- these targets are cloud models
+  // with comparable capability so a queued/unreachable box never strands the turn.
+  "gx10/gpt-oss-120b": "deepseek/deepseek-v4-pro",
+  "gx10/gpt-oss-20b": "deepseek/deepseek-v4-flash",
+  "gx10/qwen3-coder-30b": "deepseek/deepseek-v4-pro",
 };
 
 /*
