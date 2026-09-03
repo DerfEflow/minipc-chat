@@ -181,6 +181,19 @@
   color: var(--simplify-text);
   text-shadow: 0 0 4px rgba(107, 255, 195, .25);
 }
+#simplify-root .simplify-turn.simplify-assistant[data-served-route]::after {
+  content: "answered via " attr(data-served-route) " on " attr(data-served-provider);
+  display: block;
+  margin-top: 8px;
+  color: var(--simplify-text);
+  font-size: 9px;
+  font-variant: small-caps;
+  font-weight: 400;
+  letter-spacing: .11em;
+  line-height: 1.35;
+  opacity: .42;
+  text-shadow: none;
+}
 #simplify-root .simplify-turn.simplify-notice {
   align-self: center;
   border: 1px dashed rgba(255, 255, 255, 0.18);
@@ -246,6 +259,25 @@
 #simplify-root .simplify-composer textarea:focus {
   box-shadow: inset 0 0 12px -6px var(--simplify-line), 0 0 0 2px rgba(57, 255, 20, .25);
 }
+#simplify-root .simplify-thinking {
+  display: none;
+  align-self: center;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px 9px;
+}
+#simplify-root .simplify-composer:has(.simplify-send:disabled) .simplify-thinking { display: flex; }
+#simplify-root .simplify-thinking i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--simplify-text);
+  box-shadow: 0 0 5px var(--simplify-text);
+  animation: simplify-breathe 1.8s ease-in-out infinite;
+}
+#simplify-root .simplify-thinking i:nth-child(2) { animation-delay: .2s; }
+#simplify-root .simplify-thinking i:nth-child(3) { animation-delay: .4s; }
+@keyframes simplify-breathe { 0%, 60%, 100% { opacity: .2; } 30% { opacity: .85; } }
 #simplify-root .simplify-send {
   flex: none;
   padding: 10px 16px;
@@ -264,6 +296,10 @@
 #simplify-root .simplify-send:hover { opacity: .82; }
 #simplify-root .simplify-send:active { transform: translateY(1px); }
 #simplify-root .simplify-send:disabled { opacity: .4; cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  #simplify-root .simplify-thinking i { animation: none; opacity: .55; }
+}
 
 /* ---- the hamburger-menu entry point (see docs/wiring/lane-i-simplify.md) ----
    Rendered inside the archive rail in place of the Knowledge Vault section, GUESTS ONLY. Styled

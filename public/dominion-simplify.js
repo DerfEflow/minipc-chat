@@ -207,6 +207,7 @@
       <div class="simplify-feed" id="simplify-feed" role="log" aria-live="polite"></div>
       <form class="simplify-composer" id="simplify-composer">
         <textarea id="simplify-input" rows="1" placeholder="Ask anything…" aria-label="Message" autocomplete="off"></textarea>
+        <span class="simplify-thinking" role="status" aria-label="Thinking"><i></i><i></i><i></i></span>
         <button type="submit" class="simplify-send" id="simplify-send">SEND</button>
       </form>`;
     document.body.appendChild(root);

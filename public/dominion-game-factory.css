@@ -120,6 +120,8 @@ body.dgf-open{overflow:hidden}
 #dgf-root .dgf-artifact p{margin:8px 0 0;color:var(--gf-muted);font-size:10px}
 #dgf-root .dgf-copy{display:inline-flex;margin:8px 5px 0 0;padding:4px 7px;border-radius:999px;background:rgba(255,143,120,.08);color:var(--gf-red);font:700 8px/1 ui-monospace,SFMono-Regular,Consolas,monospace;text-transform:uppercase}
 #dgf-root .dgf-copy[data-ok="true"]{background:rgba(142,226,134,.08);color:var(--gf-green)}
+#dgf-root .dgf-copy[data-state="deferred"]{align-items:center;gap:6px;border:1px solid rgba(223,149,79,.34);background:rgba(223,149,79,.05);color:var(--gf-muted)}
+#dgf-root .dgf-copy[data-state="deferred"]::after{content:"optional";padding:2px 5px;border-radius:999px;background:rgba(223,149,79,.1);color:var(--gf-brass);font-size:7px;letter-spacing:.08em}
 #dgf-root .dgf-artifact-review{margin-top:11px;padding-top:10px;border-top:1px solid var(--gf-line)}
 #dgf-root .dgf-artifact-open{width:100%}
 #dgf-root .dgf-artifact-unavailable{display:block;color:var(--gf-muted);font-size:10px;line-height:1.45}

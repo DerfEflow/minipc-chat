@@ -15,23 +15,23 @@
 <link rel="stylesheet" href="/dominion-tenant.css?v=17" />
 <link rel="stylesheet" href="/dominion-vault.css?v=6" />
 <link rel="stylesheet" href="/dominion-forge.css?v=6" />
-<link rel="stylesheet" href="/dominion-images.css?v=9" />
-<link id="dominion-video-style" rel="stylesheet" href="/dominion-video.css?v=8" />
+<link rel="stylesheet" href="/dominion-images.css?v=10" />
+<link id="dominion-video-style" rel="stylesheet" href="/dominion-video.css?v=9" />
 <link rel="stylesheet" href="/dominion-ide.css?v=26" />
-<link rel="stylesheet" href="/dominion-lenses.css?v=7" />
+<link rel="stylesheet" href="/dominion-lenses.css?v=8" />
 <link rel="stylesheet" href="/dominion-beginner.css?v=5" />
 <link rel="stylesheet" href="/dominion-vibe.css?v=19" />
 <link rel="stylesheet" href="/dominion-tour.css?v=3" />
 <link rel="stylesheet" href="/dominion-markdown.css?v=1" />
 <link rel="stylesheet" href="/dominion-feedback.css?v=2" />
 <link rel="stylesheet" href="/altana.css?v=3" />
-<link rel="stylesheet" href="/dominion-simplify.css?v=1" />
+<link rel="stylesheet" href="/dominion-simplify.css?v=2" />
 <!-- dominion-models.css restructures .model-row and friends, which dominion-cinematic-06.css already
      declares at the same specificity, so it has to come after that sheet. It does: cinematic-06
      arrives by @import inside dominion-ui.css near the top of this head. It does NOT need to be the
      last sheet on the page, which is why it sits above dominion-mobile.css rather than below it. -->
 <link rel="stylesheet" href="/dominion-models.css?v=1" />
-<link id="dominion-game-factory-style" rel="stylesheet" href="/dominion-game-factory.css?v=2" />
+<link id="dominion-game-factory-style" rel="stylesheet" href="/dominion-game-factory.css?v=3" />
 <!-- Last on purpose: touch corrections must outrank the width-based sheets above, and that includes
      the three sheets added on 2026-08-03. None of them declare a rule this file settles, so the
      order is uncontested today. Keep this line last anyway: the reason it is last is structural,
@@ -600,13 +600,13 @@
        direction is "assume guest". -->
   <script src="/dominion-money.js?v=2"></script>
   <script src="/dominion-forge.js?v=6"></script>
-  <script src="/dominion-images.js?v=14" defer></script>
-  <script src="/dominion-video.js?v=14" defer></script>
-  <script src="/dominion-game-factory.js?v=2" defer></script>
+  <script src="/dominion-images.js?v=15" defer></script>
+  <script src="/dominion-video.js?v=15" defer></script>
+  <script src="/dominion-game-factory.js?v=3" defer></script>
   <script src="/dominion-lexicon.js?v=14"></script>
-  <script src="/dominion-ide.js?v=43" defer></script>
+  <script src="/dominion-ide.js?v=44" defer></script>
   <script src="/dominion-tour.js?v=6" defer></script>
-  <script src="/dominion-lenses.js?v=15" defer></script>
+  <script src="/dominion-lenses.js?v=16" defer></script>
   <script src="/dominion-beginner.js?v=4" defer></script>
   <script src="/dominion-vibe.js?v=22" defer></script>
   <script src="/dominion-markdown.js?v=1"></script>
@@ -617,7 +617,7 @@
   <script type="module" src="/altana.js?v=3"></script>
   <!-- Classic script rather than a module, matching dominion-images.js and dominion-ide.js. It is a
        self-contained IIFE with no imports of its own and only needs to set window.DominionSimplify. -->
-  <script src="/dominion-simplify.js?v=1"></script>
+  <script src="/dominion-simplify.js?v=2"></script>
   <script type="module">
     import { altanaMount } from "/altana.js?v=3";
     /*

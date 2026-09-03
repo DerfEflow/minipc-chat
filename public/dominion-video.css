@@ -4,6 +4,11 @@
  */
 @import url("./dominion-video-base.css");
 
+/* The model that actually answered sits in the agent line as provenance, not an alert. */
+#dv-root .dv-message-status{display:flex;align-items:baseline;gap:7px;min-width:0}
+#dv-root .dv-served-by{overflow:hidden;color:#789188;font:500 8px/1.2 ui-monospace,monospace;letter-spacing:.03em;text-transform:none;white-space:nowrap;text-overflow:ellipsis}
+#dv-root .dv-served-by span{color:#6f847a}
+
 /* Mobile single-generation must always expose the existing generation action.
  * The normal storyboard panel is intentionally hidden on mobile, but its generate action is the
  * same validated/idempotent path used by the one-off mobile request builder. Surface only that

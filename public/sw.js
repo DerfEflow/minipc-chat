@@ -1,5 +1,5 @@
 ﻿// Dominion AI app shell: network-first, offline-capable, live APIs never cached.
-const CACHE = "dominion-ai-v184-mobile-game-factory";
+const CACHE = "dominion-ai-v185-stabilize";
 const SHELL = [
   "/",
   "/games",

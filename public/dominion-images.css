@@ -536,6 +536,9 @@ body.dfi-open #dfi-root .scene { transform: none; }
 #dfi-root .creation-meta > div { display: grid; gap: 7px; min-width: 0; }
 #dfi-root .creation-meta b { overflow: hidden; color: #dceee9; font: 700 var(--t-value)/1.15 var(--font-ui); letter-spacing: .1em; white-space: nowrap; text-overflow: ellipsis; }
 #dfi-root .creation-meta small { color: #82998f; font: 500 var(--t-micro)/1 var(--font-mono); }
+#dfi-root .dfi-provenance { display: grid; min-width: 0; gap: 3px; font: 500 var(--t-micro)/1.25 var(--font-mono); letter-spacing: .04em; }
+#dfi-root .dfi-provenance-caption { overflow: hidden; color: #9bada6; white-space: nowrap; text-overflow: ellipsis; }
+#dfi-root .dfi-provenance-note { overflow: hidden; color: #71877e; font-style: italic; white-space: nowrap; text-overflow: ellipsis; }
 #dfi-root .card-action { flex: none; width: 38px; height: 38px; display: grid; place-items: center; cursor: pointer; color: var(--copper-hot); border: 1px solid rgba(199,124,66,.32); background: rgba(17,9,4,.65); }
 #dfi-root .card-action:hover { color: #ffd0a0; border-color: rgba(242,173,108,.6); box-shadow: 0 0 13px rgba(242,173,108,.13); }
 #dfi-root .card-action svg { width: 17px; }
@@ -584,6 +587,7 @@ body.dfi-open #dfi-root .scene { transform: none; }
 #dfi-root .dfi-viewer-meta { padding: 17px 19px 19px; }
 #dfi-root .dfi-viewer-meta p { margin: 0 0 9px; color: #dceee9; font-size: 14.5px; line-height: 1.6; }
 #dfi-root .dfi-viewer-meta small { display: block; margin-bottom: 14px; color: #82998f; font: 500 var(--t-micro)/1 var(--font-mono); letter-spacing: .09em; }
+#dfi-root .dfi-viewer-meta .dfi-provenance { margin: -5px 0 14px; }
 #dfi-root .dfi-viewer-actions { display: flex; gap: 9px; flex-wrap: wrap; }
 #dfi-root .dfi-viewer-actions a, #dfi-root .dfi-viewer-actions button { height: 42px; display: inline-flex; align-items: center; gap: 8px; padding: 0 16px; cursor: pointer; text-decoration: none; border: 1px solid rgba(151,222,202,.2); color: #c2d6d0; background: rgba(0,7,5,.6); font: 700 var(--t-label)/1 var(--font-mono); letter-spacing: .12em; }
 #dfi-root .dfi-viewer-actions .primary { color: var(--lime-hot); border-color: rgba(121,255,82,.5); background: rgba(121,255,82,.08); }

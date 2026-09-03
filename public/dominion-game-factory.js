@@ -355,7 +355,7 @@
             ? (ownerAttested ? "Owner-attested browser upload" : nativeApiVerified ? "Native API verified" : "Verified")
             : deferred ? "Deferred (not required; owner may complete later)"
             : copy.status === "VERIFIED" ? "Verification insufficient" : human(copy.status);
-          return `<span class="dgf-copy" data-ok="${verified}">${esc(copy.backend)} · ${esc(status)}</span>`;
+          return `<span class="dgf-copy" data-ok="${verified}"${deferred ? ' data-state="deferred"' : ""}>${esc(copy.backend)} · ${esc(status)}</span>`;
         }).join("") : `<span class="dgf-copy">No verified copies</span>`}
         <div class="dgf-artifact-review">${reviewControl}</div>
       </article>`;

@@ -1180,6 +1180,16 @@
     }
     return card;
   }
+  function provenanceMarkup(result) {
+    const served = result && result.servedBy;
+    const model = served && served.model ? String(served.model).split("/").at(-1) : "";
+    const caption = served && served.engine === "draft"
+      ? "free draft engine" + (model ? " · " + model : "")
+      : model + (served && served.quality ? " · " + served.quality : "");
+    const note = result && result.note ? String(result.note) : "";
+    if (!caption && !note) return "";
+    return `<span class="dfi-provenance">${caption ? `<span class="dfi-provenance-caption">${esc(caption)}</span>` : ""}${note ? `<span class="dfi-provenance-note">${esc(note)}</span>` : ""}</span>`;
+  }
   async function renderGallery() {
     const gallery = $("#gallery");
     if (!gallery) return;
@@ -1226,7 +1236,7 @@
         card.innerHTML = `
           <div class="creation-art"><img class="creation-img" alt="${esc(t.prompt.slice(0, 80))}" src="data:image/png;base64,${t.b64}"></div>
           <div class="card-chrome"><span>UNSAVED · long-press to keep</span></div>
-          <div class="creation-meta"><div><b>${esc(t.prompt.toUpperCase().slice(0, 60) || "UNTITLED")}</b><small>${esc(cap(t.quality))} · ${esc(cap(t.aspect))} · not on this device</small></div></div>`;
+          <div class="creation-meta"><div><b>${esc(t.prompt.toUpperCase().slice(0, 60) || "UNTITLED")}</b><small>${esc(cap(t.quality))} · ${esc(cap(t.aspect))} · not on this device</small>${provenanceMarkup(t)}</div></div>`;
         const open = document.createElement("button");
         open.className = "card-action";
         open.setAttribute("aria-label", "Open image");
@@ -1246,7 +1256,7 @@
       card.innerHTML = `
         <div class="creation-art"><img class="creation-img" loading="lazy" alt="${esc(rec.prompt.slice(0, 80))}"></div>
         <div class="card-chrome"><span>${rec.source === "batch" ? "BATCH" : rec.source === "draft" ? "FREE DRAFT" : "STANDARD"} · ${pad4(rec.seq || 0)}${rec.savedAt ? " · SAVED" : ""}</span></div>
-        <div class="creation-meta"><div><b>${esc(rec.prompt.toUpperCase().slice(0, 60) || "UNTITLED")}</b><small>${esc(cap(rec.quality))} · ${esc(cap(rec.aspect))} · ${SIZES[rec.aspect] || ""}</small></div></div>`;
+        <div class="creation-meta"><div><b>${esc(rec.prompt.toUpperCase().slice(0, 60) || "UNTITLED")}</b><small>${esc(cap(rec.quality))} · ${esc(cap(rec.aspect))} · ${SIZES[rec.aspect] || ""}</small>${provenanceMarkup(rec)}</div></div>`;
       card.querySelector(".creation-img").src = url;
       const fav = document.createElement("button");
       fav.className = "favorite" + (rec.favorite ? " active" : "");
@@ -1304,6 +1314,7 @@
       <div class="dfi-viewer-meta">
         <p>${esc(rec.prompt || "(no description saved)")}</p>
         <small>${esc(cap(rec.quality))} · ${SIZES[rec.aspect] || ""} · ${new Date(rec.ts).toLocaleString()} · ${rec.source === "batch" ? "FROM A BATCH" : rec.source === "draft" ? "FREE DRAFT" : "MADE NOW"}</small>
+        ${provenanceMarkup(rec)}
         <div class="dfi-viewer-actions"></div>
       </div>`;
     const actions = card.querySelector(".dfi-viewer-actions");
