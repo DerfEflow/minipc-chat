@@ -29,10 +29,15 @@ const MOCK_OLLAMA = PORT + 1;
 const MOCK_OR = PORT + 2;
 const OWNER = "owner@test.com";
 // 2026-08-03 prune: qwen3-vl and qwen3-235b left the catalog. These two must be seats the mock
-// OpenRouter endpoint can serve in a keyless test boot: nano-12b-vl rides the nvidia lane, whose
+// OpenRouter endpoint can serve in a keyless test boot: the vision seat rides the nvidia lane, whose
 // missing key falls back to OpenRouter (the mock); Trinity is OpenRouter-native. DeepSeek/OpenAI/
 // Anthropic seats would refuse outright here ("no key"), which is why neither default is used.
-const VISION_MODEL = "nvidia/nemotron-nano-12b-v2-vl";   // vision:true, tools probed live
+// VISION_MODEL swapped 2026-09-03 (STABILIZE Step 1, minimal out-of-lane edit — see the simplify
+// lane's final report): nvidia/nemotron-nano-12b-v2-vl was removed from models.catalog.mjs — NVIDIA
+// retired it 2026-08-26, confirmed HTTP 410 "end of life". minimax/minimax-m3 takes its place here:
+// same provider ("nvidia", same keyless-falls-back-to-OpenRouter path this test exercises), same
+// vision:true flag, still a live catalog seat.
+const VISION_MODEL = "minimax/minimax-m3";                // vision:true, tools probed live
 const TEXT_MODEL = "arcee-ai/trinity-large-thinking";    // openrouter, toolCapable, no vision
 const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
