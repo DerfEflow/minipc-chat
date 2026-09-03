@@ -88,6 +88,39 @@ function waitForNoPublisher(dir) {
 }
 
 /*
+ * Required behavior 4 (deficiency 16): production observed `EPERM: operation not permitted, link
+ * '/broker-requests/.tmp-...' -> ...` from exactly this call. `/broker-requests` is a dedicated
+ * ext4 mount (see hands/gx10-controller-entrypoint.mjs), so link() failing there is a sandboxing/
+ * mount-option quirk (seccomp/AppArmor denying the link syscall, a restrictive bind mount, etc.),
+ * not evidence that the request or the isolation boundary is untrustworthy. The prior request
+ * handoff treated any non-EEXIST failure as fatal, which let a filesystem quirk surface all the way
+ * up as a canary SECURITY_INTERRUPTED. Fall back to an equally exclusive publish primitive so a
+ * link()-denying mount is not a security event: O_CREAT|O_EXCL claims the exact same destination
+ * name atomically, just like link() does, using the same already-fsynced bytes, so the published
+ * content and the "only one writer can create this name" guarantee are identical either way.
+ */
+function publishFinalName(temp, path, value, mode, gid, io) {
+  try {
+    io.linkSync(temp, path);
+    return "linked";
+  } catch (error) {
+    if (error?.code !== "EPERM") throw error;
+    let fd;
+    try { fd = io.openSync(path, "wx", mode); }
+    catch (fallbackError) {
+      if (fallbackError?.code === "EEXIST") { const conflict = new Error("EEXIST"); conflict.code = "EEXIST"; throw conflict; }
+      throw fallbackError;
+    }
+    try {
+      exactSpoolMetadata(fd, mode, gid, io);
+      io.writeFileSync(fd, value);
+      io.fsyncSync(fd);
+    } finally { io.closeSync(fd); }
+    return "copied";
+  }
+}
+
+/*
  * A publication marker blocks readers before the final link can become visible. The marker stays
  * behind on every pre-commit failure/crash; the sole writer removes it only after the final name
  * and its single-link state have been fsynced. Startup recovery is therefore fail-closed.
@@ -111,7 +144,7 @@ export function durableNoReplace(path, value, mode = 0o640, { gid = GAME_FACTORY
     io.fsyncSync(fd);
   } finally { io.closeSync(fd); }
   try {
-    io.linkSync(temp, path);
+    publishFinalName(temp, path, value, mode, gid, io);
     io.unlinkSync(temp);
     fsyncParent(path, io);
   } catch (error) {

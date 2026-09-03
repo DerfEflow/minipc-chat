@@ -63,8 +63,13 @@ function stable(value) {
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
 }
 const stableHash = (value) => createHash("sha256").update(JSON.stringify(stable(value))).digest("hex");
-const JOURNAL_SCHEMA_VERSION = 1;
-const JOURNAL_SCHEMA_CHECKSUM = createHash("sha256").update("dispatches:v1|dispatch_events:v1|orchestrator_leader:v1").digest("hex");
+// Required behavior 2 (deficiency 16): a probe failure that only proves the node is not currently
+// connected (asleep, off, gx10-gamefactory's ~15-minute reconnect cycle, a hub 409 lockout) is not
+// proof that isolation was compromised. Default 10 minutes; env GAME_FACTORY_PROOF_GRACE_MS.
+export const GAME_FACTORY_PROOF_GRACE_MS_DEFAULT = 10 * 60_000;
+const JOURNAL_SCHEMA_VERSION = 2;
+const JOURNAL_SCHEMA_CHECKSUM = createHash("sha256").update("dispatches:v1|dispatch_events:v1|orchestrator_leader:v1|worker_suspension:v1|worker_identity:v1").digest("hex");
+const JOURNAL_SCHEMA_V1_CHECKSUM = createHash("sha256").update("dispatches:v1|dispatch_events:v1|orchestrator_leader:v1").digest("hex");
 
 function asDispatch(row) {
   if (!row) return null;
@@ -140,9 +145,35 @@ export function createGameFactoryDispatchJournal({ dir, now = () => Date.now() }
       leaseUntil INTEGER NOT NULL,
       updatedAt INTEGER NOT NULL
     );
+    -- Required behavior 2: a durable, restart-safe record of "the worker lane is suspended (grace
+    -- window for a not-connected probe), not security-latched". Singleton: there is one worker lane.
+    CREATE TABLE IF NOT EXISTS worker_suspension (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+      active INTEGER NOT NULL DEFAULT 0,
+      since INTEGER NOT NULL DEFAULT 0,
+      node TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT '',
+      identity TEXT NOT NULL DEFAULT '',
+      updatedAt INTEGER NOT NULL DEFAULT 0
+    );
+    -- The last isolation identity (controllerRecoveryEpoch/brokerInstanceId/containerGenerationId/
+    -- brokerBootIdSha256) observed on a fully secure probe. Compared against the identity captured
+    -- at suspension start to tell "the same broker came back" from "a different broker container".
+    CREATE TABLE IF NOT EXISTS worker_identity (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+      identity TEXT NOT NULL DEFAULT '',
+      updatedAt INTEGER NOT NULL DEFAULT 0
+    );
   `);
   const at = () => Number(now()) || Date.now();
-  const schemaRow = db.prepare("SELECT version,checksum FROM dispatch_schema WHERE singleton=1").get();
+  let schemaRow = db.prepare("SELECT version,checksum FROM dispatch_schema WHERE singleton=1").get();
+  if (schemaRow && Number(schemaRow.version) === 1 && schemaRow.checksum === JOURNAL_SCHEMA_V1_CHECKSUM && existingSchemaVersion === 1) {
+    // The only supported migration is the known v1 schema. worker_suspension/worker_identity are
+    // additive (CREATE TABLE IF NOT EXISTS above already made them); only the metadata row advances.
+    db.prepare("UPDATE dispatch_schema SET version=?,checksum=?,appliedAt=? WHERE singleton=1")
+      .run(JOURNAL_SCHEMA_VERSION, JOURNAL_SCHEMA_CHECKSUM, at());
+    schemaRow = db.prepare("SELECT version,checksum FROM dispatch_schema WHERE singleton=1").get();
+  }
   if ((schemaRow && (Number(schemaRow.version) !== JOURNAL_SCHEMA_VERSION || schemaRow.checksum !== JOURNAL_SCHEMA_CHECKSUM)) ||
       (existingSchemaVersion === JOURNAL_SCHEMA_VERSION && !schemaRow)) {
     db.close();
@@ -163,6 +194,47 @@ export function createGameFactoryDispatchJournal({ dir, now = () => Date.now() }
   function event(runId, type, payload = {}) {
     db.prepare("INSERT INTO dispatch_events (runId,type,payload,createdAt) VALUES (?,?,?,?)")
       .run(clean(runId, 500), clean(type, 100), json(payload), at());
+  }
+
+  // -- Required behavior 2: grace-window suspension for a retryable "node not connected" probe. --
+  function getSuspension() {
+    const row = db.prepare("SELECT * FROM worker_suspension WHERE singleton=1").get();
+    return {
+      active: row?.active === 1, since: Number(row?.since) || 0, node: row?.node || "",
+      reason: row?.reason || "", identity: row ? parse(row.identity, null) : null,
+    };
+  }
+  function beginSuspension({ node = "", reason = "" } = {}) {
+    return tx(() => {
+      const current = db.prepare("SELECT * FROM worker_suspension WHERE singleton=1").get();
+      const stamp = at();
+      if (current?.active === 1) {
+        // Already suspended: keep the original `since` (the grace window is measured from the first
+        // observed disconnect), just refresh the human-facing reason/node.
+        db.prepare("UPDATE worker_suspension SET node=?,reason=?,updatedAt=? WHERE singleton=1")
+          .run(clean(node, 160), safeText(reason, 1000), stamp);
+      } else {
+        const identityRow = db.prepare("SELECT identity FROM worker_identity WHERE singleton=1").get();
+        db.prepare(`INSERT INTO worker_suspension (singleton,active,since,node,reason,identity,updatedAt) VALUES (1,1,?,?,?,?,?)
+          ON CONFLICT(singleton) DO UPDATE SET active=1,since=excluded.since,node=excluded.node,reason=excluded.reason,identity=excluded.identity,updatedAt=excluded.updatedAt`)
+          .run(stamp, clean(node, 160), safeText(reason, 1000), identityRow?.identity || "null", stamp);
+      }
+      return getSuspension();
+    });
+  }
+  function endSuspension() {
+    return tx(() => {
+      db.prepare(`INSERT INTO worker_suspension (singleton,active,since,node,reason,identity,updatedAt) VALUES (1,0,0,'','','',?)
+        ON CONFLICT(singleton) DO UPDATE SET active=0,since=0,node='',reason='',identity='',updatedAt=excluded.updatedAt`)
+        .run(at());
+      return getSuspension();
+    });
+  }
+  function rememberWorkerIdentity(identity) {
+    if (!identity || typeof identity !== "object") return;
+    db.prepare(`INSERT INTO worker_identity (singleton,identity,updatedAt) VALUES (1,?,?)
+      ON CONFLICT(singleton) DO UPDATE SET identity=excluded.identity,updatedAt=excluded.updatedAt`)
+      .run(json(identity), at());
   }
 
   function payloadTuple(value) {
@@ -642,6 +714,7 @@ export function createGameFactoryDispatchJournal({ dir, now = () => Date.now() }
     bindPayloadGeneration, payloadGeneration, bindAuthorizationAbsence,
     listActive, listRetentionPending, recordRetentionAck, latestForTask,
     acquireLeadership, releaseLeadership, health,
+    getSuspension, beginSuspension, endSuspension, rememberWorkerIdentity,
     close() { try { db.close(); } catch {} },
   };
 }
@@ -681,6 +754,9 @@ export function createGameFactoryOrchestrator({
   workerId = "", capabilities = DEFAULT_CAPABILITIES, maxConcurrent = 1,
   leaseMs = 120_000, pollMs = 10_000, leaderLeaseMs = 30_000,
   remoteGraceMs = 5 * 60_000, now = () => Date.now(),
+  // Env read directly here (not threaded through server.mjs, which this lane does not own) so the
+  // documented GAME_FACTORY_PROOF_GRACE_MS still takes effect without any change outside this file.
+  proofGraceMs = Number(process.env.GAME_FACTORY_PROOF_GRACE_MS) || GAME_FACTORY_PROOF_GRACE_MS_DEFAULT,
   taskToRequest = defaultRequest, log = () => {},
 } = {}) {
   if (!store) throw new Error("createGameFactoryOrchestrator needs a store");
@@ -695,6 +771,7 @@ export function createGameFactoryOrchestrator({
     throw new Error("the static GX10 broker topology requires exact maxConcurrent=1");
   }
   const concurrency = 1;
+  const graceMs = Math.min(Math.max(Number(proofGraceMs) || GAME_FACTORY_PROOF_GRACE_MS_DEFAULT, 30_000), 6 * 60 * 60_000);
   let timer = null, ticking = null, closed = false;
   let lastTickAt = 0, lastSuccessAt = 0, lastError = "", leader = false, lastProbe = null, lastProbeAt = 0;
 
@@ -714,6 +791,30 @@ export function createGameFactoryOrchestrator({
       && result.programs[0] === "node" && result.programs[1] === "godot"
       && Array.isArray(result.capabilities) && result.capabilities.length === 2
       && result.capabilities[0] === "quality_assurance" && result.capabilities[1] === "godot";
+  }
+
+  // Required behavior 2: the identity a fully secure probe carries. Only captured when the probe
+  // passed every secureProbeMatchesExpectedWorker check, so a suspension can later tell "the exact
+  // same broker container reconnected" from "a different broker container is now answering".
+  function probeIdentity(result) {
+    if (!secureProbeMatchesExpectedWorker(result)) return null;
+    return {
+      controllerRecoveryEpoch: result.controllerRecoveryEpoch, brokerInstanceId: result.brokerInstanceId,
+      containerGenerationId: result.containerGenerationId, brokerBootIdSha256: result.brokerBootIdSha256,
+    };
+  }
+  function sameIdentity(a, b) {
+    return !!a && !!b && a.controllerRecoveryEpoch === b.controllerRecoveryEpoch
+      && a.brokerInstanceId === b.brokerInstanceId && a.containerGenerationId === b.containerGenerationId
+      && a.brokerBootIdSha256 === b.brokerBootIdSha256;
+  }
+  // The exact "node not connected" signature the Hands worker adapter produces (gamefactoryworker.mjs)
+  // when hands/hub.mjs reports `hands node "..." is not connected (machine asleep, off, or the node
+  // service is down)`, and the generic transport-throw path in the same adapter. Both are retryable
+  // connectivity failures, not proof that isolation was compromised; a real proof mismatch (wrong
+  // capabilities, wrong node identity, EPERM on the broker link) never sets offline:true.
+  function isRetryableDisconnect(result) {
+    return !!result && result.ok === false && result.offline === true && result.retryable === true;
   }
 
   function hasPayloadDeathProof(response, runId) {
@@ -1294,16 +1395,52 @@ export function createGameFactoryOrchestrator({
       }
       const securityEpochAfterProbe = durable.securityEpoch();
       const workerSecure = secureProbeMatchesExpectedWorker(workerReady);
+
+      // Required behavior 2 (deficiency 16): classify this probe outcome BEFORE deciding whether to
+      // latch. A probe failure whose payload only proves the node is not currently connected
+      // (retryable: offline, no EPERM/identity-mismatch) suspends dispatching for a grace window
+      // instead of security-latching every active task. A real isolation failure (proof mismatch,
+      // wrong identity, EPERM on the broker link) still latches immediately, exactly as before.
+      const suspensionBefore = durable.getSuspension();
+      let mustLatch = false, suspendedNow = false;
+      if (workerSecure) {
+        const identity = probeIdentity(workerReady);
+        if (suspensionBefore.active) {
+          const graceExpired = stamp - suspensionBefore.since > graceMs;
+          if (!graceExpired && sameIdentity(suspensionBefore.identity, identity)) {
+            durable.endSuspension(); // RESUME: same broker container reconnected within the grace window.
+          } else {
+            mustLatch = true; // identity changed, or the grace window expired before it came back.
+            durable.endSuspension();
+          }
+        }
+        durable.rememberWorkerIdentity(identity);
+      } else if (isRetryableDisconnect(workerReady) && !durable.hasPendingSecurity()) {
+        if (suspensionBefore.active && stamp - suspensionBefore.since > graceMs) {
+          mustLatch = true; // still disconnected past the grace window: latch as today.
+          durable.endSuspension();
+        } else {
+          durable.beginSuspension({
+            node: expectedWorkerNode,
+            reason: safeText(workerReady?.error || workerReady?.reason, 1000) || "the worker node is not connected",
+          });
+          suspendedNow = true;
+        }
+      } else {
+        mustLatch = true; // a real isolation failure (proof mismatch, refused identity, EPERM, ...).
+        if (suspensionBefore.active) durable.endSuspension();
+      }
+
       // Persist the global observation before listing active rows. A stale leader may be between
       // its own final fence and a claim/start/complete write, so the dispatch snapshot alone is not
       // a sufficient fence. Awaiting also gives deterministic tests a point after the durable epoch
       // commit but before the snapshot; the production journal method itself is synchronous.
-      const reconciliationSecurityEpoch = workerSecure
-        ? securityEpochAfterProbe
-        : await durable.observeProofLoss(workerReady,
-          safeText(workerReady?.error || workerReady?.reason, 1000) || "the force probe did not prove current worker isolation");
+      const reconciliationSecurityEpoch = mustLatch
+        ? await durable.observeProofLoss(workerReady,
+          safeText(workerReady?.error || workerReady?.reason, 1000) || "the force probe did not prove current worker isolation")
+        : securityEpochAfterProbe;
       const activeDispatches = durable.listActive(1000);
-      const securityIncident = !workerSecure || durable.hasPendingSecurity();
+      const securityIncident = mustLatch || durable.hasPendingSecurity();
       if (securityIncident) {
         // Fence the complete active snapshot before the first asynchronous cancellation. Otherwise
         // a restart could resolve one old latch after probe recovery and accidentally allow another
@@ -1317,10 +1454,17 @@ export function createGameFactoryOrchestrator({
           }
         }
       }
-      for (const dispatch of activeDispatches) {
-        await reconcileOne(dispatch, workerSecure, workerReady, reconciliationSecurityEpoch);
-        report.reconciled++;
+      // Suspended: the worker is genuinely unreachable this tick. Do not call reconcileOne, which
+      // would otherwise treat "!workerSecure" as proof loss and latch every active task; a worker
+      // hiccup must never kill a task. Active dispatches simply wait for the next tick; the store's
+      // own leaseMs-based reconcile() below still reclaims a task whose lease independently expires.
+      if (!suspendedNow) {
+        for (const dispatch of activeDispatches) {
+          await reconcileOne(dispatch, workerSecure, workerReady, reconciliationSecurityEpoch);
+          report.reconciled++;
+        }
       }
+      report.suspended = suspendedNow;
       report.storeRecovery = store.reconcile({ limit: 100 });
       const retentionBlocksAdmission = durable.listRetentionPending(1000)
         .some((dispatch) => clean(dispatch.status, 80).toUpperCase() !== "PAUSED");
@@ -1380,10 +1524,16 @@ export function createGameFactoryOrchestrator({
   }
 
   function health() {
+    const suspension = durable.getSuspension();
     return {
       enabled: worker.enabled === true, node: worker.node || "", workerId: stableWorkerId,
       leader, instanceId, capabilities: workerCaps.slice(), maxConcurrent: concurrency,
-      lastTickAt, lastSuccessAt, lastError, probe: lastProbe,
+      lastTickAt, lastSuccessAt, lastError, probe: lastProbe, proofGraceMs: graceMs,
+      suspended: suspension.active,
+      suspension: suspension.active ? {
+        since: suspension.since, node: suspension.node, reason: suspension.reason,
+        graceRemainingMs: Math.max(graceMs - ((Number(now()) || Date.now()) - suspension.since), 0),
+      } : null,
       journal: durable.health(), worker: typeof worker.health === "function" ? worker.health() : null,
     };
   }
