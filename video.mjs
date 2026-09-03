@@ -72,6 +72,9 @@ function restoreProjectSnapshot(current, snapshot) {
   restored.jobs = clone(current.jobs || []);
   restored.exports = clone(current.exports || []);
   restored.providerAttempts = clone(current.providerAttempts || []);
+  // productions is an operational ledger of provider jobs (like jobs/exports above), not creative
+  // edit history: undoing a screenplay edit must not orphan a production's job references.
+  restored.productions = clone(current.productions || []);
   return restored;
 }
 
@@ -149,19 +152,37 @@ function defaultTimeline() {
     audioTracks: Array.from({ length: AUDIO_TRACKS }, (_, index) => ({ id: "a" + (index + 1), kind: "audio", name: "Audio " + (index + 1), mute: false, solo: false, lock: false, clips: [] })),
   };
 }
-const DEFAULT_SETTINGS = Object.freeze({ model: "google:gemini@omni-flash", purpose: "Social campaign", platform: "YouTube", ratio: "16:9", resolution: "720p", format: "mp4", duration: 30, folder: null });
+// `style` (video-characters lane, required behavior #4: "style block") is a free-text project-wide
+// visual style note folded into every /produce composed prompt, alongside purpose/platform.
+const DEFAULT_SETTINGS = Object.freeze({ model: "google:gemini@omni-flash", purpose: "Social campaign", platform: "YouTube", ratio: "16:9", resolution: "720p", format: "mp4", duration: 30, folder: null, style: "" });
 function createState({ id, name, tenantId, now, temporary = false }) {
   const at = iso(now);
   return { schemaVersion: 1, id, tenantId, name: String(name || "Untitled video").trim().slice(0, 160) || "Untitled video", createdAt: at, updatedAt: at,
     temporary: !!temporary, expiresAt: temporary ? new Date(Number(now()) + 24 * 60 * 60 * 1000).toISOString() : null,
     settings: clone(DEFAULT_SETTINGS), scenes: [], screenplay: { text: "", tokens: 0, limit: MAX_SCREENPLAY_TOKENS, revisions: [] }, timeline: defaultTimeline(), ui: { panels: { writer: "regular", board: "regular" }, focus: false, zoom: 1 }, conversation: [],
     ai: { screenwriter: { model: SCREENWRITER_MODEL, contextWindow: MAX_SCREENPLAY_TOKENS, reasoning: true, state: { brief: "", generatedSections: 0, lastTurn: null } }, visualOrchestrator: { model: VISUAL_ORCHESTRATOR_MODEL, state: {} }, director: { model: DIRECTOR_MODEL, contextWindow: 1000000, compactAtPercent: 70, compactionRequired: false, state: {} }, liaison: { model: "claude-sonnet-5", promptCaching: true, state: {} } },
+    // `characters` (video-characters lane, required behavior #2): an ordered list of
+    // { id, role } attaching permanent account-level characters (videocharacters.mjs) to THIS
+    // project. Deliberately just ids + an optional role note here — name/description/image live
+    // in the characters store and are hydrated by video-http.mjs's cast projection, the same way
+    // job media stays out of the project file until it is actually downloaded.
+    characters: [],
+    // `productions` (required behavior #4): a bounded operational ledger of /produce runs, the
+    // same "operational record, not creative history" category jobs already are. Kept small
+    // (slice -50) because the authoritative per-scene state is the job itself; this just remembers
+    // which jobs belong to which production and in what order they were composed.
+    productions: [],
     history: { head: 0, undo: [], redo: [] }, jobs: [], exports: [], providerAttempts: [] };
 }
 function migrateState(state) {
   state.settings ||= clone(DEFAULT_SETTINGS);
+  if (typeof state.settings.style !== "string") state.settings.style = "";
   state.ui ||= { panels: { writer: "regular", board: "regular" }, focus: false, zoom: 1 };
   state.exports ||= [];
+  // A project saved before the video-characters lane has neither field; both default to empty
+  // rather than failing assertState, the same forward-compatible pattern `exports` already used.
+  state.characters = (Array.isArray(state.characters) ? state.characters : []).filter((c) => c && typeof c.id === "string").slice(0, 50).map((c) => ({ id: c.id, role: typeof c.role === "string" ? c.role.slice(0, 200) : null }));
+  state.productions = (Array.isArray(state.productions) ? state.productions : []).slice(-50);
   state.providerAttempts = (Array.isArray(state.providerAttempts) ? state.providerAttempts : []).slice(-100);
   state.conversation ||= [];
   state.ai ||= {};
@@ -187,6 +208,8 @@ function assertState(state) {
   if (!state || !PROJECT_ID.test(state.id)) fail("video_project_corrupt", "The video project has an invalid identity.", 409);
   if (!Array.isArray(state.scenes) || state.scenes.length > MAX_SCENES) fail("video_scene_limit", "A project can contain at most 100 scenes.", 409);
   if (!Array.isArray(state.providerAttempts) || state.providerAttempts.length > 100) fail("video_provider_attempts_invalid", "The project provider-attempt ledger is invalid.", 409);
+  if (!Array.isArray(state.characters) || state.characters.length > 50) fail("video_characters_invalid", "A project can attach at most 50 characters.", 409);
+  if (!Array.isArray(state.productions) || state.productions.length > 50) fail("video_productions_invalid", "The project production ledger is invalid.", 409);
   for (const attempt of state.providerAttempts) if (Buffer.byteLength(JSON.stringify(attempt || {}), "utf8") > 8 * 1024 * 1024) fail("video_provider_attempt_invalid", "A provider-attempt record is too large.", 409);
   if (!state.timeline || state.timeline.videoTracks?.length !== VIDEO_TRACKS || state.timeline.audioTracks?.length !== AUDIO_TRACKS) fail("video_timeline_invalid", "Video projects always have three video and four audio tracks.", 409);
   if (!(Number(state.settings?.duration) >= 1) || Number(state.settings.duration) > MAX_PROJECT_DURATION) fail("video_project_duration_invalid", "Project duration is outside the supported range.", 409);
@@ -221,6 +244,10 @@ function clientProject(state) {
     screenplay: state.screenplay.text, screenplaySha256: createHash("sha256").update(state.screenplay.text || "").digest("hex"), scenes: clone(state.scenes), tracks, clips, ui: clone(state.ui), messages: clone(state.conversation),
     ai: clientAi, jobs: state.jobs.map(({ localOutput, providerResponse, request, ...job }) => ({ ...clone(job), hasLocalOutput: !!localOutput, model: request?.model || null, cost: job.cost ?? providerResponse?.cost ?? null })),
     exports: clone(state.exports || []),
+    // Raw id+role attachment; video-http.mjs hydrates this into `cast` (name/description/primary
+    // image URL) because that hydration needs the characters store, which this module never imports.
+    characters: clone(state.characters || []),
+    productions: clone(state.productions || []),
   };
 }
 
@@ -239,6 +266,7 @@ function normalizeClientCheckpoint(current, incoming = {}) {
     format: ["mp4", "mov", "webm"].includes(project.format) ? project.format : current.settings.format,
     duration: Math.min(MAX_PROJECT_DURATION, Math.max(1, Number(project.duration ?? current.settings.duration) || 30)),
     folder: project.folder == null ? null : String(project.folder).slice(0, 260),
+    style: String(project.style ?? current.settings.style ?? "").slice(0, 2000),
   };
   const screenplayText = String(incoming.screenplay ?? current.screenplay.text);
   const screenplayTokens = tokenCount(screenplayText);
@@ -268,6 +296,10 @@ function normalizeClientCheckpoint(current, incoming = {}) {
       ...(typeof scene.generateAudio === "boolean" ? { generateAudio: scene.generateAudio } : {}),
       ...(Array.isArray(scene.shots) && scene.shots.length ? { shots: scene.shots.slice(0, 6).map((shot) => ({ duration: Math.max(1, Math.min(15, Math.round(Number(shot?.duration) || 1))), prompt: String(shot?.prompt || "").slice(0, 512) })) } : {}),
       ...(scene.mediaJobId ? { mediaJobId: String(scene.mediaJobId) } : {}),
+      // Characters attached to THIS scene (video-characters lane, required behavior #2), editable
+      // through the same checkpoint path as every other scene field. `list()` (above) already
+      // trims/validates strings; 20 is generous against the model reference-image caps this feeds.
+      ...(list(scene.characterIds, 20).length ? { characterIds: list(scene.characterIds, 20) } : {}),
     };
   });
   if (!Array.isArray(incoming.tracks) || !Array.isArray(incoming.clips)) fail("video_timeline_invalid", "A checkpoint must contain its timeline tracks and clips.");
@@ -617,6 +649,98 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
   }
   function renameProject(tenantId, id, name) { const text = String(name || "").trim(); if (!text || text.length > 160) fail("video_name_invalid", "Project names must be between 1 and 160 characters."); return mutate(tenantId, id, "project.renamed", (s) => { s.name = text; }, { name: text }); }
   function deleteProject(tenantId, id, { confirmDelete = false } = {}) { if (confirmDelete !== true) fail("video_delete_confirmation_required", "Explicit project deletion confirmation is required."); const dir = projectDir(tenantId, id); if (!existsSync(dir)) fail("video_project_missing", "Video project not found.", 404); if (!within(tenantRoot(tenantId), dir) || basename(dir) !== id) fail("video_path_invalid", "Invalid project path."); const state = load(tenantId, id); if (state.jobs.some((job) => jobRequiresRetention(job, { requireDelivery: state.temporary }))) fail("video_job_in_progress", "This project still has provider work, an unsettled video, or a verified mobile download awaiting delivery. Let Dominion finish before deleting the project.", 409); if (state.providerAttempts.some(providerAttemptRequiresRetention)) fail("video_provider_attempt_in_progress", "This project has a provider request or charge awaiting settlement or repair. Let Dominion finish before deleting the project.", 409); rmSync(dir, { recursive: true, force: false }); return { deleted: true, id }; }
+  /*
+   * CHARACTER ATTACHMENT (video-characters lane, required behavior #2). `characters` is the
+   * project's own tiny "which permanent characters does this project use" list; the characters
+   * themselves live entirely in videocharacters.mjs and are never duplicated here. No revision
+   * assertion inside `mutate`'s callback here on purpose, matching every other structural command
+   * (scene.add, screenplay.set, ...) — the caller (video-http.mjs's POST
+   * /projects/:id/characters route) asserts expectedProjectRevision itself before calling this,
+   * the same pattern checkpointProject/updateAiState already use.
+   */
+  function setProjectCharacters(tenantId, id, characters) {
+    return mutate(tenantId, id, "project.characters.set", (s) => {
+      const list = Array.isArray(characters) ? characters : [];
+      if (list.length > 50) fail("video_character_limit", "A project can attach at most 50 characters.");
+      const seen = new Set();
+      s.characters = list.map((entry) => {
+        const characterId = typeof entry === "string" ? entry : String(entry?.id || "");
+        if (!characterId || seen.has(characterId)) return null;
+        seen.add(characterId);
+        return { id: characterId, role: entry && typeof entry === "object" && entry.role ? String(entry.role).slice(0, 200) : null };
+      }).filter(Boolean);
+    }, { count: Array.isArray(characters) ? characters.length : 0 });
+  }
+  // Used by the characters store's DELETE ?force=false gate (video-http.mjs wires this in as
+  // `isAttached`) to decide whether a 409 refusal is warranted before deleting a character.
+  function isCharacterAttached(tenantId, characterId) {
+    const tenant = validPart(tenantId, "tenant");
+    for (const entry of projectEntries(tenant)) {
+      try {
+        const state = load(tenant, entry.name);
+        if ((state.characters || []).some((c) => c.id === characterId)) return true;
+        if ((state.scenes || []).some((scene) => Array.isArray(scene.characterIds) && scene.characterIds.includes(characterId))) return true;
+      } catch { /* A corrupt project cannot block or unblock deletion; skip it. */ }
+    }
+    return false;
+  }
+  // The `force: true` half of DELETE /characters/:id: detach a character from every project and
+  // every scene that references it, tenant-wide, so a forced character delete never leaves a
+  // scene pointing at an id that no longer resolves to anything.
+  function removeCharacterFromAllProjects(tenantId, characterId) {
+    const tenant = validPart(tenantId, "tenant");
+    let touched = 0;
+    for (const entry of projectEntries(tenant)) {
+      try {
+        const state = load(tenant, entry.name);
+        const attachedProject = (state.characters || []).some((c) => c.id === characterId);
+        const attachedScene = (state.scenes || []).some((scene) => Array.isArray(scene.characterIds) && scene.characterIds.includes(characterId));
+        if (!attachedProject && !attachedScene) continue;
+        mutate(tenant, state.id, "project.characters.detach", (s) => {
+          s.characters = (s.characters || []).filter((c) => c.id !== characterId);
+          s.scenes = (s.scenes || []).map((scene) => Array.isArray(scene.characterIds) && scene.characterIds.includes(characterId)
+            ? { ...scene, characterIds: scene.characterIds.filter((cid) => cid !== characterId) } : scene);
+        }, { characterId });
+        touched += 1;
+      } catch { /* A corrupt project is left for explicit operator recovery. */ }
+    }
+    return { touched };
+  }
+
+  /*
+   * PRODUCTIONS (video-characters lane, required behavior #4). A production is an operational
+   * batch record — "these scene jobs were submitted together as one /produce run" — not creative
+   * history, so it rides the same restoreProjectSnapshot exemption jobs/exports already get.
+   * No revision assertion here either: the caller checks expectedProjectRevision ONCE before
+   * submitting any scene jobs (submitting jobs itself advances the project revision on every
+   * scene, so re-asserting the ORIGINAL revision here would always spuriously fail).
+   */
+  function createProduction(tenantId, id, record) {
+    return mutate(tenantId, id, "production.created", (s) => {
+      s.productions = [...(s.productions || []), {
+        id: String(record.id), createdAt: iso(now), model: String(record.model || ""), quality: String(record.quality || ""),
+        scenes: (Array.isArray(record.sceneJobs) ? record.sceneJobs : []).map((entry) => ({ sceneId: String(entry.sceneId || ""), jobId: entry.jobId ? String(entry.jobId) : null, mode: entry.mode ? String(entry.mode) : null, status: String(entry.status || "queued").slice(0, 60) })),
+      }].slice(-50);
+    }, { productionId: record.id });
+  }
+  function updateProductionScene(tenantId, id, productionId, sceneId, patch = {}) {
+    return mutate(tenantId, id, "production.scene.updated", (s) => {
+      const production = (s.productions || []).find((p) => p.id === productionId);
+      if (!production) fail("video_production_missing", "Production not found.", 404);
+      const scene = production.scenes.find((item) => item.sceneId === sceneId);
+      if (!scene) fail("video_production_scene_missing", "Production scene not found.", 404);
+      if (patch.jobId !== undefined) scene.jobId = patch.jobId ? String(patch.jobId) : null;
+      if (patch.status !== undefined) scene.status = String(patch.status || "").slice(0, 60);
+      if (patch.mode !== undefined) scene.mode = patch.mode ? String(patch.mode) : null;
+    }, { productionId, sceneId });
+  }
+  function getProduction(tenantId, id, productionId) {
+    const state = load(tenantId, id);
+    const production = (state.productions || []).find((p) => p.id === productionId);
+    if (!production) fail("video_production_missing", "Production not found.", 404);
+    return clone(production);
+  }
+
   function applyVisualPlan(state, rawScenes) {
     const plan = Array.isArray(rawScenes) ? rawScenes : [];
     if (!plan.length || plan.length > MAX_SCENES) fail("video_scene_limit", "A visual plan must contain between 1 and 100 scenes.");
@@ -624,7 +748,10 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     state.scenes = plan.map((scene, index) => {
       const id = String(scene?.sceneId || scene?.id || `scene_${index + 1}`); if (!SAFE_ID.test(id.replaceAll("-", "_"))) fail("video_scene_invalid", "Visual plan contains an invalid scene id.");
       const old = previous.get(id) || {};
-      return { ...old, id, title: String(scene?.title || old.title || `Scene ${index + 1}`).slice(0, 160), prompt: String(scene?.videoPrompt || scene?.imagePrompt || old.prompt || "").slice(0, 32000), imagePrompt: String(scene?.imagePrompt || "").slice(0, 32000), continuity: String(scene?.continuity || "").slice(0, 8000), model: VIDEO_CAPABILITIES[scene?.suggestedVideoModel] ? scene.suggestedVideoModel : old.model || null, status: old.status || "planned" };
+      // characterIds arrives already resolved from names to ids by video-http.mjs's CAST mapping
+      // (video-characters lane, required behavior #3) — this module never sees character names.
+      const characterIds = Array.isArray(scene?.characterIds) ? scene.characterIds.filter((v) => typeof v === "string" && v).slice(0, 20) : old.characterIds || [];
+      return { ...old, id, title: String(scene?.title || old.title || `Scene ${index + 1}`).slice(0, 160), prompt: String(scene?.videoPrompt || scene?.imagePrompt || old.prompt || "").slice(0, 32000), imagePrompt: String(scene?.imagePrompt || "").slice(0, 32000), continuity: String(scene?.continuity || "").slice(0, 8000), model: VIDEO_CAPABILITIES[scene?.suggestedVideoModel] ? scene.suggestedVideoModel : old.model || null, status: old.status || "planned", ...(characterIds.length ? { characterIds } : {}) };
     });
   }
   function applyCommand(tenantId, id, command = {}) { const type = String(command.type || ""); return mutate(tenantId, id, "command." + type, (s) => {
@@ -1043,6 +1170,7 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
     MAX_SCENES, MAX_SCREENPLAY_TOKENS, VIDEO_TRACKS, AUDIO_TRACKS, capabilities: VIDEO_CAPABILITIES,
     createProject, listProjects, getProject: (tenantId, id) => clone(load(tenantId, id)), getClientProject: (tenantId, id) => clientProject(load(tenantId, id)),
     renameProject, deleteProject, checkpointProject, listCheckpoints, restoreCheckpoint, updateAiState, recordExport, markJobSettled, markJobDelivered, applyCommand, undo, redo, submitGeneration, pollJob, downloadJobOutput, recoverJobs, recoverTemporaryJobs, storageBudget, cleanupExpiredTemporaryProjects,
+    setProjectCharacters, isCharacterAttached, removeCharacterFromAllProjects, createProduction, updateProductionScene, getProduction,
     validateVideoRequest, safeError: safeVideoError, paths: (tenantId, id) => ({ ...paths(tenantId, id) }),
   };
 }
