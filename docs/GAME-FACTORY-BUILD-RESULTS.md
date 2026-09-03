@@ -1,0 +1,44 @@
+# Game Factory build: results ledger (2026-09-03)
+
+Companion to GAME-FACTORY-BUILD.md (the design). Kinds of proof: UNIT (mocked, in run-tests.mjs), RIG (the
+exact production code booted locally with production keys, the owner's real Google Drive connection, and a
+verified human-owner identity), PROD (measured against app.dominion.tools after deploy).
+
+## What shipped
+
+- `gamefactorykit/` (kit runtime, ports, templates, PNG encoder, assembler, 12-suite QA harness, reference
+  game Vector Vault) and `gamefactoryqa.mjs` (server QA runner: permission-sandboxed child process).
+- `gamefactoryforge.mjs`: the server forge, a second worker on the durable task queue for product_planning,
+  visual_design and gameplay_engineering, with model ladders, a local QA validation loop and honest failure.
+- `gamefactorysupervisor.mjs`: the stage supervisor applying the section-3 rules table through the store's
+  own commands with deterministic idempotency keys; autopilot sidecar; Run to playtest.
+- `gamefactorybuilds.mjs`: server-side view of build bundles (exists / resolveFile / summary).
+- `gamefactoryhttp.mjs` + owner surface: Run to playtest, server-served play route with CSP, Build and QA
+  cards, five health cards, autopilot badge (Codex design pass D8 on top).
+- `server.mjs` wiring behind GAME_FACTORY_SUPERVISOR=1 / GAME_FACTORY_FORGE=1; /api/version reports
+  factorySupervisor and factoryForge; ops/prod-verify.mjs asserts both.
+
+## Proof so far
+
+- UNIT: full suite on the integrated branch 187 suites passed, 0 failed (Windows, GAME_FACTORY_TEST_ROOT on F:).
+- UNIT: the reference game passes all 12 suites through the real `node --permission` child runner in about
+  200 ms wall time; five tampering tests flip the right suite; runner timeouts and crashes report honestly.
+- RIG: Run to playtest as a verified human owner: IDEA -> SPECIFICATION with 11 artifacts, every one
+  VERIFIED on the owner's real Google Drive; SPECIFICATION and VISUAL_SYSTEM approvals recorded with the
+  Run-to-playtest rationale; supervisor advanced to ARCHITECTURE and the forge claimed the design task.
+  (Continued below as the run progresses.)
+
+## Fixes found by integration (not by the lanes)
+
+1. Supervisor stall after a non-retryable forge failure and an owner Retry: the build existed, its only
+   gameplay task was FAILED, nothing was queued. Now re-queues gameplay work on the same build (test 20).
+2. Owner uid: the factory keys projects by tenancy `userIdFor(OWNER_EMAIL)` (16-hex digest), not the literal
+   "owner" that OWNER_T carries; the supervisor iterated zero projects until wired with the right uid.
+
+## Deviations, said plainly
+
+- Web-canvas lane instead of the Godot candidate the templates name (D1). Godot capability untouched.
+- QA runs on the server runner (`target: "server-qa"`), not the GX10 broker lane (D2); the GX10 QA rung is a
+  follow-up (TODO(fred) in the spec).
+- icon-192 and the splash fallback are kit-drawn (no bitmap resize primitive); provenance says so.
+- Playtest approval is never automatic; Run to playtest pre-approves only the two planning gates.
