@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGameFactoryGate } from "./gamefactory.mjs";
@@ -530,6 +530,184 @@ try {
     assert.equal((await call(api, { path: "/api/game-factory/nope", tenant: owner })).res.statusCode, 404);
     const all = createGameFactoryHttp({ store, gate: createGameFactoryGate("all"), resolveTenant: (req) => req.tenant });
     assert.equal((await call(all, { path: `/api/game-factory/games/${projectId}`, tenant: member })).res.statusCode, 404);
+  });
+
+  await test("Run to playtest sits beside Start game plan at IDEA, routes to the injected supervisor, and 503s fail-closed without one", async () => {
+    const config = (await call(api, { path: "/api/game-factory/config", tenant: owner })).res.json();
+    assert.equal(config.toolchain, "web-canvas");
+
+    const ideaId = store.listProjects(owner.uid)[3].id;
+    const supervisorCalls = [];
+    const withSupervisor = createGameFactoryHttp({
+      store, gate: createGameFactoryGate("owner"), resolveTenant: (req) => req.tenant,
+      supervisor: {
+        runToPlaytest: async (input) => { supervisorCalls.push(input); return { status: 200, body: { project: { id: input.projectId } } }; },
+        getAutopilot: (id) => id === ideaId,
+      },
+      builds: { exists: () => false, resolveFile: () => null, summary: () => ({ status: "BUILT", versionName: "0.1.1", bundleSha256: "e".repeat(64), fileCount: 12, qa: { passed: 12, failed: 0, suites: {} } }) },
+    });
+
+    const detail = (await call(withSupervisor, { path: `/api/game-factory/games/${ideaId}`, tenant: owner })).res.json().game;
+    const runAction = detail.allowedActions.find((action) => action.id === "run_to_playtest");
+    const startAction = detail.allowedActions.find((action) => action.id === "start");
+    assert.ok(runAction, "run_to_playtest must be offered at IDEA");
+    assert.equal(runAction.label, "Run to playtest");
+    assert.equal(runAction.kind, "primary");
+    assert.equal(runAction.requiresConfirmation, true);
+    assert.match(runAction.confirmNote, /records your approval of the specification and visual system in advance/);
+    assert.ok(startAction, "the manual Start game plan path must remain available");
+    assert.equal(startAction.label, "Start game plan");
+    assert.equal(detail.autopilot, true, "autopilot reads from the injected supervisor.getAutopilot");
+    assert.equal(detail.build, null, "IDEA has no activeBuild yet, so build stays null even with a summary adapter injected");
+
+    const version = store.getProject(owner.uid, ideaId).version;
+    const routed = await call(withSupervisor, {
+      method: "POST", path: `/api/game-factory/games/${ideaId}/commands`, tenant: owner,
+      headers: { "Idempotency-Key": "run-to-playtest-1" },
+      body: { command: "run_to_playtest", expectedVersion: version, payload: {} },
+    });
+    assert.equal(routed.res.statusCode, 200, JSON.stringify(routed.res.json()));
+    assert.equal(supervisorCalls.length, 1);
+    assert.equal(supervisorCalls[0].projectId, ideaId);
+    assert.equal(supervisorCalls[0].uid, owner.uid);
+    assert.equal(supervisorCalls[0].actor, owner.email);
+
+    // The default api instance in this file has no supervisor injected: fail closed, not a crash.
+    const noSupervisor = await call(api, {
+      method: "POST", path: `/api/game-factory/games/${ideaId}/commands`, tenant: owner,
+      headers: { "Idempotency-Key": "run-to-playtest-no-supervisor" },
+      body: { command: "run_to_playtest", expectedVersion: version, payload: {} },
+    });
+    assert.equal(noSupervisor.res.statusCode, 503);
+    assert.equal(noSupervisor.res.json().code, "supervisor_unavailable");
+    assert.equal(store.getProject(owner.uid, ideaId).state, "IDEA", "a 503 must not mutate the durable record");
+  });
+
+  await test("preview carries a server-served bundle previewUrl once builds.exists is true, defaults to secondary until PLAYTEST_READY, and the fail-closed default builds adapter keeps the old behavior", async () => {
+    const bundleProjectId = store.listProjects(owner.uid)[4].id;
+    let commandIndex = 0;
+    const command = (type, payload = {}) => {
+      const current = store.getProject(owner.uid, bundleProjectId);
+      const result = store.executeCommand({
+        uid: owner.uid, projectId: bundleProjectId, key: `bundle-preview-setup-${++commandIndex}`,
+        expectedVersion: current.version, type, payload, actor: owner.email,
+      });
+      assert.ok([200, 202].includes(result.status), `${type}: ${JSON.stringify(result.body)}`);
+      return result;
+    };
+    command("advance");
+    recordVerifiedArtifact(bundleProjectId, "00_GAME_BRIEF", "1");
+    recordVerifiedArtifact(bundleProjectId, "01_MARKET_CASE", "2");
+    recordVerifiedArtifact(bundleProjectId, "02_RELEASE_ROADMAP", "3");
+    recordVerifiedArtifact(bundleProjectId, "03_BUILD_WORKFLOW", "4");
+    command("approve", { gate: "SPECIFICATION", subjectHash: store.getApprovalSubject(owner.uid, bundleProjectId, "SPECIFICATION").hash });
+    command("advance");
+    recordVerifiedArtifact(bundleProjectId, "04_GAME_ARCHITECTURE", "5");
+    recordVerifiedArtifact(bundleProjectId, "05_VISUAL_SYSTEM", "6");
+    command("approve", { gate: "VISUAL_SYSTEM", subjectHash: store.getApprovalSubject(owner.uid, bundleProjectId, "VISUAL_SYSTEM").hash });
+    command("advance");
+    command("advance");
+    const build = store.createBuild({ uid: owner.uid, projectId: bundleProjectId, sourceCommit: "bundle-commit", targets: ["android", "ios"] });
+    assert.equal(build.status, 201, JSON.stringify(build.body));
+    const buildId = build.body.buildId;
+    assert.equal(store.getProject(owner.uid, bundleProjectId).state, "IMPLEMENTATION");
+
+    const existsCalls = [];
+    const bundleApi = createGameFactoryHttp({
+      store, gate: createGameFactoryGate("owner"), resolveTenant: (req) => req.tenant,
+      builds: {
+        exists: (args) => { existsCalls.push(args); return args.buildId === buildId; },
+        resolveFile: () => null, summary: () => null,
+      },
+    });
+    const detail = (await call(bundleApi, { path: `/api/game-factory/games/${bundleProjectId}`, tenant: owner })).res.json().game;
+    const preview = detail.allowedActions.find((action) => action.id === "preview");
+    assert.deepEqual(preview, {
+      id: "preview", label: "Play current build", kind: "secondary", clientAction: "preview",
+      previewUrl: `/api/game-factory/games/${bundleProjectId}/builds/${buildId}/play/index.html`,
+    });
+    assert.equal(existsCalls[0].uid, owner.uid);
+    assert.equal(existsCalls[0].projectId, bundleProjectId);
+    assert.equal(existsCalls[0].buildId, buildId);
+
+    // No builds adapter injected: the fail-closed default (exists always false) must fall back to
+    // the pre-existing tunnel-only behavior, i.e. no preview action at all without a workspaceId.
+    const noBundleDetail = (await call(api, { path: `/api/game-factory/games/${bundleProjectId}`, tenant: owner })).res.json().game;
+    assert.equal(noBundleDetail.allowedActions.some((action) => action.id === "preview"), false);
+  });
+
+  await test("the play route serves the resolved bundle file with a locked-down CSP, 404s a missing file, and refuses a decoded traversal or absolute path before calling the resolver", async () => {
+    const bundleDir = mkdtempSync(join(tmpdir(), "dominion-gamefactory-bundle-"));
+    writeFileSync(join(bundleDir, "index.html"), "<!doctype html><title>t</title>");
+    const resolveCalls = [];
+    const buildsMock = {
+      exists: () => true, summary: () => null,
+      resolveFile: ({ uid: u, projectId: p, buildId: b, relPath }) => {
+        resolveCalls.push({ uid: u, projectId: p, buildId: b, relPath });
+        return relPath === "index.html" ? { absolute: join(bundleDir, "index.html"), mime: "text/html; charset=utf-8", size: 10 } : null;
+      },
+    };
+    // verifiedHumanFactoryOwner only ever returns true under gate mode "owner" (it checks the mode
+    // itself, not just tenant.isOwner), so the owner-path assertions below need gate "owner". Testing
+    // that a non-owner is refused specifically by the route's ownerOnly wall flag (not merely by the
+    // gate) needs gate "all", the same pattern the artifact-content-review test above uses.
+    const playApi = createGameFactoryHttp({ store, gate: createGameFactoryGate("owner"), resolveTenant: (req) => req.tenant, builds: buildsMock });
+    const playApiAll = createGameFactoryHttp({ store, gate: createGameFactoryGate("all"), resolveTenant: (req) => req.tenant, builds: buildsMock });
+    const validIdentity = { source: "jwt", verified: true, email: owner.email };
+    const playPath = `/api/game-factory/games/${projectId}/builds/build-xyz/play/index.html`;
+
+    assert.equal((await call(playApi, { path: playPath })).res.statusCode, 401, "sign-in is required first, like every other route");
+
+    const notHuman = await call(playApi, { path: playPath, tenant: owner });
+    assert.equal(notHuman.res.statusCode, 403);
+    assert.equal(notHuman.res.json().code, "human_owner_required", "an owner tenant without a verified human JWT still cannot play a build");
+
+    const memberDenied = await call(playApiAll, { path: playPath, tenant: member, identity: { source: "jwt", verified: true, email: member.email } });
+    assert.equal(memberDenied.res.statusCode, 403);
+    assert.equal(memberDenied.res.json().code, "owner_only");
+
+    const served = await call(playApi, { path: playPath, tenant: owner, identity: validIdentity });
+    assert.equal(served.res.statusCode, 200, JSON.stringify(served.res.body));
+    assert.equal(served.res.headers["content-type"], "text/html; charset=utf-8");
+    assert.equal(served.res.headers["cache-control"], "no-store");
+    assert.equal(served.res.headers["x-content-type-options"], "nosniff");
+    assert.match(served.res.headers["content-security-policy"], /default-src 'self'/);
+    assert.match(served.res.headers["content-security-policy"], /script-src 'self'/);
+    assert.match(served.res.headers["content-security-policy"], /connect-src 'none'/);
+    assert.match(served.res.headers["content-security-policy"], /frame-ancestors 'self'/);
+    assert.equal(served.res.body, "<!doctype html><title>t</title>");
+    assert.equal(resolveCalls[0].relPath, "index.html");
+    assert.equal(resolveCalls[0].buildId, "build-xyz");
+    assert.equal(resolveCalls[0].uid, owner.uid);
+
+    const bare = await call(playApi, { path: `/api/game-factory/games/${projectId}/builds/build-xyz/play`, tenant: owner, identity: validIdentity });
+    assert.equal(bare.res.statusCode, 200, "a bare /play defaults to index.html");
+
+    const missing = await call(playApi, { path: `/api/game-factory/games/${projectId}/builds/build-xyz/play/missing.js`, tenant: owner, identity: validIdentity });
+    assert.equal(missing.res.statusCode, 404);
+    assert.equal(missing.res.json().code, "not_found");
+
+    // A literal ".." or single-percent-encoded "%2e%2e" is already collapsed by the WHATWG URL
+    // parser before this handler ever sees it (verified: both routes end up 404 "unknown route"
+    // because the parser consumes the "play" segment along with the dot-segment). The route's own
+    // ".." rejection is defense in depth for a caller that hands in an unnormalized URL, and it is
+    // exercised here through an encoding the URL parser does NOT collapse: a backslash next to an
+    // encoded ".." decodes, after this route's own decodeURIComponent, to a real ".." string.
+    const beforeTraversal = resolveCalls.length;
+    const traversal = await call(playApi, { path: `/api/game-factory/games/${projectId}/builds/build-xyz/play/%5c%2e%2e%5csecrets.env`, tenant: owner, identity: validIdentity });
+    assert.equal(traversal.res.statusCode, 400);
+    assert.equal(traversal.res.json().code, "bad_play_path");
+    assert.equal(resolveCalls.length, beforeTraversal, "a decoded traversal must never reach the resolver");
+
+    const absolute = await call(playApi, { path: `/api/game-factory/games/${projectId}/builds/build-xyz/play/%2fetc/passwd`, tenant: owner, identity: validIdentity });
+    assert.equal(absolute.res.statusCode, 400);
+    assert.equal(absolute.res.json().code, "bad_play_path");
+    assert.equal(resolveCalls.length, beforeTraversal, "a decoded absolute path must never reach the resolver either");
+
+    const noBuildsAdapter = await call(api, { path: playPath, tenant: owner, identity: validIdentity });
+    assert.equal(noBuildsAdapter.res.statusCode, 404, "the fail-closed default builds adapter 404s rather than ever reading a file");
+
+    rmSync(bundleDir, { recursive: true, force: true });
   });
 
   console.log(`\n${n} game factory HTTP tests passed`);
