@@ -99,10 +99,26 @@ export function openAIResultFromOllama(response, { transport = "gx10" } = {}) {
 
 // One user-safe failure shape for the lane, so ideRetryableFailure and the reroute ladder can
 // classify it exactly like any other provider transport death.
-export function gx10Failure(detail, { retryable = true } = {}) {
+//
+// lane/chat follow-up (2026-09-03, production evidence: a busy GX10 produced no first token for
+// 150s while the client waited, because the relay's own dispatch deadline is up to 10 minutes and
+// carries no interim "queued" signal). Two additions, both opt-in so every existing caller and the
+// gx10_test.mjs default-call contract (retryable:true) is unchanged:
+//   - content/toolCalls: when the node streamed SOME text before the relay ultimately failed (a
+//     genuine mid-stream death, not the queued case), that text rides the failure exactly like the
+//     generic cloud lane's `or.partial`/`or.content`, so the round loop folds it into the fallback
+//     model's transcript as a continuation instead of silently dropping already-shown text.
+//   - retryable defaults to true (an ordinary transport hiccup still deserves the same-seat retry
+//     schedule), but the two callers that KNOW retrying the same seat is pointless — the node was
+//     never connected, or nothing arrived within the first-token watchdow — pass retryable:false so
+//     the round loop skips straight to the rung-3 cross-model fallback instead of re-queuing behind
+//     whatever the box is already busy with.
+export function gx10Failure(detail, { retryable = true, content = "", toolCalls = [] } = {}) {
+  const hasPartial = !!(content || (Array.isArray(toolCalls) && toolCalls.length));
   return {
     ok: false,
     retryable,
     error: "GX10 (local): " + String(detail || "the box did not answer").slice(0, 300),
+    ...(hasPartial ? { partial: true, content, toolCalls } : {}),
   };
 }
