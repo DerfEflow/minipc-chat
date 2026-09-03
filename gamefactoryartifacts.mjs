@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, existsSync, lstatSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { MANDATORY_ARTIFACT_BACKENDS, REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
+import { DEFERRED_ARTIFACT_BACKENDS, MANDATORY_ARTIFACT_BACKENDS, REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
 import { LOCKED_NATIVE_CHATGPT_PROJECT_ID, OWNER_ATTESTED_NATIVE_PROJECT_FALLBACK_APPROVED } from "./gamefactorynativeevidence.mjs";
 
 const TRUE = new Set(["1", "true", "yes", "on", "enabled"]);
@@ -32,10 +32,15 @@ const safeError = (value) => clean(value, 1000)
   .replace(/\bBearer\s+[^\s,;]+/ig, "Bearer [redacted]")
   .replace(/([?&](?:access_?token|api_?key|key|password|secret|signature)=)[^&#\s]*/ig, "$1[redacted]")
   .replace(/\b(?:access_?token|api_?key|password|secret)\s*[:=]\s*[^\s,;]+/ig, "credential=[redacted]");
+// "status: blocked" here names the chatgpt_project backend specifically, not the game plan: since
+// the 2026-09-03 gate relaxation (gamefactory.mjs MANDATORY_ARTIFACT_BACKENDS), chatgpt_project is
+// DEFERRED and does not block planning, completion, or any lifecycle transition. This object is
+// reported informationally alongside the mandatory backends' real status.
 const compliance = () => ({
-  status: "blocked",
+  status: "deferred",
   complete: false,
   requiredVerifiedBackends: [...MANDATORY_ARTIFACT_BACKENDS],
+  deferredBackends: [...DEFERRED_ARTIFACT_BACKENDS],
   nativeProjectConfigured: false,
   nativeProjectVerification: "DOCUMENTED_API_UNAVAILABLE",
   ownerAttestedBrowserFallback: {
@@ -44,7 +49,8 @@ const compliance = () => ({
     projectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
   },
   fallbackBackend: "none",
-  blocker: "No documented native ChatGPT Project verification API is configured. An approved owner-attested browser-upload record may be added only through the offline privileged operator command after primary and Drive verification.",
+  blocker: "",
+  deferralReason: "No documented native ChatGPT Project verification API is configured. chatgpt_project is deferred: an approved owner-attested browser-upload record may be added later through the offline privileged operator command after primary and Drive verification, but nothing here blocks the game plan.",
 });
 
 export function gameFactoryArtifactFlags(env = process.env) {
@@ -373,7 +379,7 @@ export function createGameFactoryArtifactMirror({
   function health() {
     return {
       configured: true,
-      status: "blocked",
+      status: localWritesEnabled && driveWritesEnabled ? "ready" : "blocked",
       localWritesEnabled: !!localWritesEnabled,
       driveConfigured: typeof driveForTenant === "function",
       driveWritesEnabled: !!driveWritesEnabled,
@@ -385,9 +391,11 @@ export function createGameFactoryArtifactMirror({
         projectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
       },
       requiredVerifiedBackends: [...MANDATORY_ARTIFACT_BACKENDS],
+      deferredBackends: [...DEFERRED_ARTIFACT_BACKENDS],
       fallbackBackend: "none",
       complianceComplete: false,
-      blocker: compliance().blocker,
+      blocker: !localWritesEnabled ? "Local artifact writes are disabled." : !driveWritesEnabled ? "Google Drive mirror writes are disabled." : "",
+      deferralReason: compliance().deferralReason,
       immutable: true,
       deletionSupported: false,
       reviewReadsSupported: true,

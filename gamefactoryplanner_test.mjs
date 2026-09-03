@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { MANDATORY_ARTIFACT_BACKENDS, REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
+import { DEFERRED_ARTIFACT_BACKENDS, MANDATORY_ARTIFACT_BACKENDS, REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
 import { createGameFactoryPlanner } from "./gamefactoryplanner.mjs";
 import {
   LOCKED_NATIVE_CHATGPT_PROJECT_ID, NATIVE_PROJECT_OWNER_ATTESTED_STATUS, OWNER_ATTESTATION_ACKNOWLEDGEMENT,
@@ -201,33 +201,51 @@ await test("a trusted start renders all eleven exact templates and records no ap
     assert.equal(artifact.twoCopyReady, true);
     assert.deepEqual(artifact.requiredCopies.map((copy) => copy.backend), [...MANDATORY_ARTIFACT_BACKENDS]);
     assert.equal(artifact.requiredCopies.some((copy) => copy.backend === "google_drive" && copy.verified), true);
-    assert.equal(artifact.requiredCopies.some((copy) => copy.backend === "chatgpt_project" && copy.verified), true);
+    assert.equal(artifact.requiredCopies.some((copy) => copy.backend === "chatgpt_project"), false);
+    // chatgpt_project is reported informationally (DEFERRED backend), never inside requiredCopies.
+    assert.deepEqual(artifact.deferredCopies.map((copy) => copy.backend), [...DEFERRED_ARTIFACT_BACKENDS]);
+    assert.equal(artifact.deferredCopies.some((copy) => copy.backend === "chatgpt_project" && copy.verified), true);
   }
 });
 
-await test("2xx Drive results cannot hide a missing mandatory native-project copy", async () => {
+await test("a missing chatgpt_project copy no longer blocks: specification starts on primary + google_drive alone, chatgpt reported deferred", async () => {
+  // Deficiency 15 / required behavior 1: chatgpt_project has no API, so it moved from mandatory to
+  // DEFERRED on 2026-09-03. This harness never gives any artifact a chatgpt_project copy, matching
+  // production reality (44/44 artifact copies verified on primary+drive, 0 chatgpt_project ever).
   const h = harness();
   const planner = createGameFactoryPlanner({ store: h.store, artifactMirror: h.artifactMirror });
-  const response = await planner.startSpecification({ uid: "owner", projectId: h.project.id, key: "start-native-missing", expectedVersion: 1 });
-  assert.equal(response.status, 503);
-  assert.equal(response.body.code, "mandatory_artifact_copies_incomplete");
-  assert.equal(response.body.ok, false);
-  assert.equal(response.body.partial, true);
+  const response = await planner.startSpecification({ uid: "owner", projectId: h.project.id, key: "start-chatgpt-deferred", expectedVersion: 1 });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ok, true);
   assert.equal(response.body.project.state, "SPECIFICATION");
-  assert.equal(response.body.specification.requiredCopiesComplete, false);
-  assert.equal(response.body.storage.complianceComplete, false);
-  assert.equal(response.body.failures.mirror.length, 0);
-  assert.equal(response.body.failures.mandatoryCopies.length, REQUIRED_GAME_ARTIFACTS.length);
-  for (const failure of response.body.failures.mandatoryCopies) assert.deepEqual(failure.backends, ["chatgpt_project"]);
+  assert.equal(response.body.specification.requiredCopiesComplete, true);
+  assert.equal(response.body.storage.complianceComplete, true);
+  assert.equal(response.body.failures.mandatoryCopies.length, 0);
+  assert.equal(response.body.artifacts.length, REQUIRED_GAME_ARTIFACTS.length);
+  for (const artifact of response.body.artifacts) {
+    assert.equal(artifact.twoCopyReady, true);
+    assert.deepEqual(artifact.requiredCopies.map((copy) => copy.backend), ["google_drive"]);
+  }
+  // The deferral queue lists every artifact's still-unsynced chatgpt_project copy, informationally.
+  assert.deepEqual(response.body.deferred.backends, ["chatgpt_project"]);
+  assert.equal(response.body.deferred.pending.length, REQUIRED_GAME_ARTIFACTS.length);
+  for (const item of response.body.deferred.pending) {
+    assert.equal(item.copies.length, 1);
+    assert.equal(item.copies[0].backend, "chatgpt_project");
+    assert.equal(item.copies[0].verified, false);
+  }
 });
 
-await test("caller-shaped owner-attested copy objects cannot convince the planner", async () => {
+await test("caller-shaped owner-attested copy objects cannot convince the planner that chatgpt_project is synced, but they no longer block either", async () => {
   const h = harness({ callerShapedNativeCopies: true });
   const planner = createGameFactoryPlanner({ store: h.store, artifactMirror: h.artifactMirror });
   const response = await planner.startSpecification({ uid: "owner", projectId: h.project.id, key: "start-forged-native", expectedVersion: 1 });
-  assert.equal(response.status, 503);
-  assert.equal(response.body.code, "mandatory_artifact_copies_incomplete");
-  assert.equal(response.body.artifacts.every((artifact) => artifact.requiredCopies.find((copy) => copy.backend === "chatgpt_project")?.verified === false), true);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ok, true);
+  // A caller-shaped fake lacks the full evidence manifest, so it still cannot report as verified...
+  assert.equal(response.body.artifacts.every((artifact) => artifact.deferredCopies.find((copy) => copy.backend === "chatgpt_project")?.verified === false), true);
+  // ...but that is now merely informational: it does not gate the 200 response either way.
+  assert.equal(response.body.failures.mandatoryCopies.length, 0);
 });
 
 await test("a 2xx mirror response without verified store evidence remains a loud partial failure", async () => {

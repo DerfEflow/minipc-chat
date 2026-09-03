@@ -7,7 +7,7 @@
  * artifact versions. Storage-copy and human-approval truth always comes back from the store.
  */
 import { createHash } from "node:crypto";
-import { MANDATORY_ARTIFACT_BACKENDS, REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
+import { DEFERRED_ARTIFACT_BACKENDS, MANDATORY_ARTIFACT_BACKENDS, REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
 import { PORTFOLIO_PACKAGE_DATE, renderGameArtifact } from "./gamefactorytemplates.mjs";
 
 const result = (status, body) => ({ status, body });
@@ -178,6 +178,9 @@ export function createGameFactoryPlanner({ store, artifactMirror, log = () => {}
       });
       const local = verifiedCopy(artifact, "primary", copyComplete("primary"));
       const requiredCopies = MANDATORY_ARTIFACT_BACKENDS.map((backend) => verifiedCopy(artifact, backend, copyComplete(backend)));
+      // DEFERRED backends (chatgpt_project) are reported for the owner's reconciliation queue but
+      // never counted toward mandatoryCopyFailures below: deferral is informational, never a gate.
+      const deferredCopies = DEFERRED_ARTIFACT_BACKENDS.map((backend) => verifiedCopy(artifact, backend, copyComplete(backend)));
       const op = operation.get(expected.artifactKey) || {};
       const ingestStatus = Number(op.ingest?.status) || 500;
       const mirrorStatus = op.mirror
@@ -193,7 +196,8 @@ export function createGameFactoryPlanner({ store, artifactMirror, log = () => {}
         mirror: mirrorStatus,
         requiredCopies,
         mandatoryCopiesVerified: requiredCopies.filter((copy) => copy.verified).length,
-        twoCopyReady: requiredCopies.length === 2 && requiredCopies.every((copy) => copy.verified),
+        twoCopyReady: local.verified && requiredCopies.every((copy) => copy.verified),
+        deferredCopies,
       };
     });
 
@@ -247,6 +251,16 @@ export function createGameFactoryPlanner({ store, artifactMirror, log = () => {}
         local: localFailures.map((item) => item.artifactKey),
         mirror: mirrorFailures.map((item) => item.artifactKey),
         mandatoryCopies: mandatoryCopyFailures,
+      },
+      // Informational only, never a blocker (see MANDATORY_ARTIFACT_BACKENDS in gamefactory.mjs):
+      // what the owner may still sync by hand through the offline attestation command, per backend.
+      deferred: {
+        backends: [...DEFERRED_ARTIFACT_BACKENDS],
+        pending: artifacts.filter((artifact) => artifact.deferredCopies.some((copy) => !copy.verified))
+          .map((artifact) => ({
+            artifactKey: artifact.artifactKey,
+            copies: artifact.deferredCopies,
+          })),
       },
       artifacts,
     });

@@ -148,10 +148,15 @@ test("mobile interaction and reduced-motion requirements are explicit", () => {
 });
 
 test("release and artifact claims remain evidence-based", () => {
-  includes(js, "Completion requires a byte-verified Drive copy and approved native Project evidence", "two-copy artifact rule");
+  // Deficiency 15 (2026-09-03 owner-ordered gate relaxation): mandatory completion is now the
+  // primary object plus a byte-verified Drive copy; chatgpt_project is a DEFERRED, non-blocking
+  // backend, and its status wording must read as informational rather than as a failure.
+  includes(js, "Completion requires a byte-verified Drive copy for every required artifact", "mandatory artifact rule");
+  includes(js, "Native ChatGPT Project evidence is deferred, not required", "deferred backend is informational, not a blocker");
   includes(js, 'copy.status === "VERIFIED"', "copy verification state");
   includes(js, 'copy.status === "OWNER_ATTESTED"', "owner-attested native Project provenance");
   includes(js, "Owner-attested browser upload", "truthful owner-attested label");
+  includes(js, "Deferred (not required; owner may complete later)", "truthful deferred-copy label");
   includes(js, 'copy.algorithm === "sha256" && copy.fingerprint === artifact.sha256', "copy verification matches the registered artifact hash");
   includes(js, "Evidence must match the active build", "build-bound test evidence");
   includes(js, "New builds invalidate stale approvals", "approval invalidation truth");

@@ -67,7 +67,17 @@ function invalidation(evidenceId, { reason = "SOURCE_REMOVED", observedSourceCou
 
 function setup(dir, uid = "owner-uid") {
   let clock = BASE_TIME;
-  const store = createGameFactoryStore({ dir, now: () => typeof clock === "function" ? clock() : clock });
+  // This file tests the native-evidence ledger mechanics themselves (append-only, idempotent,
+  // chronology, corruption/ambiguity detection, invalidation), using artifact.complete as a
+  // convenient end-to-end signal of "is chatgpt_project evidence currently valid". Since 2026-09-03
+  // chatgpt_project is a DEFERRED backend and no longer part of the application-wide default
+  // MANDATORY_ARTIFACT_BACKENDS (see gamefactory.mjs), so this store is opened with an explicit
+  // requiredArtifactBackends override to keep exercising that signal; the default (deferred,
+  // non-gating) behavior is covered separately in gamefactorystore_test.mjs.
+  const store = createGameFactoryStore({
+    dir, now: () => typeof clock === "function" ? clock() : clock,
+    requiredArtifactBackends: ["chatgpt_project", "google_drive"],
+  });
   const project = store.seedPortfolio({ uid, email: "owner@example.com" })[0];
   const made = store.recordArtifact({
     uid, projectId: project.id, artifactKey: REQUIRED_GAME_ARTIFACTS[0], sha256: "a".repeat(64), size: 12, mimeType: "text/markdown",
@@ -87,7 +97,8 @@ try {
       const prior = h.store.getProject(h.uid, h.project.id).artifacts.find((item) => item.id === h.artifact.id);
       assert.equal(prior.complete, false);
       assert.equal(h.store.artifactCopyComplete({ uid: h.uid, projectId: h.project.id, artifactId: h.artifact.id, backend: "chatgpt_project" }), false);
-      assert.equal(prior.copies.find((copy) => copy.backend === "chatgpt_project").status, "MISSING");
+      // "DEFERRED" since 2026-09-03 (chatgpt_project has no API); informational, not "MISSING".
+      assert.equal(prior.copies.find((copy) => copy.backend === "chatgpt_project").status, "DEFERRED");
       const generic = h.store.recordArtifactCopy({ uid: h.uid, artifactId: h.artifact.id, backend: "chatgpt_project", status: "VERIFIED", fingerprint: h.artifact.sha256 });
       assert.equal(generic.status, 403);
       assert.equal(generic.body.code, "native_project_evidence_offline_only");
@@ -362,7 +373,12 @@ try {
     db.prepare("UPDATE game_factory_schema SET version=1,checksum=? WHERE singleton=1").run(V1_CHECKSUM);
     db.exec("PRAGMA user_version=1");
     db.close();
-    const migrated = createGameFactoryStore({ dir: legacyDir });
+    // Reopen with the same requiredArtifactBackends override as setup() above: this test's whole
+    // point is that a legacy VERIFIED chatgpt_project row must not receive free v2 completion trust
+    // after migration, which requires chatgpt_project to actually be a gating backend for this store.
+    // Under the app-wide default (chatgpt_project deferred) google_drive alone already completes the
+    // artifact, which would make this assertion meaningless.
+    const migrated = createGameFactoryStore({ dir: legacyDir, requiredArtifactBackends: ["chatgpt_project", "google_drive"] });
     try {
       const artifact = migrated.getProject("legacy-owner", migrated.listProjects("legacy-owner")[0].id).artifacts[0];
       const native = artifact.copies.find((copy) => copy.backend === "chatgpt_project");
