@@ -34,6 +34,19 @@ verified human-owner identity), PROD (measured against app.dominion.tools after 
    gameplay task was FAILED, nothing was queued. Now re-queues gameplay work on the same build (test 20).
 2. Owner uid: the factory keys projects by tenancy `userIdFor(OWNER_EMAIL)` (16-hex digest), not the literal
    "owner" that OWNER_T carries; the supervisor iterated zero projects until wired with the right uid.
+3. QA controls suite hardcoded the reference game's action names, so every generated game failed the key
+   test; it now recognizes the game's own `meta.actions` plus the reserved types.
+4. The forge discarded every round's output; it now keeps files and verdicts under
+   `forge/<slug>/attempts/<taskId>/round-N/`, names causes in the final error, and teaches the model the
+   exact harness rules. A repair queued with no prior source is implemented from the design.
+5. The kit's `assembleBundle` is async and the forge did not await it (its unit test used a synchronous
+   fake), so a completed task carried no bundle fingerprint and the supervisor stalled at IMPLEMENTATION.
+   Fixed on both call sites; the fake is async now; the supervisor also reads the fingerprint from the
+   bundle's build.json as a second source.
+6. QA analytics rule flagged gameplay props like `vaultId` as identifiers; it now flags personal
+   identifiers (email, name, phone, address, opaque id strings) only. Store-readiness accepts an icon
+   larger than the slot (the Foundry returns 1024x1024 for the 512 slot).
+7. Build card read build.json beside the bundle; the kit writes it inside the bundle.
 
 ## Deviations, said plainly
 
