@@ -35,8 +35,12 @@ t("an unknown/removed model id yields no fallback instead of inventing one", () 
 t("privacy mode is enforced inside the fallback: Trusted mode refuses an OpenRouter/DeepSeek fallback", () => {
   // deepseek-v4-flash's mapped fallback is a Moonshot (OpenRouter-fallback-eligible) model, which
   // Trusted mode (openai+anthropic+local+gx10 only) must refuse rather than silently route around.
+  // Since the catalog gained per-seat fallback ids (lane/simplify, 2026-09-03) the declared fallback for
+  // deepseek-v4-flash is a Claude seat, which Trusted mode allows. The invariant under test is therefore:
+  // whatever the fallback is, it never leaves the trusted provider set, and never silently substitutes.
   const fb = pickFallbackModel("deepseek/deepseek-v4-flash", { privacyMode: "trusted", tried: [] });
-  assert.equal(fb, null, "Trusted mode must refuse a fallback outside its own allow-list, never substitute silently");
+  const TRUSTED = new Set(["anthropic", "openai", "gx10", "local"]);
+  assert.ok(fb === null || TRUSTED.has(fallbackProviderOf(fb)), "Trusted mode must refuse a fallback outside its own allow-list, never substitute silently (got " + fb + ")");
 });
 
 t("Private mode (Anthropic-only) refuses a non-Anthropic fallback", () => {
