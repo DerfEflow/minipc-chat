@@ -173,6 +173,16 @@ await check("GET /api/game-factory/config — reachable (human-owner gate intact
   }
 });
 
+await check("GET /api/version — game-factory supervisor and forge running", async () => {
+  // The factory's owner surfaces sit behind the human-owner gate, so the running process reports the
+  // two new background pieces on the public version line as bare booleans (no identities, no secrets):
+  // factorySupervisor (approvals become transitions) and factoryForge (tasks become game bundles).
+  const j = await getJson("/api/version");
+  if (j.factorySupervisor !== true) throw new Error("factorySupervisor is not running: " + JSON.stringify(j.factorySupervisor));
+  if (j.factoryForge !== true) throw new Error("factoryForge is not running: " + JSON.stringify(j.factoryForge));
+  return `supervisor and forge both running (commit ${j.commit}, ${j.runningFactoryTasks} factory task(s) running)`;
+});
+
 console.log(`\nDominion AI production verification — ${HOST}`);
 console.log("=".repeat(78));
 for (const r of results) console.log(`  ${r.ok ? "PASS" : "FAIL"}  ${r.name}${r.detail ? " — " + r.detail : ""}`);
