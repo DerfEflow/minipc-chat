@@ -411,6 +411,68 @@ try {
     });
   }
 
+  // ---- integration review (Fable, 2026-09-03): the forge exhausted every model, the store marked the
+  // game FAILED, the owner pressed Retry. The build exists, its only gameplay task is FAILED, and
+  // nothing else is queued. The supervisor must put work back on that build, not sit there. ----------
+  {
+    const project = store.listProjects(owner).find((p) => p.state === "IDEA");
+    assert.ok(project, "a game still at IDEA is needed for the retry scenario");
+
+    await test("after a non-retryable forge failure and an owner Retry, the supervisor re-queues gameplay work on the same build", async () => {
+      const started = await supervisor.runToPlaytest({ projectId: project.id, key: nextKey("run-retry"), expectedVersion: project.version });
+      assert.equal(started.status, 200, JSON.stringify(started.body));
+      const planningOnly = { product_planning: AUTO_FORGE.product_planning, visual_design: AUTO_FORGE.visual_design };
+      const atBuild = await tickUntil(project.id, (d) => d.state === "IMPLEMENTATION" && !!d.activeBuild && (d.tasks || []).some((t) => t.capability === "gameplay_engineering" && t.status === "QUEUED"), { autoComplete: planningOnly });
+      const buildId = atBuild.activeBuild.id;
+      assert.equal(store.listBuilds(owner, project.id).length, 1);
+
+      // The forge claims the implement task and gives up honestly (every model rung failed). The queue
+      // is tenant-wide, so a stale QUEUED gameplay task left behind by an earlier scenario on another
+      // game may come first; park those as FAILED (a held game the supervisor never touches) until
+      // this game's own task is claimed.
+      let claimed = null;
+      for (let i = 0; i < 10 && !claimed; i++) {
+        advanceClock();
+        const next = store.claimNextTask({ workerId: "test-forge", capability: "gameplay_engineering", leaseMs: 60_000 });
+        assert.ok(next, "expected a queued gameplay task to claim");
+        if (next.projectId === project.id) claimed = next;
+        else store.failTask({ uid: owner, taskId: next.id, workerId: "test-forge", attempt: next.attempt, error: "parked by the retry scenario", retryable: false });
+      }
+      assert.ok(claimed && claimed.buildId === buildId, "claimed this game's task on its active build");
+      advanceClock();
+      const failed = store.failTask({ uid: owner, taskId: claimed.id, workerId: "test-forge", attempt: claimed.attempt, error: "No model produced a game that passes the local checks after 4 rounds on 3 models; last failures: core-loop", retryable: false });
+      assert.equal(failed.status, 200, JSON.stringify(failed.body));
+      let detail = store.getProject(owner, project.id);
+      assert.equal(detail.state, "FAILED");
+      assert.match(detail.blocker, /No model produced a game/);
+
+      // A held game is never acted on.
+      await tick();
+      detail = store.getProject(owner, project.id);
+      assert.equal(detail.state, "FAILED");
+      assert.equal((detail.tasks || []).filter((t) => t.status === "QUEUED").length, 0);
+
+      // Owner: Retry.
+      advanceClock();
+      const retried = store.executeCommand({ uid: owner, projectId: project.id, key: nextKey("retry-forge"), expectedVersion: detail.version, type: "retry", payload: {}, actor: "owner-test" });
+      assert.equal(retried.status, 200, JSON.stringify(retried.body));
+      assert.equal(retried.body.project.state, "IMPLEMENTATION");
+
+      await tick();
+      detail = store.getProject(owner, project.id);
+      const requeued = (detail.tasks || []).find((t) => t.capability === "gameplay_engineering" && t.status === "QUEUED");
+      assert.ok(requeued, "a fresh gameplay task must be queued after Retry; tasks: " + JSON.stringify((detail.tasks || []).map((t) => t.capability + ":" + t.status)));
+      assert.equal(requeued.buildId, buildId, "the work goes back onto the SAME build");
+      assert.equal(requeued.payload.kind, "repair");
+      assert.match(String(requeued.payload.reason || ""), /previous build attempt failed/i);
+      assert.equal(store.listBuilds(owner, project.id).length, 1, "no second build for the same lineage");
+
+      // With the forge succeeding this time, the game reaches PLAYTEST_READY.
+      const done = await tickUntil(project.id, (d) => d.state === "PLAYTEST_READY");
+      assert.equal(done.activeBuild.id, buildId);
+    });
+  }
+
   await test("health reports enabled, an action count, and per-project state", async () => {
     const h = supervisor.health();
     assert.equal(h.enabled, true);

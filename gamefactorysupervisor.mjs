@@ -228,10 +228,44 @@ export function createGameFactorySupervisor({
       const kind = sidecar.pendingRevision?.kind === "revise" ? "revise" : sidecar.pendingRevision?.kind === "repair" ? "repair" : "implement";
       return doCreateBuildAndQueue(detail, sidecar, kind);
     }
+    /*
+     * A build that exists but has no work behind it (integration review, Fable 2026-09-03). Two real
+     * paths land here: (1) the forge exhausted every model and failed its task non-retryably, which
+     * the store turns into project FAILED with resumeState IMPLEMENTATION, and the owner pressed
+     * Retry; (2) createBuild committed but the queueTask right after it did not. Without this rule
+     * the game would sit at IMPLEMENTATION forever with nothing queued, which is exactly the "sits
+     * forever" failure this build exists to remove. Queue a fresh task against the SAME build (no
+     * second build for the same lineage), carrying the previous failure so the forge treats it as a
+     * repair rather than a blind restart.
+     */
+    const abandoned = !gameplayTask || ["FAILED", "CANCELLED"].includes(String(gameplayTask.status || ""));
+    if (abandoned) {
+      const previous = gameplayTask ? safeText(gameplayTask.result?.error || gameplayTask.error || "", 800) : "";
+      const kind = sidecar.pendingRevision?.kind === "revise" ? "revise" : (gameplayTask ? "repair" : "implement");
+      const reason = sidecar.pendingRevision?.reason || (previous ? `The previous build attempt failed: ${previous}` : "");
+      const failures = sidecar.pendingRevision?.failures || (previous ? [previous] : []);
+      return doQueueGameplay(detail, sidecar, activeBuildId, kind, reason, failures,
+        gameplayTask ? `previous gameplay task ${gameplayTask.id} ended ${gameplayTask.status}; owner retried` : "active build has no gameplay task yet");
+    }
     if (completedGameplay && clean(completedGameplay.result?.bundleSha256, 128)) {
       return doTransition(detail, "INTEGRATION", "to-integration", "build task completed with a bundle fingerprint");
     }
     return { acted: false };
+  }
+
+  function doQueueGameplay(detail, sidecar, buildId, kind, reason, failures, why) {
+    const designVersion = specDesignVersion(detail);
+    const queueResponse = store.queueTask({
+      uid, projectId: detail.id, buildId, capability: "gameplay_engineering", title: kind,
+      payload: { kind, buildId, reason: reason || "", failures: failures || [], designVersion },
+      acceptance: ["Bundle assembles completely and passes local validation (syntax, imports, fixtures) before completion."],
+      maxAttempts: 1, safeToRetry: false,
+    });
+    sidecar.pendingRevision = null;
+    saveSidecar(dataDir, detail.id, sidecar);
+    const ok = queueResponse.status < 300;
+    recordAction(detail, ok ? `queue gameplay_engineering:${kind} on existing build ${buildId}` : `queue gameplay_engineering:${kind} FAILED (${safeText(queueResponse.body?.error, 200)})`, why || kind);
+    return { acted: ok, response: queueResponse };
   }
 
   function handleIntegration(detail, sidecar) {
