@@ -13,6 +13,12 @@ import { gzipSync, gunzipSync } from "node:zlib";
 const MAX_SCENES = 100;
 const MAX_SCREENPLAY_TOKENS = 115000;
 const SCREENWRITER_MODEL = "arcee-ai/trinity-large-thinking";
+// Display-only defaults for a project's ai.director/ai.visualOrchestrator.model fields (stabilize
+// 2026-09-03, deficiency 20 follow-up caught by live-rig testing): these must name each role's
+// PRIMARY ladder rung from video-http.mjs, never a retired model. The actual call always goes
+// through the ladder regardless of what is stored here; this is metadata shown to the user.
+const DIRECTOR_MODEL = "deepseek-v4-pro";
+const VISUAL_ORCHESTRATOR_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 const VIDEO_TRACKS = 3;
 const AUDIO_TRACKS = 4;
 const MAX_PROJECT_DURATION = 21600;
@@ -149,7 +155,7 @@ function createState({ id, name, tenantId, now, temporary = false }) {
   return { schemaVersion: 1, id, tenantId, name: String(name || "Untitled video").trim().slice(0, 160) || "Untitled video", createdAt: at, updatedAt: at,
     temporary: !!temporary, expiresAt: temporary ? new Date(Number(now()) + 24 * 60 * 60 * 1000).toISOString() : null,
     settings: clone(DEFAULT_SETTINGS), scenes: [], screenplay: { text: "", tokens: 0, limit: MAX_SCREENPLAY_TOKENS, revisions: [] }, timeline: defaultTimeline(), ui: { panels: { writer: "regular", board: "regular" }, focus: false, zoom: 1 }, conversation: [],
-    ai: { screenwriter: { model: SCREENWRITER_MODEL, contextWindow: MAX_SCREENPLAY_TOKENS, reasoning: true, state: { brief: "", generatedSections: 0, lastTurn: null } }, visualOrchestrator: { model: "nvidia/nemotron-3-ultra-550b-a55b", state: {} }, director: { model: "deepseek-ai/deepseek-v4-pro", contextWindow: 1000000, compactAtPercent: 70, compactionRequired: false, state: {} }, liaison: { model: "claude-sonnet-5", promptCaching: true, state: {} } },
+    ai: { screenwriter: { model: SCREENWRITER_MODEL, contextWindow: MAX_SCREENPLAY_TOKENS, reasoning: true, state: { brief: "", generatedSections: 0, lastTurn: null } }, visualOrchestrator: { model: VISUAL_ORCHESTRATOR_MODEL, state: {} }, director: { model: DIRECTOR_MODEL, contextWindow: 1000000, compactAtPercent: 70, compactionRequired: false, state: {} }, liaison: { model: "claude-sonnet-5", promptCaching: true, state: {} } },
     history: { head: 0, undo: [], redo: [] }, jobs: [], exports: [], providerAttempts: [] };
 }
 function migrateState(state) {
@@ -163,8 +169,8 @@ function migrateState(state) {
   const legacyScreenwriterState = legacyScreenwriter.state && typeof legacyScreenwriter.state === "object" ? legacyScreenwriter.state : {};
   state.ai.screenwriter = { model: SCREENWRITER_MODEL, contextWindow: MAX_SCREENPLAY_TOKENS, reasoning: true, state: { ...legacyScreenwriterState, brief: String(legacyScreenwriterState.brief || "").slice(0, 460_000), generatedSections: Math.max(0, Number(legacyScreenwriterState.generatedSections) || 0), lastTurn: legacyScreenwriterState.lastTurn && typeof legacyScreenwriterState.lastTurn === "object" ? legacyScreenwriterState.lastTurn : null } };
   delete state.ai.palmyra;
-  state.ai.visualOrchestrator ||= { model: "nvidia/nemotron-3-ultra-550b-a55b", state: {} };
-  state.ai.director ||= { model: "deepseek-ai/deepseek-v4-pro", contextWindow: 1000000, compactAtPercent: 70, compactionRequired: false, state: {} };
+  state.ai.visualOrchestrator ||= { model: VISUAL_ORCHESTRATOR_MODEL, state: {} };
+  state.ai.director ||= { model: DIRECTOR_MODEL, contextWindow: 1000000, compactAtPercent: 70, compactionRequired: false, state: {} };
   state.ai.liaison ||= { model: "claude-sonnet-5", promptCaching: true, state: {} };
   state.history ||= { head: 0, undo: [], redo: [] };
   state.history.head = Number.isInteger(Number(state.history.head)) ? Number(state.history.head) : 0;
@@ -785,7 +791,9 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
       state.ai.director.compactionRequired = directorCompactionNeeded({ usedTokens: state.ai.director.state.usedTokens, contextWindow: state.ai.director.contextWindow });
       if (turn.conversation) {
         state.conversation.push({ role: "user", content: String(turn.conversation.user || "").slice(0, 100000), at: turn.conversation.at });
-        state.conversation.push({ role: "assistant", content: String(turn.conversation.reply || "").slice(0, 100000), at: turn.conversation.at });
+        // servedBy: which ladder rung actually answered each role this turn (stabilize 2026-09-03,
+        // required behavior #2) - ordinary metadata on the saved turn, never an error/degraded flag.
+        state.conversation.push({ role: "assistant", content: String(turn.conversation.reply || "").slice(0, 100000), at: turn.conversation.at, servedBy: turn.conversation.servedBy && typeof turn.conversation.servedBy === "object" ? clone(turn.conversation.servedBy) : null });
         if (state.conversation.length > 500) state.conversation = state.conversation.slice(-500);
       }
     }, { models: { director: turn.director?.model, visualOrchestrator: turn.visualOrchestrator?.model, liaison: turn.liaison?.model }, expectedProjectRevision: turn.expectedProjectRevision });
@@ -878,15 +886,39 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
   }
   function persistProviderResult(tenantId, projectId, jobId, result, eventType, submission = {}) {
     const status = String(result.status || "processing").toLowerCase();
+    const providerReportedFailure = ["failed", "error"].includes(status);
     return mutate(tenantId, projectId, eventType, (s) => {
       const target = s.jobs.find((item) => item.id === jobId);
-      target.status = status === "success" && result.videoURL ? "ready" : ["failed", "error"].includes(status) ? "failed" : "generating";
+      const priorFailureRetries = Number(target.providerFailureRetries || 0);
+      /*
+       * RETRY A PROVIDER-REPORTED FAILURE ONCE BEFORE MARKING THE JOB FAILED (stabilize
+       * 2026-09-03, required behavior #4). This branch fires when Runware itself accepted and RAN
+       * the task and then reported it failed - a definitive task-level result, not a transport
+       * error (those are handled separately by classifyVideoRetry/pollJob's retry_safe path).
+       * Fred's rule is that nothing may end in a silent or announced error while an alternative
+       * remains untried, so the SAME request is resubmitted once (see pollJob's
+       * "provider_failed_retry" branch) before the job is ever shown to the user as failed.
+       */
+      const retryProviderFailure = providerReportedFailure && priorFailureRetries < 1;
+      target.status = status === "success" && result.videoURL ? "ready" : providerReportedFailure ? (retryProviderFailure ? "retrying" : "failed") : "generating";
       target.taskUuid = jobId; target.progress = Number(result.progress ?? target.progress ?? 0); target.cost = result.cost ?? target.cost; target.output = result.videoURL || target.output || null; target.videoUUID = result.videoUUID || target.videoUUID || null; target.videoId = result.outputs?.videoId || target.videoId || null; target.lastPolledAt = iso(now);
-      target.submission = { ...(target.submission || {}), state: "accepted", acceptedAt: iso(now), ...submission };
+      target.submission = { ...(target.submission || {}), state: retryProviderFailure ? "provider_failed_retry" : "accepted", acceptedAt: iso(now), ...submission };
       if (status === "success" && !target.output) { target.status = "failed"; target.error = "video_provider_missing_output"; }
-      if (["failed", "error"].includes(status)) { target.error = String(result.code || result.error?.code || "video_provider_failed").slice(0, 160); target.providerError = { code: target.error, message: String(result.message || result.error?.message || "Runware reported that this video task failed.").slice(0, 800), status: null }; }
+      if (providerReportedFailure) {
+        target.providerFailureRetries = priorFailureRetries + 1;
+        const rawCode = String(result.code || result.error?.code || "video_provider_failed").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 160) || "video_provider_failed";
+        if (retryProviderFailure) {
+          // Not shown to the user: the job stays "retrying" and the client keeps polling normally.
+          target.lastProviderFailure = { code: rawCode, at: iso(now) };
+        } else {
+          target.error = rawCode;
+          // Plain language only (required behavior #4): Runware's free-form error/message text is
+          // never forwarded to the user verbatim, only its short machine code (already sanitized above).
+          target.providerError = { code: rawCode, message: "The video provider could not complete this generation, even after Dominion automatically retried the identical request once. Nothing further was charged for the retry.", status: null };
+        }
+      }
       if (target.status === "failed") stampScene(s, target, "failed");
-    }, { jobId, taskUuid: jobId, status }).jobs.find((item) => item.id === jobId);
+    }, { jobId, taskUuid: jobId, status, providerReportedFailure }).jobs.find((item) => item.id === jobId);
   }
   async function submitGeneration(tenantId, projectId, request, billingContext = {}) {
     const valid = validateVideoRequest(request);
@@ -931,6 +963,30 @@ export function createVideoFeature({ dataDir, fetch: fetchImpl = globalThis.fetc
         const retry = classifyVideoRetry(err, Number(job.attempt || 0)); const failure = providerFailure(err); const recovery = submissionRecovery(err); const nextAttempts = attempts + 1;
         const retrySafe = retry.retryable && recovery.safeToResubmit && nextAttempts < 3; const acknowledgementUnknown = retry.retryable && !recovery.safeToResubmit;
         return mutate(tenantId, projectId, "job.resubmit_failed", (s) => { const target = s.jobs.find((item) => item.id === jobId); target.attempt = Number(target.attempt || 0) + 1; target.status = retrySafe || acknowledgementUnknown ? "retrying" : "failed"; target.retry = retry; target.error = failure.code; target.providerError = failure; target.submission = { state: retrySafe ? "retry_safe" : acknowledgementUnknown ? "ack_unknown" : "failed", attempts: nextAttempts, safeToResubmit: retrySafe }; if (target.status === "failed") stampScene(s, target, "failed"); }, { jobId, retry, recovery, providerError: failure }).jobs.find((item) => item.id === jobId);
+      }
+    }
+    /*
+     * REQUIRED BEHAVIOR #4: a job Runware reports FAILED (a definitive task-level result, not a
+     * transport error) is retried once with the identical request before persistProviderResult
+     * ever marks it "failed". persistProviderResult set this submission state and left the job
+     * "retrying" specifically so the client's normal poll loop drives the one resubmission here,
+     * the same pattern the "retry_safe" branch above already uses for ambiguous submissions.
+     */
+    if (job.submission?.state === "provider_failed_retry") {
+      try {
+        const result = await runwareRequest(compileRunwareTask(job.request, jobId));
+        return persistProviderResult(tenantId, projectId, jobId, result, "job.retried_after_provider_failure", { attempts: Math.max(1, Number(job.submission.attempts) || 1) + 1, safeToResubmit: false });
+      } catch (err) {
+        // A transport error while retrying counts as an ordinary transport failure from here on;
+        // it does not consume a second provider-reported-failure retry.
+        const retry = classifyVideoRetry(err, Number(job.attempt || 0)); const failure = providerFailure(err);
+        return mutate(tenantId, projectId, "job.retry_after_provider_failure_failed", (s) => {
+          const target = s.jobs.find((item) => item.id === jobId);
+          target.attempt = Number(target.attempt || 0) + 1; target.status = retry.retryable ? "retrying" : "failed"; target.retry = retry;
+          target.error = failure.code; target.providerError = { code: failure.code, message: "The video provider could not be reached while Dominion retried a failed generation task.", status: failure.status };
+          target.submission = { ...target.submission, state: retry.retryable ? "accepted" : "failed" };
+          if (target.status === "failed") stampScene(s, target, "failed");
+        }, { jobId, retry, providerError: failure }).jobs.find((item) => item.id === jobId);
       }
     }
     try {

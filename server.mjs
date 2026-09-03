@@ -7790,6 +7790,40 @@ function videoSonnetCost(usage = {}) {
   return +((input * rates.input + output * rates.output + cacheRead * rates.cacheRead
     + cache5m * rates.cache5m + cache1h * rates.cache1h) / 1e6).toFixed(8);
 }
+/*
+ * Cost helpers for the model-ladder fallback rungs added in the video stabilization pass
+ * (2026-09-03, LANE-video.md required behavior #2). Haiku's cache multipliers (5m = 1.25x input,
+ * 1h = 2x input, read = 0.1x input) are not separately published in models.catalog.mjs, but they
+ * are the same Anthropic-wide multipliers already confirmed by videoSonnetCost's own rate table
+ * above (3 * 1.25 = 3.75, 3 * 2 = 6, 3 * 0.1 = 0.3) and match catalog's stated cacheHitCost: 0.10
+ * for Haiku, so they are derived, not guessed.
+ */
+function videoHaikuCost(usage = {}) {
+  const rates = { input: 1.00, output: 5.00, cache5m: 1.25, cache1h: 2.00, cacheRead: 0.10 };
+  const input = Math.max(0, Number(usage.input_tokens) || 0);
+  const output = Math.max(0, Number(usage.output_tokens) || 0);
+  const cacheRead = Math.max(0, Number(usage.cache_read_input_tokens) || 0);
+  const cacheBreakdown = usage.cache_creation && typeof usage.cache_creation === "object" ? usage.cache_creation : {};
+  const cache5mReported = Math.max(0, Number(cacheBreakdown.ephemeral_5m_input_tokens) || 0);
+  const cache1h = Math.max(0, Number(cacheBreakdown.ephemeral_1h_input_tokens) || 0);
+  const cacheCreated = Math.max(0, Number(usage.cache_creation_input_tokens) || cache5mReported + cache1h);
+  const cache5m = Math.max(cache5mReported, cacheCreated - cache1h);
+  return +((input * rates.input + output * rates.output + cacheRead * rates.cacheRead
+    + cache5m * rates.cache5m + cache1h * rates.cache1h) / 1e6).toFixed(8);
+}
+// DeepSeek direct: OpenAI-shaped usage (prompt_tokens/completion_tokens), its own
+// prompt_cache_hit_tokens field for the cache discount, no separate cache-write fee. Rates from
+// models.catalog.mjs (deepseek/deepseek-v4-pro, deepseek/deepseek-v4-flash), $ per 1M tokens.
+const VIDEO_DEEPSEEK_PRO_RATES = { inCost: 0.43, outCost: 0.87, cacheHitCost: 0.003625 };
+const VIDEO_DEEPSEEK_FLASH_RATES = { inCost: 0.05, outCost: 0.24, cacheHitCost: 0.0028 };
+function videoDeepseekCost(usage = {}, rates) {
+  const inTok = Math.max(0, Number(usage.prompt_tokens) || 0);
+  const outTok = Math.max(0, Number(usage.completion_tokens) || 0);
+  const cachedRaw = usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? usage.cached_tokens;
+  const cached = Math.max(0, Math.min(Number(cachedRaw) || 0, inTok));
+  const fresh = Math.max(0, inTok - cached);
+  return +((fresh * rates.inCost + cached * rates.cacheHitCost + outTok * rates.outCost) / 1e6).toFixed(8);
+}
 
 const videoMediaProcessor = createVideoMediaProcessor({});
 const settleVideoCharge = createVideoChargeSettler({
@@ -7837,22 +7871,25 @@ const videoHttp = createVideoHttp({
     url: OPENROUTER_URL,
     referer: OPENROUTER_REFERER,
     title: "Dominion AI",
-    screenwriterModel: "arcee-ai/trinity-large-thinking",
     timeoutMs: 300_000,
     costForUsage: (usage) => openRouterUsageCost(usage),
   },
   nvidia: {
     apiKey: () => NVIDIA_KEY,
     baseUrl: cfgGet("NVIDIA_VIDEO_AI_BASE", "https://integrate.api.nvidia.com/v1"),
-    directorModel: "deepseek-ai/deepseek-v4-pro",
-    visualModel: "nvidia/nemotron-3-ultra-550b-a55b",
     costForUsage: () => 0, // NVIDIA's configured developer endpoint is presently free.
+  },
+  // DeepSeek direct (LANE-video.md: DEEPSEEK_AI_DOMINION_UI_APIKEY, already wired for chat as
+  // PROVIDER_CFG.deepseek). Added 2026-09-03 as a model-ladder rung for every video agent.
+  deepseek: {
+    apiKey: () => DEEPSEEK_KEY,
+    baseUrl: cfgGet("DEEPSEEK_VIDEO_BASE", "https://api.deepseek.com"),
+    costForUsage: (usage, metadata) => videoDeepseekCost(usage, metadata?.model === "deepseek-v4-flash" ? VIDEO_DEEPSEEK_FLASH_RATES : VIDEO_DEEPSEEK_PRO_RATES),
   },
   anthropic: {
     apiKey: () => ANTHROPIC_KEY,
     baseUrl: cfgGet("ANTHROPIC_VIDEO_BASE", "https://api.anthropic.com"),
-    model: "claude-sonnet-5",
-    costForUsage: (usage) => videoSonnetCost(usage),
+    costForUsage: (usage, metadata) => metadata?.model === "claude-haiku-4-5-20251001" ? videoHaikuCost(usage) : videoSonnetCost(usage),
   },
   privacy: {
     modeAllows,
@@ -7862,6 +7899,10 @@ const videoHttp = createVideoHttp({
       return normalized === "private" ? PRIVATE_PROVIDERS.has(provider) : TRUSTED_PROVIDERS.has(provider);
     },
   },
+  // Boot-time model-ladder probe (LANE-video.md required behavior #6): never blocks boot (fires on
+  // the next tick, repeats hourly, both timers unref'd). Off by default in createVideoHttp so
+  // video-http_test.mjs's mocked fetch never sees an unexpected probe request.
+  bootProbe: true,
 });
 
 async function handleOcr(req, res) {

@@ -304,6 +304,94 @@ test("Runware submission and polling use one array-based async endpoint and pers
   const saved = await api.downloadJobOutput("a", p.id, submitted.jobId); assert.match(saved.localOutput, /media[\\/]generated/); assert.equal(downloads.length, 1);
 });
 
+/*
+ * Required behavior #4 (stabilize 2026-09-03): a mid-poll transport outage (network error, not a
+ * task-level result) must not lose the job or charge it twice. The job stays "retrying" through the
+ * outage and recovers cleanly once the provider answers again - the same durable job id polled
+ * throughout, never resubmitted as a fresh paid task.
+ */
+test("a mid-poll transport outage keeps the job retrying without losing it or double-charging", async (t) => {
+  let pollAttempts = 0;
+  const fetch = async (url, options) => {
+    const payload = JSON.parse(options.body); const task = payload[0];
+    if (task.taskType === "getResponse") {
+      pollAttempts++;
+      // runwareRequest retries transport errors internally (2 attempts by default) before ever
+      // throwing back to pollJob - fail both of those internal attempts so the outage genuinely
+      // reaches pollJob's own retry path, then let the NEXT outer poll call recover cleanly.
+      if (pollAttempts <= 2) throw Object.assign(new Error("network down"), { cause: { code: "ECONNRESET" } });
+    }
+    return new Response(JSON.stringify(providerResponse(task)), { status: 200 });
+  };
+  t.context = suite({ fetch }); clean(t);
+  const { api } = t.context; const p = api.createProject("a");
+  const submitted = await api.submitGeneration("a", p.id, validRequest());
+  const duringOutage = await api.pollJob("a", p.id, submitted.jobId);
+  assert.equal(duringOutage.status, "retrying", "a transport outage must never surface as failed");
+  assert.equal(duringOutage.id, submitted.jobId, "the same job survives the outage, not a fresh one");
+  assert.equal(pollAttempts, 2, "runwareRequest's own internal backoff was exhausted before pollJob saw the failure");
+  const recovered = await api.pollJob("a", p.id, submitted.jobId);
+  assert.equal(recovered.status, "ready");
+  assert.equal(recovered.id, submitted.jobId);
+  assert.equal(pollAttempts, 3, "recovery took exactly one more poll - no duplicate submission was made along the way");
+});
+
+/*
+ * Required behavior #4: a job Runware itself accepted and RAN, then reported "failed" on
+ * (definitive task-level result, not a transport error), is retried once with the IDENTICAL request
+ * (same durable job id as taskUUID) before ever being shown to the user as failed.
+ */
+test("a Runware-reported failed task is retried once with the identical request and can still succeed", async (t) => {
+  const submissionTasks = []; let pollAttempts = 0;
+  const fetch = async (url, options) => {
+    const payload = JSON.parse(options.body); const task = payload[0];
+    if (task.taskType === "videoInference") { submissionTasks.push(structuredClone(task)); return new Response(JSON.stringify({ data: [{ taskType: "videoInference", taskUUID: task.taskUUID, status: "processing", progress: 0 }] }), { status: 200 }); }
+    pollAttempts++;
+    if (pollAttempts === 1) return new Response(JSON.stringify({ data: [{ taskType: "videoInference", taskUUID: task.taskUUID, status: "failed", error: { code: "generationFailed", message: "raw provider text that must never reach the user" } }] }), { status: 200 });
+    return new Response(JSON.stringify(providerResponse(task)), { status: 200 });
+  };
+  t.context = suite({ fetch }); clean(t);
+  const { api } = t.context; const p = api.createProject("a");
+  const submitted = await api.submitGeneration("a", p.id, validRequest());
+  const reportedFailed = await api.pollJob("a", p.id, submitted.jobId);
+  assert.equal(reportedFailed.status, "retrying", "a provider-reported failure is not shown to the user on the first report");
+  assert.equal(reportedFailed.submission.state, "provider_failed_retry");
+  assert.equal(submissionTasks.length, 1, "the retry has not been sent yet - only the automatic poll observed the failure");
+  const retried = await api.pollJob("a", p.id, submitted.jobId);
+  assert.equal(submissionTasks.length, 2, "the next poll resubmits the identical task exactly once");
+  assert.equal(submissionTasks[1].taskUUID, submitted.jobId, "the retry reuses the SAME durable job id, never a fresh task");
+  assert.deepEqual({ ...submissionTasks[1], taskUUID: undefined }, { ...submissionTasks[0], taskUUID: undefined }, "the retried request is identical to the original, not a different model/settings substitution");
+  assert.equal(retried.status, "generating");
+  assert.equal(retried.id, submitted.jobId);
+});
+
+test("a Runware-reported failure retried once and failing again shows a plain-language message, never raw provider text", async (t) => {
+  let videoInferenceCalls = 0;
+  const rawProviderText = "internal_diagnostic_stack_trace_12345 unexpected token at offset 88";
+  const failedResponse = (task) => new Response(JSON.stringify({ data: [{ taskType: "videoInference", taskUUID: task.taskUUID, status: "failed", error: { code: "generationFailed", message: rawProviderText } }] }), { status: 200 });
+  const fetch = async (url, options) => {
+    const payload = JSON.parse(options.body); const task = payload[0];
+    if (task.taskType === "videoInference") {
+      videoInferenceCalls++;
+      // The original submission is accepted normally; the RETRIED (2nd) submission is itself the
+      // definitive second failure, matching how Runware can report failure on a submission call.
+      if (videoInferenceCalls === 1) return new Response(JSON.stringify({ data: [{ taskType: "videoInference", taskUUID: task.taskUUID, status: "processing", progress: 0 }] }), { status: 200 });
+      return failedResponse(task);
+    }
+    return failedResponse(task); // getResponse poll: the first definitive failure.
+  };
+  t.context = suite({ fetch }); clean(t);
+  const { api } = t.context; const p = api.createProject("a");
+  const submitted = await api.submitGeneration("a", p.id, validRequest());
+  const firstFailure = await api.pollJob("a", p.id, submitted.jobId);
+  assert.equal(firstFailure.status, "retrying");
+  const secondFailure = await api.pollJob("a", p.id, submitted.jobId);
+  assert.equal(secondFailure.status, "failed", "only the SECOND definitive failure, after the one retry, is shown to the user");
+  assert.equal(videoInferenceCalls, 2, "the original submission plus exactly one identical retry");
+  assert.ok(!JSON.stringify(secondFailure.providerError).includes(rawProviderText), "the raw provider message text must never reach the user");
+  assert.match(secondFailure.providerError.message, /automatically retried the identical request once/);
+});
+
 test("a client idempotency key can create only one paid provider job", async (t) => {
   t.context = suite(); clean(t);
   const { api, calls } = t.context; const p = api.createProject("a");

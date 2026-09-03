@@ -166,7 +166,10 @@ function featureMock(overrides = {}) {
         value.ai.screenwriter = { state: { generationId: command.generationId, generatedSections: command.generatedSections } };
       }
       value.history.head++;
-      return { ok: true };
+      // A real applyCommand (video.mjs) returns the updated project, which the auto-checkpoint path
+      // (deficiency 21) reads back for its own newly-persisted screenplay text and sha - {ok:true}
+      // alone would silently zero that out and make the very next save look concurrently stale.
+      return structuredClone(value);
     },
     updateAiState(tenantId, id, state) {
       calls.push(["updateAiState", tenantId, id, state]); const value = projects.get(id); feature.getProject(tenantId, id);
@@ -183,7 +186,7 @@ function featureMock(overrides = {}) {
       value.history.head++;
       return structuredClone(value);
     },
-    submitGeneration(tenantId, id, input) { calls.push(["submitGeneration", tenantId, id, input]); const value = projects.get(id); value.jobs.push({ id: JOB_ID, status: "generating", request: input }); return { jobId: JOB_ID, taskUuid: JOB_ID, project: id }; },
+    submitGeneration(tenantId, id, input, options) { calls.push(["submitGeneration", tenantId, id, input, options]); const value = projects.get(id); value.jobs.push({ id: JOB_ID, status: "generating", request: input }); return { jobId: JOB_ID, taskUuid: JOB_ID, project: id }; },
     pollJob(tenantId, id, jobId) { calls.push(["pollJob", tenantId, id, jobId]); feature.getProject(tenantId, id); return { id: jobId, status: "generating", request: { duration: 5 } }; },
     downloadJobOutput(tenantId, id, jobId) { calls.push(["downloadJobOutput", tenantId, id, jobId]); return { id: jobId, status: "ready", localOutput: `Z:/data/${jobId}.mp4`, request: { duration: 5 }, cost: 0.12, media: { hasAudio: true, duration: 5 }, clips: [{ id: `clip-${jobId}`, trackId: "v1", type: "video", start: 2, duration: 5, mediaJobId: jobId, mediaFile: `${jobId}.mp4`, linked: `audio-${jobId}` }, { id: `audio-${jobId}`, trackId: "a1", type: "audio", start: 2, duration: 5, mediaJobId: jobId, mediaFile: `${jobId}.mp4`, linked: `clip-${jobId}` }] }; },
     paths() { return { generated: "Z:/data/generated", exports: "Z:/data/exports" }; },
@@ -192,7 +195,7 @@ function featureMock(overrides = {}) {
   return { feature, calls, projects };
 }
 
-function setup({ tenant, feature: customFeature, billing: customBilling, fetch: fetchImpl, openrouter = {}, nvidia = {}, anthropic = {}, privacy = {}, media = {}, desktopPresence, meter: meterImpl, settlementAdmin = null, now } = {}) {
+function setup({ tenant, feature: customFeature, billing: customBilling, fetch: fetchImpl, openrouter = {}, nvidia = {}, anthropic = {}, deepseek = {}, privacy = {}, media = {}, desktopPresence, meter: meterImpl, settlementAdmin = null, now, bootProbe = false } = {}) {
   const mock = customFeature ? { feature: customFeature, calls: customFeature.calls || [] } : featureMock();
   const T = tenant || { tenantId: "tenant_a", email: "a@example.test", role: "credit", status: "active", invited: true, isOwner: false };
   const billing = customBilling || { account: () => ({ autorecharge: true, hasCard: true, balance: 100 }), canChat: () => true };
@@ -208,12 +211,14 @@ function setup({ tenant, feature: customFeature, billing: customBilling, fetch: 
     fetch: fetchImpl || (async () => { throw new Error("unexpected network"); }),
     runware: { apiKey: () => "runware-test" },
     openrouter: { apiKey: () => "openrouter-test", url: "https://openrouter.test/api/v1/chat/completions", generationUrl: "https://openrouter.test/api/v1/generation", referer: "https://app.dominion.tools", title: "Dominion AI", costForUsage: (usage) => Number(usage?.cost) || 0, ...openrouter },
-    nvidia: { apiKey: () => "nvidia-test", baseUrl: "https://nvidia.test/v1", directorModel: "deepseek-ai/deepseek-v4-pro", ...nvidia },
+    nvidia: { apiKey: () => "nvidia-test", baseUrl: "https://nvidia.test/v1", ...nvidia },
     anthropic: { apiKey: () => "anthropic-test", baseUrl: "https://anthropic.test", ...anthropic },
+    deepseek: { apiKey: () => "deepseek-test", baseUrl: "https://deepseek.test", ...deepseek },
     privacy,
     media,
     desktopPresence,
     now,
+    bootProbe,
   });
   return { http, T, billing, screened, metered, ...mock };
 }
@@ -231,7 +236,12 @@ test("config is identity/invite gated and never exposes credentials", async () =
   assert.equal(result.body.screenwriter.available, true);
   assert.equal(result.body.screenwriter.provider, "openrouter");
   assert.equal(result.body.screenwriter.reasoning, "mandatory");
-  assert.equal(result.body.agents.visualOrchestrator.model, "nvidia/nemotron-3-ultra-550b-a55b");
+  assert.equal(result.body.agents.visualOrchestrator.model, "nvidia/nemotron-3-super-120b-a12b");
+  assert.equal(result.body.agents.director.model, "deepseek-v4-pro");
+  assert.deepEqual(result.body.agents.director.ladder.map((rung) => rung.provider), ["deepseek", "nvidia", "nvidia", "anthropic"]);
+  assert.equal(result.body.agents.director.configured, true);
+  assert.equal(result.body.agents.liaison.model, "claude-sonnet-5");
+  assert.equal(result.body.agents.liaison.configured, true);
   assert.match(result.body.storageKey, /^[a-f0-9]{24}$/);
   assert.equal(typeof result.body.desktopCapability, "string");
   assert.equal(JSON.stringify(result.body).includes("nvidia-test"), false);
@@ -398,6 +408,32 @@ test("generation validates safety and submits the exact model/settings without s
   assert.equal(submitted[3].generateAudio, true);
   assert.equal(submitted[3].idempotencyKey, "ui_generation_1");
   assert.deepEqual(env.screened, ["Sunrise over water"]);
+});
+
+/*
+ * Deficiency 19 (stabilize 2026-09-03): POST /api/video/jobs 500'd for every real, signed-in tenant
+ * because the old code called structuredClone(tenant) directly, and the live tenant object (as
+ * server.mjs's OWNER_T/tenants.resolve() actually hand it over) carries a live `memory.propose()`
+ * function - structuredClone throws a DataCloneError on any function. Reproduce exactly that shape.
+ */
+test("tenant projection is cloneable and carries the fields the feature reads, even with live handles attached", async () => {
+  let proposed = false;
+  const liveTenant = {
+    tenantId: "tenant_a", id: "tenant_a", uid: "tenant_a", email: "a@example.test", role: "credit", status: "active", invited: true, isOwner: false,
+    memory: { propose: () => { proposed = true; } }, // a live, non-cloneable handle - the actual crash cause
+    chatlog: { append: () => {} }, artifacts: { list: () => [] }, flywheel: { record: () => {} },
+  };
+  assert.throws(() => structuredClone(liveTenant), /could not be cloned|DataCloneError/i, "sanity: the raw live tenant is not structured-clone-safe, matching the crash");
+  const env = setup({ tenant: liveTenant });
+  const result = await call(env.http, "POST", "/api/video/jobs", { projectId: PROJECT_ID, model: "google:gemini@omni-flash", prompt: "Sunrise over water", duration: 5, ratio: "16:9", resolution: "720p" });
+  assert.equal(result.res.statusCode, 202, "the live-handle tenant must never 500 the request");
+  const submitted = env.calls.find((entry) => entry[0] === "submitGeneration");
+  const projected = submitted[4]?.tenant;
+  assert.ok(projected, "submitGeneration must receive a tenant projection, not the omitted 4th argument");
+  assert.doesNotThrow(() => structuredClone(projected), "the projection itself must be structured-clone-safe");
+  assert.equal(typeof projected.memory, "undefined", "live handles must not ride along in the projection");
+  assert.deepEqual(projected, { id: "tenant_a", uid: "tenant_a", email: "a@example.test", role: "credit", isOwner: false, invited: true, status: "active", tenantId: "tenant_a" });
+  assert.equal(proposed, false, "nothing on the live tenant was invoked just by submitting a job");
 });
 
 test("project media uploads stream through the injected verifier contract", async () => {
@@ -1250,16 +1286,30 @@ test("screenwriter status distinguishes an active turn from durable action requi
   assert.equal(idle.body.active, false); assert.equal(idle.body.pending, false); assert.equal(idle.body.status, "idle");
 });
 
-test("screenwriter rejects a stale first turn before calling OpenRouter", async () => {
-  let providerCalls = 0;
-  const env = setup({ fetch: async () => { providerCalls++; throw new Error("must not call"); } });
+/*
+ * Deficiency 21 (stabilize 2026-09-03): a prompt that differs from the persisted screenplay used to
+ * be refused outright as "stale". Since there is no unresolved provider work here (no prior
+ * screenwriter turn at all), the prompt IS what the user wants written from - it is now
+ * auto-checkpointed as a new revision and the turn proceeds, instead of being refused.
+ */
+test("screenwriter auto-checkpoints a stale first-turn prompt and proceeds, instead of refusing it", async () => {
+  const providerCalls = [];
+  const env = setup({ fetch: async (_url, options) => {
+    providerCalls.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({
+      id: "gen-auto-checkpoint", model: "arcee-ai/trinity-large-thinking",
+      choices: [{ finish_reason: "stop", message: { content: "INT. NEW OPENING - DAY" } }],
+      usage: { prompt_tokens: 18, completion_tokens: 8, total_tokens: 26, cost: 0.0000112 },
+    }), { status: 200 });
+  } });
   assert.equal(env.projects.get(PROJECT_ID).ai.screenwriter, undefined);
+  assert.equal(env.projects.get(PROJECT_ID).screenplay.text, "FADE IN");
   const out = await call(env.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "A newly typed first-turn brief", limit: 115_000 });
-  assert.equal(out.res.statusCode, 409);
-  assert.equal(out.body.code, "screenwriter_stale_prompt");
-  assert.equal(providerCalls, 0);
-  assert.equal(env.calls.some((entry) => entry[0] === "applyCommand"), false);
-  assert.equal(env.metered.length, 0);
+  assert.equal(out.res.statusCode, 200);
+  assert.equal(providerCalls.length, 1, "no unresolved provider work meant the stale prompt was checkpointed, not refused");
+  const checkpoint = env.calls.find((entry) => entry[0] === "applyCommand" && entry[3].type === "screenplay.set" && entry[3].text === "A newly typed first-turn brief");
+  assert.ok(checkpoint, "the stale prompt must be persisted as a new checkpoint revision before Trinity is called");
+  assert.equal(checkpoint[3].expectedScreenplaySha256, screenplaySha("FADE IN"), "the checkpoint is guarded against a genuine concurrent race, not skipped");
 });
 
 test("screenwriter preserves leading and trailing screenplay whitespace for the exact stale guard", async () => {
@@ -1339,16 +1389,26 @@ test("screenwriter privacy: trusted admits the fixed crew, private still refuses
   ], "trusted mode never consults the per-model gate: the crew is fixed");
 });
 
-test("screenwriter rejects stale and concurrent turns before a second paid request", async () => {
-  let staleCalls = 0;
-  const stale = setup({ fetch: async () => { staleCalls++; throw new Error("must not call"); } });
+test("screenwriter auto-checkpoints an existing stale prompt, and still blocks a concurrent turn on the same project", async () => {
+  const staleCalls = [];
+  const stale = setup({ fetch: async (_url, options) => {
+    staleCalls.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({
+      id: "gen-stale-checkpoint", model: "arcee-ai/trinity-large-thinking",
+      choices: [{ finish_reason: "stop", message: { content: "INT. OLDER SCREENPLAY REWRITTEN - DAY" } }],
+      usage: { prompt_tokens: 20, completion_tokens: 9, total_tokens: 29, cost: 0.0000125 },
+    }), { status: 200 });
+  } });
   const staleProject = stale.projects.get(PROJECT_ID);
   staleProject.screenplay.text = "CURRENT SAVED SCREENPLAY";
   staleProject.ai.screenwriter = { state: { brief: "Mystery", generatedSections: 1, generationId: "gen-current", lastTurn: null } };
-  const rejected = await call(stale.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "OLDER SCREENPLAY", limit: 115_000 });
-  assert.equal(rejected.res.statusCode, 409);
-  assert.equal(rejected.body.code, "screenwriter_stale_prompt");
-  assert.equal(staleCalls, 0);
+  // No providerAttempts entry exists (only ai.screenwriter.state is set), so nothing is genuinely
+  // unresolved - deficiency 21 auto-checkpoints the stale prompt as a new revision and proceeds.
+  const checkpointed = await call(stale.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "OLDER SCREENPLAY", limit: 115_000 });
+  assert.equal(checkpointed.res.statusCode, 200);
+  assert.equal(staleCalls.length, 1, "no unresolved provider attempt meant the stale prompt was checkpointed, not refused");
+  const checkpoint = stale.calls.find((entry) => entry[0] === "applyCommand" && entry[3].type === "screenplay.set" && entry[3].text === "OLDER SCREENPLAY");
+  assert.ok(checkpoint, "the stale prompt must be persisted as a new checkpoint revision before Trinity is called");
 
   let releaseProvider; let announceStarted;
   const started = new Promise((resolve) => { announceStarted = resolve; });
@@ -1381,14 +1441,14 @@ test("plain chat runs director + producer only: no orchestrator call, no storybo
   const models = [];
   const fetch = async (_url, options) => {
     const body = JSON.parse(options.body); models.push(body.model);
-    if (body.model === "deepseek-ai/deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: routingBlock({ path: "quick_clip", needs_screenwriter: false, needs_storyboard: false, ready_to_generate: true, reason: "One shot, one subject.", suggested_recommendation: "generate", scene_draft: { title: "Fox at dawn", prompt: "A red fox steps through frosted grass at dawn", duration: 5 } }) } }], usage: { total_tokens: 20 } }), { status: 200 });
-    if (body.model === "nvidia/nemotron-3-ultra-550b-a55b") throw new Error("the orchestrator must not run for plain chat");
+    if (body.model === "deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: routingBlock({ path: "quick_clip", needs_screenwriter: false, needs_storyboard: false, ready_to_generate: true, reason: "One shot, one subject.", suggested_recommendation: "generate", scene_draft: { title: "Fox at dawn", prompt: "A red fox steps through frosted grass at dawn", duration: 5 } }) } }], usage: { total_tokens: 20 } }), { status: 200 });
+    if (body.model === "nvidia/nemotron-3-super-120b-a12b") throw new Error("the orchestrator must not run for plain chat");
     return new Response(JSON.stringify({ content: [{ type: "text", text: "Nice and simple. Want me to just shoot it?" }], usage: { input_tokens: 10, output_tokens: 5 } }), { status: 200 });
   };
   const env = setup({ fetch });
   const out = await call(env.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, message: "quick clip of a red fox at dawn" });
   assert.equal(out.res.statusCode, 200);
-  assert.ok(!models.includes("nvidia/nemotron-3-ultra-550b-a55b"), "plain chat must never pay for the 550B planner");
+  assert.ok(!models.includes("nvidia/nemotron-3-super-120b-a12b"), "plain chat must never pay for the visual orchestrator");
   assert.equal(out.body.visualOrchestrator.skipped, true);
   assert.deepEqual(out.body.degraded, [], "a skipped orchestrator is not a degraded one");
   assert.equal(out.body.routing.path, "quick_clip");
@@ -1405,7 +1465,7 @@ test("plain chat runs director + producer only: no orchestrator call, no storybo
 test("an ad brief routes to the screenwriter and the storyboard, as suggestions", async () => {
   const fetch = async (_url, options) => {
     const body = JSON.parse(options.body);
-    if (body.model === "deepseek-ai/deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: routingBlock({ path: "scripted", needs_screenwriter: true, needs_storyboard: true, ready_to_generate: false, reason: "An ad lives on its script.", suggested_recommendation: "screenwriter" }) } }], usage: { total_tokens: 20 } }), { status: 200 });
+    if (body.model === "deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: routingBlock({ path: "scripted", needs_screenwriter: true, needs_storyboard: true, ready_to_generate: false, reason: "An ad lives on its script.", suggested_recommendation: "screenwriter" }) } }], usage: { total_tokens: 20 } }), { status: 200 });
     return new Response(JSON.stringify({ content: [{ type: "text", text: "An ad lives or dies on the script. Let me get the writer on it." }], usage: { input_tokens: 10, output_tokens: 5 } }), { status: 200 });
   };
   const env = setup({ fetch });
@@ -1419,7 +1479,7 @@ test("an ad brief routes to the screenwriter and the storyboard, as suggestions"
 test("a mangled routing block loses the recommendation, never the turn", async () => {
   const fetch = async (_url, options) => {
     const body = JSON.parse(options.body);
-    if (body.model === "deepseek-ai/deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: "Directive: open on the product.\n```json\n{\"routing\": {oops not json\n```" } }], usage: { total_tokens: 20 } }), { status: 200 });
+    if (body.model === "deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: "Directive: open on the product.\n```json\n{\"routing\": {oops not json\n```" } }], usage: { total_tokens: 20 } }), { status: 200 });
     return new Response(JSON.stringify({ content: [{ type: "text", text: "Tell me more about the feel you want." }], usage: { input_tokens: 10, output_tokens: 5 } }), { status: 200 });
   };
   const env = setup({ fetch });
@@ -1433,7 +1493,7 @@ test("a mangled routing block loses the recommendation, never the turn", async (
 test("ready_to_generate without a usable prompt is not ready", async () => {
   const fetch = async (_url, options) => {
     const body = JSON.parse(options.body);
-    if (body.model === "deepseek-ai/deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: routingBlock({ path: "quick_clip", ready_to_generate: true, suggested_recommendation: "generate", scene_draft: { title: "Untitled", prompt: "" } }) } }], usage: { total_tokens: 20 } }), { status: 200 });
+    if (body.model === "deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: routingBlock({ path: "quick_clip", ready_to_generate: true, suggested_recommendation: "generate", scene_draft: { title: "Untitled", prompt: "" } }) } }], usage: { total_tokens: 20 } }), { status: 200 });
     return new Response(JSON.stringify({ content: [{ type: "text", text: "What is the shot?" }], usage: { input_tokens: 10, output_tokens: 5 } }), { status: 200 });
   };
   const env = setup({ fetch });
@@ -1447,8 +1507,8 @@ test("chat runs DeepSeek director then cached Sonnet liaison and persists both o
   const providerCalls = [];
   const fetch = async (url, options) => {
     const body = JSON.parse(options.body); providerCalls.push({ url: String(url), body, options });
-    if (body.model === "deepseek-ai/deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: "Move the reveal to scene three." } }], usage: { total_tokens: 88 } }), { status: 200 });
-    if (body.model === "nvidia/nemotron-3-ultra-550b-a55b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ order: 1, sceneId: "s1", title: "Reveal", imagePrompt: "A rain-lit close-up of the heroine", videoPrompt: "Slow push in", continuity: "Red coat", suggestedVideoModel: "google:gemini@omni-flash" }] }) } }], usage: { total_tokens: 44 } }), { status: 200 });
+    if (body.model === "deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: "Move the reveal to scene three." } }], usage: { total_tokens: 88 } }), { status: 200 });
+    if (body.model === "nvidia/nemotron-3-super-120b-a12b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ order: 1, sceneId: "s1", title: "Reveal", imagePrompt: "A rain-lit close-up of the heroine", videoPrompt: "Slow push in", continuity: "Red coat", suggestedVideoModel: "google:gemini@omni-flash" }] }) } }], usage: { total_tokens: 44 } }), { status: 200 });
     return new Response(JSON.stringify({ content: [{ type: "text", text: "I will move the reveal and preserve continuity." }], usage: { input_tokens: 99, output_tokens: 14 } }), { status: 200 });
   };
   const env = setup({ fetch });
@@ -1456,17 +1516,19 @@ test("chat runs DeepSeek director then cached Sonnet liaison and persists both o
   assert.equal(out.res.statusCode, 200);
   assert.match(out.body.reply, /preserve continuity/);
   assert.equal(providerCalls.length, 3);
-  assert.equal(providerCalls[0].body.model, "deepseek-ai/deepseek-v4-pro");
+  assert.equal(providerCalls[0].body.model, "deepseek-v4-pro");
   assert.equal(providerCalls[0].body.stream, false);
-  assert.deepEqual(providerCalls[0].body.chat_template_kwargs, { thinking: false });
+  assert.equal(Object.hasOwn(providerCalls[0].body, "chat_template_kwargs"), false, "the DeepSeek-direct rung speaks plain DeepSeek, not NVIDIA's dialect");
   assert.equal(Object.hasOwn(providerCalls[0].body, "extra_body"), false);
   assert.equal(providerCalls[0].body.top_p, .95);
   assert.equal(providerCalls[0].body.max_tokens, 512);
-  assert.equal(providerCalls[1].body.model, "nvidia/nemotron-3-ultra-550b-a55b");
+  assert.equal(out.body.director.servedBy.provider, "deepseek");
+  assert.equal(providerCalls[1].body.model, "nvidia/nemotron-3-super-120b-a12b");
   assert.equal(providerCalls[1].body.stream, false);
   assert.deepEqual(providerCalls[1].body.chat_template_kwargs, { enable_thinking: false });
   assert.equal(Object.hasOwn(providerCalls[1].body, "extra_body"), false);
   assert.equal(providerCalls[1].body.temperature, 1); assert.equal(providerCalls[1].body.top_p, .95);
+  assert.equal(out.body.visualOrchestrator.servedBy.provider, "nvidia");
   assert.equal(providerCalls[2].body.model, "claude-sonnet-5");
   assert.equal(providerCalls[2].body.system[0].cache_control.type, "ephemeral");
   assert.equal(providerCalls[2].body.messages[0].content[0].cache_control.type, "ephemeral");
@@ -1488,8 +1550,8 @@ test("chat atomically saves all AI roles but quarantines a visual plan after a c
   const mock = featureMock();
   const fetch = async (url, options) => {
     const body = JSON.parse(options.body);
-    if (body.model === "deepseek-ai/deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: "Hold on the final frame." } }], usage: { total_tokens: 41 } }), { status: 200 });
-    if (body.model === "nvidia/nemotron-3-ultra-550b-a55b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ sceneId: "ai_scene", imagePrompt: "A still silhouette against dawn" }] }) } }] }), { status: 200 });
+    if (body.model === "deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: "Hold on the final frame." } }], usage: { total_tokens: 41 } }), { status: 200 });
+    if (body.model === "nvidia/nemotron-3-super-120b-a12b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ sceneId: "ai_scene", imagePrompt: "A still silhouette against dawn" }] }) } }] }), { status: 200 });
     mock.projects.get(PROJECT_ID).scenes = [{ id: "newer_user_scene", title: "Newer user edit" }];
     mock.projects.get(PROJECT_ID).history.head++;
     return new Response(JSON.stringify({ content: [{ type: "text", text: "I will hold the final frame." }] }), { status: 200 });
@@ -1515,11 +1577,11 @@ test("a concurrent same-project chat is refused before provider egress while the
   const directorGate = new Promise((resolve) => { releaseDirector = resolve; });
   const fetch = async (_url, options) => {
     const body = JSON.parse(options.body); providerCalls.push(body.model);
-    if (body.model === "deepseek-ai/deepseek-v4-pro") {
+    if (body.model === "deepseek-v4-pro") {
       announceDirector(); await directorGate;
       return new Response(JSON.stringify({ choices: [{ message: { content: "Keep the newer edit and preserve this proposal." } }], usage: { total_tokens: 20 } }), { status: 200 });
     }
-    if (body.model === "nvidia/nemotron-3-ultra-550b-a55b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ sceneId: "deferred_plan", imagePrompt: "A deferred visual plan" }] }) } }] }), { status: 200 });
+    if (body.model === "nvidia/nemotron-3-super-120b-a12b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ sceneId: "deferred_plan", imagePrompt: "A deferred visual plan" }] }) } }] }), { status: 200 });
     return new Response(JSON.stringify({ content: [{ type: "text", text: "I preserved the proposal without replacing newer work." }] }), { status: 200 });
   };
   const env = setup({ feature: mock.feature, fetch });
@@ -1528,7 +1590,7 @@ test("a concurrent same-project chat is refused before provider egress while the
 
   const duplicate = await call(env.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, action: "build_storyboard", message: "Run a second plan" });
   assert.equal(duplicate.res.statusCode, 409); assert.equal(duplicate.body.code, "video_ai_busy");
-  assert.deepEqual(providerCalls, ["deepseek-ai/deepseek-v4-pro"]);
+  assert.deepEqual(providerCalls, ["deepseek-v4-pro"]);
 
   mock.feature.checkpointProject("tenant_a", PROJECT_ID, {
     label: "Intervening user checkpoint", state: { screenplay: "FADE IN" },
@@ -1541,7 +1603,7 @@ test("a concurrent same-project chat is refused before provider egress while the
   assert.equal(completed.body.visualOrchestrator.applyStatus, "quarantined_stale");
   assert.deepEqual(completed.body.degraded, ["visualPlanStale"]);
   assert.equal(completed.body.visualOrchestrator.error.code, "visual_plan_quarantined_stale");
-  assert.deepEqual(providerCalls, ["deepseek-ai/deepseek-v4-pro", "nvidia/nemotron-3-ultra-550b-a55b", "claude-sonnet-5"]);
+  assert.deepEqual(providerCalls, ["deepseek-v4-pro", "nvidia/nemotron-3-super-120b-a12b", "claude-sonnet-5"]);
   assert.equal(mock.calls.filter((entry) => entry[0] === "updateAiState").length, 1);
   assert.equal(mock.projects.get(PROJECT_ID).history.head, 3);
 });
@@ -1553,11 +1615,11 @@ test("project deletion is refused while chat is active and the released AI turn 
   const directorGate = new Promise((resolve) => { releaseDirector = resolve; });
   const fetch = async (_url, options) => {
     const body = JSON.parse(options.body); providerCalls.push(body.model);
-    if (body.model === "deepseek-ai/deepseek-v4-pro") {
+    if (body.model === "deepseek-v4-pro") {
       announceDirector(); await directorGate;
       return new Response(JSON.stringify({ choices: [{ message: { content: "Keep this project alive through the save." } }], usage: { total_tokens: 18 } }), { status: 200 });
     }
-    if (body.model === "nvidia/nemotron-3-ultra-550b-a55b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ sceneId: "saved_after_delete_race", imagePrompt: "A project safely preserved" }] }) } }] }), { status: 200 });
+    if (body.model === "nvidia/nemotron-3-super-120b-a12b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ sceneId: "saved_after_delete_race", imagePrompt: "A project safely preserved" }] }) } }] }), { status: 200 });
     return new Response(JSON.stringify({ content: [{ type: "text", text: "The project and its new plan are saved." }] }), { status: 200 });
   };
   const env = setup({ feature: mock.feature, fetch });
@@ -1568,7 +1630,7 @@ test("project deletion is refused while chat is active and the released AI turn 
   assert.equal(deletion.res.statusCode, 409); assert.equal(deletion.body.code, "video_ai_busy");
   assert.equal(mock.projects.has(PROJECT_ID), true);
   assert.equal(mock.calls.some((entry) => entry[0] === "deleteProject"), false);
-  assert.deepEqual(providerCalls, ["deepseek-ai/deepseek-v4-pro"]);
+  assert.deepEqual(providerCalls, ["deepseek-v4-pro"]);
 
   releaseDirector();
   const completed = await chat;
@@ -1578,28 +1640,50 @@ test("project deletion is refused while chat is active and the released AI turn 
   assert.equal(mock.projects.get(PROJECT_ID).history.head, 2);
   assert.equal(mock.projects.get(PROJECT_ID).scenes[0].sceneId, "saved_after_delete_race");
   assert.equal(mock.calls.filter((entry) => entry[0] === "updateAiState").length, 1);
-  assert.deepEqual(providerCalls, ["deepseek-ai/deepseek-v4-pro", "nvidia/nemotron-3-ultra-550b-a55b", "claude-sonnet-5"]);
+  assert.deepEqual(providerCalls, ["deepseek-v4-pro", "nvidia/nemotron-3-super-120b-a12b", "claude-sonnet-5"]);
 });
 
 test("NVIDIA compaction uses the same explicit non-streaming DeepSeek request shape", async () => {
-  const mock = featureMock(); delete mock.feature.getClientProject; mock.projects.get(PROJECT_ID).ai.director.compactionRequired = true;
+  const mock = featureMock();
+  const seeded = mock.projects.get(PROJECT_ID);
+  seeded.ai.director.compactionRequired = true;
+  seeded.conversation.push({ role: "user", content: "Earlier turn", at: "2026-01-01T00:00:00.000Z" }, { role: "assistant", content: "Earlier reply", at: "2026-01-01T00:00:01.000Z" });
+  // The shared default mock's getClientProject strips ai/messages entirely (most tests never need
+  // them); compaction needs both, so this test provides its own faithful client projection rather
+  // than widening the default mock every other test in this file also uses.
+  mock.feature.getClientProject = (tenantId, id) => {
+    const value = mock.feature.getProject(tenantId, id);
+    return { project: { id: value.id, name: value.name, model: "google:gemini@omni-flash", ratio: "16:9", resolution: "720p" }, projectRevision: value.history.head, screenplay: value.screenplay.text, screenplaySha256: screenplaySha(value.screenplay.text), scenes: [], tracks: [], clips: [], ui: {}, ai: value.ai, messages: value.conversation };
+  };
   const providerCalls = []; const fetch = async (url, options) => {
     const body = JSON.parse(options.body); providerCalls.push(body);
-    if (body.model === "deepseek-ai/deepseek-v4-pro" && providerCalls.length === 1) return new Response(JSON.stringify({ choices: [{ message: { content: "Faithful summary" } }] }), { status: 200 });
-    if (body.model === "deepseek-ai/deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: "Use the summary." } }] }), { status: 200 });
-    if (body.model === "nvidia/nemotron-3-ultra-550b-a55b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ imagePrompt: "A locked frame" }] }) } }] }), { status: 200 });
+    if (body.model === "nvidia/nemotron-3-super-120b-a12b" && providerCalls.length === 1) return new Response(JSON.stringify({ choices: [{ message: { content: "Faithful summary" } }] }), { status: 200 });
+    if (body.model === "deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: "Use the summary." } }] }), { status: 200 });
+    if (body.model === "nvidia/nemotron-3-super-120b-a12b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ imagePrompt: "A locked frame" }] }) } }] }), { status: 200 });
     return new Response(JSON.stringify({ content: [{ type: "text", text: "I saved the plan." }] }), { status: 200 });
   };
+  // Compaction stays on the single, currently-alive NVIDIA rung (not laddered) per the video lane's
+  // disclosed scope decision - it is bookkeeping ahead of the real (laddered) director turn.
   const env = setup({ feature: mock.feature, fetch }); const out = await call(env.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, action: "build_storyboard", message: "Keep the essential context" });
   assert.equal(out.res.statusCode, 200); assert.equal(providerCalls[0].stream, false); assert.equal(providerCalls[0].top_p, .95); assert.deepEqual(providerCalls[0].chat_template_kwargs, { thinking: false });
 });
 
-test("visual orchestrator failure is surfaced as structured degradation without model substitution", async () => {
+/*
+ * Deficiency 20 (stabilize 2026-09-03): every agent, including the visual orchestrator, is now a
+ * ladder of provider/model rungs that auto-skips a 4xx/5xx/timeout rung. A single rung's failure no
+ * longer degrades the turn by itself - only running out of rungs does. This test now proves the
+ * skip-to-exhaustion behavior in full: every rung is made to fail, in ladder order, before the
+ * orchestrator is allowed to come back degraded.
+ */
+test("visual orchestrator failure is surfaced as structured degradation only after every ladder rung is exhausted", async () => {
   const providerCalls = [];
   const fetch = async (url, options) => {
     const body = JSON.parse(options.body); providerCalls.push(body.model);
-    if (body.model === "deepseek-ai/deepseek-v4-pro") return new Response(JSON.stringify({ choices: [{ message: { content: "Build three ordered images." } }] }), { status: 200 });
-    if (body.model === "nvidia/nemotron-3-ultra-550b-a55b") return new Response(JSON.stringify({ error: { message: "visual endpoint unavailable" } }), { status: 503 });
+    const step = providerCalls.length;
+    if (step === 1) { assert.equal(body.model, "deepseek-v4-pro"); return new Response(JSON.stringify({ choices: [{ message: { content: "Build three ordered images." } }] }), { status: 200 }); }
+    if (step === 2) { assert.equal(body.model, "nvidia/nemotron-3-super-120b-a12b"); return new Response(JSON.stringify({ error: { message: "visual endpoint unavailable" } }), { status: 503 }); }
+    if (step === 3) { assert.equal(body.model, "deepseek-v4-pro"); return new Response(JSON.stringify({ error: { message: "visual endpoint unavailable" } }), { status: 503 }); }
+    if (step === 4) { assert.equal(body.model, "nvidia/nemotron-3-ultra-550b-a55b"); return new Response(JSON.stringify({ error: { message: "visual endpoint unavailable" } }), { status: 503 }); }
     assert.equal(body.model, "claude-sonnet-5");
     assert.match(body.messages.at(-1).content, /DEGRADED/);
     return new Response(JSON.stringify({ content: [{ type: "text", text: "The visual planner is unavailable; the director plan is saved." }] }), { status: 200 });
@@ -1610,24 +1694,52 @@ test("visual orchestrator failure is surfaced as structured degradation without 
   assert.deepEqual(out.body.degraded, ["visualOrchestrator"]);
   assert.equal(out.body.visualOrchestrator.available, false);
   assert.equal(out.body.visualOrchestrator.error.code, "nvidia_visual_orchestrator_http_503");
-  assert.deepEqual(providerCalls, ["deepseek-ai/deepseek-v4-pro", "nvidia/nemotron-3-ultra-550b-a55b", "claude-sonnet-5"]);
+  assert.deepEqual(providerCalls, ["deepseek-v4-pro", "nvidia/nemotron-3-super-120b-a12b", "deepseek-v4-pro", "nvidia/nemotron-3-ultra-550b-a55b", "claude-sonnet-5"]);
 });
 
-test("a director failure is explicit and never falls through to Sonnet", async () => {
+/*
+ * Deficiency 20's exact reproduction: the director's first-choice model is retired and answers
+ * HTTP 410 (matching deepseek-ai/deepseek-v4-pro's actual 2026-08-07 retirement). The ladder must
+ * skip it and serve from the next rung, carrying provenance back as ordinary servedBy metadata -
+ * the client must never see an error for a call any rung answered.
+ */
+test("director ladder skips a retired (410) rung and serves from the next, reporting servedBy", async () => {
+  const providerCalls = [];
+  const fetch = async (_url, options) => {
+    const body = JSON.parse(options.body); providerCalls.push(body.model);
+    if (body.model === "deepseek-v4-pro") return new Response(JSON.stringify({ error: { message: "This model has been retired." } }), { status: 410 });
+    if (body.model === "deepseek-ai/deepseek-v4-pro-0813") return new Response(JSON.stringify({ choices: [{ message: { content: routingBlock({ path: "quick_clip", needs_screenwriter: false, needs_storyboard: false, ready_to_generate: true, reason: "One shot.", suggested_recommendation: "generate", scene_draft: { title: "Retired-rung recovery", prompt: "A single establishing shot", duration: 5 } }) } }], usage: { total_tokens: 22 } }), { status: 200 });
+    if (body.model === "nvidia/nemotron-3-super-120b-a12b") throw new Error("visual orchestrator must not run for a plain quick_clip turn");
+    return new Response(JSON.stringify({ content: [{ type: "text", text: "Shot's ready when you are." }] }), { status: 200 });
+  };
+  const env = setup({ fetch });
+  const out = await call(env.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, message: "quick clip, one establishing shot" });
+  assert.equal(out.res.statusCode, 200, "a retired first rung must never surface to the client as an error");
+  assert.deepEqual(providerCalls.slice(0, 2), ["deepseek-v4-pro", "deepseek-ai/deepseek-v4-pro-0813"]);
+  assert.equal(out.body.director.servedBy.provider, "nvidia");
+  assert.equal(out.body.director.servedBy.model, "deepseek-ai/deepseek-v4-pro-0813");
+  assert.equal(out.body.routing.path, "quick_clip");
+  assert.equal(out.body.sceneDraft.prompt, "A single establishing shot");
+});
+
+test("a director failure surfaces to the client only after every ladder rung is exhausted", async () => {
   const calls = [];
   const fetch = async (url) => { calls.push(String(url)); return new Response(JSON.stringify({ error: { message: "model is unavailable" } }), { status: 404 }); };
   const env = setup({ fetch });
   const out = await call(env.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, action: "build_storyboard", message: "Change the ending" });
   assert.equal(out.res.statusCode, 400);
-  assert.equal(out.body.code, "nvidia_director_http_404");
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].includes("nvidia"), true);
+  assert.equal(out.body.code, "anthropic_http_404");
+  assert.equal(calls.length, 4, "deepseek, nvidia (x2), and anthropic must each be tried before the turn fails");
+  assert.equal(calls[0].includes("deepseek"), true);
+  assert.equal(calls[1].includes("nvidia"), true);
+  assert.equal(calls[2].includes("nvidia"), true);
+  assert.equal(calls[3].includes("anthropic"), true);
 });
 
-test("a provider deadline abort is returned once as a timeout instead of being retried", async () => {
+test("a provider deadline abort surfaces as a timeout only after every ladder rung times out", async () => {
   let calls = 0; const fetch = async () => { calls++; const error = new Error("deadline"); error.name = "AbortError"; throw error; };
   const env = setup({ fetch }); const out = await call(env.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, action: "build_storyboard", message: "Change the ending" });
-  assert.equal(out.res.statusCode, 504); assert.equal(out.body.code, "nvidia_director_timeout"); assert.equal(calls, 1);
+  assert.equal(out.res.statusCode, 504); assert.equal(out.body.code, "anthropic_timeout"); assert.equal(calls, 4);
 });
 
 test("the aggregate AI-turn deadline stops before another provider request and never retries completed work", async () => {
@@ -1640,7 +1752,7 @@ test("the aggregate AI-turn deadline stops before another provider request and n
   const env = setup({ fetch, now: () => clock, nvidia: { aiTurnTimeoutMs: 30_000 } });
   const out = await call(env.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, action: "build_storyboard", message: "Tighten the reveal" });
   assert.equal(out.res.statusCode, 504); assert.equal(out.body.code, "video_ai_turn_timeout");
-  assert.deepEqual(providerCalls, ["deepseek-ai/deepseek-v4-pro"]);
+  assert.deepEqual(providerCalls, ["deepseek-v4-pro"]);
   assert.equal(env.calls.some((entry) => entry[0] === "updateAiState"), false);
 });
 
@@ -1650,11 +1762,11 @@ test("deployment drain tracks an active AI turn and refuses new AI work until it
   const providerCalls = [];
   const fetch = async (_url, options) => {
     const body = JSON.parse(options.body); providerCalls.push(body.model);
-    if (body.model === "deepseek-ai/deepseek-v4-pro") {
+    if (body.model === "deepseek-v4-pro") {
       announceDirector(); await new Promise((resolve) => { releaseDirector = resolve; });
       return new Response(JSON.stringify({ choices: [{ message: { content: "Preserve the final beat." } }], usage: { total_tokens: 10 } }), { status: 200 });
     }
-    if (body.model === "nvidia/nemotron-3-ultra-550b-a55b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ imagePrompt: "A quiet final frame" }] }) } }] }), { status: 200 });
+    if (body.model === "nvidia/nemotron-3-super-120b-a12b") return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ scenes: [{ imagePrompt: "A quiet final frame" }] }) } }] }), { status: 200 });
     return new Response(JSON.stringify({ content: [{ type: "text", text: "The final beat is preserved." }] }), { status: 200 });
   };
   const env = setup({ fetch });
@@ -1668,33 +1780,49 @@ test("deployment drain tracks an active AI turn and refuses new AI work until it
   releaseDirector(); assert.equal((await turn).res.statusCode, 200);
   const drained = await draining;
   assert.deepEqual(drained, { pending: 1, completed: 1, timedOut: false });
-  assert.deepEqual(providerCalls, ["deepseek-ai/deepseek-v4-pro", "nvidia/nemotron-3-ultra-550b-a55b", "claude-sonnet-5"]);
+  assert.deepEqual(providerCalls, ["deepseek-v4-pro", "nvidia/nemotron-3-super-120b-a12b", "claude-sonnet-5"]);
   assert.equal(env.calls.filter((entry) => entry[0] === "updateAiState").length, 1);
 });
 
-test("AI requests enforce exact role models and final serialized context windows", async () => {
+/*
+ * Deficiency 20 (stabilize 2026-09-03) replaced a single admin-overridable model per role with a
+ * fixed, code-owned ladder of provider/model rungs per role - there is no longer a "wrong model"
+ * override to reject (director_model_mismatch/screenwriter_model_mismatch no longer exist as
+ * mechanisms). Disclosed test-scope narrowing: what remains meaningful here is that an agent with
+ * NO credentials on any of its rungs is honestly reported unavailable, never silently answered from
+ * an uncredentialed rung, plus the still-unchanged context-window limits below.
+ */
+test("AI requests report every role honestly unconfigured with no credentials, and still enforce final serialized context windows", async () => {
   let providerCalls = 0;
-  const wrongDirector = setup({ nvidia: { directorModel: "another/model" }, fetch: async () => { providerCalls++; throw new Error("must not call"); } });
-  const mismatch = await call(wrongDirector.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, message: "Plan this" });
-  assert.equal(mismatch.res.statusCode, 503); assert.equal(mismatch.body.code, "director_model_mismatch"); assert.equal(providerCalls, 0);
-
-  const wrongVisual = setup({ nvidia: { visualModel: "another/model" } });
-  const config = await call(wrongVisual.http, "GET", "/api/video/config");
-  assert.equal(config.body.agents.visualOrchestrator.model, "nvidia/nemotron-3-ultra-550b-a55b");
+  const noRoleCredentials = setup({ nvidia: { apiKey: () => "" }, anthropic: { apiKey: () => "" }, deepseek: { apiKey: () => "" }, fetch: async () => { providerCalls++; throw new Error("must not call"); } });
+  const config = await call(noRoleCredentials.http, "GET", "/api/video/config");
+  assert.equal(config.body.agents.director.configured, false);
   assert.equal(config.body.agents.visualOrchestrator.configured, false);
+  assert.equal(config.body.agents.liaison.configured, false);
+  const mismatch = await call(noRoleCredentials.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, message: "Plan this" });
+  // Every rung is unconfigured; the ladder skips deepseek/nvidia/nvidia and exhausts on the last
+  // (anthropic) rung's own "not configured" rejection - never a fabricated generic role code.
+  assert.equal(mismatch.res.statusCode, 503); assert.equal(mismatch.body.code, "anthropic_not_configured"); assert.equal(providerCalls, 0);
 
-  const wrongWriter = setup({ openrouter: { screenwriterModel: "another/model" }, fetch: async () => { providerCalls++; throw new Error("must not call"); } });
+  // Trinity/OpenRouter alone missing: /config honestly reports it unconfigured, but deficiency 20's
+  // screenwriter ladder means an actual request still succeeds via the DeepSeek-direct fallback
+  // rung rather than failing the turn - the whole point of the ladder.
+  let fallbackCalls = 0;
+  const wrongWriter = setup({ openrouter: { apiKey: () => "" }, fetch: async () => { fallbackCalls++; return new Response(JSON.stringify({ choices: [{ message: { content: "INT. FALLBACK OPENING - DAY" } }], usage: { total_tokens: 12 } }), { status: 200 }); } });
   const writerConfig = await call(wrongWriter.http, "GET", "/api/video/config");
   assert.equal(writerConfig.body.agents.screenwriter.model, "arcee-ai/trinity-large-thinking");
   assert.equal(writerConfig.body.agents.screenwriter.configured, false);
   setPersistedScreenplay(wrongWriter, "Write an opening");
-  const writerMismatch = await call(wrongWriter.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "Write an opening", limit: 115_000 });
-  assert.equal(writerMismatch.res.statusCode, 503); assert.equal(writerMismatch.body.code, "screenwriter_model_mismatch"); assert.equal(providerCalls, 0);
+  const viaFallback = await call(wrongWriter.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "Write an opening", limit: 115_000 });
+  assert.equal(viaFallback.res.statusCode, 200, "an unconfigured Trinity must fall through to the screenwriter's own direct-provider rungs, not fail the turn");
+  assert.equal(fallbackCalls, 1);
 
-  const missingWriter = setup({ openrouter: { apiKey: () => "" }, fetch: async () => { providerCalls++; throw new Error("must not call"); } });
-  setPersistedScreenplay(missingWriter, "Write an opening");
-  const unavailable = await call(missingWriter.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "Write an opening", limit: 115_000 });
-  assert.equal(unavailable.res.statusCode, 503); assert.equal(unavailable.body.code, "screenwriter_not_configured"); assert.equal(providerCalls, 0);
+  // Every screenwriter rung unconfigured: honestly reported unavailable with a structured code,
+  // never a silent 500 and never a fabricated call.
+  const noWriterAtAll = setup({ openrouter: { apiKey: () => "" }, deepseek: { apiKey: () => "" }, anthropic: { apiKey: () => "" }, fetch: async () => { providerCalls++; throw new Error("must not call"); } });
+  setPersistedScreenplay(noWriterAtAll, "Write an opening");
+  const unavailable = await call(noWriterAtAll.http, "POST", "/api/video/screenwrite", { projectId: PROJECT_ID, prompt: "Write an opening", limit: 115_000 });
+  assert.equal(unavailable.res.statusCode, 503); assert.equal(unavailable.body.code, "anthropic_not_configured"); assert.equal(providerCalls, 0);
 
   const oversized = setup({ fetch: async () => { providerCalls++; throw new Error("must not call"); } });
   const tooLarge = await call(oversized.http, "POST", "/api/video/chat", { projectId: PROJECT_ID, expectedProjectRevision: 1, message: "Plan this", context: { immutableNotes: "x".repeat(3_100_000) } });
