@@ -47,6 +47,13 @@ verified human-owner identity), PROD (measured against app.dominion.tools after 
    identifiers (email, name, phone, address, opaque id strings) only. Store-readiness accepts an icon
    larger than the slot (the Foundry returns 1024x1024 for the 512 slot).
 7. Build card read build.json beside the bundle; the kit writes it inside the bundle.
+8. The kit runtime (browser shim) had never executed anywhere: it read `state.status` and `level.name`
+   (the contract exposes `rules.status(state)` and `level.title`, so the status line read "undefined"),
+   drew no controls at all (neither the reference nor the generated render.js draws them, so every
+   button was an invisible tap target), and dispatched only pointer-down. It now draws every control
+   with a label from the palette, reads status through the contract, dispatches move/up, and survives a
+   render error. A fake-DOM boot smoke (`gamefactorykit_runtime_test.mjs`) boots the reference game and
+   a real generated bundle through it.
 
 ## Deviations, said plainly
 
