@@ -37,6 +37,14 @@ verified human-owner identity), PROD (measured against app.dominion.tools after 
   at 21:34Z (five minutes end to end), new bundle served, old build's approvals invalidated.
 - RIG: the kit runtime boots the generated bundle through a fake DOM (controls drawn, input dispatched).
 
+- PROD: main 1e76a89 deployed 2026-09-03 21:43Z (Railway 4c7b2848); the app serves 1e76a89;
+  `ops/prod-verify.mjs` ALL 8 CHECKS PASSED, including "game-factory supervisor and forge running".
+  Railway flags staged before the deploy: GAME_FACTORY_SUPERVISOR=1, GAME_FACTORY_FORGE=1,
+  GAME_FACTORY_QA_RUNNER=server, GAME_FACTORY_LEVELS=12, GAME_FACTORY_MAX_REPAIRS=3. Rollback: tag
+  prod-2026-09-03-before-gamefactory (d366e37) and /data/backups/pre-gamefactory-build-2026-09-03.tgz.
+  The first production game run needs the owner's own tap (Run to playtest), because the factory
+  refuses every non-human identity by design.
+
 ## Fixes found by integration (not by the lanes)
 
 1. Supervisor stall after a non-retryable forge failure and an owner Retry: the build existed, its only
