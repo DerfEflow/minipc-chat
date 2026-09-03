@@ -588,6 +588,80 @@ export function createImagesFeature(deps) {
     });
   }
 
+  /*
+   * ---- Programmatic entry point for internal callers (video-characters lane, 2026-09-03) ----
+   *
+   * Character reference images run through the exact same Foundry ladder (paid gpt-image-2 ->
+   * safety rewrite -> free draft) as POST /api/images/generate, but a Video Studio character
+   * create/add-image call has no req/res of its own — it already has a resolved tenant and a
+   * built prompt. This duplicates NONE of the ladder logic: it calls the same normalizeItem/
+   * parseRefs/callPaidOnce/isSafetyError/rewriteForSafety/draftOne/usageCostUsd/priceFor helpers
+   * handleGenerate uses above, so the two paths cannot drift apart. handleGenerate itself is
+   * untouched (LANE-video-characters.md: "no behavior change to the HTTP handler").
+   *
+   * Returns the same shape handleGenerate's JSON body carries on success
+   * ({ images, model, quality, aspect, size, costUsd, servedBy, note }), or { error } — never
+   * throws, so a caller can treat a total-unavailability case as data rather than an exception.
+   */
+  async function generateImagesInternal({ tenant = null, prompt, quality = "medium", aspect = "portrait", n = 1, refs = [] } = {}) {
+    const item = normalizeItem({ prompt, quality, aspect, n }, { maxN: SYNC_MAX_N });
+    if (item.error) return { error: item.error };
+    const parsedRefs = parseRefs(refs);
+    if (parsedRefs.error) return { error: parsedRefs.error };
+    const screen = screenContent(item.prompt, { isOwner: !!tenant?.isOwner });
+    if (screen.blocked) return { error: screen.reason, code: "content_blocked" };
+    if (!key() && !nvidiaKey()) return { error: "Image generation is not configured on this server (no OpenAI or NVIDIA key)." };
+
+    let promptUsed = item.prompt;
+    let rewriteInfo = null;
+    let attempt = key()
+      ? await callPaidOnce(promptUsed, item, parsedRefs.refs, { timeout: 60000 })
+      : { ok: false, status: 0, msg: "Image generation needs the OpenAI key (OPEN_AI_DOMINION_UI_APIKEY)." };
+
+    if (!attempt.ok && isSafetyError(attempt.msg)) {
+      const rewritten = await rewriteForSafety(item.prompt);
+      if (rewritten) { rewriteInfo = rewritten; promptUsed = rewritten.text; attempt = await callPaidOnce(promptUsed, item, parsedRefs.refs, { timeout: 60000 }); }
+    }
+
+    if (attempt.ok) {
+      const costUsd = usageCostUsd(attempt.usage) ?? +(priceFor(item.quality, item.aspect) * attempt.images.length).toFixed(6);
+      if (costUsd && tenant && !tenant.isOwner) meter(tenant, costUsd);
+      await logUsage({ ts: new Date().toISOString(), model, mode: "image", status: "completed", images: attempt.images.length, quality: item.quality, aspect: item.aspect, refs: parsedRefs.refs.length || null, costUsd, rewritten: !!rewriteInfo, uid: tenant?.uid, source: "video_character" });
+      log(`image gen (video character): ${attempt.images.length} ${item.quality}/${item.aspect}${rewriteInfo ? " (prompt rewritten by " + rewriteInfo.model + " after a safety rejection)" : ""} · $${costUsd} · ${tenant?.isOwner ? "owner" : tenant?.email || tenant?.uid || "unknown"}`);
+      return {
+        images: attempt.images.map((b64) => ({ b64, format: "png" })),
+        model, quality: item.quality, aspect: item.aspect, size: item.size, costUsd,
+        servedBy: { engine: "paid", model, quality: item.quality },
+        note: rewriteInfo ? `the prompt was adjusted by ${rewriteInfo.model} after a safety rejection; the subject was kept` : undefined,
+      };
+    }
+
+    // Paid failed (possibly after the one safety-rewrite retry): fall to the free draft engine
+    // before ever returning the paid engine's raw error, same rule as handleGenerate above.
+    const paidFailureMsg = attempt.msg;
+    if (!nvidiaKey()) {
+      await logUsage({ ts: new Date().toISOString(), model, mode: "image", status: "error", error: paidFailureMsg.slice(0, 200), uid: tenant?.uid, source: "video_character" });
+      return { error: paidFailureMsg + " The free draft engine is not configured on this server either (no NVIDIA key)." };
+    }
+    const draftPrompt = rewriteInfo ? promptUsed : item.prompt;
+    const draftAttempts = await Promise.all(Array.from({ length: item.n }, () => draftOne(draftPrompt, item.size, item.quality)));
+    const draftImages = draftAttempts.filter((a) => a.b64).map((a) => ({ b64: a.b64, format: "png" }));
+    if (!draftImages.length) {
+      const draftMsg = draftAttempts.find((a) => a.error)?.error || "Draft generation returned no images.";
+      await logUsage({ ts: new Date().toISOString(), model, mode: "image", status: "error", error: (paidFailureMsg + " | draft: " + draftMsg).slice(0, 200), uid: tenant?.uid, source: "video_character" });
+      return { error: paidFailureMsg + " The free draft engine also failed: " + draftMsg };
+    }
+    const notes = [`served by the free draft engine after the paid engine failed (${paidFailureMsg})`];
+    if (rewriteInfo) notes.push(`the prompt was first adjusted by ${rewriteInfo.model} for a safety rejection, subject kept`);
+    await logUsage({ ts: new Date().toISOString(), model: draftModel, mode: "image_draft", status: "completed", images: draftImages.length, quality: item.quality, aspect: item.aspect, costUsd: 0, fallbackFrom: model, fallbackReason: paidFailureMsg.slice(0, 200), uid: tenant?.uid, source: "video_character" });
+    log(`image gen (video character) fell back to draft: ${draftImages.length}/${item.n} ${item.quality}/${item.aspect} · paid engine failed (${paidFailureMsg}) · ${tenant?.isOwner ? "owner" : tenant?.email || tenant?.uid || "unknown"}`);
+    return {
+      images: draftImages, model: draftModel, quality: item.quality, aspect: item.aspect, size: item.size, costUsd: 0,
+      servedBy: { engine: "draft", model: draftModel, quality: item.quality },
+      note: notes.join("; "),
+    };
+  }
+
   // ---- POST /api/images/refine — sharpen a creative directive with a cheap text model.
   // Same wall as generation; metered from real usage at the refine model's published rates.
   async function handleRefine(req, res) {
@@ -881,5 +955,5 @@ export function createImagesFeature(deps) {
     return json(res, 200, { id: job.id, status: job.status });
   }
 
-  return { handleConfig, handleGenerate, handleRefine, handleBatchCreate, handleBatchList, handleBatchGet, handleBatchCancel };
+  return { handleConfig, handleGenerate, handleRefine, handleBatchCreate, handleBatchList, handleBatchGet, handleBatchCancel, generateImagesInternal };
 }

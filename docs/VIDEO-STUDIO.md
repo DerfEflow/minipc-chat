@@ -259,6 +259,126 @@ Primary references: [Sonnet 5 changes](https://platform.claude.com/docs/en/about
 [vision](https://platform.claude.com/docs/en/build-with-claude/vision), and
 [pricing](https://platform.claude.com/docs/en/about-claude/pricing).
 
+## Characters and productions
+
+Video Studio is a hybrid of InVideo-style character consistency and Veo3-style single-button
+production (Fred, 2026-09-03). A **character** is a permanent, account-level record — no project
+scoping, no expiry, survives project deletion — created once through the exact same Foundry image
+ladder (`images.mjs`: paid `gpt-image-2` → one safety-rewrite retry → free draft engine) the
+Foundry itself uses, via a programmatic entry point (`generateImagesInternal`) rather than a second
+implementation. An image is produced whenever either engine is configured; total unavailability
+(neither OpenAI nor NVIDIA configured) still creates the character record with a plain-language
+note rather than refusing the whole request, consistent with the house rule that nothing may fail
+to produce a viable result while an alternative — here, "the character exists and can be given an
+image later" — remains available.
+
+Storage: `DATA_DIR/video/users/<tenantId>/characters/index.json` plus
+`characters/<id>/ref-<n>.png`, where `n` is a stable per-character sequence number (not an array
+position), so deleting one image never renumbers another out from under a client holding its URL.
+A character is `{ id, name, description, style, voiceNotes, images: [{ n, file, engine, model,
+quality, prompt, createdAt }], createdAt, updatedAt }`.
+
+### Routes
+
+All character routes are tenant-scoped, available to owners and credit users alike, and gated by
+the same desktop-capability rule as every other Video Studio write.
+
+| Route | Behavior |
+|---|---|
+| `GET /api/video/characters` | List, with each image's servable URL. |
+| `POST /api/video/characters` | `{ name, description, style?, voiceNotes?, quality?: "low"\|"medium", count?: 1-3 }`. Builds the prompt as `name. description. style. character reference sheet, neutral background, full body and face clearly visible.` and generates `count` reference images through the Foundry ladder. |
+| `POST /api/video/characters/:id/images` | `{ prompt }` generates one more image the same way, or `{ b64 }` stores an uploaded PNG directly (no provider call, no charge). |
+| `DELETE /api/video/characters/:id/images/:n` | Removes one image by its stable sequence number. |
+| `PATCH /api/video/characters/:id` | Updates name/description/style/voiceNotes. |
+| `DELETE /api/video/characters/:id` | Refuses with 409 `character_attached` if the character is attached to any project's `characters` list or any scene's `characterIds`, unless `{ force: true }`, which detaches it everywhere (every project, every scene) before deleting. |
+| `GET /api/video/characters/:id/images/:n` | Serves the PNG, tenant-checked, `cache-control: private, max-age=31536000, immutable` (a new image always gets a new `n`, so the URL is content-stable). |
+
+### Project and scene attachment
+
+`POST /api/video/projects/:id/characters { characterIds, expectedProjectRevision }` sets the
+project's `characters` field (an ordered list of `{ id, role }`, role optional free text) after
+verifying every id resolves to a real character for that tenant. `GET /projects/:id` always returns
+a hydrated `cast` array (`{ id, name, description, voiceNotes, role, image, imageN }`) alongside the
+raw `characters` attachment list, so the storyboard renders its chips and the producer's prompts
+have names/descriptions/voice notes without a second round trip. A character deleted out from under
+a project attachment is silently skipped in `cast`, never an error.
+
+Scenes carry their own `characterIds: []`, editable through the existing checkpoint path exactly
+like every other scene field. Deleting an attached character is refused (409) unless forced, per the
+routes table above; forcing detaches it from every project's `characters` list and every scene's
+`characterIds` in one pass (`video.mjs` `removeCharacterFromAllProjects`).
+
+### Screenwriter and visual-orchestrator CAST awareness
+
+When a project has an attached cast, both the screenwriter (Trinity and its fallback rungs) and the
+visual orchestrator receive a `CAST` block (name, description, voice notes) ahead of the rest of
+their prompt, and are instructed to use each character's exact listed name. The visual orchestrator
+is additionally asked to return `"characterNames": []` per scene (the cast members that scene
+uses); the server resolves those names to character ids by exact case-insensitive match
+(`mapCharacterNamesToScenes`) and writes `scene.characterIds`. An unmatched name is never dropped
+from wherever the model already wrote it (the scene's own prose fields) — it simply is not added to
+`characterIds`, so a typo or a character outside the project's roster degrades to plain text rather
+than vanishing.
+
+### Chat-triggered scriptwriting
+
+From the director chat, three tiers of intent detection decide whether to run the screenwriter
+immediately, in order: (1) the client's own explicit `action: "screenwrite"` (a UI affordance
+sending it), (2) a small deterministic phrase matcher on the message text ("write the script",
+"screenplay", "storyboard this", "scenes for"), (3) the creative director's own classification —
+its existing routing JSON block now carries an optional top-level `"action":"screenwrite"`,
+sibling to `"routing"`, which the director sets only when the user is explicitly asking for the
+script *right now*, not merely describing a story that could use one.
+
+Any of the three routes to the same path: the chat message, with the last twelve turns of prior
+conversation folded in as context, becomes the brief for `executeScreenwriterTurn` — the exact same
+durable, reconciliation-safe function `POST /screenwrite` uses, so a chat-triggered write gets the
+same crash-safety and billing-exactness guarantees as the dedicated screenwriter panel. The freshly
+saved screenplay is then handed to the CAST-aware visual orchestrator to produce the storyboard, and
+both are persisted through the normal `updateAiState` checkpoint (the same path plain chat uses for
+its own visual plan). The chat reply is a deterministic summary of what was actually saved (word
+count, scene count) rather than a further paid liaison call — a disclosed scope narrowing: running
+director-classification tier (3) already costs one provider call, and adding a liaison call on top
+of the screenwriter and visual-orchestrator calls already made would be a third and fourth paid
+round trip for a turn whose content is already fully described by what was just written and saved.
+
+### Produce: one button, one consistent production
+
+`POST /api/video/produce { projectId, expectedProjectRevision, model?, quality?, dryRun? }` composes,
+for every storyboard scene, one production prompt:
+
+```
+Purpose: <project purpose> for <project platform>.  <scene prompt>
+CHARACTERS: <Name>: <description>; keep face, hair, wardrobe and proportions identical to the
+  reference images. <repeated per attached character, most-used across the whole production first>
+Style: <project style>
+```
+
+A missing or out-of-range scene duration is filled from the model's range rather than refused. When
+the selected model supports `mode: "reference"` and at least one attached character has a generated
+image, the scene submits in reference mode with that model's `maxReferenceImages` most-used
+characters' images (read straight off disk and sent as base64 data URIs — the character-image route
+is tenant-authenticated, so Runware cannot fetch it as a URL); otherwise the scene submits in text
+mode, relying on the CHARACTERS block alone. `dryRun: true` returns the composed prompts and a
+`referencePlan` (which characters, never raw image bytes) without creating any job or production
+record. A real run submits scene jobs in storyboard order at most 2 in flight, each with idempotency
+key `produce-<productionId>-<sceneId>`, and records a bounded production ledger entry
+(`video.mjs` `createProduction`) carrying each scene's exact composed prompt/duration/ratio/
+resolution so a later retry never has to re-derive them from a storyboard the user may have since
+edited.
+
+`GET /api/video/produce/:id?projectId=` reports live per-scene status by reusing the exact same
+settle-and-download path `GET /jobs/:id` uses (`settleAndDescribeJob`), so a scene that reaches
+`ready` is already a playable timeline clip by the time the client sees that status. A scene whose
+job Runware itself reports `failed` — after that job's own existing built-in one-time
+provider-failure retry has already been exhausted — is resubmitted exactly once more in text mode
+(dropping reference images, keeping the same CHARACTERS-block prompt) before ever being reported as
+`needs attention`; while that retry is outstanding the status reads `retrying: consistency
+degraded`, never a bare error. For credit (non-owner) accounts, the standard video billing gate is
+pre-checked once before the whole production starts and again before each individual scene submits;
+a mid-production shortfall pauses the remaining, not-yet-submitted scenes with status `paused: add
+credits` and leaves already-submitted scenes to finish normally — never a failure toast.
+
 ## Settlement repair runbook
 
 This is a financial break-glass path. It is owner-only, operates through the live application
