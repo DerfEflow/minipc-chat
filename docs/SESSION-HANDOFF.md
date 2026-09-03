@@ -88,3 +88,17 @@ Full autonomy on this project (his standing directive). Reply format = essential
 steps with a recommendation; he replies with a number. No em dashes, no "not X but Y" constructions.
 `F:\` + sandbox = full access; `C:\Documents` = read-only except an app's own backup folder, never
 delete without permission. Snapshot/branch before risky changes.
+
+## Game Factory build (2026-09-03 evening): the factory now produces games
+
+Owner order: "build it so that it works and produces games that can be previewed natively and then iterated."
+Design: docs/GAME-FACTORY-BUILD.md. Results ledger: docs/GAME-FACTORY-BUILD-RESULTS.md.
+New modules: gamefactorykit/ (kit, 12-suite QA harness, reference game), gamefactoryqa.mjs (permission-sandboxed
+server QA runner), gamefactoryforge.mjs (server worker: design, assets, code generation with model ladders),
+gamefactorysupervisor.mjs (stage supervisor: approvals and evidence become transitions), gamefactorybuilds.mjs
+(bundle view for the play route). Flags: GAME_FACTORY_SUPERVISOR=1, GAME_FACTORY_FORGE=1, GAME_FACTORY_QA_RUNNER=server.
+Owner flow: Run to playtest (one tap) -> plan + planning approvals -> design -> assets -> build -> 12 QA suites ->
+PLAYTEST_READY -> Play current build (served by the server at /api/game-factory/games/:id/builds/:buildId/play/) ->
+Approve playtest or Request changes (revise loop, new build, QA, PLAYTEST_READY again).
+Traps: projects are keyed by the owner's TENANT uid (tenancy userIdFor(email)), never "owner"; the factory admits
+only a verified human owner session, so scripts cannot drive it in production (rig uses a locally signed CF JWT).
