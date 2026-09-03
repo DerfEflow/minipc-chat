@@ -148,6 +148,9 @@ function errorPayload(error, requestId) {
   const mediaStatus = media ? (error.code === "STORAGE_QUOTA_EXCEEDED" ? 507 : /UNAVAILABLE/.test(error.code) ? 503 : /DOWNLOAD|EMPTY|INVALID_VIDEO_OUTPUT|INVALID_MEDIA_OUTPUT/.test(error.code) ? 502 : 400) : 500;
   const status = known ? (media ? mediaStatus : Number(error.status)) : 500;
   const code = known ? String(error.code || "video_error") : "video_internal";
+  // An unknown fault used to leave no trace anywhere but a requestId in the client's error toast.
+  // Log it server-side so the cause is diagnosable (stabilize 2026-09-03).
+  if (!known) console.error(`[video] internal fault ${requestId}:`, error && error.stack ? error.stack : error);
   const message = known
     ? cleanText(error.message, 800) || "The video operation could not be completed."
     : "Dominion Video hit an internal fault. Nothing was marked complete or charged by this response.";
