@@ -466,7 +466,12 @@ try {
     assert.equal(missingDrive.status, 409);
     assert.equal(missingDrive.body.code, "native_project_drive_unverified");
     assert.equal(store.recordArtifactCopy({ uid: owner, artifactId: made.body.artifactId, backend: "google_drive", status: "VERIFIED", fingerprint: hash }).status, 200);
-    assert.equal(store.getProject(owner, projectId).artifacts[0].complete, false);
+    // Required behavior 1 (deficiency 15, 2026-09-03): chatgpt_project is a DEFERRED backend, not
+    // mandatory. With this default store config, primary+google_drive verified is already complete;
+    // native Project evidence remains a genuine, still-tested append-only mechanism below, it just
+    // no longer gates completeness for the default MANDATORY_ARTIFACT_BACKENDS.
+    assert.equal(store.getProject(owner, projectId).artifacts[0].complete, true);
+    assert.equal(store.getProject(owner, projectId).artifacts[0].copies.find((copy) => copy.backend === "chatgpt_project").status, "DEFERRED");
     const rejected = store.recordArtifactCopy({ uid: owner, artifactId: made.body.artifactId, backend: "chatgpt_project", status: "VERIFIED", fingerprint: hash });
     assert.equal(rejected.status, 403);
     assert.equal(rejected.body.code, "native_project_evidence_offline_only");
