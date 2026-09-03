@@ -244,7 +244,10 @@
     const single=isMobileSingle(), cap=capability(), mobile=state.drafts.mobileMedia, modes=cap?.modes||['text'];
     const mode=modes.includes(mobile.mode)?mobile.mode:modes[0], screenwriterAvailable=state.config?.agents?.screenwriter?.configured===true&&state.config?.screenwriter?.available===true;
     const writerRecovering=state.screenwriterRecovery?.pending===true,projectOperationBusy=!!projectSwitching||state.inflight.chat||generationBusy()||state.inflight.import||state.inflight.export,generationDisabled=generationBusy()||!!projectSwitching||(!single&&projectEditLocked())?'disabled aria-disabled="true"':'', chatDisabled=projectEditLocked()||!!projectSwitching?'disabled aria-disabled="true"':'', writerDisabled=!screenwriterAvailable||state.inflight.screenwriter||writerRecovering||projectOperationBusy;
-    const messageMarkup=state.messages.map(m=>`<article class="${m.role==='user'?'user':m.role==='status'?'degraded':''}">${m.role==='assistant'?'<b>Video liaison</b>':m.role==='status'?'<b>Orchestration status</b>':''}<p>${esc(m.code?`${m.code}: ${m.content}`:m.content)}</p></article>`).join('');
+    // servedBy: which ladder rung actually answered (stabilize 2026-09-03, LANE-video required
+    // behavior #2) - shown as ordinary provenance in the existing status line, never as an error.
+    const servedByTag=sb=>{const m=sb?.liaison;return m?.model?`<small class="dv-served-by">Answered by ${esc(String(m.model).split('/').at(-1)||m.model)}${m.provider?` · ${esc(m.provider)}`:''}</small>`:'';};
+    const messageMarkup=state.messages.map(m=>`<article class="${m.role==='user'?'user':m.role==='status'?'degraded':''}">${m.role==='assistant'?'<b>Video liaison</b>':m.role==='status'?'<b>Orchestration status</b>':''}<p>${esc(m.code?`${m.code}: ${m.content}`:m.content)}</p>${m.role==='assistant'?servedByTag(m.servedBy):''}</article>`).join('');
     /*
      * The producer's recommendation, as one tap. The server decides which chips exist from the
      * creative director's routing verdict, so the client never guesses intent, and there is always

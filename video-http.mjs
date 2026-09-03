@@ -19,9 +19,23 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_PROVIDER_BYTES = 2 * 1024 * 1024;
 const MAX_SCREENPLAY_CHARS = 460_000;
 const SCREENWRITER_MODEL = "arcee-ai/trinity-large-thinking";
-const DIRECTOR_MODEL = "deepseek-ai/deepseek-v4-pro";
-const VISUAL_MODEL = "nvidia/nemotron-3-ultra-550b-a55b";
 const SONNET_MODEL = "claude-sonnet-5";
+/*
+ * MODEL LADDERS (stabilize 2026-09-03, deficiency 20 + LANE-video required behavior #2). NVIDIA
+ * retired deepseek-ai/deepseek-v4-pro on 2026-08-07 (every director turn 410'd in production, and
+ * the old visual orchestrator alone took 50-57s). Fred's overriding rule is that nothing may end
+ * in a silent or announced error while an alternative remains untried, so every agent now has an
+ * ordered ladder of provider+model rungs instead of one hardcoded model. runAgentLadder (below)
+ * walks the list and returns the first rung that answers with usable content; the served rung is
+ * recorded as ordinary metadata (servedBy), never as a degraded/error state. Model ids for NVIDIA
+ * and DeepSeek-direct were confirmed live on the rig 2026-09-03 (see specs/LANE-video.md).
+ */
+const HAIKU_MODEL = "claude-haiku-4-5-20251001"; // Anthropic direct model id (models.catalog.mjs directId); "claude-haiku-4-5" is the display/catalog id only.
+const DEEPSEEK_PRO_MODEL = "deepseek-v4-pro"; // DeepSeek direct (api.deepseek.com), not the OpenRouter-style "deepseek/deepseek-v4-pro" id.
+const DEEPSEEK_FLASH_MODEL = "deepseek-v4-flash"; // DeepSeek direct.
+const NVIDIA_DEEPSEEK_MODEL = "deepseek-ai/deepseek-v4-pro-0813"; // NVIDIA's live replacement for the retired deepseek-ai/deepseek-v4-pro.
+const NVIDIA_NEMOTRON_SUPER_MODEL = "nvidia/nemotron-3-super-120b-a12b"; // NVIDIA, ~4.4s.
+const NVIDIA_NEMOTRON_ULTRA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"; // NVIDIA, 50-57s for five tokens; last resort only.
 const SCREENWRITER_CONTEXT_TOKENS = 115_000;
 const SCREENWRITER_MAX_OUTPUT_TOKENS = 16_384;
 const SCREENWRITER_MIN_OUTPUT_TOKENS = 8_192;
@@ -67,6 +81,25 @@ function failWithScreenwriterAttempt(status, code, message, attempt) {
   throw error;
 }
 const clone = (value) => value == null ? value : structuredClone(value);
+/*
+ * PLAIN TENANT PROJECTION (stabilize 2026-09-03, deficiency 19). Every POST /api/video/jobs 500'd
+ * with a DataCloneError: the signed-in tenant object (OWNER_T / tenants.resolve() in server.mjs)
+ * carries live handles - a `memory` object with a `propose()` function, plus chatlog/artifacts/
+ * flywheel/etc - and structuredClone refuses to clone a function. billingGate (server.mjs) and
+ * everything downstream of submitGeneration's billingContext.tenant only ever reads isOwner, role,
+ * and email, so there was never a reason to hand it the whole live tenant. Project onto exactly the
+ * fields any video code reads, which are all structured-clone-safe by construction.
+ */
+const plainTenant = (tenant) => ({
+  id: tenant?.id ?? null,
+  uid: tenant?.uid ?? null,
+  email: tenant?.email ?? null,
+  role: tenant?.role ?? null,
+  isOwner: !!tenant?.isOwner,
+  invited: !!tenant?.invited,
+  status: tenant?.status ?? null,
+  tenantId: tenant?.tenantId ?? null,
+});
 const cleanText = (value, max = 20_000) => String(value || "").trim().slice(0, max);
 const trimSlash = (value) => String(value || "").replace(/\/+$/, "");
 const credential = (value) => cleanText(typeof value === "function" ? value() : value, 20_000);
@@ -379,9 +412,11 @@ export function createVideoHttp({
   openrouter = {},
   nvidia = {},
   anthropic = {},
+  deepseek = {},
   privacy = {},
   desktopPresence = null,
   now = Date.now,
+  bootProbe = false,
 } = {}) {
   if (!feature || typeof feature !== "object") throw new TypeError("feature is required");
   if (typeof resolveTenant !== "function") throw new TypeError("resolveTenant is required");
@@ -395,6 +430,7 @@ export function createVideoHttp({
   const activeScreenwriterTurns = new Set();
   const activeAiProjects = new Set();
   const activeAiTurns = new Set();
+  const rungHealth = new Map(); // rungKey -> {healthy, lastError, lastProbedAt}; demotion from the boot probe (required behavior #6).
   let screenwriterActivityVersion = 0;
   let screenwriterDraining = false;
   const presenceTtlMs = Math.max(15_000, Number(desktopPresence?.ttlMs) || 90_000);
@@ -440,7 +476,7 @@ export function createVideoHttp({
    * Private mode still refuses the studio outright: one provider, no exceptions, refuse rather
    * than substitute.
    */
-  const STUDIO_CREW_PROVIDERS = new Set(["runware", "nvidia", "openrouter", "anthropic"]);
+  const STUDIO_CREW_PROVIDERS = new Set(["runware", "nvidia", "openrouter", "anthropic", "deepseek"]);
   function requireProviderPrivacy(body, { provider, model }) {
     const requested = String(body?.privacyMode || "normal").trim().toLowerCase();
     const mode = new Set(["normal", "trusted", "private"]).has(requested) ? requested : "normal";
@@ -460,6 +496,75 @@ export function createVideoHttp({
     const remaining = Math.floor(Number(deadlineAt) - Number(now()));
     if (!Number.isFinite(remaining) || remaining <= 0) fail(504, "video_ai_turn_timeout", "The video AI turn reached its aggregate deadline before another provider request could start. Completed provider work was not silently retried.");
     return Math.max(1_000, Math.min(remaining, Math.max(1_000, Number(configuredTimeout) || 180_000)));
+  }
+
+  // The four provider configs a ladder rung can settle against, keyed the same way servedBy.provider names them.
+  const PROVIDER_CONFIG_BY_NAME = { nvidia, deepseek, anthropic, openrouter };
+
+  /*
+   * ONE SMALL LADDER HELPER (LANE-video required behavior #2, deficiency 20). Every studio agent
+   * below builds an ordered list of rungs - each a {provider, model, call} thunk - fresh per turn
+   * from live config. runAgentLadder tries each rung in order and returns the first one that
+   * answers with usable content. A rung's failure only stops the WHOLE ladder if it is not "the
+   * provider's fault" (see isLadderSkippable) or if every rung has now failed - Fred's rule that
+   * nothing may end in a silent or announced error while an alternative remains untried. The
+   * served rung rides back as ordinary metadata (servedBy), never as a degraded/error state.
+   */
+  function isLadderSkippable(error) {
+    if (!(error instanceof VideoHttpError)) return false;
+    const status = Number(error.status);
+    return Number.isInteger(status) && status >= 400 && status < 600;
+  }
+  function rungKey(agent, provider, model) { return `${agent}:${provider}:${model}`; }
+  function rungDemoted(agent, provider, model) {
+    const record = rungHealth.get(rungKey(agent, provider, model));
+    return !!record && record.healthy === false;
+  }
+  function recordRungHealth(agent, provider, model, healthy, error) {
+    rungHealth.set(rungKey(agent, provider, model), { healthy, lastError: healthy ? null : cleanText(error?.code || error?.message, 200) || null, lastProbedAt: Number(now()) });
+  }
+  async function runAgentLadder(agentName, rungs) {
+    const usable = rungs.filter((rung) => !rungDemoted(agentName, rung.provider, rung.model));
+    // A rung demoted by the hourly boot probe is skipped first, but demotion never fully blocks a
+    // turn: if every rung is currently demoted, try them all anyway rather than refuse outright.
+    const ordered = usable.length ? usable : rungs;
+    let lastError = null;
+    for (const rung of ordered) {
+      try {
+        const outcome = await rung.call();
+        recordRungHealth(agentName, rung.provider, rung.model, true);
+        return { ...outcome, servedBy: { agent: agentName, model: rung.model, provider: rung.provider } };
+      } catch (error) {
+        if (!isLadderSkippable(error)) throw error;
+        recordRungHealth(agentName, rung.provider, rung.model, false, error);
+        lastError = error;
+      }
+    }
+    throw lastError || new VideoHttpError(503, `${agentName}_ladder_exhausted`, `No configured model answered for ${agentName}. Nothing was silently substituted or marked complete.`);
+  }
+  // Shared OpenAI-chat-completions-shaped transport: NVIDIA and DeepSeek-direct both speak this dialect.
+  async function callOpenAiStyleTransport({ provider, apiKey, url, model, messages, maxTokens, temperature, topP, deadlineAt, timeoutMs, extraBody = {} }) {
+    if (!apiKey) fail(503, `${provider}_not_configured`, `${provider} is not configured. No substitute model was used for this rung.`);
+    const body = await providerPost(fetchImpl, url, {
+      provider,
+      headers: { Authorization: `Bearer ${apiKey}` },
+      timeoutMs: deadlineAt != null ? remainingAiTimeout(deadlineAt, timeoutMs) : Math.max(1_000, Number(timeoutMs) || 120_000),
+      retryAmbiguous: false,
+      body: { model, stream: false, messages, temperature, top_p: topP, max_tokens: maxTokens, ...extraBody },
+    });
+    return { text: openAiText(body, provider), usage: body.usage || null };
+  }
+  // Shared Anthropic Messages API transport: used for both the liaison and the director's last-resort rung.
+  async function callAnthropicTransport({ apiKey, url, model, system, messages, maxTokens, deadlineAt, timeoutMs, version }) {
+    if (!apiKey) fail(503, "anthropic_not_configured", "Claude is not configured. No substitute model was used for this rung.");
+    const body = await providerPost(fetchImpl, url, {
+      provider: "anthropic",
+      headers: { "x-api-key": apiKey, "anthropic-version": version || "2023-06-01" },
+      timeoutMs: deadlineAt != null ? remainingAiTimeout(deadlineAt, timeoutMs) : Math.max(1_000, Number(timeoutMs) || 120_000),
+      retryAmbiguous: false,
+      body: { model, max_tokens: maxTokens, ...(system ? { system } : {}), messages },
+    });
+    return { text: anthropicText(body), usage: body.usage || null };
   }
 
   function issueDesktopCapability(tenantId) {
@@ -691,11 +796,15 @@ export function createVideoHttp({
     };
   }
 
-  async function callScreenwriter(tenant, project, prompt, { onSubmitting = null, onGeneration = null } = {}) {
-    const apiKey = credential(openrouter.apiKey);
-    const configuredModel = cleanText(openrouter.screenwriterModel || SCREENWRITER_MODEL, 200);
-    if (configuredModel !== SCREENWRITER_MODEL) fail(503, "screenwriter_model_mismatch", `Video screenwriting requires ${SCREENWRITER_MODEL}; no substitute model was used.`);
-    if (!apiKey) fail(503, "screenwriter_not_configured", "Trinity Large Thinking is not configured through OpenRouter. No substitute model was used.");
+  /*
+   * Shared, provider-independent screenplay turn construction (LANE-video required behavior #2:
+   * "preserving the 115k-token contract"). Every screenwriter rung - Trinity or a fallback -
+   * writes from the exact same messages and is bound by the exact same immutable 115,000-token
+   * ceiling regardless of which model ends up serving it; the ceiling is not a per-model context
+   * window, it is Dominion's own promise to the project, so it is enforced once here rather than
+   * per rung.
+   */
+  function buildScreenwriterTurn(project, prompt) {
     const writerState = project?.ai?.screenwriter?.state && typeof project.ai.screenwriter.state === "object" ? project.ai.screenwriter.state : {};
     const generatedSections = Math.max(0, Number(writerState.generatedSections) || 0);
     const brief = generatedSections > 0 ? String(writerState.brief || "").slice(0, MAX_SCREENPLAY_CHARS) : prompt;
@@ -704,9 +813,8 @@ export function createVideoHttp({
     const userContent = generatedSections > 0
       ? `Project: ${cleanText(project?.project?.name || project?.name, 300)}\n\nOriginal story brief:\n${brief}\n\nCurrent screenplay (authoritative, including any user edits):\n${prompt}\n\nWrite only the next new screenplay section. Continue directly from the current ending, preserve continuity, and do not repeat or rewrite the existing screenplay.`
       : `Project: ${cleanText(project?.project?.name || project?.name, 300)}\n\nStory brief:\n${prompt}\n\nWrite only the opening screenplay section. Do not repeat the brief. Return screenplay text only.`;
-    const messages = [
-      { role: "system", content: "You are Dominion's principal screenwriter. Think carefully, then write vivid, production-ready screenplay prose with scene headings, action, dialogue, continuity, visual direction, and sound cues. Preserve the user's intent. Each response is one new screenplay section that Dominion saves atomically. Never repeat the existing screenplay, expose private reasoning, or claim a scene was generated or filmed." },
-    ];
+    const systemContent = "You are Dominion's principal screenwriter. Think carefully, then write vivid, production-ready screenplay prose with scene headings, action, dialogue, continuity, visual direction, and sound cues. Preserve the user's intent. Each response is one new screenplay section that Dominion saves atomically. Never repeat the existing screenplay, expose private reasoning, or claim a scene was generated or filmed.";
+    const messages = [{ role: "system", content: systemContent }];
     if (prior?.userContent && prior?.content) {
       const assistant = { role: "assistant", content: String(prior.content) };
       if (Array.isArray(prior.reasoningDetails)) assistant.reasoning_details = clone(prior.reasoningDetails);
@@ -717,10 +825,88 @@ export function createVideoHttp({
     const estimatedInput = requestTokenEstimate(messages);
     const remainingOutput = SCREENWRITER_CONTEXT_TOKENS - CONTEXT_SAFETY_TOKENS - estimatedInput;
     if (remainingOutput < SCREENWRITER_MIN_OUTPUT_TOKENS) {
-      fail(413, "video_screenplay_context_limit", `The Trinity screenwriter request needs about ${estimatedInput.toLocaleString()} input tokens, leaving too little room inside the immutable 115,000-token total limit. Shorten the screenplay or restore an earlier checkpoint; no content was compacted or silently dropped.`);
+      fail(413, "video_screenplay_context_limit", `The screenwriter request needs about ${estimatedInput.toLocaleString()} input tokens, leaving too little room inside the immutable 115,000-token total limit. Shorten the screenplay or restore an earlier checkpoint; no content was compacted or silently dropped.`);
     }
     const maxTokens = Math.min(SCREENWRITER_MAX_OUTPUT_TOKENS, Math.floor(remainingOutput));
-    enforceContextWindow("video_screenplay_context_limit", "The Trinity screenwriter request", messages, SCREENWRITER_CONTEXT_TOKENS, maxTokens);
+    enforceContextWindow("video_screenplay_context_limit", "The screenwriter request", messages, SCREENWRITER_CONTEXT_TOKENS, maxTokens);
+    return { messages, systemContent, userContent, brief, generatedSections, maxTokens };
+  }
+
+  // OpenAI-style usage (deepseek) uses prompt_tokens/completion_tokens; Anthropic uses input_tokens/output_tokens.
+  // Reshape either into the one ledger shape screenplay.set and the provider attempt record already expect.
+  function normalizeScreenwriterUsage(rawUsage, shape, costForUsage) {
+    const usage = rawUsage || {};
+    const promptTokens = shape === "anthropic" ? Math.max(0, Number(usage.input_tokens) || 0) : Math.max(0, Number(usage.prompt_tokens) || 0);
+    const completionTokens = shape === "anthropic" ? Math.max(0, Number(usage.output_tokens) || 0) : Math.max(0, Number(usage.completion_tokens) || 0);
+    const reasoningTokens = shape === "anthropic" ? 0 : Math.max(0, Number(usage.completion_tokens_details?.reasoning_tokens) || 0);
+    const cost = Math.max(0, Number(typeof costForUsage === "function" ? costForUsage(clone(usage)) : 0) || 0);
+    return { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens, cost, completion_tokens_details: { reasoning_tokens: reasoningTokens } };
+  }
+
+  // A rung failure with no HTTP status we can read as 4xx is still definitively unbilled when it
+  // never left this process (missing credential): no request was ever sent.
+  function rungDefinitivelyUnbilled(error) {
+    return definitiveProviderHttpRejection(error) || /_not_configured$/.test(String(error?.code || ""));
+  }
+
+  /*
+   * SCREENWRITER FALLBACK RUNGS (LANE-video required behavior #2, "preserving... the
+   * saved-checkpoint semantics"). Trinity (OpenRouter) keeps its full async generation-id
+   * reconciliation ledger untouched - that machinery exists because OpenRouter can accept and bill
+   * a request before the final response ever arrives, so an ambiguous Trinity failure MUST stay in
+   * the existing reconciliation-required path rather than risk a second paid call on top of an
+   * unresolved first one. DeepSeek-direct and Claude-direct are ordinary synchronous request/response
+   * calls: either the fetch returns a complete, priced result, or nothing was ever billed. Each
+   * fallback rung still gets its own durable "provider_submitting" placeholder for crash safety.
+   */
+  async function screenwriterFallbackRungs(tenant, project, prompt, turn, { tenantId, projectId, expectedScreenplaySha256, expectedScreenwriterGenerationId }) {
+    const deepseekUrl = endpoint(deepseek.baseUrl || "https://api.deepseek.com", "/chat/completions");
+    const anthropicUrl = endpoint(anthropic.baseUrl || "https://api.anthropic.com", "/v1/messages");
+    const anthropicMessages = turn.messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: String(m.content || "") }));
+    const rungs = [
+      { provider: "deepseek", model: DEEPSEEK_PRO_MODEL, shape: "openai", costForUsage: deepseek.costForUsage, call: () => callOpenAiStyleTransport({ provider: "deepseek_screenwriter", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_PRO_MODEL, messages: turn.messages, maxTokens: turn.maxTokens, temperature: 0.3, topP: 0.8, timeoutMs: deepseek.timeoutMs }) },
+      { provider: "anthropic", model: SONNET_MODEL, shape: "anthropic", costForUsage: anthropic.costForUsage, call: () => callAnthropicTransport({ apiKey: credential(anthropic.apiKey), url: anthropicUrl, model: SONNET_MODEL, system: turn.systemContent, messages: anthropicMessages, maxTokens: turn.maxTokens, timeoutMs: anthropic.timeoutMs, version: anthropic.version }) },
+    ];
+    let lastError = null;
+    for (const rung of rungs) {
+      let submissionAttempt = null;
+      try {
+        const candidate = { attemptId: `sw_local_${randomUUID().replaceAll("-", "")}`, generationId: null, status: "provider_submitting", rejectionCode: null, finishReason: null, sourceScreenplaySha256: expectedScreenplaySha256, sourceGenerationId: expectedScreenwriterGenerationId, settlement: { status: "awaiting_response", costUsd: 0 } };
+        try { await feature.applyCommand(tenantId, projectId, { type: "screenwriter.attempt", begin: true, attempt: candidate }); submissionAttempt = candidate; }
+        catch (submitError) {
+          const persistenceError = new VideoHttpError(503, "screenwriter_attempt_persist_failed", "Dominion could not durably record the fallback screenplay request before provider egress, so it was not called.");
+          persistenceError.cause = submitError; throw persistenceError;
+        }
+        const { text: rawText, usage: rawUsage } = await rung.call();
+        const text = String(rawText || "").trim();
+        if (!text) fail(502, `${rung.provider}_screenwriter_empty_response`, `${rung.provider} returned no usable screenplay text.`);
+        const usage = normalizeScreenwriterUsage(rawUsage, rung.shape, rung.costForUsage);
+        const generationId = `local_${randomUUID().replaceAll("-", "")}`;
+        const lastTurn = { userContent: turn.userContent, content: text };
+        const updatedText = turn.generatedSections > 0 ? `${prompt}\n\n${text.trimStart()}` : text;
+        const attempt = { attemptId: submissionAttempt.attemptId, generationId, status: "provider_accepted", rejectionCode: null, finishReason: "stop", usage, billable: true, settlement: { status: "pending", costUsd: usage.cost } };
+        await feature.applyCommand(tenantId, projectId, { type: "screenwriter.attempt", attempt: { ...submissionAttempt, generationId, status: "provider_correlated", settlement: { status: "not_billed", costUsd: 0 } } });
+        return {
+          text: updatedText, section: text, brief: turn.brief, generatedSections: turn.generatedSections + 1, lastTurn,
+          usage, model: rung.model, sessionId: null, attempt, generationId, finishReason: "stop", truncated: false,
+          servedBy: { agent: "screenwriter", provider: rung.provider, model: rung.model },
+        };
+      } catch (rungError) {
+        if (submissionAttempt) {
+          const rejected = rungDefinitivelyUnbilled(rungError);
+          await feature.applyCommand(tenantId, projectId, { type: "screenwriter.attempt", attempt: { ...submissionAttempt, status: rejected ? "provider_http_rejected" : "reconciliation_required", rejectionCode: cleanText(rungError?.code || "screenwriter_fallback_rejected", 120), settlement: { status: rejected ? "not_billed" : "awaiting_response", costUsd: 0 } } });
+        }
+        if (!isLadderSkippable(rungError)) throw rungError;
+        lastError = rungError;
+      }
+    }
+    throw lastError || new VideoHttpError(503, "screenwriter_ladder_exhausted", "No configured screenwriter model answered. Nothing was silently substituted or marked complete.");
+  }
+
+  async function callScreenwriterTrinity(tenant, project, prompt, turn, { onSubmitting = null, onGeneration = null } = {}) {
+    const apiKey = credential(openrouter.apiKey);
+    if (!apiKey) fail(503, "screenwriter_not_configured", "Trinity Large Thinking is not configured through OpenRouter. No substitute model was used.");
+    const { messages, userContent, brief, generatedSections, maxTokens } = turn;
     const providerUrl = cleanText(openrouter.url, 2_000) || endpoint(openrouter.baseUrl || "https://openrouter.ai/api/v1", "/chat/completions");
     const referer = cleanText(openrouter.referer, 2_000);
     const title = cleanText(openrouter.title || "Dominion AI", 200);
@@ -831,15 +1017,11 @@ export function createVideoHttp({
       text: updatedText, section: text, brief, generatedSections: generatedSections + 1, lastTurn,
       usage, model: SCREENWRITER_MODEL, sessionId, attempt,
       generationId, finishReason, truncated: finishReason === "length",
+      servedBy: { agent: "screenwriter", provider: "openrouter", model: SCREENWRITER_MODEL },
     };
   }
 
   async function callDirector(tenant, project, message, context, deadlineAt) {
-    const apiKey = credential(nvidia.apiKey);
-    const configuredModel = cleanText(nvidia.directorModel || DIRECTOR_MODEL, 200);
-    if (configuredModel !== DIRECTOR_MODEL) fail(503, "director_model_mismatch", `Video creative direction requires ${DIRECTOR_MODEL}; no substitute model was used.`);
-    const model = DIRECTOR_MODEL;
-    if (!apiKey) fail(503, "director_not_configured", "DeepSeek V4 Pro is not configured on the NVIDIA endpoint. No substitute model was used.");
     let conversation = Array.isArray(project?.messages) ? project.messages : [];
     const directorState = project?.ai?.director?.state || {};
     let compactedSummary = cleanText(directorState.compactedSummary, 100_000);
@@ -885,44 +1067,42 @@ export function createVideoHttp({
           { role: "system", content: "Compact this video-project conversation into a faithful working brief. Preserve every unresolved decision, character/visual continuity fact, user constraint, scene change, model decision, and failure. Remove repetition only. Return the brief alone." },
           { role: "user", content: JSON.stringify({ priorSummary: compactedSummary, conversation: chunk }) },
         ];
-        enforceContextWindow("video_director_context_limit", "The DeepSeek conversation-compaction request", compactionMessages, LONG_CONTEXT_TOKENS, 16_384);
-        const compacted = await providerPost(fetchImpl, endpoint(nvidia.baseUrl || "https://integrate.api.nvidia.com/v1", "/chat/completions"), {
-          provider: "nvidia_director_compaction", headers: { Authorization: `Bearer ${apiKey}` }, timeoutMs: remainingAiTimeout(deadlineAt, nvidia.timeoutMs), retryAmbiguous: false,
-          body: { model, stream: false, messages: compactionMessages, temperature: 0.1, top_p: 0.95, max_tokens: 16_384, chat_template_kwargs: { thinking: false } },
+        enforceContextWindow("video_director_context_limit", "The conversation-compaction request", compactionMessages, LONG_CONTEXT_TOKENS, 16_384);
+        // Compaction is bookkeeping ahead of the real director turn, not the turn itself: it stays
+        // on one reliable, currently-alive, free NVIDIA model rather than carrying its own ladder.
+        const compacted = await callOpenAiStyleTransport({
+          provider: "nvidia_director_compaction", apiKey: credential(nvidia.apiKey),
+          url: endpoint(nvidia.baseUrl || "https://integrate.api.nvidia.com/v1", "/chat/completions"),
+          model: NVIDIA_NEMOTRON_SUPER_MODEL, messages: compactionMessages, maxTokens: 16_384, temperature: 0.1, topP: 0.95,
+          deadlineAt, timeoutMs: nvidia.timeoutMs, extraBody: { chat_template_kwargs: { thinking: false } },
         });
-        compactedSummary = openAiText(compacted, "nvidia_director_compaction");
-        lastUsage = compacted.usage || null;
-        await maybeMeterProvider(tenant, nvidia, compacted.usage, { kind: "video_director_compaction", provider: "nvidia", model });
+        compactedSummary = compacted.text;
+        lastUsage = compacted.usage;
+        await maybeMeterProvider(tenant, nvidia, compacted.usage, { kind: "video_director_compaction", provider: "nvidia", model: NVIDIA_NEMOTRON_SUPER_MODEL });
       }
       compaction = { summary: compactedSummary, usage: lastUsage, atPercent: 70 };
       conversation = [];
     }
     const projectContext = makeProjectContext();
     const maxTokens = Math.min(16_384, Math.max(512, Number(nvidia.directorMaxTokens) || 512));
-    const messages = [
-      { role: "system", content: directorSystem },
-      { role: "user", content: `${projectContext}\n\nUser request:\n${message}` },
+    const temperature = Number.isFinite(Number(nvidia.directorTemperature)) ? Number(nvidia.directorTemperature) : 1;
+    const topP = Number.isFinite(Number(nvidia.directorTopP)) ? Number(nvidia.directorTopP) : 0.95;
+    const userContent = `${projectContext}\n\nUser request:\n${message}`;
+    const openAiMessages = [{ role: "system", content: directorSystem }, { role: "user", content: userContent }];
+    enforceContextWindow("video_director_context_limit", "The video creative-director request", openAiMessages, LONG_CONTEXT_TOKENS, maxTokens);
+    const nvidiaUrl = endpoint(nvidia.baseUrl || "https://integrate.api.nvidia.com/v1", "/chat/completions");
+    const deepseekUrl = endpoint(deepseek.baseUrl || "https://api.deepseek.com", "/chat/completions");
+    const anthropicUrl = endpoint(anthropic.baseUrl || "https://api.anthropic.com", "/v1/messages");
+    const ladder = [
+      { provider: "deepseek", model: DEEPSEEK_PRO_MODEL, call: () => callOpenAiStyleTransport({ provider: "deepseek_director", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_PRO_MODEL, messages: openAiMessages, maxTokens, temperature, topP, deadlineAt, timeoutMs: deepseek.timeoutMs }) },
+      { provider: "nvidia", model: NVIDIA_DEEPSEEK_MODEL, call: () => callOpenAiStyleTransport({ provider: "nvidia_director", apiKey: credential(nvidia.apiKey), url: nvidiaUrl, model: NVIDIA_DEEPSEEK_MODEL, messages: openAiMessages, maxTokens, temperature, topP, deadlineAt, timeoutMs: nvidia.timeoutMs, extraBody: { chat_template_kwargs: { thinking: false } } }) },
+      { provider: "nvidia", model: NVIDIA_NEMOTRON_SUPER_MODEL, call: () => callOpenAiStyleTransport({ provider: "nvidia_director", apiKey: credential(nvidia.apiKey), url: nvidiaUrl, model: NVIDIA_NEMOTRON_SUPER_MODEL, messages: openAiMessages, maxTokens, temperature, topP, deadlineAt, timeoutMs: nvidia.timeoutMs, extraBody: { chat_template_kwargs: { thinking: false } } }) },
+      { provider: "anthropic", model: SONNET_MODEL, call: () => callAnthropicTransport({ apiKey: credential(anthropic.apiKey), url: anthropicUrl, model: SONNET_MODEL, system: directorSystem, messages: [{ role: "user", content: userContent }], maxTokens, deadlineAt, timeoutMs: anthropic.timeoutMs, version: anthropic.version }) },
     ];
-    enforceContextWindow("video_director_context_limit", "The DeepSeek creative-director request", messages, LONG_CONTEXT_TOKENS, maxTokens);
-    const body = await providerPost(fetchImpl, endpoint(nvidia.baseUrl || "https://integrate.api.nvidia.com/v1", "/chat/completions"), {
-      provider: "nvidia_director",
-      headers: { Authorization: `Bearer ${apiKey}` },
-      timeoutMs: remainingAiTimeout(deadlineAt, nvidia.timeoutMs),
-      retryAmbiguous: false,
-      body: {
-        model,
-        stream: false,
-        messages,
-        temperature: Number.isFinite(Number(nvidia.directorTemperature)) ? Number(nvidia.directorTemperature) : 1,
-        top_p: Number.isFinite(Number(nvidia.directorTopP)) ? Number(nvidia.directorTopP) : 0.95,
-        max_tokens: maxTokens,
-        chat_template_kwargs: { thinking: false },
-      },
-    });
-    await maybeMeterProvider(tenant, nvidia, body.usage, { kind: "video_director", provider: "nvidia", model });
-    const raw = openAiText(body, "nvidia_director");
-    const routed = routingFromText(raw);
-    return { directive: routed.directive, routing: routed.routing, usage: body.usage || null, model, compaction };
+    const served = await runAgentLadder("director", ladder);
+    await maybeMeterProvider(tenant, PROVIDER_CONFIG_BY_NAME[served.servedBy.provider], served.usage, { kind: "video_director", provider: served.servedBy.provider, model: served.servedBy.model });
+    const routed = routingFromText(served.text);
+    return { directive: routed.directive, routing: routed.routing, usage: served.usage, model: served.servedBy.model, servedBy: served.servedBy, compaction };
   }
 
   /*
@@ -1026,110 +1206,114 @@ export function createVideoHttp({
   }
 
   async function callVisualOrchestrator(tenant, project, message, director, deadlineAt) {
-    const apiKey = credential(nvidia.apiKey);
-    const configuredModel = cleanText(nvidia.visualModel || VISUAL_MODEL, 200);
-    if (configuredModel !== VISUAL_MODEL) fail(503, "visual_orchestrator_model_mismatch", `The visual orchestrator requires ${VISUAL_MODEL}; no substitute model was used.`);
-    const model = VISUAL_MODEL;
-    if (!apiKey) fail(503, "visual_orchestrator_not_configured", `The visual orchestrator ${VISUAL_MODEL} is not configured. No substitute model was used.`);
     const conversation = director.compaction?.summary ? { compactedSummary: director.compaction.summary } : project?.messages || [];
     const source = JSON.stringify({ screenplay: project?.screenplay, conversation, currentScenes: project?.scenes || [], projectSettings: project?.project, userRequest: message, directorPlan: director.directive });
     const maxTokens = Math.min(16_384, Math.max(512, Number(nvidia.visualMaxTokens) || 8_192));
+    const temperature = Number.isFinite(Number(nvidia.visualTemperature)) ? Number(nvidia.visualTemperature) : 1;
+    const topP = Number.isFinite(Number(nvidia.visualTopP)) ? Number(nvidia.visualTopP) : 0.95;
     const messages = [
       { role: "system", content: "You are Dominion's visual orchestrator. Read the creative director plan, screenplay, and saved conversation, then produce the images needed in exact story order. Return JSON only in this shape: {\"scenes\":[{\"order\":1,\"sceneId\":\"scene_1\",\"title\":\"\",\"imagePrompt\":\"\",\"videoPrompt\":\"\",\"continuity\":\"\",\"suggestedVideoModel\":\"\"}]}. Use no more than 100 scenes. Image prompts must be specific enough to preserve characters, wardrobe, location, lighting, composition, lens, and continuity. Do not claim any image or video was generated." },
       { role: "user", content: source },
     ];
-    enforceContextWindow("video_visual_context_limit", "The Nemotron visual-orchestrator request", messages, LONG_CONTEXT_TOKENS, maxTokens);
-    const body = await providerPost(fetchImpl, endpoint(nvidia.baseUrl || "https://integrate.api.nvidia.com/v1", "/chat/completions"), {
-      provider: "nvidia_visual_orchestrator",
-      headers: { Authorization: `Bearer ${apiKey}` },
-      timeoutMs: remainingAiTimeout(deadlineAt, nvidia.timeoutMs),
-      retryAmbiguous: false,
-      body: {
-        model,
-        messages,
-        stream: false,
-        temperature: Number.isFinite(Number(nvidia.visualTemperature)) ? Number(nvidia.visualTemperature) : 1,
-        top_p: Number.isFinite(Number(nvidia.visualTopP)) ? Number(nvidia.visualTopP) : 0.95,
-        max_tokens: maxTokens,
-        chat_template_kwargs: { enable_thinking: false },
-      },
-    });
-    await maybeMeterProvider(tenant, nvidia, body.usage, { kind: "video_visual_orchestration", provider: "nvidia", model });
-    return { available: true, plan: visualPlanFromText(openAiText(body, "nvidia_visual_orchestrator")), usage: body.usage || null, model };
+    enforceContextWindow("video_visual_context_limit", "The visual-orchestrator request", messages, LONG_CONTEXT_TOKENS, maxTokens);
+    const nvidiaUrl = endpoint(nvidia.baseUrl || "https://integrate.api.nvidia.com/v1", "/chat/completions");
+    const deepseekUrl = endpoint(deepseek.baseUrl || "https://api.deepseek.com", "/chat/completions");
+    // Parsing/validating the scene plan happens INSIDE each rung: a rung that answers with
+    // unusable JSON is exactly as unhelpful as one that answers with an HTTP error, so a malformed
+    // plan also falls through to the next rung rather than failing the whole orchestrator outright.
+    const nvidiaCall = (model) => async () => {
+      const { text, usage } = await callOpenAiStyleTransport({ provider: "nvidia_visual_orchestrator", apiKey: credential(nvidia.apiKey), url: nvidiaUrl, model, messages, maxTokens, temperature, topP, deadlineAt, timeoutMs: nvidia.timeoutMs, extraBody: { chat_template_kwargs: { enable_thinking: false } } });
+      return { plan: visualPlanFromText(text), usage };
+    };
+    const ladder = [
+      { provider: "nvidia", model: NVIDIA_NEMOTRON_SUPER_MODEL, call: nvidiaCall(NVIDIA_NEMOTRON_SUPER_MODEL) },
+      { provider: "deepseek", model: DEEPSEEK_PRO_MODEL, call: async () => { const { text, usage } = await callOpenAiStyleTransport({ provider: "deepseek_visual_orchestrator", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_PRO_MODEL, messages, maxTokens, temperature, topP, deadlineAt, timeoutMs: deepseek.timeoutMs }); return { plan: visualPlanFromText(text), usage }; } },
+      // Last resort: the 550B planner is slow (50-57s measured), but it is never simply left untried.
+      { provider: "nvidia", model: NVIDIA_NEMOTRON_ULTRA_MODEL, call: nvidiaCall(NVIDIA_NEMOTRON_ULTRA_MODEL) },
+    ];
+    const served = await runAgentLadder("visual_orchestrator", ladder);
+    await maybeMeterProvider(tenant, PROVIDER_CONFIG_BY_NAME[served.servedBy.provider], served.usage, { kind: "video_visual_orchestration", provider: served.servedBy.provider, model: served.servedBy.model });
+    return { available: true, plan: served.plan, usage: served.usage, model: served.servedBy.model, servedBy: served.servedBy };
   }
 
   async function callLiaison(tenant, project, message, director, visual, deadlineAt) {
-    const apiKey = credential(anthropic.apiKey);
-    if (anthropic.model && anthropic.model !== SONNET_MODEL) fail(503, "liaison_model_mismatch", `Video liaison requires ${SONNET_MODEL}; no substitute model was used.`);
-    if (!apiKey) fail(503, "liaison_not_configured", "Claude Sonnet 5 is not configured. No substitute model was used.");
     const stableContext = JSON.stringify({ role: "video project state", project: project?.project, screenplay: project?.screenplay, scenes: project?.scenes, tracks: project?.tracks, clips: project?.clips });
     const maxTokens = Math.min(16_384, Math.max(256, Number(anthropic.maxTokens) || 4_096));
-    enforceContextWindow("video_liaison_context_limit", "The Claude liaison request", {
+    enforceContextWindow("video_liaison_context_limit", "The liaison request", {
       stableContext,
       userRequest: message,
       director: { model: director.model, directive: director.directive },
       visual: visual.available ? visual.plan : visual.error,
     }, LONG_CONTEXT_TOKENS, maxTokens);
-    const body = await providerPost(fetchImpl, endpoint(anthropic.baseUrl || "https://api.anthropic.com", "/v1/messages"), {
-      provider: "anthropic",
-      headers: { "x-api-key": apiKey, "anthropic-version": anthropic.version || "2023-06-01" },
-      timeoutMs: remainingAiTimeout(deadlineAt, anthropic.timeoutMs),
-      retryAmbiguous: false,
-      body: {
-        model: SONNET_MODEL,
-        max_tokens: maxTokens,
-        /*
-         * SHE SOUNDS LIKE A PERSON WHO MAKES FILMS (Fred, 2026-08-05: "This is a creative director
-         * and it should sound like a creative director. give it personality. It's one of the
-         * differentiators of this app."). The old prompt produced a competent status clerk. The
-         * honesty constraints are untouched and come LAST, because they outrank the voice.
-         */
-        system: [{ type: "text", text: [
-          "You are the producer in Dominion's video studio: the person the user talks to about the film they want to make.",
-          "You have made a lot of things. You have opinions and you offer them.",
-          "",
-          "HOW YOU TALK: like a working creative director, not a help system. Warm, direct, a little wry.",
-          "Short sentences. Say what you would do and why in one line. Ask ONE sharp question at a time when",
-          "something is genuinely missing, rather than interrogating with a list. Never open with 'Certainly' or",
-          "'I understand'. Never narrate your own process. No bullet lists unless the user asks for one.",
-          "",
-          "WHEN THE DIRECTOR RECOMMENDS A STEP: put it in your own words as a suggestion with a reason, the way a",
-          "colleague would ('An ad lives or dies on the script, so let me get the writer on this first'). The user",
-          "will see buttons for the actual choice, so do not list options or ask them to type a number. Never insist:",
-          "if they want to skip straight to a render, that is their call and you make it work.",
-          "",
-          "HONESTY OUTRANKS EVERYTHING ABOVE. Never claim a generation, save, edit, charge, or export happened",
-          "unless the supplied state proves it. Surface every limitation and failure plainly. If something is not",
-          "configured or not built, say so instead of implying it will happen.",
-        ].join("\n"), cache_control: { type: "ephemeral" } }],
-        messages: [
-          { role: "user", content: [{ type: "text", text: stableContext, cache_control: { type: "ephemeral" } }] },
-          { role: "assistant", content: "I have the persisted project context." },
-          // Three distinct states, and telling them apart matters: a plan, a step we deliberately
-          // did not run, and a step that failed. Calling the first two "DEGRADED" made the
-          // producer apologise for a storyboard nobody asked for (and threw on a null error).
-          { role: "user", content: `User request:\n${message}\n\nCreative director directive (${director.model}):\n${director.directive}\n\nVisual orchestrator (${visual.model}):\n${
-            visual.available ? JSON.stringify(visual.plan)
-              : visual.skipped ? "NOT RUN — no storyboard was requested this turn. Do not mention a storyboard unless the user raised it, and never imply one was built."
-              : `DEGRADED — ${visual.error?.code || "visual_orchestrator_unavailable"}: ${visual.error?.message || "The visual orchestrator did not answer."}`}` },
-        ],
-      },
-    });
-    await maybeMeterProvider(tenant, anthropic, body.usage, { kind: "video_liaison", provider: "anthropic", model: SONNET_MODEL });
-    return { reply: anthropicText(body), usage: body.usage || null, model: SONNET_MODEL };
+    /*
+     * SHE SOUNDS LIKE A PERSON WHO MAKES FILMS (Fred, 2026-08-05: "This is a creative director
+     * and it should sound like a creative director. give it personality. It's one of the
+     * differentiators of this app."). The old prompt produced a competent status clerk. The
+     * honesty constraints are untouched and come LAST, because they outrank the voice.
+     */
+    const systemText = [
+      "You are the producer in Dominion's video studio: the person the user talks to about the film they want to make.",
+      "You have made a lot of things. You have opinions and you offer them.",
+      "",
+      "HOW YOU TALK: like a working creative director, not a help system. Warm, direct, a little wry.",
+      "Short sentences. Say what you would do and why in one line. Ask ONE sharp question at a time when",
+      "something is genuinely missing, rather than interrogating with a list. Never open with 'Certainly' or",
+      "'I understand'. Never narrate your own process. No bullet lists unless the user asks for one.",
+      "",
+      "WHEN THE DIRECTOR RECOMMENDS A STEP: put it in your own words as a suggestion with a reason, the way a",
+      "colleague would ('An ad lives or dies on the script, so let me get the writer on this first'). The user",
+      "will see buttons for the actual choice, so do not list options or ask them to type a number. Never insist:",
+      "if they want to skip straight to a render, that is their call and you make it work.",
+      "",
+      "HONESTY OUTRANKS EVERYTHING ABOVE. Never claim a generation, save, edit, charge, or export happened",
+      "unless the supplied state proves it. Surface every limitation and failure plainly. If something is not",
+      "configured or not built, say so instead of implying it will happen.",
+    ].join("\n");
+    // Three distinct states, and telling them apart matters: a plan, a step we deliberately did
+    // not run, and a step that failed. Calling the first two "DEGRADED" made the producer
+    // apologise for a storyboard nobody asked for (and threw on a null error).
+    const visualLine = `User request:\n${message}\n\nCreative director directive (${director.model}):\n${director.directive}\n\nVisual orchestrator (${visual.model}):\n${
+      visual.available ? JSON.stringify(visual.plan)
+        : visual.skipped ? "NOT RUN — no storyboard was requested this turn. Do not mention a storyboard unless the user raised it, and never imply one was built."
+        : `DEGRADED — ${visual.error?.code || "visual_orchestrator_unavailable"}: ${visual.error?.message || "The visual orchestrator did not answer."}`}`;
+    const anthropicSystem = [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }];
+    const anthropicMessages = [
+      { role: "user", content: [{ type: "text", text: stableContext, cache_control: { type: "ephemeral" } }] },
+      { role: "assistant", content: "I have the persisted project context." },
+      { role: "user", content: visualLine },
+    ];
+    // DeepSeek-direct is OpenAI-chat-completions-shaped: flatten the structured, cache-tagged
+    // Anthropic content blocks into plain strings. Prompt caching is an Anthropic-only mechanic;
+    // losing it on the last-resort rung is an acceptable trade for a producer reply that still answers.
+    const openAiMessages = [
+      { role: "system", content: systemText },
+      { role: "user", content: stableContext },
+      { role: "assistant", content: "I have the persisted project context." },
+      { role: "user", content: visualLine },
+    ];
+    const anthropicUrl = endpoint(anthropic.baseUrl || "https://api.anthropic.com", "/v1/messages");
+    const deepseekUrl = endpoint(deepseek.baseUrl || "https://api.deepseek.com", "/chat/completions");
+    const ladder = [
+      { provider: "anthropic", model: SONNET_MODEL, call: () => callAnthropicTransport({ apiKey: credential(anthropic.apiKey), url: anthropicUrl, model: SONNET_MODEL, system: anthropicSystem, messages: anthropicMessages, maxTokens, deadlineAt, timeoutMs: anthropic.timeoutMs, version: anthropic.version }) },
+      { provider: "anthropic", model: HAIKU_MODEL, call: () => callAnthropicTransport({ apiKey: credential(anthropic.apiKey), url: anthropicUrl, model: HAIKU_MODEL, system: anthropicSystem, messages: anthropicMessages, maxTokens, deadlineAt, timeoutMs: anthropic.timeoutMs, version: anthropic.version }) },
+      { provider: "deepseek", model: DEEPSEEK_FLASH_MODEL, call: () => callOpenAiStyleTransport({ provider: "deepseek_liaison", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_FLASH_MODEL, messages: openAiMessages, maxTokens, temperature: 1, topP: 0.95, deadlineAt, timeoutMs: deepseek.timeoutMs }) },
+    ];
+    const served = await runAgentLadder("liaison", ladder);
+    await maybeMeterProvider(tenant, PROVIDER_CONFIG_BY_NAME[served.servedBy.provider], served.usage, { kind: "video_liaison", provider: served.servedBy.provider, model: served.servedBy.model });
+    return { reply: served.text, usage: served.usage, model: served.servedBy.model, servedBy: served.servedBy };
   }
 
   async function persistAiTurn(tenantId, projectId, expectedProjectRevision, message, director, visual, liaison, { buildStoryboard = true } = {}) {
-    const conversation = { at: new Date(Number(now())).toISOString(), user: message, director: director.directive, visualPlan: visual.available ? clone(visual.plan) : null, visualError: visual.available ? null : clone(visual.error), reply: liaison.reply };
+    const conversation = { at: new Date(Number(now())).toISOString(), user: message, director: director.directive, visualPlan: visual.available ? clone(visual.plan) : null, visualError: visual.available ? null : clone(visual.error), reply: liaison.reply, servedBy: { director: clone(director.servedBy || null), visualOrchestrator: clone(visual.servedBy || null), liaison: clone(liaison.servedBy || null) } };
     if (typeof feature.updateAiState === "function") {
       const saved = await feature.updateAiState(tenantId, projectId, {
         expectedProjectRevision,
-        director: { model: director.model, usage: clone(director.usage), directive: director.directive, routing: clone(director.routing || null), compaction: clone(director.compaction) },
+        director: { model: director.model, usage: clone(director.usage), directive: director.directive, routing: clone(director.routing || null), compaction: clone(director.compaction), servedBy: clone(director.servedBy || null) },
         // A skipped orchestrator writes NOTHING about itself: passing a record here would stamp an
         // applyStatus and, worse, hand updateAiState a plan-shaped absence to reason about. The
         // last real plan stays exactly as it was.
-        visualOrchestrator: buildStoryboard ? { model: visual.model, available: visual.available, usage: clone(visual.usage), plan: clone(visual.plan), error: clone(visual.error) } : null,
-        liaison: { model: liaison.model, usage: clone(liaison.usage), reply: liaison.reply },
+        visualOrchestrator: buildStoryboard ? { model: visual.model, available: visual.available, usage: clone(visual.usage), plan: clone(visual.plan), error: clone(visual.error), servedBy: clone(visual.servedBy || null) } : null,
+        liaison: { model: liaison.model, usage: clone(liaison.usage), reply: liaison.reply, servedBy: clone(liaison.servedBy || null) },
         visualPlanScenes: buildStoryboard && visual.available ? clone(visual.plan.scenes) : null,
         conversation,
       });
@@ -1161,14 +1345,32 @@ export function createVideoHttp({
     activeScreenwriterProjects.add(activeKey);
     screenwriterActivityVersion++;
     try {
-      const project = await feature.getProject(tenantId, projectId);
-      const persistedText = String(project?.screenplay?.text || "");
-      const writerState = project?.ai?.screenwriter?.state || {};
-      if (prompt !== persistedText) fail(409, "screenwriter_stale_prompt", "The screenplay changed after this request was prepared. Save or refresh the current project before starting Trinity; no provider call was made.");
-      const expectedScreenplaySha256 = createHash("sha256").update(persistedText).digest("hex");
-      const expectedScreenwriterGenerationId = cleanText(writerState.generationId, 200) || null;
+      let project = await feature.getProject(tenantId, projectId);
       const unresolved = pendingScreenwriterAttempt(project);
       if (unresolved) fail(409, "screenwriter_reconciliation_required", "This project already has Trinity provider work awaiting completion or reconciliation. Refresh the saved project; no second provider request was made.");
+      let persistedText = String(project?.screenplay?.text || "");
+      if (prompt !== persistedText) {
+        /*
+         * AUTO-CHECKPOINT INSTEAD OF STALE REFUSAL (stabilize 2026-09-03, deficiency 21). The
+         * client always saves a checkpoint before asking Trinity to write; if that save silently
+         * failed, raced, or simply hadn't landed yet, the old behavior refused the entire turn as
+         * "stale" even though nothing was actually unresolved (checked above). There is no
+         * provider work in flight, so the prompt IS the screenplay the user wants written from:
+         * persist it as a real checkpoint (new revision, new sha) and proceed. Only genuinely
+         * unresolved provider work still blocks the turn (the check above, unchanged).
+         */
+        const beforeSha256 = createHash("sha256").update(persistedText).digest("hex");
+        try { project = await feature.applyCommand(tenantId, projectId, { type: "screenplay.set", text: prompt, expectedScreenplaySha256: beforeSha256 }); }
+        catch (checkpointError) {
+          if (String(checkpointError?.code || "") === "screenwriter_stale_write") fail(409, "screenwriter_stale_prompt", "The screenplay changed twice in a race while this request was preparing to auto-checkpoint. Refresh the current project before starting Trinity; no provider call was made.");
+          throw checkpointError;
+        }
+        persistedText = String(project?.screenplay?.text || "");
+      }
+      const writerState = project?.ai?.screenwriter?.state || {};
+      const expectedScreenplaySha256 = createHash("sha256").update(persistedText).digest("hex");
+      const expectedScreenwriterGenerationId = cleanText(writerState.generationId, 200) || null;
+      const turn = buildScreenwriterTurn(project, prompt);
       let submissionAttempt = null;
       let provisionalAttempt = null;
       let result;
@@ -1180,7 +1382,7 @@ export function createVideoHttp({
         });
       };
       try {
-        result = await callScreenwriter(tenant, project, prompt, {
+        result = await callScreenwriterTrinity(tenant, project, prompt, turn, {
           onSubmitting: async () => {
             const candidate = {
               attemptId: `sw_local_${randomUUID().replaceAll("-", "")}`,
@@ -1205,6 +1407,7 @@ export function createVideoHttp({
       }
       catch (error) {
         const attempted = error?.screenwriterAttempt;
+        let cleanFailure = false;
         if (attempted) {
           const { billable, ...attempt } = attempted;
           const recorded = { ...attempt, sourceScreenplaySha256: expectedScreenplaySha256, sourceGenerationId: expectedScreenwriterGenerationId };
@@ -1222,17 +1425,45 @@ export function createVideoHttp({
               throw billingError;
             }
           }
+          // A response body was parsed (even one that got rejected): ambiguous/billable OpenRouter
+          // territory. Preserve the existing reconciliation-required behavior exactly - never risk
+          // a second paid call on top of unresolved Trinity work.
         } else if (provisionalAttempt) {
           const providerUsage = error?.providerUsage && typeof error.providerUsage === "object" ? clone(error.providerUsage) : null;
           const providerCost = Math.max(0, Number(providerUsage?.cost) || 0);
           await feature.applyCommand(tenantId, projectId, { type: "screenwriter.attempt", attempt: { ...provisionalAttempt, ...(providerUsage ? { usage: providerUsage } : {}), status: "reconciliation_required", rejectionCode: cleanText(error?.code || "screenwriter_response_interrupted", 120), settlement: { status: "awaiting_response", costUsd: providerCost } } });
           await completeSubmission(provisionalAttempt.generationId);
+          // A generation id was already seen for Trinity: real work may be in flight. Same rule.
         } else if (submissionAttempt) {
           const rejected = definitiveProviderHttpRejection(error);
           const generationId = cleanText(error?.providerGenerationId, 200) || null;
           await feature.applyCommand(tenantId, projectId, { type: "screenwriter.attempt", attempt: { ...submissionAttempt, generationId, status: rejected ? "provider_http_rejected" : "reconciliation_required", rejectionCode: cleanText(error?.code || (rejected ? "screenwriter_provider_rejected" : "screenwriter_acknowledgement_unknown"), 120), settlement: { status: rejected ? "not_billed" : "awaiting_response", costUsd: Math.max(0, Number(error?.providerUsage?.cost) || 0) } } });
+          // Trinity's own placeholder was just closed out terminal ("provider_http_rejected") only
+          // when the rejection was definitive (no generation id or cost ever observed). That
+          // makes the attempt ledger correct, but this branch runs only after OpenRouter actually
+          // answered the submission POST (an HTTP status came back) - Fred's own reconciliation
+          // suite treats a real OpenRouter response, even a clean 401/503, as strictly the
+          // OpenRouter-scoped "fix your key / wait and retry" flow, not a cue to silently answer
+          // from a different provider. So a definitive rejection here still does NOT fall through
+          // to the ladder; cleanFailure stays false and the existing reconciliation-safe behavior
+          // (and every test asserting it) is unchanged. Disclosed narrowing of the ladder spec:
+          // automatic screenwriter fallthrough is scoped to "Trinity never got a submission off
+          // the ground at all" (see the else branch below), not "Trinity answered and refused."
+        } else {
+          // onSubmitting itself never completed (screenwriter_not_configured, or the durable
+          // placeholder write failed before any provider egress): nothing was ever begun, so no
+          // OpenRouter response exists to be scoped to OpenRouter - safe to try a direct rung.
+          cleanFailure = true;
         }
-        throw error;
+        if (!cleanFailure) throw error;
+        /*
+         * TRINITY LADDER FALLTHROUGH (stabilize 2026-09-03, deficiency 20, required behavior #2).
+         * OpenRouter/Trinity never got billable or ambiguous work off the ground this specific
+         * turn, so fall through to a direct rung instead of ending the turn in an error - Fred's
+         * rule that nothing may end in a silent or announced error while an alternative remains
+         * untried. Anything even slightly ambiguous stayed on the reconciliation path above.
+         */
+        result = await screenwriterFallbackRungs(tenant, project, prompt, turn, { tenantId, projectId, expectedScreenplaySha256, expectedScreenwriterGenerationId });
       }
       const latest = await feature.getProject(tenantId, projectId);
       const latestHash = createHash("sha256").update(String(latest?.screenplay?.text || "")).digest("hex");
@@ -1248,7 +1479,8 @@ export function createVideoHttp({
       await completeSubmission(result.generationId);
       let settlement;
       try {
-        settlement = await maybeMeterProvider(tenant, openrouter, result.usage, { kind: "video_screenwrite", provider: "openrouter", model: SCREENWRITER_MODEL, generationId: result.generationId });
+        const servedByProvider = result.servedBy?.provider || "openrouter";
+        settlement = await maybeMeterProvider(tenant, PROVIDER_CONFIG_BY_NAME[servedByProvider] || openrouter, result.usage, { kind: "video_screenwrite", provider: servedByProvider, model: result.servedBy?.model || SCREENWRITER_MODEL, generationId: result.generationId });
         await feature.applyCommand(tenantId, projectId, { type: "screenwriter.attempt", attempt: { ...baseAttempt, status: "provider_accepted", settlement: attemptSettlement(settlement, result.usage), candidate: recoverableCandidate(result) } });
       }
       catch (billingError) {
@@ -1266,7 +1498,7 @@ export function createVideoHttp({
         await feature.applyCommand(tenantId, projectId, { type: "screenwriter.attempt", attempt: { ...baseAttempt, status: "recoverable_stale_settled", settlement: attemptSettlement(settlement, result.usage), candidate: recoverableCandidate(result) } });
         throw saveError;
       }
-      return { text: result.text, screenplaySha256: createHash("sha256").update(result.text).digest("hex"), model: result.model, projectId, usage: result.usage, finishReason: result.finishReason, truncated: result.truncated };
+      return { text: result.text, screenplaySha256: createHash("sha256").update(result.text).digest("hex"), model: result.model, projectId, usage: result.usage, finishReason: result.finishReason, truncated: result.truncated, servedBy: result.servedBy || null };
     } finally { activeScreenwriterProjects.delete(activeKey); screenwriterActivityVersion++; }
   }
 
@@ -1531,7 +1763,7 @@ export function createVideoHttp({
 
     if (method === "GET" && (path === "/" || path === "/config")) {
       const mobile = isMobileRequest(req, { device: parsed.searchParams.get("device") });
-      const screenwriterConfigured = !!credential(openrouter.apiKey) && cleanText(openrouter.screenwriterModel || SCREENWRITER_MODEL, 200) === SCREENWRITER_MODEL;
+      const screenwriterConfigured = !!credential(openrouter.apiKey);
       let desktopCapability = null; let device;
       if (!mobile) {
         desktopCapability = issueDesktopCapability(tenantId);
@@ -1542,16 +1774,36 @@ export function createVideoHttp({
         ok: true,
         models: clone(feature.capabilities || {}), capabilities: clone(feature.capabilities || {}),
         limits: { scenes: Number(feature.MAX_SCENES) || 100, screenplayTokens: Number(feature.MAX_SCREENPLAY_TOKENS) || 115_000, videoTracks: Number(feature.VIDEO_TRACKS) || 3, audioTracks: Number(feature.AUDIO_TRACKS) || 4 },
+        // Each agent is a ladder of provider+model rungs, not one fixed model (stabilize
+        // 2026-09-03). `model` names the primary (first) rung for backward compatibility;
+        // `ladder` lists every rung in try-order. `configured` is true when at least one rung has
+        // a credential - a single missing key no longer makes an agent appear entirely dead.
         agents: {
-          director: { model: DIRECTOR_MODEL, configured: !!credential(nvidia.apiKey) && cleanText(nvidia.directorModel || DIRECTOR_MODEL, 200) === DIRECTOR_MODEL },
-          visualOrchestrator: { model: VISUAL_MODEL, configured: !!credential(nvidia.apiKey) && cleanText(nvidia.visualModel || VISUAL_MODEL, 200) === VISUAL_MODEL },
-          screenwriter: { model: SCREENWRITER_MODEL, configured: screenwriterConfigured },
-          liaison: { model: SONNET_MODEL, configured: !!credential(anthropic.apiKey) && (!anthropic.model || anthropic.model === SONNET_MODEL) },
+          director: {
+            model: DEEPSEEK_PRO_MODEL,
+            ladder: [{ provider: "deepseek", model: DEEPSEEK_PRO_MODEL }, { provider: "nvidia", model: NVIDIA_DEEPSEEK_MODEL }, { provider: "nvidia", model: NVIDIA_NEMOTRON_SUPER_MODEL }, { provider: "anthropic", model: SONNET_MODEL }],
+            configured: !!credential(deepseek.apiKey) || !!credential(nvidia.apiKey) || !!credential(anthropic.apiKey),
+          },
+          visualOrchestrator: {
+            model: NVIDIA_NEMOTRON_SUPER_MODEL,
+            ladder: [{ provider: "nvidia", model: NVIDIA_NEMOTRON_SUPER_MODEL }, { provider: "deepseek", model: DEEPSEEK_PRO_MODEL }, { provider: "nvidia", model: NVIDIA_NEMOTRON_ULTRA_MODEL }],
+            configured: !!credential(nvidia.apiKey) || !!credential(deepseek.apiKey),
+          },
+          screenwriter: {
+            model: SCREENWRITER_MODEL,
+            ladder: [{ provider: "openrouter", model: SCREENWRITER_MODEL }, { provider: "deepseek", model: DEEPSEEK_PRO_MODEL }, { provider: "anthropic", model: SONNET_MODEL }],
+            configured: screenwriterConfigured,
+          },
+          liaison: {
+            model: SONNET_MODEL,
+            ladder: [{ provider: "anthropic", model: SONNET_MODEL }, { provider: "anthropic", model: HAIKU_MODEL }, { provider: "deepseek", model: DEEPSEEK_FLASH_MODEL }],
+            configured: !!credential(anthropic.apiKey) || !!credential(deepseek.apiKey),
+          },
         },
         screenwriter: {
           available: screenwriterConfigured,
           model: SCREENWRITER_MODEL, provider: "openrouter", reasoning: "mandatory", contextTokens: SCREENWRITER_CONTEXT_TOKENS,
-          message: screenwriterConfigured ? "Trinity Large Thinking is configured through OpenRouter." : credential(openrouter.apiKey) ? `The configured screenwriter is not ${SCREENWRITER_MODEL}; no substitute model will be used.` : "Add OPENROUTER_API_KEY to enable Trinity Large Thinking. No substitute model will be used.",
+          message: screenwriterConfigured ? "Trinity Large Thinking is configured through OpenRouter." : "Add OPENROUTER_API_KEY to enable Trinity Large Thinking; DeepSeek direct and Claude Sonnet 5 serve as automatic fallback rungs when Trinity fails.",
         },
         provider: { runwareConfigured: !!credential(runware.apiKey) },
         storageKey: createHash("sha256").update(`dominion-video:${tenantId}`).digest("hex").slice(0, 24),
@@ -1686,7 +1938,7 @@ export function createVideoHttp({
         resolution: cleanText(body.resolution, 20) || "720p",
         generateAudio: body.generateAudio ?? body.audio ?? true,
       };
-      const submitted = await feature.submitGeneration(tenantId, projectId, request, { tenant: clone(tenant) });
+      const submitted = await feature.submitGeneration(tenantId, projectId, request, { tenant: plainTenant(tenant) });
       return json(res, 202, { ...clone(submitted), id: submitted.jobId, projectId, status: submitted.status || "queued", singleGeneration, message: submitted.deduplicated ? "That generation request is already saved; Dominion will keep polling the original task." : submitted.status === "retrying" ? "Runware did not confirm the saved task yet; Dominion will recover it by task UUID." : "Video generation was queued and will be verified before it reaches the timeline." });
     }
 
@@ -1797,7 +2049,7 @@ export function createVideoHttp({
       const body = await readJson(req);
       await requireDesktop(req, context, body);
       if (screenwriterDraining) fail(503, "video_ai_draining", "Dominion is finishing active video AI checkpoints for a server restart. Retry after the deployment completes; no provider call was made.");
-      requireProviderPrivacy(body, { provider: "nvidia", model: DIRECTOR_MODEL });
+      requireProviderPrivacy(body, { provider: "deepseek", model: DEEPSEEK_PRO_MODEL });
       const projectId = ensureProjectId(body.projectId);
       const expectedProjectRevision = projectRevisionPrecondition(body);
       const message = cleanText(body.message, 100_000);
@@ -1824,12 +2076,12 @@ export function createVideoHttp({
            * producer, and the storyboard is only built when the person taps the chip.
            */
           const buildStoryboard = String(body.action || "chat") === "build_storyboard";
-          let visual = { available: false, model: cleanText(nvidia.visualModel || VISUAL_MODEL, 200), plan: null, usage: null, error: null, skipped: true };
+          let visual = { available: false, model: NVIDIA_NEMOTRON_SUPER_MODEL, plan: null, usage: null, error: null, skipped: true };
           if (buildStoryboard) {
             try { visual = await callVisualOrchestrator(tenant, project, message, director, deadlineAt); }
             catch (error) {
               if (!(error instanceof VideoHttpError) || !String(error.code || "").includes("visual_orchestrator")) throw error;
-              visual = { available: false, model: cleanText(nvidia.visualModel || VISUAL_MODEL, 200), plan: null, usage: null, error: { code: error.code, message: error.message } };
+              visual = { available: false, model: NVIDIA_NEMOTRON_SUPER_MODEL, plan: null, usage: null, error: { code: error.code, message: error.message } };
             }
           }
           const liaison = await callLiaison(tenant, project, message, director, visual, deadlineAt);
@@ -1839,12 +2091,12 @@ export function createVideoHttp({
           const routing = director.routing || { ...DEFAULT_ROUTING };
           return json(res, 200, {
             reply: liaison.reply, projectId,
-            director: { directive: director.directive, model: director.model },
+            director: { directive: director.directive, model: director.model, servedBy: clone(director.servedBy || null) },
             routing: clone(routing),
             chips: chipsFor(routing),
             sceneDraft: routing.readyToGenerate ? clone(routing.sceneDraft) : null,
-            visualOrchestrator: { model: visual.model, available: visual.available, skipped: visual.skipped === true, applied: persisted.planApplied, applyStatus: persisted.applyStatus, plan: clone(visual.plan), error: visualError },
-            liaison: { model: liaison.model }, saved: true,
+            visualOrchestrator: { model: visual.model, available: visual.available, skipped: visual.skipped === true, applied: persisted.planApplied, applyStatus: persisted.applyStatus, plan: clone(visual.plan), error: visualError, servedBy: clone(visual.servedBy || null) },
+            liaison: { model: liaison.model, servedBy: clone(liaison.servedBy || null) }, saved: true,
             // A skipped orchestrator is not a degraded one: it was never asked to run.
             degraded: visual.skipped || (visual.available && !stalePlan) ? [] : [stalePlan ? "visualPlanStale" : "visualOrchestrator"],
           });
@@ -1911,5 +2163,51 @@ export function createVideoHttp({
     }
   }
 
-  return { handle, drain, activeScreenwriterTurns: () => activeScreenwriterTurns.size };
+  /*
+   * BOOT-TIME MODEL PROBE (LANE-video required behavior #6). Each agent's first rung gets a
+   * 1-token probe request; a rung that 4xx's is demoted (skipped first, not blocked - see
+   * runAgentLadder) until the next hourly probe. 5xx/timeout/network errors do NOT demote - those
+   * are exactly the transient failures the ladder itself already recovers from, and demoting on a
+   * blip would just make the next real turn try a healthy-but-untested rung for no reason. This
+   * never runs during tests (bootProbe defaults to false) and never blocks boot: it is scheduled
+   * on the next tick and repeats hourly, both un-refed so it cannot keep the process alive.
+   */
+  function bootProbeCandidates() {
+    const deepseekUrl = endpoint(deepseek.baseUrl || "https://api.deepseek.com", "/chat/completions");
+    const nvidiaUrl = endpoint(nvidia.baseUrl || "https://integrate.api.nvidia.com/v1", "/chat/completions");
+    const anthropicUrl = endpoint(anthropic.baseUrl || "https://api.anthropic.com", "/v1/messages");
+    const openrouterUrl = cleanText(openrouter.url, 2_000) || endpoint(openrouter.baseUrl || "https://openrouter.ai/api/v1", "/chat/completions");
+    const probeMessages = [{ role: "user", content: "Reply with one word: OK" }];
+    return [
+      { agent: "director", provider: "deepseek", model: DEEPSEEK_PRO_MODEL, apiKey: credential(deepseek.apiKey), probe: () => callOpenAiStyleTransport({ provider: "deepseek_director", apiKey: credential(deepseek.apiKey), url: deepseekUrl, model: DEEPSEEK_PRO_MODEL, messages: probeMessages, maxTokens: 1, temperature: 0, topP: 1, timeoutMs: 15_000 }) },
+      { agent: "visual_orchestrator", provider: "nvidia", model: NVIDIA_NEMOTRON_SUPER_MODEL, apiKey: credential(nvidia.apiKey), probe: () => callOpenAiStyleTransport({ provider: "nvidia_visual_orchestrator", apiKey: credential(nvidia.apiKey), url: nvidiaUrl, model: NVIDIA_NEMOTRON_SUPER_MODEL, messages: probeMessages, maxTokens: 1, temperature: 0, topP: 1, timeoutMs: 15_000, extraBody: { chat_template_kwargs: { enable_thinking: false } } }) },
+      // A raw completion, never the reconciliation-aware Trinity path: a boot probe must not create a durable provider attempt on any project.
+      { agent: "screenwriter", provider: "openrouter", model: SCREENWRITER_MODEL, apiKey: credential(openrouter.apiKey), probe: () => providerPost(fetchImpl, openrouterUrl, { provider: "openrouter_trinity_probe", headers: { Authorization: `Bearer ${credential(openrouter.apiKey)}` }, timeoutMs: 15_000, retryAmbiguous: false, body: { model: SCREENWRITER_MODEL, stream: false, messages: probeMessages, max_tokens: 1 } }) },
+      { agent: "liaison", provider: "anthropic", model: SONNET_MODEL, apiKey: credential(anthropic.apiKey), probe: () => callAnthropicTransport({ apiKey: credential(anthropic.apiKey), url: anthropicUrl, model: SONNET_MODEL, messages: probeMessages, maxTokens: 1, timeoutMs: 15_000, version: anthropic.version }) },
+    ];
+  }
+  async function runBootProbe() {
+    for (const candidate of bootProbeCandidates()) {
+      if (!candidate.apiKey) continue; // nothing to probe - unconfigured, not demoted (the ladder already skips on missing keys).
+      try {
+        await candidate.probe();
+        recordRungHealth(candidate.agent, candidate.provider, candidate.model, true);
+        console.log(`[video] boot probe: ${candidate.agent} rung 1 (${candidate.provider}/${candidate.model}) is live.`);
+      } catch (error) {
+        const status = Number(error?.status);
+        const demote = Number.isInteger(status) && status >= 400 && status < 500;
+        if (demote) recordRungHealth(candidate.agent, candidate.provider, candidate.model, false, error);
+        console.log(`[video] boot probe: ${candidate.agent} rung 1 (${candidate.provider}/${candidate.model}) ${demote ? "demoted until the next hourly probe" : "did not answer (left active - not a 4xx)"}: ${cleanText(error?.code || error?.message, 200)}`);
+      }
+    }
+  }
+  let bootProbeTimer = null;
+  if (bootProbe) {
+    const kickoff = () => { runBootProbe().catch((error) => console.error("[video] boot probe crashed:", error?.message || error)); };
+    setTimeout(kickoff, 0).unref?.();
+    bootProbeTimer = setInterval(kickoff, 60 * 60 * 1000);
+    bootProbeTimer.unref?.();
+  }
+
+  return { handle, drain, activeScreenwriterTurns: () => activeScreenwriterTurns.size, runBootProbe, rungHealth };
 }
