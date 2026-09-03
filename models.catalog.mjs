@@ -235,7 +235,7 @@ export const MODELS = [
    * number we are sure of.
    */
   { id: "deepseek/deepseek-r1", name: "DeepSeek R1", origin: "DeepSeek (China)",
-    category: "Reasoning & Math", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.70, outCost: 2.50, ctx: 64000, maxOut: 16000, reasoning: true,
+    category: "Reasoning & Math", params: "671B (MoE·37B active)", paramsB: 671, inCost: 0.70, outCost: 2.50, ctx: 64000, maxOut: 16000, reasoning: true, slow: true,
     specialty: "Shows its reasoning step by step as it thinks" },
   // NVIDIA DIRECT (Fred, 2026-07-28): the build.nvidia.com developer endpoint serves these free
   // (63 free endpoints; Fred: "limits are extremely generous"). While NVIDIA_API_KEY is absent
@@ -243,7 +243,10 @@ export const MODELS = [
   // the call at $0 (transport-aware cost math). directId is the NIM catalog id, UNVERIFIED until
   // the key's first live call; a refused id falls back to OpenRouter out loud.
   { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3-ultra-550b-a55b",
-    category: "Reasoning & Math", params: "550B (MoE·55B active)", paramsB: 550, inCost: 0.42, outCost: 2.61, ctx: 1000000, maxOut: 16384, reasoning: true,
+    category: "Reasoning & Math", params: "550B (MoE·55B active)", paramsB: 550, inCost: 0.42, outCost: 2.61, ctx: 1000000, maxOut: 16384, reasoning: true, slow: true,
+    // slow: true added 2026-09-03 (STABILIZE Step 1 follow-up) -- measured live answering in
+    // 50-57s, past the 20s default live-probe budget catalogaudit.mjs used to give every NVIDIA
+    // seat; a reasoning model this size legitimately needs longer, not a dead-seat verdict.
     specialty: "Heavyweight for hard math and science problems" },
   { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", origin: "DeepSeek (direct)", provider: "deepseek", directId: "deepseek-v4-flash",
     category: "Reasoning & Math", params: "undisclosed (MoE)", paramsB: null, inCost: 0.05, outCost: 0.24, cacheHitCost: 0.0028, ctx: 1000000, maxOut: 384000, reasoning: true,
@@ -264,7 +267,7 @@ export const MODELS = [
 
   // ---- Creative & Writing -------------------------------------------------------------------
   { id: "arcee-ai/trinity-large-thinking", name: "Trinity Large Thinking", origin: "Arcee AI",
-    category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.25, outCost: 0.80, ctx: 262144, toolCapable: true,   // audited: tool endpoints live
+    category: "Creative & Writing", params: "undisclosed", paramsB: null, inCost: 0.25, outCost: 0.80, ctx: 262144, toolCapable: true, slow: true,   // audited: tool endpoints live
     specialty: "A creative-writing specialist for stories and prose" },
 
   // ---- Vision / Multimodal ------------------------------------------------------------------
@@ -291,33 +294,31 @@ export const MODELS = [
     specialty: "The biggest free model here, with a 1M-token memory" },
   /*
    * meta/llama-3.1-70b-instruct REMOVED 2026-09-03 (STABILIZE Step 1, deficiency #1/#2/#4): NVIDIA
-   * retired it 2026-08-26 (HTTP 410 "end of life"), confirmed absent from the current
-   * specs/nvidia_models.txt live list. It held the Simplify "empathetic" route.
+   * retired it 2026-08-26 (HTTP 410 "end of life").
    *
-   * REPLACEMENT: nvidia/llama-3.1-nemotron-70b-instruct below. This exact id was probed DEAD
-   * (HTTP 404 "Not found for account") on 2026-08-03 per docs/SIMPLIFY-ROUTING-TABLE.md section 1
-   * — that earlier probe was for the THEOLOGICAL route, a different NVIDIA endpoint slice, over a
-   * month before this pass. It IS present in the current specs/nvidia_models.txt live catalog
-   * (2026-09-03), and simplify.mjs's empathetic ladder tries it as rung 2 with two more rungs
-   * behind it, so a repeat 404 here degrades to the next rung rather than failing the route — see
-   * the rig proof in the STABILIZE report for whether it actually answered this time.
+   * ITS REPLACEMENT, nvidia/llama-3.1-nemotron-70b-instruct, REMOVED THE SAME DAY (lead review
+   * follow-up, live rig sweep on the merged branch): HTTP 404 "Not found for account" on this
+   * NVIDIA account, and the fallback chase sent the request on to OpenRouter, which answered "No
+   * endpoints found" — a dead end on both wires, not a degraded-but-working seat.
+   *
+   * THE SUGGESTED SECOND REPLACEMENT, nvidia/llama-3.1-nemotron-ultra-253b-v1, was live-probed
+   * before adding it (probeNvidiaChatLive, tiny prompt, real key) and is ALSO dead on this account:
+   * HTTP 404 "Not found for account", 245ms, same failure shape as the seat it would have replaced.
+   * Not added to the catalog. Per the standing fallback instruction for this exact case, the
+   * empathetic ladder's rung 2 (simplify.mjs) now goes straight to nvidia/nemotron-3-super-120b-a12b:free
+   * instead of naming a dead-end seat here at all — see REMOVED_MODEL_FALLBACKS below for both dead
+   * ids' forwarding entries, kept so nothing that still names them by id invents a model instead of
+   * degrading cleanly.
+   *
+   * nvidia/nemotron-3.5-content-safety REMOVED THE SAME DAY (lead review follow-up): it is a
+   * moderation classifier, not a chat model — every ordinary chat turn gets "Conversation roles
+   * must alternate user/assistant/..." back, confirmed by both probeNvidiaChatLive and a live
+   * seat_sweep run through the real /chat pipeline. It was never wired as an answering seat in this
+   * app (see the STABILIZE routing table), so removing it as a selectable catalog row costs no
+   * route anything; nothing in this codebase resolves it as a moderation/classifier call either, so
+   * there is no reason to keep the id in place — REMOVED_MODEL_FALLBACKS below forwards a stale
+   * reference to claude-haiku-4-5 rather than inventing a classifier pipeline nobody asked for.
    */
-  { id: "nvidia/llama-3.1-nemotron-70b-instruct", name: "Nemotron 70B Instruct", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/llama-3.1-nemotron-70b-instruct",
-    category: "Open & Trainable", params: "70B", paramsB: 70, inCost: 0, outCost: 0, ctx: 131072,
-    specialty: "Warm, plain-spoken answers when the question is personal" },
-  /*
-   * nvidia/nemotron-3.5-content-safety KEPT as a catalog row (still listed on NVIDIA, per
-   * specs/nvidia_models.txt) but no longer used as an ANSWERING seat anywhere in this app
-   * (STABILIZE Step 1, deficiency #2): it is a moderation classifier, not a chat model, and
-   * rejects an ordinary chat turn with "Conversation roles must alternate user/assistant/...".
-   * simplify.mjs's safety route now answers on claude-haiku-4-5 with a care-first system prompt.
-   * toolCapable:false is unchanged; catalogaudit.mjs's new live chat-probe (added this pass) marks
-   * this seat "unavailable" on every run so the general picker hides it too, with its `fallback`
-   * field (below) pointing at claude-haiku-4-5 for any code that still resolves it by id.
-   */
-  { id: "nvidia/nemotron-3.5-content-safety", name: "Nemotron Content Safety", origin: "NVIDIA (direct)", provider: "nvidia", directId: "nvidia/nemotron-3.5-content-safety",
-    category: "Open & Trainable", params: "undisclosed", paramsB: null, inCost: 0, outCost: 0, ctx: 131072, toolCapable: false,
-    specialty: "Handles sensitive and safety questions carefully" },
   /*
    * THE FREE FLEET (ARSENAL Wave 2, docs/ARSENAL-PROGRAM.md). Every row below was LIVE-PROBED on
    * 2026-07-29 against integrate.api.nvidia.com with the production key: it answered, and the
@@ -380,7 +381,12 @@ export const REMOVED_MODEL_FALLBACKS = {
   // STABILIZE Step 1, 2026-09-03 prune (three confirmed-410 NVIDIA seats removed for good)
   "z-ai/glm-5.2": "nvidia/nemotron-3-super-120b-a12b:free",           // UTILITY_MODEL's new home
   "nvidia/nemotron-nano-12b-v2-vl": "nvidia/nemotron-3-nano-omni-30b-a3b",  // next smallest free vision seat
-  "meta/llama-3.1-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct", // same job, live NVIDIA id
+  // Lead review follow-up, same day: nemotron-70b-instruct (meta/llama-3.1-70b-instruct's own
+  // replacement) turned out dead too, so this now skips straight to the seat that is actually live.
+  "meta/llama-3.1-70b-instruct": "nvidia/nemotron-3-super-120b-a12b:free",
+  "nvidia/llama-3.1-nemotron-70b-instruct": "nvidia/nemotron-3-super-120b-a12b:free", // measured dead (404) 2026-09-03
+  "nvidia/llama-3.1-nemotron-ultra-253b-v1": "nvidia/nemotron-3-super-120b-a12b:free", // the suggested next pick; ALSO measured dead (404) same day, never added to MODELS
+  "nvidia/nemotron-3.5-content-safety": "anthropic/claude-haiku-4-5", // classifier, not a chat model; never an answering seat
   // Creative & Writing -> the surviving creative seat
   "anthracite-org/magnum-v4-72b": "arcee-ai/trinity-large-thinking",
   "sao10k/l3.3-euryale-70b": "arcee-ai/trinity-large-thinking",
@@ -594,7 +600,7 @@ export const BATTALION_ROSTER = {
   single: "nvidia/nemotron-3-super-120b-a12b:free",      // simple turns: one strong fast seat
   workers: [                                             // the parallel bench, round-robin
     "nvidia/nemotron-3-super-120b-a12b:free",            //   reasoning
-    "nvidia/llama-3.1-nemotron-70b-instruct",            //   warm, plain-spoken (replaced glm-5.2, EOL 08-21)
+    "nvidia/nemotron-3-nano-omni-30b-a3b",               //   free NVIDIA-lane worker (replaced nemotron-70b-instruct, measured dead 09-03)
     "openai/gpt-oss-20b",                                //   fast general
     "minimax/minimax-m3",                                //   long-context + vision seat
   ],
@@ -625,21 +631,24 @@ export const battalionRosterIds = () => [BATTALION_ROSTER.assess, BATTALION_ROST
  *   openai/gpt-oss-20b                        PAID bare ($0.03/$0.13), :free exists  -> :free
  *   nvidia/nemotron-3-ultra-550b-a55b         PAID bare ($0.60/$3.60), :free exists  -> :free
  *   nvidia/nemotron-3-super-120b-a12b:free    already a $0 route                     -> itself
- *   nvidia/llama-3.1-nemotron-70b-instruct    NO $0 route on OpenRouter at all       -> the free 120B
+ *   nvidia/nemotron-3-nano-omni-30b-a3b       NO $0 route on OpenRouter at all       -> the free 120B
  *   minimax/minimax-m3                        NO $0 route on OpenRouter at all       -> the free 120B
  *
  * (z-ai/glm-5.2's row here was removed with it from MODELS 2026-09-03, STABILIZE Step 1 — NVIDIA
- * retired the seat 2026-08-21 and it took its BATTALION worker slot with it; see the roster above.)
+ * retired the seat 2026-08-21 and it took its BATTALION worker slot with it; see the roster above.
+ * nvidia/llama-3.1-nemotron-70b-instruct's row was removed the same day, lead review follow-up —
+ * that seat also turned out dead (HTTP 404 "Not found for account"); nemotron-3-nano-omni-30b-a3b
+ * took its worker slot instead, mapped below on the SAME no-free-twin reasoning as minimax-m3.)
  *
  * FOUR OF THE FIVE ARE PAID under their bare ids, so a plain __forceProvider reroute would have
  * charged Fred on a lane whose own failure message says "Nothing was billed". Every value below is a
- * $0 route, each live-probed HTTP 200 (nemotron-70b-instruct is UNVERIFIED on this specific point —
- * it has no OpenRouter-native row in this catalog to probe a :free twin against, so it takes the
- * same no-free-twin fallback as minimax-m3 on the same reasoning, not a fresh probe). The two seats
- * with no free twin fall to the free 120B: that loses the coder and the long-context specialist,
- * which is a real downgrade and is announced in the manifest rather than swallowed. Vision is not
- * among the losses — the swarm refuses picture turns outright, so the minimax seat's vision never
- * runs here.
+ * $0 route, each live-probed HTTP 200 (nemotron-3-nano-omni-30b-a3b is UNVERIFIED on this specific
+ * point — it has no OpenRouter-native row in this catalog to probe a :free twin against, so it
+ * takes the same no-free-twin fallback as minimax-m3 on the same reasoning, not a fresh probe). The
+ * two seats with no free twin fall to the free 120B: that loses the coder and the long-context
+ * specialist, which is a real downgrade and is announced in the manifest rather than swallowed.
+ * Vision is not among the losses — the swarm refuses picture turns outright, so the minimax seat's
+ * vision never runs here.
  *
  * The $0 invariant is enforced by battalion_failover_test, not by this comment.
  */
@@ -647,7 +656,7 @@ export const BATTALION_FAILOVER = {
   "openai/gpt-oss-20b": "openai/gpt-oss-20b:free",
   "nvidia/nemotron-3-ultra-550b-a55b": "nvidia/nemotron-3-ultra-550b-a55b:free",
   "nvidia/nemotron-3-super-120b-a12b:free": "nvidia/nemotron-3-super-120b-a12b:free",
-  "nvidia/llama-3.1-nemotron-70b-instruct": "nvidia/nemotron-3-super-120b-a12b:free",
+  "nvidia/nemotron-3-nano-omni-30b-a3b": "nvidia/nemotron-3-super-120b-a12b:free",
   "minimax/minimax-m3": "nvidia/nemotron-3-super-120b-a12b:free",
 };
 
@@ -722,8 +731,9 @@ export const MODEL_FALLBACKS = Object.freeze({
   "minimax/minimax-m3": "nvidia/nemotron-3-super-120b-a12b:free",
   "nvidia/nemotron-3-nano-omni-30b-a3b": "minimax/minimax-m3",
   "nvidia/nemotron-3-super-120b-a12b:free": "deepseek/deepseek-v4-flash",
-  "nvidia/llama-3.1-nemotron-70b-instruct": "anthropic/claude-haiku-4-5",
-  "nvidia/nemotron-3.5-content-safety": "anthropic/claude-haiku-4-5",
+  // nvidia/llama-3.1-nemotron-70b-instruct and nvidia/nemotron-3.5-content-safety REMOVED from
+  // MODELS 2026-09-03 (lead review follow-up) -- both dead ends, see REMOVED_MODEL_FALLBACKS above
+  // for where a stale reference to either id now resolves instead.
   "openai/gpt-oss-20b": "deepseek/deepseek-v4-flash",
   "gx10/gpt-oss-120b": "deepseek/deepseek-v4-flash",
   "gx10/qwen3-coder-30b": "qwen/qwen3-coder",

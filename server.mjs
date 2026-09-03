@@ -6488,15 +6488,28 @@ async function handleStripeWebhook(req, res) {
 // models.catalog.mjs's module state, which /api/models (catalogPayload) and any request-time
 // fallback lookup (resolveServingModel) read from — this is the wiring half of "the model picker
 // offers seats that cannot answer" (deficiency #4): the data now reaches the picker.
+//
+// Two cadences, added 2026-09-03 (lead review follow-up on Step 1's first live rig proof, which
+// caught the live NVIDIA probe hiding a seat on one transient 503 and another on a timeout too
+// short for a legitimate 550B reasoning model): the HOURLY run above still audits everything, but a
+// seat the audit has hidden no longer waits a full hour to be checked again — a second interval
+// reprobes only the currently-unavailable NVIDIA seats every 10 minutes (catalogaudit.mjs's
+// opts.onlyIds), so a transient failure clears itself fast without needing a debounce override.
+// The audit's own 2-consecutive-failure debounce (catalogaudit.mjs, opts.priorFailCounts) is what
+// keeps a single blip from hiding a seat in the first place; failCounts is round-tripped through
+// AUDIT_FILE below specifically so a server restart does not throw that count away.
 import { runCatalogAudit } from "./catalogaudit.mjs";
 import { setUnavailableSeats } from "./models.catalog.mjs";
 const AUDIT_FILE = dataPath("catalog-audit.json");
 let lastAudit = null;
 try { lastAudit = JSON.parse(await readFile(AUDIT_FILE, "utf8")); } catch {}
 if (lastAudit && lastAudit.unavailable) setUnavailableSeats(lastAudit.unavailable);   // survive a restart without a blank slate
-async function runAuditAndStore(trigger) {
+const auditKeys = { openrouter: OPENROUTER_KEY, openai: OPENAI_KEY, anthropic: ANTHROPIC_KEY, deepseek: DEEPSEEK_KEY, nvidia: NVIDIA_KEY, google: GOOGLE_AISTUDIO_KEY };
+async function runAuditAndStore(trigger, opts = {}) {
   try {
-    const r = await runCatalogAudit({ openrouter: OPENROUTER_KEY, openai: OPENAI_KEY, anthropic: ANTHROPIC_KEY, deepseek: DEEPSEEK_KEY, nvidia: NVIDIA_KEY, google: GOOGLE_AISTUDIO_KEY });
+    const priorUnavailable = (lastAudit && lastAudit.unavailable) || {};
+    const priorFailCounts = (lastAudit && lastAudit.failCounts) || {};
+    const r = await runCatalogAudit(auditKeys, { priorUnavailable, priorFailCounts, ...opts });
     r.trigger = trigger;
     lastAudit = r;
     setUnavailableSeats(r.unavailable || {});
@@ -6508,6 +6521,10 @@ async function runAuditAndStore(trigger) {
 if (String(cfgGet("CATALOG_AUDIT", "1")) === "1") {
   setTimeout(() => runAuditAndStore("boot"), 90 * 1000);
   setInterval(() => runAuditAndStore("hourly"), 3600 * 1000);
+  setInterval(() => {
+    const hiddenNvidiaIds = Object.keys((lastAudit && lastAudit.unavailable) || {}).filter((id) => { const m = modelById(id); return m && m.provider === "nvidia"; });
+    if (hiddenNvidiaIds.length) runAuditAndStore("10min-reprobe", { onlyIds: hiddenNvidiaIds });
+  }, 10 * 60 * 1000);
 }
 
 // Door-list automation: when the owner mints a code for a specific email, add that email to the

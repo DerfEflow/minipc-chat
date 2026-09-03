@@ -11,6 +11,34 @@
  * `result.unavailable` (id -> reason), which server.mjs hands to models.catalog.mjs's
  * setUnavailableSeats() so /api/models can hide it and a request-time caller can resolve its
  * fallback (STABILIZE Step 1, 2026-09-03, deficiency #3-#5).
+ *
+ * DEBOUNCE (added 2026-09-03, lead review follow-up on Step 1's first live rig proof). The live
+ * NVIDIA probe hid two seats it should not have on that first rig run:
+ *   - nvidia/nemotron-3-nano-omni-30b-a3b on a single transient HTTP 503 "ResourceExhausted" —
+ *     a rate-limit blip, not a dead seat.
+ *   - nvidia/nemotron-3-ultra-550b-a55b on the flat 20s probe timeout, though it is a 550B
+ *     reasoning model that legitimately answers in 50-57s.
+ * Fixes, both load-bearing for the NVIDIA live-probe path only (list-based dead-id checks for
+ * every OTHER provider are unaffected — that signal has never been observed to flap):
+ *   1. A seat only flips to `unavailable` after 2 CONSECUTIVE failed probes, tracked in
+ *      `result.failCounts` (id -> consecutive-failure count), persisted in catalog-audit.json by
+ *      server.mjs so a restart does not reset the count back to zero. A single failure (including a
+ *      5xx "resource exhausted" — deliberately NOT special-cased to skip the debounce; it counts as
+ *      one ordinary strike toward the two required, same as any other failure shape) lands in
+ *      `result.notes` as a warning, not `result.unavailable`.
+ *   2. One success immediately restores a seat and zeroes its counter — no debounce on the way back
+ *      up, only on the way down.
+ *   3. The probe timeout is 60s for a seat the catalog flags `slow: true` (models.catalog.mjs:
+ *      nvidia/nemotron-3-ultra-550b-a55b, deepseek/deepseek-r1, arcee-ai/trinity-large-thinking —
+ *      the last two are not NVIDIA-provider so this only actually changes ultra-550b's behavior
+ *      today, but all three are flagged for when/if live-probing ever widens past NVIDIA) and 20s
+ *      otherwise.
+ *   4. `opts.onlyIds` restricts the per-model loop to a specific id list — server.mjs uses this for
+ *      a 10-MINUTE reprobe of only the seats currently marked unavailable, instead of making every
+ *      seat wait out the full hourly cycle to recover. `result.unavailable`/`result.failCounts` are
+ *      seeded from `opts.priorUnavailable`/`opts.priorFailCounts` so a run that does not visit a
+ *      given id (onlyIds excludes it, or that id's provider could not be checked this pass) leaves
+ *      its prior status untouched rather than silently clearing or reasserting it.
  */
 import { MODELS, modelById, TENANT_DEFAULT_MODEL, DEFAULT_MODEL, UTILITY_MODEL } from "./models.catalog.mjs";
 
@@ -109,7 +137,10 @@ async function listDirect(provider, keys) {
  * Kept as an SSE reader here (own client, not openAiCompatStream) to avoid pulling a second file
  * into this lane's ownership boundary for one probe function.
  */
-const NVIDIA_PROBE_TIMEOUT_MS = 20000;
+// Exported (not just const) so tests can assert on the exact numbers without waiting them out.
+export const NVIDIA_PROBE_TIMEOUT_MS = 20000;
+export const NVIDIA_PROBE_TIMEOUT_MS_SLOW = 60000;   // catalog-flagged slow/reasoning seats (see header)
+export const NVIDIA_UNAVAILABLE_STRIKES = 2;          // consecutive failed probes before a seat is hidden
 const NVIDIA_PROBE_BAD_CONTENT_RE = /must alternate|invalid.{0,20}role|unsupported.{0,20}conversation|content.{0,10}safety.{0,10}(model|classifier)/i;
 
 export async function probeNvidiaChatLive(directId, url, key, timeoutMs = NVIDIA_PROBE_TIMEOUT_MS) {
@@ -163,9 +194,18 @@ export async function probeNvidiaChatLive(directId, url, key, timeoutMs = NVIDIA
 // probe posts to (tests point this at a local mock; production leaves it unset for the real one).
 // opts.skipLiveProbe short-circuits the NVIDIA invocation pass — used by boot-time callers that
 // want the (cheap, list-only) check immediately and the live probe on the next hourly run, and by
-// tests that only care about the list-based checks.
+// tests that only care about the list-based checks. opts.onlyIds restricts the per-model loop to
+// those catalog ids (the 10-minute unavailable-seat reprobe); opts.priorUnavailable/
+// opts.priorFailCounts seed state so ids this run does not visit keep their last known status —
+// see the DEBOUNCE section of this file's header comment.
 export async function runCatalogAudit(keys = {}, opts = {}) {
-  const result = { checkedAt: new Date().toISOString(), ok: true, problems: [], notes: [], providers: {}, unavailable: {} };
+  const priorUnavailable = opts.priorUnavailable || {};
+  const priorFailCounts = opts.priorFailCounts || {};
+  const onlyIds = opts.onlyIds ? new Set(opts.onlyIds) : null;
+  const result = {
+    checkedAt: new Date().toISOString(), ok: true, problems: [], notes: [], providers: {},
+    unavailable: { ...priorUnavailable }, failCounts: { ...priorFailCounts },
+  };
 
   let orLive = null;
   try { orLive = await listOpenRouter(keys.openrouter); result.providers.openrouter = "checked (" + orLive.size + " live models)"; }
@@ -181,12 +221,14 @@ export async function runCatalogAudit(keys = {}, opts = {}) {
 
   for (const raw of MODELS) {
     const m = modelById(raw.id);
+    if (onlyIds && !onlyIds.has(m.id)) continue;   // not visited this pass -- seeded state stands
     const special = [m.id === TENANT_DEFAULT_MODEL ? "GUEST-DEFAULT" : "", m.id === DEFAULT_MODEL ? "OWNER-DEFAULT" : "", m.id === UTILITY_MODEL ? "UTILITY" : ""].filter(Boolean).join("+");
     let deadByList = false;
     if (m.provider === "openrouter") {
-      if (!orLive) continue;
+      if (!orLive) continue;   // list unchecked this pass -- leave seeded state untouched
       const l = orLive.get(m.id);
       if (!l) { result.ok = false; result.problems.push({ kind: "dead-id", id: m.id, note: "not on OpenRouter; every call 404s" + (special ? " · " + special : "") }); result.unavailable[m.id] = "not on OpenRouter"; continue; }
+      delete result.unavailable[m.id];   // confirmed present -- no debounce on OpenRouter's own check
       const supportsTools = (l.supported_parameters || []).includes("tools");
       if (m.toolCapable && !supportsTools) { result.ok = false; result.problems.push({ kind: "mislabel", id: m.id, note: "flagged tool-capable but no OpenRouter endpoint supports tools" + (special ? " · " + special : "") }); }
       else if (!m.toolCapable && supportsTools) result.notes.push({ kind: "undersell", id: m.id, note: "supports tools but flagged chat-only" });
@@ -215,21 +257,51 @@ export async function runCatalogAudit(keys = {}, opts = {}) {
       }
     } else {
       const s = directSets[m.provider];
-      if (s && !s.has(m.directId)) {
-        result.ok = false; deadByList = true;
-        result.problems.push({ kind: "dead-id", id: m.id, note: `directId '${m.directId}' not on ${m.provider}` + (special ? " · " + special : "") });
-        result.unavailable[m.id] = `directId '${m.directId}' not on ${m.provider}`;
+      if (s) {
+        if (!s.has(m.directId)) {
+          result.ok = false; deadByList = true;
+          const reason = `directId '${m.directId}' not on ${m.provider}`;
+          result.problems.push({ kind: "dead-id", id: m.id, note: reason + (special ? " · " + special : "") });
+          result.unavailable[m.id] = reason;
+          result.failCounts[m.id] = 0;
+        } else if (m.provider !== "nvidia") {
+          // Non-NVIDIA direct providers have no live-probe/debounce layer below: list presence IS
+          // the whole check, so passing it clears a stale mark immediately, same as before this
+          // pass. NVIDIA deliberately does NOT clear here -- the live probe below is the sole
+          // authority on an NVIDIA seat (that is the entire reason it exists: list presence is not
+          // proof of liveness), and skipping the clear here also means a skipLiveProbe pass
+          // (server.mjs's fast boot check) cannot accidentally un-hide a seat only a live probe
+          // ever condemned.
+          delete result.unavailable[m.id];
+        }
       }
+      // s === null: this provider's list wasn't checked this pass (no key, or a network failure)
+      // -- leave whatever was seeded from opts.priorUnavailable/opts.priorFailCounts untouched.
     }
     // The live invocation pass: NVIDIA only (see probeNvidiaChatLive's header), skipped when the
     // list check already proved the id dead (no need to spend a second call finding that out
     // again), when there is no key (nothing to call with), or when the caller asked to skip it.
     if (m.provider === "nvidia" && keys.nvidia && !deadByList && !opts.skipLiveProbe) {
-      const probe = await probeNvidiaChatLive(m.directId, nvidiaChatUrl, keys.nvidia, opts.nvidiaProbeTimeoutMs || NVIDIA_PROBE_TIMEOUT_MS);
-      if (!probe.unchecked && !probe.ok) {
-        result.ok = false;
-        result.problems.push({ kind: "unavailable", id: m.id, note: `live chat probe failed: ${probe.reason}` + (special ? " · " + special : "") });
-        result.unavailable[m.id] = probe.reason;
+      const timeoutMs = opts.nvidiaProbeTimeoutMs != null ? opts.nvidiaProbeTimeoutMs : (m.slow ? NVIDIA_PROBE_TIMEOUT_MS_SLOW : NVIDIA_PROBE_TIMEOUT_MS);
+      const probe = await probeNvidiaChatLive(m.directId, nvidiaChatUrl, keys.nvidia, timeoutMs);
+      if (!probe.unchecked) {
+        if (probe.ok) {
+          if (result.unavailable[m.id]) {
+            delete result.unavailable[m.id];
+            result.notes.push({ kind: "restored", id: m.id, note: "live chat probe succeeded; seat restored" + (special ? " · " + special : "") });
+          }
+          result.failCounts[m.id] = 0;   // restored on the first success -- no debounce on the way up
+        } else {
+          const newCount = (result.failCounts[m.id] || 0) + 1;
+          result.failCounts[m.id] = newCount;
+          if (newCount >= NVIDIA_UNAVAILABLE_STRIKES) {
+            result.ok = false;
+            result.problems.push({ kind: "unavailable", id: m.id, note: `live chat probe failed ${newCount}x consecutively: ${probe.reason}` + (special ? " · " + special : "") });
+            result.unavailable[m.id] = probe.reason;
+          } else {
+            result.notes.push({ kind: "probe-warn", id: m.id, note: `live chat probe failed (${newCount}/${NVIDIA_UNAVAILABLE_STRIKES} consecutive), not yet hidden: ${probe.reason}` + (special ? " · " + special : "") });
+          }
+        }
       }
     }
   }
