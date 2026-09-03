@@ -1,7 +1,7 @@
 /* SD Tech Mobile Game Factory — authenticated HTTP and durable SSE transport. */
 import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
-import { GAME_STATES, REQUIRED_GAME_ARTIFACTS, MANDATORY_ARTIFACT_BACKENDS, QA_REQUIRED_SUITES, APPROVAL_GATES, HOLD_STATES, allowedTransitions, stateProgress } from "./gamefactory.mjs";
+import { GAME_STATES, REQUIRED_GAME_ARTIFACTS, MANDATORY_ARTIFACT_BACKENDS, DEFERRED_ARTIFACT_BACKENDS, QA_REQUIRED_SUITES, APPROVAL_GATES, HOLD_STATES, allowedTransitions, stateProgress } from "./gamefactory.mjs";
 
 const MAX_BODY = 1024 * 1024;
 const MAX_ARTIFACT_CONTENT_BYTES = 512 * 1024;
@@ -328,7 +328,8 @@ export function createGameFactoryHttp({
     const path = url.pathname.replace(/\/$/, "");
     const artifactContentMatch = path.match(ARTIFACT_CONTENT_ROUTE);
     const isSyntheticCanary = path === SYNTHETIC_CANARY_ROUTE;
-    const check = wall(req, { ownerOnly: path === "/api/game-factory/health" || !!artifactContentMatch || isSyntheticCanary });
+    const isChatgptReconciliation = path === "/api/game-factory/admin/chatgpt-reconciliation";
+    const check = wall(req, { ownerOnly: path === "/api/game-factory/health" || !!artifactContentMatch || isSyntheticCanary || isChatgptReconciliation });
     if (check.response) return json(res, check.response.status, check.response.body);
     const T = check.T, uid = T.uid || "owner";
     const expectedAction = isSyntheticCanary ? SYNTHETIC_CANARY_ACTION : "game-factory";
@@ -384,6 +385,7 @@ export function createGameFactoryHttp({
       return json(res, 200, {
         allowed: true, owner: !!T.isOwner, mode: gate.mode,
         states: [...GAME_STATES], requiredArtifacts: [...REQUIRED_GAME_ARTIFACTS], requiredArtifactBackends: [...MANDATORY_ARTIFACT_BACKENDS],
+        deferredArtifactBackends: [...DEFERRED_ARTIFACT_BACKENDS],
         qaRequiredSuites: [...QA_REQUIRED_SUITES], approvalGates: [...APPROVAL_GATES],
         artifactViewer: {
           enabled: !!T.isOwner && typeof readArtifactContent === "function",
@@ -415,6 +417,22 @@ export function createGameFactoryHttp({
 
     if (req.method === "GET" && path === "/api/game-factory/health") {
       return json(res, 200, { store: store.health(), worker: workerHealth(T), mirror: mirrorHealth(T), release: releaseHealth(T) });
+    }
+
+    // Deficiency 15's deliverable: the reconciliation queue of what the owner may still sync by hand
+    // through the offline attestation command. Purely informational (never a blocker); owner-only
+    // because it names artifact identities the same way the artifact/health surfaces already do.
+    if (req.method === "GET" && path === "/api/game-factory/admin/chatgpt-reconciliation") {
+      if (!T.isOwner) return json(res, 403, { error: "Only the owner can view the reconciliation queue.", code: "owner_only" });
+      const queue = typeof store.chatgptProjectReconciliationQueue === "function"
+        ? store.chatgptProjectReconciliationQueue({ uid })
+        : [];
+      return json(res, 200, {
+        backend: "chatgpt_project", deferred: true,
+        attestationDoc: "docs/NATIVE_CHATGPT_PROJECT_OWNER_ATTESTATION.md",
+        offlineOperatorCommand: "node ops/record-native-chatgpt-project-attestation.mjs",
+        pending: queue,
+      });
     }
 
     if (req.method === "GET" && path === "/api/game-factory/events") {

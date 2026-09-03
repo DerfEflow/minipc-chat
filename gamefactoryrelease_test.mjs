@@ -135,10 +135,16 @@ await test("complete preflight can be ready for upload but never performs final 
   assert.equal(serialized.includes("accessToken"), false);
 });
 
-await test("caller-shaped owner-attested copy objects cannot convince release preflight", async () => {
+await test("a caller-shaped google_drive copy cannot convince release preflight; a caller-shaped chatgpt_project copy is irrelevant (deferred)", async () => {
   const detail = project();
+  // chatgpt_project is a DEFERRED backend since the 2026-09-03 gate relaxation: a browser/caller
+  // cannot fake it into mandatory status because it was never mandatory to begin with. What must
+  // still resist caller-shaped fakery is google_drive, the one remaining mandatory backend.
   detail.artifacts[0].copies[0] = {
     backend: "chatgpt_project", status: "OWNER_ATTESTED", algorithm: "sha256", fingerprint: detail.artifacts[0].sha256,
+  };
+  detail.artifacts[0].copies[1] = {
+    backend: "google_drive", status: "VERIFIED", algorithm: "sha256", fingerprint: "not-the-real-sha256",
   };
   detail.complete = true;
   detail.missing = [];
@@ -147,6 +153,18 @@ await test("caller-shaped owner-attested copy objects cannot convince release pr
   const assessed = await service.assess({ uid: "owner", projectId: detail.id, platform: "android", packageId: "tools.dominion.vectorvault" });
   assert.equal(assessed.body.readyForUpload, false);
   assert.ok(assessed.body.blockers.some((item) => item.code === "ARTIFACT_COPIES_INCOMPLETE"));
+});
+
+await test("a genuinely verified google_drive copy alone is sufficient; a missing/fake chatgpt_project copy never blocks", async () => {
+  const detail = project();
+  // Same artifact as the base fixture, but strip chatgpt_project entirely (never attested at all).
+  detail.artifacts[0].copies = detail.artifacts[0].copies.filter((copy) => copy.backend !== "chatgpt_project");
+  const store = storeFor(detail);
+  const service = createGameFactoryReleaseReadiness({ store, capabilityProvider: async () => readyCapabilities(), now: () => 1_800_000_000_000 });
+  const assessed = await service.assess({ uid: "owner", projectId: detail.id, platform: "android", packageId: "tools.dominion.vectorvault" });
+  assert.equal(assessed.body.readyForUpload, true);
+  assert.equal(assessed.body.blockers.some((item) => item.code === "ARTIFACT_COPIES_INCOMPLETE"), false);
+  assert.deepEqual(assessed.body.evidence.artifacts.requiredVerifiedBackends, ["google_drive"]);
 });
 
 await test("build-bound quality and approval evidence fail closed", async () => {

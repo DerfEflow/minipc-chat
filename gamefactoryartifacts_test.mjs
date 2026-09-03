@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { createGameFactoryArtifactMirror, gameFactoryArtifactFlags } from "./gamefactoryartifacts.mjs";
 import { createGameFactoryStore } from "./gamefactorystore.mjs";
+import { REQUIRED_GAME_ARTIFACTS } from "./gamefactory.mjs";
 
 const clone = (value) => structuredClone(value);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -77,7 +78,8 @@ try {
     assert.equal(service.health().nativeProjectConfigured, false);
     assert.equal(service.health().status, "blocked");
     assert.equal(service.health().reviewReadsSupported, true);
-    assert.deepEqual(service.health().requiredVerifiedBackends, ["chatgpt_project", "google_drive"]);
+    assert.deepEqual(service.health().requiredVerifiedBackends, ["google_drive"]);
+    assert.deepEqual(service.health().deferredBackends, ["chatgpt_project"]);
     assert.equal("delete" in service, false);
   });
 
@@ -100,7 +102,7 @@ try {
     assert.equal(made.body.local.backend, "primary");
     assert.equal(made.body.local.status, "VERIFIED");
     assert.equal(made.body.complete, false);
-    assert.equal(made.body.compliance.status, "blocked");
+    assert.equal(made.body.compliance.status, "deferred");
     const rel = made.body.local.locator.replace("factory-local://", "").split("/");
     firstPath = join(dir, "objects", ...rel);
     assert.equal(existsSync(firstPath), true);
@@ -138,7 +140,7 @@ try {
     assert.equal(mirrored.status, 200);
     assert.equal(mirrored.body.sha256, made.body.sha256);
     assert.equal(mirrored.body.complete, false);
-    assert.equal(mirrored.body.compliance.status, "blocked");
+    assert.equal(mirrored.body.compliance.status, "deferred");
     assert.equal(drive.uploads, 1);
     const artifact = store.detail.artifacts.find((item) => item.id === made.body.artifactId);
     assert.equal(artifact.copies.find((item) => item.backend === "google_drive").status, "VERIFIED");
@@ -179,7 +181,9 @@ try {
     assert.equal(artifact.complete, false);
   });
 
-  await test("the durable store never treats primary plus Drive as mandated two-copy completeness", async () => {
+  await test("by default the durable store treats primary plus verified Drive as complete; chatgpt_project reports DEFERRED, not MISSING, and never gates completeness", async () => {
+    // Deficiency 15 / required behavior 1 (2026-09-03): chatgpt_project moved from mandatory to a
+    // DEFERRED backend (gamefactory.mjs MANDATORY_ARTIFACT_BACKENDS is now ["google_drive"] only).
     const durable = createGameFactoryStore({ dir: join(dir, "sqlite") });
     try {
       const projectId = durable.seedPortfolio({ uid: "owner", email: "owner@example.com" })[0].id;
@@ -193,11 +197,33 @@ try {
       assert.equal((await integration.mirrorArtifact({ uid: "owner", projectId, artifactId: ingested.body.artifactId })).status, 200);
       const artifact = durable.getProject("owner", projectId).artifacts.find((item) => item.id === ingested.body.artifactId);
       assert.deepEqual(artifact.copies.map((item) => item.backend).sort(), ["chatgpt_project", "google_drive", "primary"]);
-      assert.equal(artifact.copies.find((item) => item.backend === "chatgpt_project").status, "MISSING");
-      assert.equal(artifact.complete, false);
+      assert.equal(artifact.copies.find((item) => item.backend === "chatgpt_project").status, "DEFERRED");
+      assert.equal(artifact.complete, true);
+      // Project-level complete still requires all 11 required artifacts; only one was created here.
       assert.equal(durable.getProject("owner", projectId).complete, false);
+      assert.deepEqual(durable.getProject("owner", projectId).missing, REQUIRED_GAME_ARTIFACTS.slice(1));
     } finally {
       durable.close();
+    }
+  });
+
+  await test("an explicit requiredArtifactBackends override can still require chatgpt_project evidence for a stricter caller", async () => {
+    const strict = createGameFactoryStore({ dir: join(dir, "sqlite-strict"), requiredArtifactBackends: ["chatgpt_project", "google_drive"] });
+    try {
+      const projectId = strict.seedPortfolio({ uid: "owner", email: "owner@example.com" })[0].id;
+      const strictDrive = new FakeDrive();
+      const integration = createGameFactoryArtifactMirror({
+        store: strict, rootDir: join(dir, "strict-objects"), localWritesEnabled: true, driveWritesEnabled: true,
+        driveForTenant: async () => strictDrive,
+      });
+      const ingested = await integration.ingestBuffer({ uid: "owner", projectId, artifactKey: "00_GAME_BRIEF", data: "strict brief", mimeType: "text/markdown" });
+      assert.equal((await integration.mirrorArtifact({ uid: "owner", projectId, artifactId: ingested.body.artifactId })).status, 200);
+      const artifact = strict.getProject("owner", projectId).artifacts.find((item) => item.id === ingested.body.artifactId);
+      assert.equal(artifact.copies.find((item) => item.backend === "chatgpt_project").status, "DEFERRED");
+      assert.equal(artifact.complete, false);
+      assert.equal(strict.getProject("owner", projectId).complete, false);
+    } finally {
+      strict.close();
     }
   });
 

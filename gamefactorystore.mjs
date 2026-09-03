@@ -69,6 +69,14 @@ export const SYNTHETIC_CANARY_SCHEMA = "game-factory.synthetic-worker-canary.v1"
 const SYNTHETIC_CANARY_TITLE = "Trusted synthetic worker canary";
 const SYNTHETIC_CANARY_CAPABILITY = "quality_assurance";
 const SYNTHETIC_CANARY_MAX_ATTEMPTS = 2;
+// Deficiency 17: outbox_events accumulated 132 PENDING rows with 0 attempts and no consumer. Every
+// row's kind is "domain_event" (see emit() below); nothing else has ever called insertOutbox. The
+// drainer below is generic over kind so a future insertOutbox caller is not silently ignored.
+const OUTBOX_MAX_ATTEMPTS = 8;
+const OUTBOX_BACKOFF_BASE_MS = 30_000;
+const OUTBOX_BACKOFF_MAX_MS = 30 * 60_000;
+const outboxBackoffMs = (attempts) => Math.min(OUTBOX_BACKOFF_BASE_MS * (2 ** Math.max(Number(attempts) || 0, 0)), OUTBOX_BACKOFF_MAX_MS);
+const MIRROR_WRITES_TRUE = new Set(["1", "true", "yes", "on", "enabled"]);
 function syntheticCanaryRecipe() {
   return {
     payload: {
@@ -448,6 +456,8 @@ export function createGameFactoryStore({
     events: db.prepare("SELECT * FROM game_events WHERE uid=? AND projectId=? AND id>? ORDER BY id LIMIT ?"),
     insertEvent: db.prepare("INSERT INTO game_events (projectId,uid,type,actor,causationId,correlationId,payload,createdAt) VALUES (?,?,?,?,?,?,?,?)"),
     insertOutbox: db.prepare("INSERT OR IGNORE INTO outbox_events (projectId,uid,kind,effectKey,payload,createdAt) VALUES (?,?,?,?,?,?)"),
+    outboxPending: db.prepare("SELECT * FROM outbox_events WHERE status IN ('PENDING','RETRYABLE') AND nextAttemptAt<=? ORDER BY nextAttemptAt, id LIMIT ?"),
+    outboxSettle: db.prepare("UPDATE outbox_events SET status=?, attempts=attempts+1, nextAttemptAt=?, lastError=?, deliveredAt=? WHERE id=?"),
     command: db.prepare("SELECT * FROM command_idempotency WHERE uid=? AND commandKey=?"),
     saveCommand: db.prepare("INSERT INTO command_idempotency (uid,commandKey,requestHash,status,response,createdAt) VALUES (?,?,?,?,?,?)"),
     tasks: db.prepare("SELECT * FROM game_tasks WHERE projectId=? AND uid=? ORDER BY createdAt DESC LIMIT ?"),
@@ -647,10 +657,14 @@ export function createGameFactoryStore({
         provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
       };
     } else {
+      // chatgpt_project is a DEFERRED backend (see the comment at MANDATORY_ARTIFACT_BACKENDS in
+      // gamefactory.mjs): no evidence yet is expected, informational, and never a blocker. It stays
+      // reconcilable through the offline owner-attestation flow whenever Fred chooses to run it.
       state.copy = {
-        backend: "chatgpt_project", status: "MISSING", fingerprint: "", algorithm: "sha256", attempts: 0,
-        lastError: "No native Project evidence has been recorded.", verifiedAt: 0,
-        provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
+        backend: "chatgpt_project", status: "DEFERRED", fingerprint: "", algorithm: "sha256", attempts: 0,
+        lastError: "ChatGPT Project sync is deferred; use the offline owner-attestation command when ready.",
+        reason: "chatgpt_project has no API; this backend is deferred and does not block the game plan.",
+        verifiedAt: 0, provenance: "NONE", nativeProjectId: LOCKED_NATIVE_CHATGPT_PROJECT_ID,
       };
     }
     return state;
@@ -1812,6 +1826,134 @@ export function createGameFactoryStore({
     return report;
   }
 
+  /*
+   * The outbox is a durable record of intended external effects, not the effect itself. Every row
+   * so far is kind="domain_event" (written by emit() above, in the same transaction as the durable
+   * game_events row). The real fan-out for those events already happens independently: the SSE
+   * /events handler (gamefactoryhttp.mjs) polls game_events directly, so a domain_event's delivery
+   * is already durable and already live before this drainer ever looks at it. What genuinely never
+   * happens today is a retry of a Google Drive mirror that failed or was skipped after the
+   * synchronous attempt in gamefactoryplanner.mjs/startSpecification. classifyOutboxRow() checks
+   * the durable copy-verification truth (never a caller's claim) so an artifact that is really still
+   * unmirrored stays RETRYABLE instead of being marked DELIVERED by mistake.
+   */
+  function classifyOutboxRow(row, { env = process.env } = {}) {
+    if (row.kind !== "domain_event") {
+      // No second outbox kind exists anywhere in this codebase today (grep insertOutbox). Keep this
+      // branch honest instead of silently dropping a future kind: deliver it to the local journal
+      // (the row is already durable) and say plainly that no effect is wired up yet.
+      // TODO(fred): give this kind a real external effect the day a second insertOutbox caller ships.
+      return { status: "DELIVERED", note: "no external effect is defined for this outbox kind yet" };
+    }
+    const envelope = parse(row.payload, {});
+    const type = cleanText(envelope?.type, 160);
+    if (type !== "artifact.version_created") {
+      return { status: "DELIVERED", note: "delivered via the durable game_events table and the live /events SSE poll; no separate push was required for this event type" };
+    }
+    const artifactId = cleanText(envelope?.payload?.id, 180);
+    if (!artifactId) return { status: "DELIVERED", note: "malformed artifact.version_created payload carried no artifact id; nothing to mirror" };
+    const alreadyMirrored = artifactCopyComplete({ uid: row.uid, projectId: row.projectId, artifactId, backend: "google_drive" });
+    if (alreadyMirrored) return { status: "DELIVERED", note: "google_drive copy is already verified" };
+    if (!MIRROR_WRITES_TRUE.has(cleanText(env.GAME_FACTORY_MIRROR_WRITES, 20).toLowerCase())) {
+      return { status: "DELIVERED", note: "Drive mirror writes are disabled (GAME_FACTORY_MIRROR_WRITES is not enabled); no mirror action is possible from the outbox" };
+    }
+    return { status: "RETRYABLE", error: "google_drive copy is not yet verified", note: "awaiting a drive-mirror-capable outbox pass (pass deliver to drainOutbox to perform the real upload)" };
+  }
+
+  function settleOutboxRow(row, outcome, at) {
+    const requested = ["DELIVERED", "RETRYABLE", "DEAD"].includes(outcome?.status) ? outcome.status : "RETRYABLE";
+    const attempts = Number(row.attempts) || 0;
+    const exhausted = requested === "RETRYABLE" && attempts + 1 >= OUTBOX_MAX_ATTEMPTS;
+    const finalStatus = exhausted ? "DEAD" : requested;
+    const nextAttemptAt = finalStatus === "RETRYABLE" ? at + outboxBackoffMs(attempts) : 0;
+    const lastError = safeText(outcome?.error || (exhausted ? `outbox delivery did not succeed after ${OUTBOX_MAX_ATTEMPTS} attempts` : outcome?.note || ""), 2000);
+    q.outboxSettle.run(finalStatus, nextAttemptAt, lastError, finalStatus === "DELIVERED" ? at : 0, row.id);
+    return finalStatus;
+  }
+
+  function drainOutboxRows(rows, { deliver = null, env = process.env, at } = {}) {
+    const report = { scanned: rows.length, delivered: 0, retried: 0, dead: 0 };
+    return (async () => {
+      for (const row of rows) {
+        let outcome;
+        try {
+          outcome = deliver ? await deliver({ ...row, payload: parse(row.payload, {}) }) : null;
+          if (!outcome || outcome.status === "SKIP") outcome = classifyOutboxRow(row, { env });
+        } catch (error) {
+          outcome = { status: "RETRYABLE", error: safeText(error?.message || error, 1000) || "outbox delivery threw" };
+        }
+        const finalStatus = settleOutboxRow(row, outcome, at);
+        if (finalStatus === "DELIVERED") report.delivered++;
+        else if (finalStatus === "DEAD") report.dead++;
+        else report.retried++;
+      }
+      return report;
+    })();
+  }
+
+  // Synchronous boot-time drain: no injected deliver, so only the pure-DB default classification
+  // above can run (no network, safe to call from inside this synchronous constructor). This is what
+  // actually clears the 132 pre-existing rows the first time this store opens after the fix ships.
+  function drainOutboxSync({ limit = 1000, env = process.env } = {}) {
+    const at = timestamp();
+    const rows = q.outboxPending.all(at, Math.min(Math.max(Number(limit) || 1000, 1), 5000));
+    const report = { scanned: rows.length, delivered: 0, retried: 0, dead: 0 };
+    for (const row of rows) {
+      let outcome;
+      try { outcome = classifyOutboxRow(row, { env }); }
+      catch (error) { outcome = { status: "RETRYABLE", error: safeText(error?.message || error, 1000) || "outbox classification failed" }; }
+      const finalStatus = settleOutboxRow(row, outcome, at);
+      if (finalStatus === "DELIVERED") report.delivered++;
+      else if (finalStatus === "DEAD") report.dead++;
+      else report.retried++;
+    }
+    return report;
+  }
+
+  // General drain, usable on a recurring tick. `deliver` is optional; when supplied (for example by
+  // the orchestrator with a real artifact-mirror adapter) it may perform the actual network effect
+  // for a row and return { status }, or return null/"SKIP" to fall through to the default classifier.
+  function drainOutbox({ limit = 100, deliver = null, env = process.env } = {}) {
+    const at = timestamp();
+    const rows = q.outboxPending.all(at, Math.min(Math.max(Number(limit) || 100, 1), 1000));
+    return drainOutboxRows(rows, { deliver, env, at });
+  }
+
+  // What the owner can still sync by hand: every current artifact version whose chatgpt_project
+  // evidence has not reached a completing status. Purely a read of durable, already-computed truth;
+  // it records nothing. See docs/NATIVE_CHATGPT_PROJECT_OWNER_ATTESTATION.md for the offline command.
+  function chatgptProjectReconciliationQueue({ uid = "", limit = 200 } = {}) {
+    const who = cleanUid(uid);
+    const rows = who
+      ? db.prepare(`SELECT a.* FROM game_artifacts a WHERE a.uid=?
+          AND a.version=(SELECT MAX(version) FROM game_artifacts b WHERE b.projectId=a.projectId AND b.artifactKey=a.artifactKey)
+          ORDER BY a.projectId, a.artifactKey`).all(who)
+      : db.prepare(`SELECT a.* FROM game_artifacts a
+          WHERE a.version=(SELECT MAX(version) FROM game_artifacts b WHERE b.projectId=a.projectId AND b.artifactKey=a.artifactKey)
+          ORDER BY a.projectId, a.artifactKey`).all();
+    const bound = Math.min(Math.max(Number(limit) || 200, 1), 1000);
+    const out = [];
+    for (const row of rows) {
+      const artifact = nativeEvidenceArtifact(row);
+      const storedCopies = q.copies.all(row.id).filter((candidate) => candidate.backend === "chatgpt_project");
+      const copy = nativeEvidenceCopy(row, storedCopies);
+      if (copySatisfiesBackend(copy, artifact, "chatgpt_project")) continue;
+      out.push({
+        projectId: row.projectId, artifactId: row.id, artifactKey: row.artifactKey, version: row.version,
+        status: copy.status, reason: copy.reason || copy.lastError,
+        readyForAttestation: nativeEvidencePrerequisites(artifact).length === 0,
+        missingPrerequisites: nativeEvidencePrerequisites(artifact),
+      });
+      if (out.length >= bound) break;
+    }
+    return out;
+  }
+
+  // Clear whatever the outbox already holds the moment this store opens. Boot-time only, pure DB
+  // reads, no network: this is what turns the 132 pre-existing PENDING rows into DELIVERED (or a
+  // genuinely still-open RETRYABLE for an artifact that really never got mirrored).
+  try { drainOutboxSync({}); } catch (error) { log("game-factory outbox boot drain failed: " + String(error?.message || error)); }
+
   function health() {
     const integrity = db.prepare("PRAGMA quick_check").get();
     const counts = {};
@@ -1845,7 +1987,8 @@ export function createGameFactoryStore({
     createBuild, queueTask, queueSyntheticCanary, claimNextTask, heartbeatTask, completeTask, failTask, securityStopTask,
     recordArtifact, recordArtifactCopy, artifactCopyComplete, recordOwnerAttestedNativeProjectEvidence,
     invalidateNativeProjectEvidence, recordTestRun, recordRelease,
-    events, getApprovalSubject, reconcile, health, stats,
+    events, getApprovalSubject, reconcile, drainOutbox, drainOutboxSync, chatgptProjectReconciliationQueue,
+    health, stats,
     close() { try { db.close(); } catch {} },
   };
 }

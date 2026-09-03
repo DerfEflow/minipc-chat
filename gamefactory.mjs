@@ -91,8 +91,17 @@ export const REQUIRED_GAME_ARTIFACTS = Object.freeze([
   "10_COMPLETENESS_REVIEW",
 ]);
 
-export const MANDATORY_ARTIFACT_BACKENDS = Object.freeze(["chatgpt_project", "google_drive"]);
-export const KNOWN_ARTIFACT_BACKENDS = Object.freeze(["primary", ...MANDATORY_ARTIFACT_BACKENDS]);
+// Deliberate gate relaxation ordered by the owner on 2026-09-03 (deficiency 15: a game plan could
+// never complete because chatgpt_project has no API and the only completion path was an offline
+// operator command run with the server stopped). Mandatory completion now requires only the local
+// primary object plus a byte-verified Google Drive copy. chatgpt_project moves to a DEFERRED
+// backend: a copy is recorded as DEFERRED with a reason, planning proceeds past it, and it stays
+// available for the owner to complete later through the same offline attestation flow (see
+// docs/NATIVE_CHATGPT_PROJECT_OWNER_ATTESTATION.md). DEFERRED is informational everywhere it is
+// surfaced (API responses, the client) and must never gate a transition or read as an error.
+export const MANDATORY_ARTIFACT_BACKENDS = Object.freeze(["google_drive"]);
+export const DEFERRED_ARTIFACT_BACKENDS = Object.freeze(["chatgpt_project"]);
+export const KNOWN_ARTIFACT_BACKENDS = Object.freeze(["primary", ...MANDATORY_ARTIFACT_BACKENDS, ...DEFERRED_ARTIFACT_BACKENDS]);
 
 export const QA_REQUIRED_SUITES = Object.freeze([
   "core-loop",

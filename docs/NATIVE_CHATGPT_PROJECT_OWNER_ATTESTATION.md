@@ -2,15 +2,17 @@
 
 ## Purpose and current boundary
 
-Every required Game Factory artifact needs a verified immutable primary object, a byte-verified Google Drive copy, and native ChatGPT Project evidence. A documented native Project verification API is the preferred evidence path. It is not currently available to this runtime.
+**2026-09-03 owner-ordered gate relaxation.** A game plan could never complete because `chatgpt_project` has no verification API and the only completion path was this offline operator command run with the server stopped — a project could sit blocked indefinitely on a step nothing in the running app could ever satisfy. The owner ordered mandatory completion narrowed to the local primary object plus a byte-verified Google Drive copy only. `chatgpt_project` is now a **DEFERRED** backend: the Start path proceeds past it, a copy is recorded as `DEFERRED` with a reason instead of blocking, and the deferred artifact stays listed on a reconciliation queue (`GET /api/game-factory/admin/chatgpt-reconciliation`, owner-only) for the owner to complete later through the exact same offline attestation flow documented below. `DEFERRED` is informational everywhere it is surfaced — the Start/spec API response, the reconciliation queue, and the client — and must never read as an error or a blocker. Everything below this section (the attestation flow itself, the manifest shape, the offline command, invalidation) is unchanged; only its place in the completion gate changed.
 
-The owner has approved one narrow temporary fallback: an offline privileged operator may append an `OWNER_ATTESTED` record after the owner visibly confirms an exact browser file upload in the locked native Project:
+Every required Game Factory artifact still benefits from a verified immutable primary object, a byte-verified Google Drive copy, and native ChatGPT Project evidence. A documented native Project verification API is the preferred evidence path for that third piece. It is not currently available to this runtime.
+
+The owner has approved one narrow temporary fallback for the deferred `chatgpt_project` copy: an offline privileged operator may append an `OWNER_ATTESTED` record after the owner visibly confirms an exact browser file upload in the locked native Project:
 
 `g-p-6a97fd4de8ac8191ae375fe1242c1ea8`
 
-`OWNER_ATTESTED` is not labelled machine-verified. It satisfies the native Project portion of mandatory-artifact completion only under this approved rule. It does not enable release writes, signing, store uploads, Android, iOS, or any worker capability.
+`OWNER_ATTESTED` is not labelled machine-verified. Recording it moves that artifact's `chatgpt_project` copy from `DEFERRED` to a genuinely evidenced state; it does not enable release writes, signing, store uploads, Android, iOS, or any worker capability. As of the 2026-09-03 relaxation, `chatgpt_project` evidence is never required for the Start path to proceed — a caller that needs a stricter, chatgpt_project-required gate (for example a dedicated reconciliation or audit path) can still request it explicitly; the default app path does not.
 
-Until a record is actually appended for every current artifact version, the normal Start path remains partial and returns `503 mandatory_artifact_copies_incomplete`. This procedure does not create evidence for the current production artifacts by itself.
+A record not yet appended for a given artifact version no longer blocks the Start path. It shows up as `DEFERRED` in the artifact's copy list and on the reconciliation queue until the owner acts on it.
 
 ## Hard boundaries
 

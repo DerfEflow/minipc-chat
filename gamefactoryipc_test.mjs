@@ -117,6 +117,31 @@ try {
     assert.deepEqual(readdirSync(dir), []);
   });
 
+  await test("required behavior 4: EPERM on link() falls back to an equally exclusive publish, not a fatal error", () => {
+    // Deficiency 16: production hit `EPERM: operation not permitted, link '/broker-requests/.tmp-...'`
+    // even though /broker-requests is a dedicated ext4 mount (a sandboxing/mount quirk, not evidence
+    // of a compromised request). This test injects that exact failure regardless of what the real
+    // test filesystem supports, so it runs unconditionally (not gated on hardLinks.available).
+    const dir = directory("eperm-fallback"); const path = join(dir, "command.json");
+    const injected = { linkSync() { const error = new Error("injected EPERM"); error.code = "EPERM"; throw error; } };
+    publish(path, "fell-back\n", { operations: injected });
+    assert.equal(readTrustedText(path, { ownerUid: uid }), "fell-back\n");
+    if (process.platform !== "win32") assert.equal(statSync(path).mode & 0o777, 0o640);
+    assert.deepEqual(readdirSync(dir).filter((name) => /^\.(?:tmp|publish)-/.test(name)), []);
+    // The no-replace guarantee must survive the fallback: a replay still sees EEXIST, never a second
+    // silent publish, whether or not link() keeps failing with EPERM on the retry.
+    assert.throws(() => publish(path, "second\n", { operations: injected }), (error) => error?.code === "EEXIST");
+    assert.equal(readTrustedText(path, { ownerUid: uid }), "fell-back\n");
+  });
+
+  await test("required behavior 4: EPERM on link() plus a real conflicting file still reports EEXIST, never a fabricated success", () => {
+    const dir = directory("eperm-fallback-conflict"); const path = join(dir, "command.json");
+    writeFileSync(path, "already-here\n", { mode: 0o640 });
+    const injected = { linkSync() { const error = new Error("injected EPERM"); error.code = "EPERM"; throw error; } };
+    assert.throws(() => publish(path, "attempted\n", { operations: injected }), (error) => error?.code === "EEXIST");
+    assert.equal(readFileSync(path, "utf8"), "already-here\n");
+  });
+
   await durablePublicationTest("link/unlink crash window is rejected then repaired to one link", () => {
     const dir = directory("link-crash"); const path = join(dir, "command.json"); let unlinks = 0;
     const injected = { unlinkSync(target) { unlinks++; if (unlinks === 1) { const error = new Error("injected unlink crash"); error.code = "EIO"; throw error; } unlinkSync(target); } };

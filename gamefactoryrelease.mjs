@@ -114,7 +114,7 @@ function artifactCompliance(detail, authoritativeComplete) {
     const artifact = byKey.get(key);
     return !artifact || MANDATORY_ARTIFACT_BACKENDS.some((backend) => !verified(artifact, backend));
   });
-  return { complete: required.length > 0 && missing.length === 0, required, missing, nativeProjectRequired: true, requiredVerifiedBackends: [...MANDATORY_ARTIFACT_BACKENDS] };
+  return { complete: required.length > 0 && missing.length === 0, required, missing, nativeProjectRequired: false, requiredVerifiedBackends: [...MANDATORY_ARTIFACT_BACKENDS] };
 }
 
 function packageIdValid(platform, packageId) {
@@ -160,7 +160,7 @@ export function createGameFactoryReleaseReadiness({
     const artifactStatus = artifactCompliance(detail, (artifact, backend) => store.artifactCopyComplete({
       uid: clean(uid, 80).toLowerCase(), projectId: detail.id, artifactId: artifact.id, backend,
     }));
-    if (!artifactStatus.complete) blockers.push(blocker("ARTIFACT_COPIES_INCOMPLETE", "artifacts", "Every required artifact needs verified ChatGPT Project and Google Drive copies; a local primary does not substitute for either."));
+    if (!artifactStatus.complete) blockers.push(blocker("ARTIFACT_COPIES_INCOMPLETE", "artifacts", "Every required artifact needs a verified Google Drive copy; a local primary does not substitute for it. (ChatGPT Project sync is deferred and does not block release.)"));
     const testsPassed = !!build && matchingTestPassed(detail, target, build);
     if (!testsPassed) blockers.push(blocker("AUTOMATED_TESTS_REQUIRED", "quality", `A passing ${target} test run bound to this build is required.`));
     const qaReady = detail.evidence?.qaReady === true;

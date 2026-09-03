@@ -319,7 +319,7 @@
         <article class="dgf-info"><small>Active work</small><b>${esc(task?.title || "No task is writing")}</b><p>${task ? `${esc(human(task.capability))} · attempt ${Number(task.attempt) || 0}/${Number(task.maxAttempts) || 0}` : "A queued task can be claimed only when no other writer owns this game."}</p></article>
         <article class="dgf-info"><small>Next work</small><b>${esc(next?.title || "No task queued")}</b><p>${next ? esc(human(next.capability)) : "The orchestrator has not scheduled another capability."}</p></article>
         <article class="dgf-info"><small>Active build</small><b>${esc(game.activeBuild?.versionName || game.activeBuildId || "Not created")}</b><p>${game.activeBuild ? `${esc(game.activeBuild.status)} · ${Number(game.activeBuild.versionCode) || 0}` : "Release evidence is bound to an immutable build when one exists."}</p></article>
-        <article class="dgf-info"><small>Required artifacts</small><b>${game.complete ? "11 of 11 complete" : `${Math.max(0, (game.required?.length || 11) - (game.missing?.length || 0))} of ${game.required?.length || 11} complete`}</b><p>Completion requires a byte-verified Drive copy and approved native Project evidence for every required artifact.</p></article>
+        <article class="dgf-info"><small>Required artifacts</small><b>${game.complete ? "11 of 11 complete" : `${Math.max(0, (game.required?.length || 11) - (game.missing?.length || 0))} of ${game.required?.length || 11} complete`}</b><p>Completion requires a byte-verified Drive copy for every required artifact. Native ChatGPT Project evidence is deferred, not required, and can be completed by the owner later without blocking progress.</p></article>
       </div>
       ${healthMarkup()}
       ${lifecycleMarkup(game)}`;
@@ -346,8 +346,15 @@
           const hashBound = copy.algorithm === "sha256" && copy.fingerprint === artifact.sha256;
           const ownerAttested = copy.backend === "chatgpt_project" && copy.status === "OWNER_ATTESTED";
           const nativeApiVerified = copy.backend === "chatgpt_project" && copy.status === "NATIVE_API_VERIFIED";
+          // chatgpt_project is a deferred backend as of 2026-09-03 (see gamefactory.mjs and
+          // docs/NATIVE_CHATGPT_PROJECT_OWNER_ATTESTATION.md): a DEFERRED copy is expected, optional,
+          // and never blocks completion, so its wording must read as informational, not as a failure.
+          const deferred = copy.backend === "chatgpt_project" && copy.status === "DEFERRED";
           const verified = hashBound && (copy.status === "VERIFIED" || ownerAttested || nativeApiVerified);
-          const status = verified ? (ownerAttested ? "Owner-attested browser upload" : nativeApiVerified ? "Native API verified" : "Verified") : copy.status === "VERIFIED" ? "Verification insufficient" : human(copy.status);
+          const status = verified
+            ? (ownerAttested ? "Owner-attested browser upload" : nativeApiVerified ? "Native API verified" : "Verified")
+            : deferred ? "Deferred (not required; owner may complete later)"
+            : copy.status === "VERIFIED" ? "Verification insufficient" : human(copy.status);
           return `<span class="dgf-copy" data-ok="${verified}">${esc(copy.backend)} · ${esc(status)}</span>`;
         }).join("") : `<span class="dgf-copy">No verified copies</span>`}
         <div class="dgf-artifact-review">${reviewControl}</div>

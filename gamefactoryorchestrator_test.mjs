@@ -701,6 +701,123 @@ try {
     store.close();
   });
 
+  // Required behavior 2 (deficiency 16): the gx10-gamefactory hands node disconnects/reconnects
+  // every ~15 minutes and gets caught in hub 409 lockouts. That is not proof isolation was lost.
+  await test("a retryable not-connected probe suspends dispatching without latching the active task", async () => {
+    const { store, journalDir, uid, project } = setup("gfo-proof-suspend-basic");
+    const worker = new FakeWorker();
+    const taskId = queue(store, uid, project.id);
+    const orchestrator = createGameFactoryOrchestrator({ store, worker, journalDir, leaseMs: 120_000 });
+    try {
+      assert.equal((await orchestrator.tick()).claimed, 1);
+      assert.equal(store.getProject(uid, project.id).tasks.find((task) => task.id === taskId).status, "RUNNING");
+      worker.probe = async () => ({
+        ok: false, node: worker.node, offline: true, retryable: true,
+        error: `hands node "${worker.node}" is not connected (machine asleep, off, or the node service is down)`,
+      });
+      const suspendedTick = await orchestrator.tick();
+      assert.equal(suspendedTick.ok, true);
+      assert.equal(suspendedTick.suspended, true);
+      assert.equal(suspendedTick.reconciled, 0);
+      assert.equal(worker.cancelCalls.length, 0);
+      assert.equal(store.getProject(uid, project.id).tasks.find((task) => task.id === taskId).status, "RUNNING");
+      assert.equal(orchestrator.health().suspended, true);
+      assert.equal(orchestrator.health().suspension.node, worker.node);
+      const journal = new DatabaseSync(join(journalDir, "gamefactory-dispatch.db"));
+      assert.equal(journal.prepare("SELECT status FROM dispatches WHERE taskId=?").get(taskId).status, "RUNNING");
+      journal.close();
+    } finally {
+      await orchestrator.close();
+      store.close();
+    }
+  });
+
+  await test("resumes normally when the same broker identity reconnects within the grace window", async () => {
+    const { store, journalDir, uid, project } = setup("gfo-proof-suspend-resume");
+    const worker = new FakeWorker();
+    const taskId = queue(store, uid, project.id);
+    const orchestrator = createGameFactoryOrchestrator({ store, worker, journalDir, leaseMs: 120_000 });
+    try {
+      assert.equal((await orchestrator.tick()).claimed, 1);
+      worker.probe = async () => ({ ok: false, node: worker.node, offline: true, retryable: true, error: "not connected" });
+      assert.equal((await orchestrator.tick()).suspended, true);
+      worker.probe = FakeWorker.prototype.probe.bind(worker); // exact same identity reconnects
+      const resumedTick = await orchestrator.tick();
+      assert.equal(resumedTick.suspended, false);
+      assert.equal(resumedTick.reconciled, 1);
+      assert.equal(worker.cancelCalls.length, 0);
+      assert.equal(orchestrator.health().suspended, false);
+      assert.equal(store.getProject(uid, project.id).tasks.find((task) => task.id === taskId).status, "RUNNING");
+      const journal = new DatabaseSync(join(journalDir, "gamefactory-dispatch.db"));
+      assert.equal(journal.prepare("SELECT status FROM dispatches WHERE taskId=?").get(taskId).status, "RUNNING");
+      journal.close();
+    } finally {
+      await orchestrator.close();
+      store.close();
+    }
+  });
+
+  await test("latches when the grace window expires while the node is still disconnected", async () => {
+    const { store, journalDir, uid, project } = setup("gfo-proof-suspend-expire");
+    const worker = new FakeWorker();
+    const taskId = queue(store, uid, project.id);
+    let clock = 1_800_000_000_000;
+    const orchestrator = createGameFactoryOrchestrator({
+      store, worker, journalDir, leaseMs: 120_000, proofGraceMs: 60_000, now: () => clock,
+    });
+    try {
+      assert.equal((await orchestrator.tick()).claimed, 1);
+      worker.probe = async () => ({ ok: false, node: worker.node, offline: true, retryable: true, error: "not connected" });
+      assert.equal((await orchestrator.tick()).suspended, true);
+      clock += 61_000; // past the 60s grace window; the node is still disconnected
+      const expired = await orchestrator.tick();
+      assert.equal(expired.suspended, false);
+      assert.equal(worker.cancelCalls.length, 1);
+      assert.equal(worker.cancelCalls[0].mode, "immediate");
+      const failed = store.getProject(uid, project.id).tasks.find((task) => task.id === taskId);
+      assert.equal(failed.status, "FAILED");
+      assert.equal(orchestrator.health().suspended, false);
+      const journal = new DatabaseSync(join(journalDir, "gamefactory-dispatch.db"));
+      assert.equal(journal.prepare("SELECT status FROM dispatches WHERE taskId=?").get(taskId).status, "SECURITY_INTERRUPTED");
+      journal.close();
+    } finally {
+      await orchestrator.close();
+      store.close();
+    }
+  });
+
+  await test("latches when a different broker identity answers after a suspension", async () => {
+    const { store, journalDir, uid, project } = setup("gfo-proof-suspend-identity-change");
+    const worker = new FakeWorker();
+    const taskId = queue(store, uid, project.id);
+    const orchestrator = createGameFactoryOrchestrator({ store, worker, journalDir, leaseMs: 120_000 });
+    try {
+      assert.equal((await orchestrator.tick()).claimed, 1);
+      worker.probe = async () => ({ ok: false, node: worker.node, offline: true, retryable: true, error: "not connected" });
+      assert.equal((await orchestrator.tick()).suspended, true);
+      // A different broker container answers: same node name, different isolation identity.
+      worker.probe = async () => ({
+        ok: true, node: worker.node, configured: true, secureForUntrustedCode: true,
+        externalBroker: true, separateBrokerCgroup: true, maxConcurrent: 1,
+        controllerRecoveryEpoch: sha("new-controller-recovery"), brokerInstanceId: sha("new-broker-instance"),
+        containerGenerationId: sha("new-container-generation"), brokerBootIdSha256: sha("new-broker-boot"),
+        programs: ["node", "godot"], capabilities: ["quality_assurance", "godot"],
+      });
+      const changedTick = await orchestrator.tick();
+      assert.equal(changedTick.suspended, false);
+      assert.equal(worker.cancelCalls.length, 1);
+      const failed = store.getProject(uid, project.id).tasks.find((task) => task.id === taskId);
+      assert.equal(failed.status, "FAILED");
+      assert.equal(orchestrator.health().suspended, false);
+      const journal = new DatabaseSync(join(journalDir, "gamefactory-dispatch.db"));
+      assert.equal(journal.prepare("SELECT status FROM dispatches WHERE taskId=?").get(taskId).status, "SECURITY_INTERRUPTED");
+      journal.close();
+    } finally {
+      await orchestrator.close();
+      store.close();
+    }
+  });
+
   await test("repairs a crash after the journal latch and security-stops the complete active snapshot", async () => {
     const { store, journalDir, uid, project } = setup("gfo-proof-loss-restart-repair");
     const worker = new FakeWorker();
@@ -1547,6 +1664,92 @@ try {
     assert.equal(detail.state, "FAILED");
     await orchestrator.close();
     store.close();
+  });
+
+  await test("a schema-1 dispatch journal fixture upgrades to schema 2 in place, losing no dispatch or event rows", async () => {
+    // Lead note 2026-09-03: the production journal (/data/game-factory/gamefactory-dispatch.db) is
+    // schema 1 with real dispatches and hundreds of events. This proves the automatic 1->2 migration
+    // (worker_suspension/worker_identity, both purely additive CREATE TABLE IF NOT EXISTS) opens a
+    // genuine v1 file, advances it, and returns every existing row unmodified rather than trusting
+    // that "additive" reasoning by inspection alone.
+    const dir = temp("gfo-journal-v1-migration");
+    const file = join(dir, "gamefactory-dispatch.db");
+    const v1Checksum = createHash("sha256").update("dispatches:v1|dispatch_events:v1|orchestrator_leader:v1").digest("hex");
+    const fixture = new DatabaseSync(file);
+    fixture.exec(`
+      CREATE TABLE dispatch_schema (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL,
+        checksum TEXT NOT NULL, appliedAt INTEGER NOT NULL
+      );
+      CREATE TABLE dispatches (
+        runId TEXT PRIMARY KEY, taskId TEXT NOT NULL, attempt INTEGER NOT NULL, uid TEXT NOT NULL,
+        projectId TEXT NOT NULL, buildId TEXT NOT NULL DEFAULT '', workerId TEXT NOT NULL,
+        capability TEXT NOT NULL, requestHash TEXT NOT NULL, taskJson TEXT NOT NULL,
+        requestJson TEXT NOT NULL, status TEXT NOT NULL, remoteStatus TEXT NOT NULL DEFAULT '',
+        lastResponse TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+        createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+        lastSeenAt INTEGER NOT NULL DEFAULT 0, endedAt INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE dispatch_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, runId TEXT NOT NULL, type TEXT NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}', createdAt INTEGER NOT NULL
+      );
+      CREATE TABLE orchestrator_leader (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1), instanceId TEXT NOT NULL,
+        leaseUntil INTEGER NOT NULL, updatedAt INTEGER NOT NULL
+      );
+    `);
+    const runIds = ["gfo-v1-fixture-run-1", "gfo-v1-fixture-run-2"];
+    for (const runId of runIds) {
+      fixture.prepare(`INSERT INTO dispatches (runId,taskId,attempt,uid,projectId,buildId,workerId,capability,requestHash,taskJson,requestJson,status,remoteStatus,lastResponse,error,createdAt,updatedAt,lastSeenAt,endedAt)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(runId, runId + "-task", 1, "gfo-v1-fixture-uid", "gfo-v1-fixture-project", "", "gx10",
+          "quality_assurance", "a".repeat(64), "{}", "{}", "SUCCEEDED", "", "", "",
+          1_000, 1_000, 1_000, 1_000);
+    }
+    let expectedEvents = 0;
+    for (const runId of runIds) {
+      for (let i = 0; i < 6; i++) {
+        fixture.prepare("INSERT INTO dispatch_events (runId,type,payload,createdAt) VALUES (?,?,?,?)")
+          .run(runId, "dispatch.status", JSON.stringify({ i }), 1_000 + i);
+        expectedEvents++;
+      }
+    }
+    fixture.prepare("INSERT INTO dispatch_schema (singleton,version,checksum,appliedAt) VALUES (1,1,?,?)").run(v1Checksum, 1_000);
+    fixture.exec("PRAGMA user_version=1");
+    fixture.close();
+
+    const journal = createGameFactoryDispatchJournal({ dir });
+    try {
+      const health = journal.health();
+      assert.equal(health.schema.version, 2, "the journal must report the upgraded schema version");
+      assert.equal(health.total, runIds.length, "no dispatch row can be lost by the migration");
+      for (const runId of runIds) {
+        const dispatch = journal.get(runId);
+        assert.ok(dispatch, `dispatch ${runId} must survive the migration`);
+        assert.equal(dispatch.status, "SUCCEEDED");
+        assert.equal(dispatch.uid, "gfo-v1-fixture-uid");
+      }
+      // A freshly migrated file has no suspension recorded yet; the new capability must work
+      // immediately without a separate backfill step.
+      assert.deepEqual(journal.getSuspension(), { active: false, since: 0, node: "", reason: "", identity: null });
+    } finally {
+      await journal.close();
+    }
+
+    // Verify the event rows physically survived migration through a fresh, independent connection
+    // (not the journal's own reader), so this cannot pass merely because the journal cached a count.
+    const verify = new DatabaseSync(file);
+    try {
+      const total = Number(verify.prepare("SELECT COUNT(*) AS n FROM dispatch_events").get().n) || 0;
+      assert.equal(total, expectedEvents, "no event row can be lost by the migration");
+      const schemaRow = verify.prepare("SELECT version,checksum FROM dispatch_schema WHERE singleton=1").get();
+      assert.equal(schemaRow.version, 2);
+      const userVersion = Number(verify.prepare("PRAGMA user_version").get().user_version) || 0;
+      assert.equal(userVersion, 2, "PRAGMA user_version must also advance so a later open does not re-run migration logic");
+    } finally {
+      verify.close();
+    }
   });
 
   console.log(`\n${passed} game factory orchestrator tests passed`);
