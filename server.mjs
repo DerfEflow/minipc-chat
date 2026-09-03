@@ -133,7 +133,7 @@ import { laneFor, canChooseLane, normalizeBuildWhere, lifecycleRoot } from "./bu
 import { sanitizeToolList } from "./toolschema.mjs";
 import { modeAllows, normalizeMode, PRIVACY_MODES, DEFAULT_PRIVACY_MODE, TRUSTED_PROVIDERS, PRIVATE_PROVIDERS } from "./privacy.mjs";
 import { swapIncomingIfPresent, finalizeIncoming, verifyCorpusFile } from "./corpusrestore.mjs";
-import { createUsersStore } from "./tenancy.mjs";
+import { createUsersStore, userIdFor } from "./tenancy.mjs";
 import { createTenantResolver, filterToolDefs, toolAllowedFor, FORGE_TOOLS } from "./tenantstores.mjs";
 import { createConnectors, connectorCrypto, isConnectorTool } from "./connectors.mjs";
 import { createFeedback, createDistiller } from "./feedback.mjs";
@@ -2118,13 +2118,20 @@ const gameFactoryForge = createGameFactoryForge({
   levels: Number(cfgGet("GAME_FACTORY_LEVELS", "12")) || 12,
   log: (message) => console.log("[dominion-ai] " + String(message || "")),
 });
+/*
+ * The factory keys every project by the OWNER'S TENANT uid, which in multi-tenant mode is
+ * tenancy.mjs's userIdFor(email) (a 16-hex digest), not the literal "owner" that OWNER_T carries.
+ * Caught on the first rig run (2026-09-03): the supervisor iterated listProjects("owner"), found
+ * nothing, and Vector Vault sat approved at SPECIFICATION with the supervisor reporting zero projects.
+ */
+const gameFactoryOwnerUid = MULTI_TENANT ? userIdFor(OWNER_EMAIL) : OWNER_T.uid;
 const gameFactorySupervisor = createGameFactorySupervisor({
   store: gameFactoryStore,
   planner: gameFactoryPlanner,
   qaRunner: gameFactoryQaRunner,
   kit: gameFactoryKit,
   dataDir: DATA_DIR,
-  ownerUid: OWNER_T.uid,
+  ownerUid: gameFactoryOwnerUid,
   ownerEmail: OWNER_EMAIL,
   maxRepairs: Number(cfgGet("GAME_FACTORY_MAX_REPAIRS", "3")) || 3,
   log: (message) => console.log("[dominion-ai] " + String(message || "")),
