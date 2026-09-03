@@ -64,3 +64,56 @@
   cursor:not-allowed!important;
   opacity:.65!important;
 }
+
+/* ===== Characters (video-characters lane) =====
+ * Functional, minimal styling only — Codex owns the visual pass. Deliberately self-contained
+ * (not relying on any variable from dominion-video-base.css, which this file does not own) so it
+ * renders usably even without that pass ever touching it.
+ */
+#dv-root .dv-characters{
+  margin:10px 16px 16px;
+  padding:10px 12px 12px;
+  border:1px solid rgba(120,145,136,.35);
+  border-radius:8px;
+  background:rgba(10,20,16,.25);
+  color:inherit;
+}
+#dv-root .dv-characters>header{display:flex;align-items:center;justify-content:space-between;font:600 12px/1.4 inherit;letter-spacing:.04em;text-transform:uppercase;margin-bottom:8px}
+#dv-root .dv-characters>header small{font-weight:400;text-transform:none;opacity:.7;letter-spacing:0}
+#dv-root .dv-characters-list{display:flex;flex-wrap:wrap;gap:8px}
+#dv-root .dv-character-card{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid rgba(120,145,136,.3);border-radius:6px;min-width:180px;max-width:260px}
+#dv-root .dv-character-thumb{width:36px;height:36px;flex:0 0 36px;border-radius:5px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:rgba(120,145,136,.15)}
+#dv-root .dv-character-thumb img{width:100%;height:100%;object-fit:cover}
+#dv-root .dv-character-copy{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+#dv-root .dv-character-copy b{font-size:12px;line-height:1.3}
+#dv-root .dv-character-copy small{font-size:10px;line-height:1.3;opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#dv-root .dv-character-attach{display:flex;align-items:center;gap:4px;font-size:10px;white-space:nowrap}
+#dv-root .dv-character-delete{border:0;background:transparent;cursor:pointer;font-size:12px;opacity:.7;padding:2px}
+#dv-root .dv-character-delete:hover{opacity:1}
+#dv-root .dv-character-new{margin-top:10px;font-size:12px}
+#dv-root .dv-character-new>summary{cursor:pointer;font-weight:600}
+#dv-root .dv-character-form{display:grid;grid-template-columns:1fr;gap:8px;margin-top:8px}
+#dv-root .dv-character-form label{display:flex;flex-direction:column;gap:3px;font-size:11px;opacity:.85}
+#dv-root .dv-character-form input,#dv-root .dv-character-form textarea,#dv-root .dv-character-form select{font:inherit;padding:5px 7px;border:1px solid rgba(120,145,136,.35);border-radius:5px;background:rgba(255,255,255,.03);color:inherit}
+#dv-root .dv-character-form-row{display:flex;gap:8px}
+#dv-root .dv-character-form-row label{flex:1}
+
+/* Character chips on a storyboard scene card (required behavior #5). */
+#dv-root .dv-scene-cast{display:flex;flex-wrap:wrap;gap:5px;padding:4px 10px 0}
+#dv-root .dv-character-chip{font-size:10px;padding:2px 7px;border-radius:99px;border:1px solid rgba(120,145,136,.4);background:rgba(120,145,136,.12);cursor:pointer;color:inherit}
+#dv-root .dv-character-add{font-size:10px;padding:2px 7px;border-radius:99px;border:1px dashed rgba(120,145,136,.5);background:transparent;cursor:pointer;color:inherit;opacity:.85}
+#dv-root .dv-character-pick{font-size:10px;padding:2px 4px;border-radius:5px;border:1px solid rgba(120,145,136,.4);background:rgba(255,255,255,.03);color:inherit}
+
+/* "Write the script" (required behavior #3/#5): a plain secondary button beside chat send. */
+#dv-root .dv-write-script{font-size:11px;padding:0 10px;border:1px solid rgba(120,145,136,.4);border-radius:6px;background:transparent;color:inherit;cursor:pointer;white-space:nowrap}
+#dv-root .dv-write-script:disabled{opacity:.5;cursor:not-allowed}
+
+/* Per-scene /produce status (required behavior #4). */
+#dv-root .dv-production-status{padding:8px 10px;border-top:1px solid rgba(120,145,136,.25);font-size:11px}
+#dv-root .dv-production-status ul{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:3px}
+#dv-root .dv-production-status li{display:flex;justify-content:space-between;gap:8px}
+#dv-root .dv-production-status li small{opacity:.75}
+#dv-root .dv-production-status li[data-status="ready"] small{color:#7fdc9a}
+#dv-root .dv-production-status li[data-status="needs"] small,
+#dv-root .dv-production-status li[data-status="failed"] small{color:#e08a7d}
+#dv-root .dv-production-status li[data-status="paused"] small{color:#e0c47d}
