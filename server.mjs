@@ -38,8 +38,10 @@ import { createUsageLimits } from "./usage-limits.mjs";
 import { effectiveForgeTier } from "./sequential.mjs";
 import { createBattalion } from "./battalion.mjs";
 import { createSeatFailover } from "./seatfailover.mjs";
+import { pickFallbackModel } from "./chatfailover.mjs";
+import { openRouterSupportsToolsCached, warmOpenRouterCapabilities } from "./openroutercapabilities.mjs";
 import { continuationContext, createLoopWatch, contextExceeded, emptyResponseInstruction, reasoningOnlyPause, supervisorPrompt, parseVerdict, pauseInstruction, summarizeToolOutcome, textLoopEvidence, SUP_CHECK_EVERY, SUP_HARD_CAP, SUP_CTX_FRACTION } from "./supervisor.mjs";
-import { TOOLBOX_OPEN_NAME, withToolbox, openToolbox } from "./toolbox.mjs";
+import { TOOLBOX_OPEN_NAME, withToolbox, openToolbox, capToolsToLimit } from "./toolbox.mjs";
 import { modelToolResult, toolResultFailed, toolMutationSucceeded } from "./toolresult.mjs";
 import { approxMessageTokens, selectHistoryWindow, compactExecutionMessages, squeezeOversizeMessages, isContextOverflowError } from "./contextwindow.mjs";
 import { openAIResponsesStream } from "./openairesponses.mjs";
@@ -986,8 +988,16 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
     const mod = u.protocol === "https:" ? https : http;
     let settled = false;
     let currentReq = null;
+    // First-token watchdog (lane/chat, deficiency item 6: minimax-m3 "hangs past 150s with no
+    // answer"). Only armed when the caller passes opts.firstTokenTimeoutMs (handleChat sets it to
+    // 30000 while nothing has streamed yet THIS TURN) — every other caller (battalion, IDE, the
+    // continuation loop after the first token) leaves it unset and this stays a no-op, byte-for-byte
+    // the same request it always was. Cleared the instant anything real arrives (see the timer body)
+    // and again in done(), so a healthy slow-but-arriving stream is never touched.
+    let firstTokenTimer = null;
     const done = (r) => {
       if (settled) return; settled = true;
+      if (firstTokenTimer) { clearTimeout(firstTokenTimer); firstTokenTimer = null; }
       if (shaped.toolsDropped && r && typeof r === "object") r.toolsDropped = shaped.toolsDropped;
       if (r && typeof r === "object") {
         // The wire that actually carried the call rides the result, so cost math can price the
@@ -1166,6 +1176,18 @@ function cloudChatStream(catalogId, messages, opts = {}, onDelta) {
       }
     );
     currentReq = req;
+    if (opts.firstTokenTimeoutMs > 0) {
+      firstTokenTimer = setTimeout(() => {
+        if (settled) return;
+        // Something is already on the wire (visible content, or a tool call the model started
+        // emitting) — this is a healthy slow answer, not a hang, so let it run to its own
+        // conclusion instead of cutting it off mid-delivery.
+        if (content || (assistantTurn.tool_calls && assistantTurn.tool_calls.length)) return;
+        try { req.destroy(); } catch {}
+        done({ ok: false, retryable: true, status: 504,
+          error: providerLabel + ": no response within " + Math.round(opts.firstTokenTimeoutMs / 1000) + "s (first-token timeout)." });
+      }, opts.firstTokenTimeoutMs);
+    }
     /*
      * A SOCKET DEATH IS RETRYABLE, and saying so here fixes three callers at once (2026-08-09).
      *
@@ -7130,6 +7152,12 @@ async function handleFeedback(req, res, u) {
 
   return sjson(res, 404, { error: "not found" });
 }
+// OpenRouter tool-capability cache warm (openroutercapabilities.mjs) — DEFAULT ON: a free,
+// unauthenticated GET against OpenRouter's own /api/v1/models, fire-and-forget, never blocks a
+// turn. OPENROUTER_CAPS_WARM_ENABLED=0 keeps test/offline boots hermetic (no outbound network at
+// all from a spawned test server), matching the AGENT-RULES "tests must not call [any] provider"
+// spirit even though this endpoint costs nothing and needs no key.
+const OPENROUTER_CAPS_WARM_ENABLED = String(cfgGet("OPENROUTER_CAPS_WARM_ENABLED", "1")) !== "0";
 // Auto mentor review — DEFAULT ON per Fred's LAX call (the self-improving loop stays alive):
 // tiered + sampled + fire-and-forget, all local (zero egress). AUTO_MENTOR=0 is the cautious flip.
 const AUTO_MENTOR = String(cfgGet("AUTO_MENTOR", "1")) !== "0";
@@ -10090,8 +10118,13 @@ async function handleChat(req, res) {
     // the SAME machinery as the local loop — carve-outs, mode gates, confirm gates, 9-state
     // lifecycle, honest logging. CHATTING-bench models (attachTools=false) stream one plain turn.
     if (cloudModel) {
-      const cloudProvider = providerOf(cloudModel) || "openrouter";
-      const cloudRec = modelById(cloudModel);
+      // Cross-model fallback (deficiency item 6, required behavior #1) needs cloudModel/cloudProvider/
+      // cloudRec to be reassignable: when the seat's own model is unreachable on every wire, the REST
+      // of the turn (later rounds, the done event, the usage row) carries on as the fallback seat. The
+      // originally requested model/provider are captured separately, below, purely to decide whether a
+      // `served` notice is owed — everything else in this block reads cloudModel/cloudProvider live.
+      let cloudProvider = providerOf(cloudModel) || "openrouter";
+      let cloudRec = modelById(cloudModel);
       let cloudTools = attachTools ? filterToolDefs(toolDefs(flywheel.activeToolOverlays()), T.role, forgeExtra) : null;
       // Connectors: every ENABLED connector of THIS account adds its MCP tools, namespaced
       // cx_<connector>__<tool>. toolDefsFor enforces the tenant wall itself (a guest's rows come
@@ -10152,20 +10185,47 @@ async function handleChat(req, res) {
         cloudTools = [EXECUTION_COMPLETE_DEF, ...cloudTools.filter((d) => d?.function?.name !== EXECUTION_COMPLETE_NAME)];
       }
       // Provider function-tool ceiling (OpenAI enforces exactly 128; nobody sensible needs more).
-      // Box tools sit first and connector tools follow in stable sorted order, so the cap sheds
-      // the alphabetical tail of connector tools and NEVER core capability. Logged out loud —
-      // a silently thinner toolbox reads as "covered" when it isn't. (2026-07-19: 55 box tools
-      // + five connectors = 198 defs, and every OpenAI-direct tool turn 400'd on the length.)
+      // Box tools (this app's own, plus toolbox_open/task_complete) are the "needs_* gating and
+      // route class" work already done above (attachTools, scopeBuildTools/openToolbox when not
+      // Wildfire, the completion gate) — they are ALWAYS kept, whole, under their own name (never
+      // the "cx_" connector prefix). Only when Wildfire or a big connector roster pushes past the
+      // cap does anything get shed, and what gets shed is chosen the same way toolbox_open already
+      // ranks capability: by name/description overlap with THIS turn's ask (lane/chat, deficiency
+      // item 6 — "select by the existing needs_* gating and route class, then by name relevance"),
+      // never a blind alphabetical tail. Logged out loud either way — a silently thinner toolbox
+      // reads as "covered" when it isn't. (2026-07-19: 55 box tools + five connectors = 198 defs,
+      // and every OpenAI-direct tool turn 400'd on the length.)
       if (cloudTools && cloudTools.length > TOOL_CAP) {
-        const dropped = cloudTools.length - TOOL_CAP;
-        const droppedNames = cloudTools.slice(TOOL_CAP).map((d) => d && d.function && d.function.name).filter(Boolean);
-        cloudTools = cloudTools.slice(0, TOOL_CAP);
-        console.log(`[dominion-ai] tool defs: offering ${TOOL_CAP} of ${TOOL_CAP + dropped} to ${cloudModel} (${dropped} connector tool(s) past the provider cap dropped)`);
+        const capped = capToolsToLimit(cloudTools, { limit: TOOL_CAP, query: workIntentText });
+        cloudTools = capped.tools;
+        console.log(`[dominion-ai] tool defs: offering ${cloudTools.length} of ${cloudTools.length + capped.dropped} to ${cloudModel} (${capped.dropped} connector tool(s) past the provider cap dropped, least relevant to this ask first)`);
         // Say it OUT LOUD in the UI. A console line nobody reads is why Fred spent months believing
         // connectors were never wired: the tools were silently shed and the answer looked normal.
-        sse({ type: "tools_capped", offered: TOOL_CAP, dropped, names: droppedNames.slice(0, 12),
-              text: `${dropped} connector tool(s) did not fit this model's ${TOOL_CAP}-tool limit and were not offered this turn. Core machine tools were kept.` });
+        sse({ type: "tools_capped", offered: cloudTools.length, dropped: capped.dropped, names: capped.droppedNames.slice(0, 12),
+              text: `${capped.dropped} connector tool(s) did not fit this model's ${TOOL_CAP}-tool limit and were not offered this turn. Core machine tools were kept.` });
       }
+      /*
+       * PROACTIVE OpenRouter no-tools check (required behavior #2). Live production error: "OpenRouter:
+       * No endpoints found that support tool use... (hermes-4-70b)". Confirmed 2026-09-03 against
+       * OpenRouter's own /api/v1/models: nousresearch/hermes-4-70b's supported_parameters genuinely
+       * omits "tools" — every turn on it with tools attached was paying a full round-trip for a 400
+       * that could never succeed. openRouterSupportsToolsCached is a synchronous, no-network read of an
+       * hourly-cached listing; a cold or unknown cache reads null and this stays a no-op (never a NEW
+       * way to refuse a working model) while warmOpenRouterCapabilities() fills it in the background for
+       * the next turn. This only ever pre-empts models whose catalog provider IS openrouter — a direct
+       * wire that happens to fall back to OpenRouter for a missing key is a rarer case the REACTIVE
+       * recovery below ("Safety net for catalog drift") still catches.
+       */
+      if (cloudTools && cloudTools.length && cloudProvider === "openrouter") {
+        const supports = openRouterSupportsToolsCached(cloudModel);
+        if (supports === false) {
+          sse({ type: "tools_unavailable", model: cloudModel,
+                text: "This model doesn't support tool calls on its current host, so this answer will be written WITHOUT machine access. Nothing was read or changed." });
+          console.log(`[dominion-ai] proactive no-tools: ${cloudModel} lacks OpenRouter tool support (cached) — answering without tools`);
+          cloudTools = null;
+        }
+      }
+      if (OPENROUTER_CAPS_WARM_ENABLED) warmOpenRouterCapabilities();   // fire-and-forget: never delays THIS turn, ready for the next one
       let inTokTotal = 0, outTokTotal = 0, costTotal = 0, catalogCostTotal = 0, sawCost = false, sawTok = false;
       // PROMPT-CACHE VISIBILITY (Fred, 2026-07-19). Every model in the catalog prices cache READS
       // far below fresh prompt tokens (deepseek-v4-pro is ~120x cheaper), and the DeepSeek/Kimi/Qwen
@@ -10240,7 +10300,8 @@ async function handleChat(req, res) {
       // Per-model, per-mode output ceiling for a single round (replaces the old hardcoded 4096 that
       // truncated long docs on every model). This is only the CHUNK size — the continuation loop below
       // resumes past finish_reason "length" until the whole answer is written, on ANY model.
-      const outCap = outLimitFor(cloudModel, mode);
+      // `let`: a cross-model fallback recomputes this for the new seat (see the fallback rung below).
+      let outCap = outLimitFor(cloudModel, mode);
       /*
        * SUPERVISED CONTINUATION (Fred, 2026-07-25) — replaces the fixed round cap entirely.
        * The worker runs as long as it is genuinely advancing; it is paused only for quality,
@@ -10296,6 +10357,34 @@ async function handleChat(req, res) {
       // changes, only the road, and re-fighting a down wire every round would re-spend the whole
       // backoff schedule each time.
       let usedOverloadReroute = false, forcedTransport = "", widenedPool = false;
+      /*
+       * PROVIDER FALLBACK LADDER (required behavior #1). "Rung 1" is the model exactly as the user
+       * picked it, retried on its own wire (RETRY_SCHEDULE below). "Rung 2" is the same model on an
+       * alternate wire — the widen-pool retry and the same-model OpenRouter reroute just above, plus
+       * the account-death reroute already living inside cloudChatStream (W2). Both of those existed
+       * before this lane; what was missing is "Rung 3": when the SEAT ITSELF cannot be reached on
+       * any wire this box knows, hand the rest of the turn to a different model that does the same
+       * job (chatfailover.mjs), rather than ending with a raw provider error. `requestedModel` /
+       * `requestedProvider` are the ORIGINAL pick, kept so a `served` notice can say, honestly, "this
+       * did not come from what you asked for" — cloudModel/cloudProvider themselves become the live
+       * truth the rest of this block (and the final done/usage rows) read from.
+       */
+      const requestedModel = cloudModel, requestedProvider = cloudProvider;
+      let servedProvider = cloudProvider, servedNoticeSent = false, fallbackHopsUsed = 0, fallbackFinalRetried = false;
+      const MAX_FALLBACK_HOPS = 1;   // rungs 1+2 (same seat) already spend two of the spec's "up to 3 rungs"
+      const triedModels = new Set([cloudModel]);
+      const announceServedIfNeeded = () => {
+        if (servedNoticeSent) return;
+        if (cloudModel === requestedModel && servedProvider === requestedProvider) return;
+        servedNoticeSent = true;
+        sse({ type: "served", model: cloudModel, provider: servedProvider });
+        console.log(`[dominion-ai] served: ${requestedModel} (${requestedProvider}) -> ${cloudModel} (${servedProvider})`);
+      };
+      // Armed only until the FIRST token of the turn actually lands (see cloudChatStream's own
+      // guard: content already on the wire disarms it even if this stays true). A hang like the
+      // measured minimax-m3 case ("hangs past 150s with no answer") no longer ties up the turn past
+      // 30s before the fallback ladder gets a turn.
+      const firstTokenOpts = () => (streamedAny ? {} : { firstTokenTimeoutMs: 30000 });
 
       for (let round = 0; !aborted; round++) {
         if (round >= cloudRoundLimit) {
@@ -10447,7 +10536,7 @@ async function handleChat(req, res) {
             tools: concludePhase ? cloudTools : toolsThisRound, toolChoice: concludePhase ? "none" : undefined,
             parallelToolCalls: completionRequired ? false : undefined,
             executionPolicy, sessionId: chatId || job.id,
-            __forceProvider: forcedTransport || undefined },
+            __forceProvider: forcedTransport || undefined, ...firstTokenOpts() },
           onDelta);
         const retryableProviderError = (r) => !!r && (r.retryable || [408, 409, 429].includes(r.status) || r.status >= 500 ||
           /timed out|couldn't reach|network|socket|ECONN|stream ended|overload|capacity|unavailable|insufficient[_\s-]*system/i.test(String(r.error || "")));
@@ -10480,7 +10569,7 @@ async function handleChat(req, res) {
             { temperature: opts.temperature, num_predict: roundOutputCap, signal: ac.signal,
               tools: toolsThisRound, parallelToolCalls: completionRequired ? false : undefined,
               executionPolicy, sessionId: chatId || job.id,
-              __forceProvider: forcedTransport || undefined },
+              __forceProvider: forcedTransport || undefined, ...firstTokenOpts() },
             onDelta);
         }
         /*
@@ -10501,7 +10590,7 @@ async function handleChat(req, res) {
             { temperature: opts.temperature, num_predict: roundOutputCap, signal: ac.signal,
               tools: toolsThisRound, parallelToolCalls: completionRequired ? false : undefined,
               executionPolicy, sessionId: chatId || job.id,
-              __forceProvider: forcedTransport || undefined, __widenProviderPool: true },
+              __forceProvider: forcedTransport || undefined, __widenProviderPool: true, ...firstTokenOpts() },
             onDelta);
         }
         /*
@@ -10523,7 +10612,7 @@ async function handleChat(req, res) {
             { temperature: opts.temperature, num_predict: roundOutputCap, signal: ac.signal,
               tools: toolsThisRound, parallelToolCalls: completionRequired ? false : undefined,
               executionPolicy, sessionId: chatId || job.id,
-              __forceProvider: "openrouter" },
+              __forceProvider: "openrouter", ...firstTokenOpts() },
             onDelta);
         }
         // Safety net for catalog drift: if THIS request carried tools and the provider refused because
@@ -10542,9 +10631,14 @@ async function handleChat(req, res) {
           or = await cloudChatStream(cloudModel, messages,
             { temperature: opts.temperature, num_predict: roundOutputCap, signal: ac.signal, tools: null, toolChoice: "none",
               executionPolicy, sessionId: chatId || job.id,
-              __forceProvider: forcedTransport || undefined },
+              __forceProvider: forcedTransport || undefined, ...firstTokenOpts() },
             onDelta);
-          await logUsage({ ts: startedAt, model: cloudModel, mode, reason: "tools_unsupported_fallback", route: routeInfo, provider: cloudProvider, status: "tools_fallback" });
+          // NOTE (fixed, was a real double-log): this used to ALSO call logUsage({status:"tools_fallback"})
+          // here and then fall through to the turn's normal completion/error logUsage below — two rows
+          // in usage.jsonl for one user turn, violating "one row per turn" (required behavior #1). The
+          // console line + the `tools_unavailable` SSE event already say this happened; the single row
+          // written at the bottom of this turn (completed/error/interrupted) is the one row of record.
+          console.log(`[dominion-ai] tools_unsupported_fallback: ${cloudModel} answered without tools this turn`);
         }
         workStop();
         if (aborted) {
@@ -10556,8 +10650,71 @@ async function handleChat(req, res) {
         }
         if (!or.ok) {
           bumpUsage(or && or.usage);
-          // Same-model retries were exhausted. Preserve the session/model choice and mark the task
-          // paused, never complete; the user can resume without Dominion silently switching models.
+
+          /*
+           * RUNG 3: a different seat for the rest of the turn (required behavior #1). Reached only
+           * after the same-seat recovery above (retry schedule, widen-pool, same-model OpenRouter
+           * reroute, and cloudChatStream's own account-death reroute) already failed. Mid-stream
+           * (or.partial, meaning content or a tool-call fragment already reached the screen this
+           * round) folds the partial text into the transcript as "continue exactly from here" and
+           * NEVER shows an error — the spec's own wording. Pre-token, the fallback just re-runs this
+           * exact round on the new seat; the only visible sign is the `served` notice.
+           */
+          if (!aborted && fallbackHopsUsed < MAX_FALLBACK_HOPS) {
+            const fb = pickFallbackModel(cloudModel, { privacyMode, tried: [...triedModels] });
+            const fbVisionOk = fb && (!imagesThisTurn || isVisionCapable(fb));
+            if (fb && fbVisionOk) {
+              fallbackHopsUsed++;
+              triedModels.add(fb);
+              const fbRec = modelById(fb), fbProvider = providerOf(fb) || "openrouter", fbToolCapable = isToolCapable(fb);
+              sse({ type: "supervisor", monitored: cloudModel, supervisor: "provider recovery", decision: "fallback_model",
+                    reason: `${cloudModel} stayed unreachable after every retry (${String(or.error || "no answer").slice(0, 140)}); continuing this turn on ${fb} instead` });
+              console.log(`[dominion-ai] seat fallback: ${cloudModel} exhausted every wire — continuing on ${fb}`);
+              recordSteeringLesson("provider_reroute", or.error || "seat unreachable on every wire", `hand the rest of the turn to ${fb}`);
+              if (or.partial && (String(or.content || "").trim() || (Array.isArray(or.toolCalls) && or.toolCalls.length))) {
+                if (or.content) messages.push({ role: "assistant", content: or.content });
+                messages.push({ role: "user", content: "[Dominion system notice — not Fred] The model serving this answer became unreachable mid-response. Continue exactly from here — do not repeat, recap, or restart; resume mid-sentence if that is where it stopped." });
+              }
+              cloudModel = fb; cloudProvider = fbProvider; cloudRec = fbRec; outCap = outLimitFor(fb, mode);
+              if (!fbToolCapable) cloudTools = null;
+              forcedTransport = ""; usedOverloadReroute = false; widenedPool = false;   // fresh wire state for the new seat
+              continue;
+            }
+          }
+
+          /*
+           * Every rung is spent. The owner's doctrine forbids ending on a raw provider error while
+           * any option is untried, so this is the LAST option: one calm retry after a short pause
+           * (the spec's exact ask — a provider having a bad SECOND, not a bad minute, still recovers
+           * here) and only if that ALSO fails does the user ever see an error event.
+           */
+          if (!aborted && !fallbackFinalRetried) {
+            fallbackFinalRetried = true;
+            sse({ type: "recovering", text: "One moment. Dominion is trying once more before reporting a problem." });
+            working("one more try before reporting a problem");
+            await sleep(3000);
+            workStop();
+            if (!aborted) {
+              or = await cloudChatStream(cloudModel, messages,
+                { temperature: opts.temperature, num_predict: roundOutputCap, signal: ac.signal,
+                  tools: toolsThisRound, parallelToolCalls: completionRequired ? false : undefined,
+                  executionPolicy, sessionId: chatId || job.id, __forceProvider: forcedTransport || undefined },
+                onDelta);
+              if (or.ok) continue;   // the pause alone recovered it — no checkpoint text, no error, carry on
+              bumpUsage(or && or.usage);
+            }
+          }
+
+          if (aborted) {
+            sse({ type: "stopped" });
+            const s = await settleTurnSpend();
+            await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: servedProvider, status: "interrupted", rounds: roundsUsed, tools: toolCount, promptTokens: sawTok ? inTokTotal : null, outputTokens: sawTok ? outTokTotal : null, costUsd: s.costUsd });
+            return endStream();
+          }
+
+          // Same-model retries, the fallback seat, and the final calm retry were ALL exhausted.
+          // Preserve the session/model choice and mark the task paused, never complete; the user can
+          // resume without Dominion silently switching models a second time.
           const checkpointText = [
             "Work checkpointed. This task is not complete.",
             "Goal: " + taskContract.objective,
@@ -10576,9 +10733,11 @@ async function handleChat(req, res) {
           // The rounds that DID succeed before the provider gave out were billed upstream, so they
           // are billed here too. This is the entry that read "cost=undefined" on every failed R1 run.
           const s = await settleTurnSpend();
-          await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, status: "error", error: String(or.error || "").slice(0, 200), rounds: roundsUsed, tools: toolCount, promptTokens: sawTok ? inTokTotal : null, outputTokens: sawTok ? outTokTotal : null, costUsd: s.costUsd });
+          await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: servedProvider, status: "error", error: String(or.error || "").slice(0, 200), rounds: roundsUsed, tools: toolCount, promptTokens: sawTok ? inTokTotal : null, outputTokens: sawTok ? outTokTotal : null, costUsd: s.costUsd });
           return endStream();
         }
+        servedProvider = or.transport || cloudProvider;
+        announceServedIfNeeded();
         bumpUsage(or.usage);
         usageLimits.record({
           model: cloudModel,
@@ -11121,11 +11280,15 @@ async function handleChat(req, res) {
       } : null;
       // OpenRouter reports real cost; direct providers don't — derive it from catalog prices.
       const costUsd = turnCostUsd();
-      console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${cloudProvider}) out=${outTok} tools=${toolCount} rounds=${roundsUsed} conf=${quality.confidence}`);
+      // servedProvider (not cloudProvider) is the WIRE that actually carried the last successful
+      // call — cloudProvider is the model's nominal/declared provider, which can differ silently
+      // when an alt-wire reroute served this turn (e.g. a Moonshot model actually carried by
+      // OpenRouter) and lied about it in this exact line before the `served` event existed.
+      console.log(`[dominion-ai] usage ${cloudModel}/${mode} (${servedProvider}) out=${outTok} tools=${toolCount} rounds=${roundsUsed} conf=${quality.confidence}`);
       const executionStatus = executionPause
         ? (reasoningOnlyPaused ? "paused_empty_response" : executionPause.decision)
         : "completed";
-      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: cloudProvider, privacyRisk, status: executionStatus, rounds: roundsUsed, tools: toolCount, images: imagesThisTurn || undefined, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo || undefined, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
+      await logUsage({ ts: startedAt, model: cloudModel, mode, reason, route: routeInfo, provider: servedProvider, requestedModel: requestedModel !== cloudModel ? requestedModel : undefined, privacyRisk, status: executionStatus, rounds: roundsUsed, tools: toolCount, images: imagesThisTurn || undefined, memoryUsed: ctxInfo.used.length, artifactsUsed: ctxInfo.artifactsUsed.length, chatsUsed: ctxInfo.chatsUsed.length, contextTokens, promptTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo || undefined, confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false });
       try { T.chatlog.record(chatId, history, answer); } catch {}
       // SaaS charge + session budget, through the one settlement path the error and interrupt exits
       // also use (see settleTurnSpend): guest credits via meterTurn, owner USD, budget event either way.
@@ -11145,7 +11308,7 @@ async function handleChat(req, res) {
         sse({ type: "stopped", reason: executionPause.decision, complete: false });
         return endStream();
       }
-      sse({ type: "done", meta: { model: cloudModel, mode, provider: cloudProvider, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo, completionVerified: completionApproved && !completionCaveats.length,
+      sse({ type: "done", meta: { model: cloudModel, mode, provider: servedProvider, requestedModel: requestedModel !== cloudModel ? requestedModel : undefined, memory: ctxInfo.used.length, artifacts: ctxInfo.artifactsUsed.length, chats: ctxInfo.chatsUsed.length, tools: toolCount, runIds: [...toolRunIds], inputTokens: inTok, outputTokens: outTok, costUsd, cache: cacheInfo, completionVerified: completionApproved && !completionCaveats.length,
         // Named limitations travel with the answer: "finished, except this was never proven".
         completionLimitations: completionCaveats.length ? completionCaveats : undefined,
         quality: { confidence: quality.confidence, hallucinationRisk: quality.hallucinationRisk, needsReview: false }, warnings: completionCaveats.length ? completionCaveats : [] } });

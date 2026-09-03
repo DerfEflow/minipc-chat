@@ -27,7 +27,19 @@
 const MINOR = /\b(child|children|kid|kids|minor|minors|underage|under[-\s]?age|pre[-\s]?teen|pre[-\s]?pubescent|toddler|infant|schoolgirl|schoolboy|jailbait|(?:1[0-7]|[1-9])\s?(?:yo|y\/o|years?[-\s]?old))\b/i;
 
 // --- sexual terms, broad — used ONLY for the minor co-occurrence test (broad is correct there). ---
-const SEXUAL_ANY = /\b(sex|sexual|sexually|porn\w*|nsfw|erotic\w*|nude|nudes|naked|blow\s?job|hand\s?job|cum\w*|masturbat\w*|orgasm\w*|ejaculat\w*|anal|oral\s*sex|intercourse|fellatio|cunniling\w*|penetrat\w*|hentai|xxx|molest\w*|\brape\b|raping|fondl\w*|aroused?)\b/i;
+// "cum\w*" narrowed to the actual sexual forms (2026-09-03, lane/chat false-positive review): the
+// wildcard swallowed ordinary English words that start the same way — "cumulative" (rainfall,
+// damage, cost — routine roofing/estimating language), "cumbersome", "cumulonimbus" — every one of
+// them a false ABSOLUTE-tier block for anyone whose message also mentioned a kid. Blatant CSAM slang
+// stays covered by CSAM_DIRECT below regardless; this list only feeds the co-occurrence test.
+const SEXUAL_ANY = /\b(sex|sexual|sexually|porn\w*|nsfw|erotic\w*|nude|nudes|naked|blow\s?job|hand\s?job|cum|cums|cumming|cumshots?|masturbat\w*|orgasm\w*|ejaculat\w*|anal|oral\s*sex|intercourse|fellatio|cunniling\w*|penetrat\w*|hentai|xxx|molest\w*|\brape\b|raping|fondl\w*|aroused?)\b/i;
+// "naked roof deck", "naked wall/frame/truss", "visible to the naked eye" — ordinary construction
+// and inspection language (roofing is Fred's own domain) that happens to spell the word this screen
+// otherwise treats as a sexual-term signal. Neutralized to "bare" BEFORE the co-occurrence test runs,
+// so "naked" stays a real signal everywhere else (a bare, unqualified "naked" near a minor term is
+// still exactly the pattern this screen exists to catch) and only these named, harmless phrasings are
+// excused. Length-preserving so it can never shift where anything else in the text is found.
+const NAKED_CONSTRUCTION_TERM = /\bnaked(\s+(?:roof(?:\s*deck)?|deck|wall|walls|frame|framing|truss(?:es)?|joists?|studs?|subfloor|sheathing|rafters?|structure|eye|flame))\b/gi;
 
 // --- blatant CSAM slang — blocks on its own, no co-occurrence needed. ---
 const CSAM_DIRECT = /\b(child\s*porn\w*|childporn|child\s*sex\w*|lolicon|\bloli\b|\bshota\b|cp\s*(?:porn|video|pics?|content)|pedophil\w*|paedophil\w*|minor\s*(?:porn|nudes?|sex\w*))\b/i;
@@ -68,9 +80,13 @@ function nearCooccur(t, rxA, rxB, window = 300) {
 export function screenContent(text, { isOwner = false } = {}) {
   const t = String(text || "");
   if (!t.trim()) return { blocked: false };
+  // Only the minors co-occurrence test reads this neutralized copy — every other check below (CSAM
+  // slang, mass-harm, RESTRICTED-tier) still reads the real `t`, unmodified. Replacement preserves
+  // length ("naked" -> "bare " + spaces) so no other match's position ever shifts.
+  const tForMinorCheck = t.replace(NAKED_CONSTRUCTION_TERM, (m, tail) => "bare" + " ".repeat(Math.max(0, m.length - 4)));
 
   // ---- ABSOLUTE (everyone, owner included, never overridable) ----
-  if (CSAM_DIRECT.test(t) || nearCooccur(t, MINOR, SEXUAL_ANY)) {
+  if (CSAM_DIRECT.test(t) || nearCooccur(tForMinorCheck, MINOR, SEXUAL_ANY)) {
     return { blocked: true, tier: "absolute", category: "minors",
       reason: "This request appears to involve sexual content with a minor. That is never permitted, for anyone. It has been refused and logged." };
   }

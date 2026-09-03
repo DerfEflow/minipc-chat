@@ -462,9 +462,25 @@ export function buildAnthropicMessagesPayload(model, messages, opts = {}) {
   }
   if (tools.length && toolChoice) payload.tool_choice = toolChoice;
 
-  // Anthropic thinking requests reject custom temperature. Omitting it retains
-  // the model's native sampling behavior.
-  if (!payload.thinking && typeof opts.temperature === "number") {
+  // lane/chat required behavior #2, live-measured 2026-09-03 against the real Messages API
+  // (production error: `temperature` is deprecated for this model, claude-opus-4-8). Two SEPARATE
+  // rejection rules, both confirmed by probe, both must hold:
+  //   (a) Anthropic's documented extended-thinking rule: temperature is incompatible with an
+  //       ACTIVE thinking block on any family (payload.thinking truthy) — this is the original
+  //       `!payload.thinking` guard and it is still correct for manual thinking (Haiku 4.5): with
+  //       a thinking block, temperature is rejected; probed again here WITHOUT one, Haiku accepts
+  //       it fine, so the manual family's restriction is thinking-conditional, not unconditional.
+  //   (b) claude-opus-4-8 and claude-sonnet-5 (the "adaptive" family) reject temperature
+  //       UNCONDITIONALLY — probed both WITH and WITHOUT a thinking block on the wire, both 400
+  //       "temperature is deprecated for this model". The previous guard here only ever agreed
+  //       with (b) by coincidence, because no caller in this codebase currently passes
+  //       opts.thinking:false for an adaptive model, so payload.thinking was always truthy for
+  //       them anyway. A future caller that disables thinking for a cheap/fast round (the same
+  //       pattern the chat pipeline already uses for tool-less conclusion rounds) would have
+  //       leaked temperature straight into this exact 400. The explicit `family !== "adaptive"`
+  //       clause closes that gap for every current and future caller regardless of the thinking
+  //       flag, data-driven from the probe above rather than from thinking-truthiness as a proxy.
+  if (!payload.thinking && family !== "adaptive" && typeof opts.temperature === "number") {
     payload.temperature = Math.max(0, Math.min(1, opts.temperature));
   }
   if (typeof opts.topP === "number" || typeof opts.top_p === "number") payload.top_p = opts.topP ?? opts.top_p;
