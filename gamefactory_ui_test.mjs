@@ -26,7 +26,7 @@ test("the classic owner surface parses and its versioned assets ship in the shel
   }
   includes(js, "window.DominionGameFactory", "stable surface global");
   includes(sw, '"/games"', "offline-capable deep route");
-  assert.match(sw, /dominion-ai-v185-stabilize/, "asset changes must advance the PWA cache");
+  assert.match(sw, /dominion-ai-v186-stabilize-video/, "asset changes must advance the PWA cache");
 });
 
 test("owner navigation stays hidden until the server account capability arrives", () => {
