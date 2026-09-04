@@ -1,6 +1,6 @@
 # Dominion AI Field Guide: The Crucible and the Game Factory
 
-Written 2026-09-03 against production commit 1e76a89 at app.dominion.tools (the Crucible stabilization of the afternoon plus the Game Factory build of the evening). This guide covers only features that exist in that build and describes each one the way the screen actually shows it. Where a feature was proven, the guide says how:
+Written 2026-09-03 against production commit 1e76a89 at app.dominion.tools (the Crucible stabilization of the afternoon plus the Game Factory build of the evening) and updated 2026-09-04 for commit 9bc7fce (the first production run's two fixes: the QA runner on Linux, and the live activity strip). This guide covers only features that exist in that build and describes each one the way the screen actually shows it. Where a feature was proven, the guide says how:
 
 - **Production**: measured against app.dominion.tools after deploy.
 - **Rig**: the exact production code booted locally with production keys and real providers.
@@ -158,7 +158,7 @@ The **SD Tech Mobile Game Factory** builds a fixed ten-game portfolio: Vector Va
 
 It is owner-only in production (`GAME_FACTORY_MODE` is `owner`), and it requires a real signed-in human owner browser session. A service token or script is refused with "The Mobile Game Factory requires a verified human owner session." That refusal is by design and is why the September stabilization could verify the gate but not drive the factory from a script.
 
-### 1. Production configuration (as of 2026-09-03)
+### 1. Production configuration (as of 2026-09-04)
 
 | Setting | Value | Meaning |
 |---|---|---|
@@ -200,7 +200,8 @@ It is owner-only in production (`GAME_FACTORY_MODE` is `owner`), and it requires
 - **Evidence gate**: the approval cannot be offered yet, and the text says exactly what is missing.
 - **Blocked**: the recorded blocker.
 - **Pause requested** / **Stop requested**: the active task is finishing at a safe boundary first; the stage is never falsified.
-- **No owner decision is pending.** The supervisor is doing the work for this stage (a task is running or about to be queued); nothing is asked of you until the next gate.
+- **The activity strip** (since 2026-09-04): whenever work is in flight, a strip with a pulsing dot sits above the buttons and says in plain words what is happening, for example "Implementation · Implement. Asking openai/gpt-5.6-terra to write the game (round 2 of 4 on this model)." Under it, clocks tick every second on the server's clock: started, last heartbeat, lease left, model, attempt. Its chip is one of three verdicts: **Working** (green: heartbeats are arriving on time), **Queued** or **Scheduling** (brass: a task waits for a worker, or the supervisor is between steps and says when it last checked), **Stalled** (red: no heartbeat for over 2.5 minutes, a lease that ran out, a queued task nobody claimed for 90 seconds, or a supervisor that stopped checking in, each with the sentence that says so). The lifecycle milestones on the Overview show the time each stage was reached, and the current one glows while a task runs.
+- **No owner decision is pending.** Shown only when nothing is in flight; the supervisor schedules the next stage on its own.
 - At **Playtest Ready**: "Play the build, then approve it or request changes."
 
 ### 4. The lifecycle
@@ -259,7 +260,7 @@ What the factory then does, stage by stage, with no further taps:
 
 ### 7. Step by step: the specification approval
 
-1. Once the four specification artifacts are complete, the notice reads **Owner gate: Specification approval is required for ...** with the evidence fingerprint, and two buttons appear: **Approve specification** and **Request changes**.
+1. Once the four specification artifacts are complete, the notice reads **Owner gate: Specification approval is required for ...** with the evidence fingerprint, and two buttons appear: **Approve specification** and **Request changes**. The notice ends with **Read the documents in the Artifacts tab**, which switches to that tab; the specification is the Game Brief, Market Case, Release Roadmap and Build Workflow, each with a **Read artifact** button.
 2. **Approve specification** opens a confirmation. The decision is bound to the exact evidence fingerprint shown; if the evidence changed since you loaded the page the server answers "The approval evidence changed. Reload the current checkpoint before deciding." Confirm with the button, or **Keep current state**.
 3. **Request changes** asks you to **Explain what must change**. The note becomes part of the durable decision record. The game moves to **Revision** with the blocker "SPECIFICATION was rejected."
 4. Approvals are listed on the **Quality & release** tab under **Owner approvals**. A new build or new evidence marks earlier approvals **superseded**; approvals never carry forward silently.
@@ -278,7 +279,7 @@ What the factory then does, stage by stage, with no further taps:
 ### 9. Work queue and the two workers
 
 - Tasks are durable rows with a capability (product planning, gameplay engineering, visual design, quality assurance, release coordination, godot, android, ios, artifact mirroring), a status, and attempt N of M. The **Work queue** tab shows them by title: design, assets, implement, repair, revise.
-- Two workers drain the same queue. The **server forge** claims product planning, visual design and gameplay engineering tasks and works one at a time with a ten-minute lease and heartbeats every thirty seconds. The **GX10 orchestrator** claims quality assurance and godot tasks for the device lane (today only the synthetic canary uses it).
+- Two workers drain the same queue. The **server forge** claims product planning, visual design and gameplay engineering tasks and works one at a time with a ten-minute lease. Since 2026-09-04 it heartbeats the store on a timer every thirty seconds while a task runs, even in the middle of a long model call, and publishes the phase it is in (asking which model, which round, running local QA, assembling the bundle), which is what the activity strip shows. The **GX10 orchestrator** claims quality assurance and godot tasks for the device lane (today only the synthetic canary uses it).
 - Exactly one writer may own a game at a time. A lease expires without a heartbeat and is reclaimed on the next tick.
 - Dispatch to the GX10 controller goes through a durable journal with a deterministic run id per attempt; success is read from the remote's terminal status, never inferred from a timeout.
 - **A transient worker disconnect no longer kills work.** Proof loss suspends dispatch for a 10-minute grace window and resumes on a matching re-probe instead of latching into failure. The outbox has a drainer.

@@ -102,3 +102,17 @@ PLAYTEST_READY -> Play current build (served by the server at /api/game-factory/
 Approve playtest or Request changes (revise loop, new build, QA, PLAYTEST_READY again).
 Traps: projects are keyed by the owner's TENANT uid (tenancy userIdFor(email)), never "owner"; the factory admits
 only a verified human owner session, so scripts cannot drive it in production (rig uses a locally signed CF JWT).
+
+## 2026-09-04 Game Factory: first production run, two fixes (main 9bc7fce)
+
+Fred ran Vector Vault at 01:16Z. Design and assets took four minutes; the implement task failed after
+six rounds because the server QA runner built its `--allow-fs-read` glob with a Windows backslash and
+Linux could not read the harness script (every suite "exited 1 without writing a results file").
+Fixed with `path.join(dir, "*")`, proven in the container before and after. Same deploy: the forge
+heartbeats on a timer and publishes its phase; the API stamps `serverNow`; the owner surface has a
+live activity strip with a working / waiting / stalled verdict and ticking clocks; the lifecycle rail
+carries the time each stage was reached; the planning-gate banner links to the Artifacts tab.
+Rollback: tag `prod-2026-09-04-before-gfprogress` (1e76a89) and `/data/backups/pre-gfprogress-2026-09-04.tgz`.
+Open: DeepSeek direct is out of credit (402 on every call, first rung of the code ladder falls
+through instantly); Anthropic timed out once after nine minutes on a 32k-token implement round;
+GPT-5.6-terra produced files on every round. Vector Vault sits in FAILED until the owner taps Retry.
