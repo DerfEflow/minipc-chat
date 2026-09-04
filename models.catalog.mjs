@@ -351,10 +351,10 @@ export const MODELS = [
    * these seats, they run at 3-6 tok/s and make the hardware look broken.
    */
   { id: "gx10/gpt-oss-120b", name: "GPT-OSS 120B (GX10)", origin: "Your GX10 (local)", provider: "gx10", directId: "gpt-oss:120b",
-    category: "Your GX10 (local)", params: "117B (MoE·5B active)", paramsB: 117, inCost: 0, outCost: 0, ctx: 32768, /* was 131072: at 131k the 120B needs 67 GiB and evicts the coder; 32k keeps both resident on the GX10 (measured 2026-09-03) */ maxOut: 16384, reasoning: true, toolCapable: true,
+    category: "Your GX10 (local)", params: "117B (MoE·5B active)", paramsB: 117, inCost: 0, outCost: 0, ctx: 131072, /* 2026-09-04 measured on the box: 120B at 131k = 65 GB and the coder at 131k = 39 GB fit TOGETHER (109 of 121 GB used, 11 GB spare). The 2026-09-03 note that 131k "evicts the coder" was wrong; 32k was never a hardware limit. OLLAMA_CONTEXT_LENGTH on the GX10 is 131072 to match, so a request at this size never reloads the model (a reload at 131k costs ~150 s). */ maxOut: 16384, reasoning: true, toolCapable: true,
     specialty: "The house workhorse: strong reasoning on your own hardware, free" },
   { id: "gx10/qwen3-coder-30b", name: "Qwen3 Coder 30B (GX10)", origin: "Your GX10 (local)", provider: "gx10", directId: "qwen3-coder:30b",
-    category: "Your GX10 (local)", params: "30B (MoE·3B active)", paramsB: 30, inCost: 0, outCost: 0, ctx: 32768, /* was 131072: at 131k the 120B needs 67 GiB and evicts the coder; 32k keeps both resident on the GX10 (measured 2026-09-03) */ maxOut: 16384, toolCapable: true,
+    category: "Your GX10 (local)", params: "30B (MoE·3B active)", paramsB: 30, inCost: 0, outCost: 0, ctx: 131072, /* 2026-09-04: fits at 131k beside the 120B (see the seat above); the server default on the GX10 matches */ maxOut: 16384, toolCapable: true,
     specialty: "Fast local coder for builds, free on your own machine" },
 ];
 

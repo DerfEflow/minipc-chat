@@ -106,3 +106,13 @@ game landed in FAILED with an honest blocker. What the rounds showed, measured i
    owner surface shows a live activity strip (working / waiting / stalled, with started, heartbeat
    and lease clocks ticking on the server clock), stamps the lifecycle rail with the time each
    stage was reached, and the planning-gate banner now points at the Artifacts tab.
+
+11. **The GX10 was fenced to 32k by a wrong note, and never asked to write code.** Fred: "I have a
+   consumer supercomputer made for this; a 32k window is not reasonable." Measured on the box on
+   2026-09-04: gpt-oss:120b at 131k (65 GB) and qwen3-coder:30b at 131k (39 GB) fit together with
+   11 GB spare; the 2026-09-03 "evicts the coder" note behind commit dce6841 was false. Speeds:
+   120B 43 tok/s, 30B 59 tok/s, the mini-PC's 8B 11.5 tok/s. Fixes: `OLLAMA_CONTEXT_LENGTH` on the
+   GX10 raised to 131072 (unit file backed up), both catalog seats advertise 131072 so a request
+   never triggers a ~150 s reload, and the code ladder now leads with the brain
+   (`gx10/gpt-oss-120b`, then terra, Sonnet, DeepSeek). Trap recorded: a reload at a different
+   num_ctx costs ~150 s per model; keep the server default equal to the catalog window.

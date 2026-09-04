@@ -79,10 +79,13 @@ returns to PLAYTEST_READY with the new build. Failed QA suites queue a `repair` 
 lineage) before the game blocks with the failing summary.
 
 D8. **Model ladder, free first where it is safe.** Design JSON: gx10/qwen3-coder-30b (free) first,
-then deepseek/deepseek-v4-pro, anthropic/claude-sonnet-5. Code generation and repairs:
-deepseek/deepseek-v4-pro, anthropic/claude-sonnet-5, openai/gpt-5.6-terra (free rung off by default;
-`GAME_FACTORY_FORGE_FREE_FIRST=1` puts gx10 first). Configurable via `GAME_FACTORY_FORGE_MODELS` and
-`GAME_FACTORY_DESIGN_MODELS` (comma-separated catalog ids). Every result carries `servedBy`.
+then deepseek/deepseek-v4-pro, anthropic/claude-sonnet-5. Code generation and repairs (revised
+2026-09-04 on Fred's ruling "the coder is the grunt; the brain could do that job"): gx10/gpt-oss-120b
+(the GX10 brain, free, 131k window, measured 43 tok/s) first, then openai/gpt-5.6-terra,
+anthropic/claude-sonnet-5, deepseek/deepseek-v4-pro (the paid rungs in the order that produced files
+in the first production run). `GAME_FACTORY_FORGE_FREE_FIRST=1` additionally puts the 30B coder in
+front. Configurable via `GAME_FACTORY_FORGE_MODELS` and `GAME_FACTORY_DESIGN_MODELS` (comma-separated
+catalog ids). Every result carries `servedBy`.
 Art: Foundry `generateImagesInternal` (paid -> safety rewrite -> free draft, already a ladder), and a
 deterministic kit-drawn PNG icon as the last rung so ASSET_GENERATION can never fail for lack of art.
 

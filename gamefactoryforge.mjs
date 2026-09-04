@@ -52,7 +52,12 @@ const MUST_PASS_LOCALLY = Object.freeze([
 // this constant is the one place to make it configurable instead of a second hardcoded id.
 const GX10_FREE_MODEL = "gx10/qwen3-coder-30b";
 const DEFAULT_DESIGN_MODELS = Object.freeze([GX10_FREE_MODEL, "deepseek/deepseek-v4-pro", "anthropic/claude-sonnet-5"]);
-const DEFAULT_CODE_MODELS = Object.freeze(["deepseek/deepseek-v4-pro", "anthropic/claude-sonnet-5", "openai/gpt-5.6-terra"]);
+// 2026-09-04 (Fred: "the coder is the grunt; the brain could do that job"): the GX10 brain leads the
+// code ladder. Measured on the box: 43 tok/s, 131k context, free; the first implement round is about
+// 13.5k tokens in and 8-12k out. Then the paid rungs in the order that actually produced files in the
+// first production run (terra did on every round; Sonnet timed out once; DeepSeek is unfunded, 402).
+const GX10_BRAIN_MODEL = "gx10/gpt-oss-120b";
+const DEFAULT_CODE_MODELS = Object.freeze([GX10_BRAIN_MODEL, "openai/gpt-5.6-terra", "anthropic/claude-sonnet-5", "deepseek/deepseek-v4-pro"]);
 
 const sha256Hex = (data) => createHash("sha256").update(data).digest("hex");
 const safeErr = (value) => {
