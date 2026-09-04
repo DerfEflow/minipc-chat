@@ -116,3 +116,12 @@ game landed in FAILED with an honest blocker. What the rounds showed, measured i
    never triggers a ~150 s reload, and the code ladder now leads with the brain
    (`gx10/gpt-oss-120b`, then terra, Sonnet, DeepSeek). Trap recorded: a reload at a different
    num_ctx costs ~150 s per model; keep the server default equal to the catalog window.
+
+12. **The GX10 hands node was evicted once a minute because its heartbeat never reached the app.**
+   hands/5 (2026-09-03) added `POST /hands/beat` as the node's idle liveness ping, and the hub evicts a
+   node with no inbound evidence for 60 s. The Cloudflare Access bypass app for the node channel
+   listed only /hands/stream, /hands/result and /hands/chunk, so every beat got a 302 to the login
+   page at the edge (measured from the GX10: beat 302, chunk 401). Fixed 2026-09-04 by adding
+   `app.dominion.tools/hands/beat` to that Access app (snapshot under F:\Claude Sandbox\gf-rig-data\cf-snapshots).
+   Rule for next time: every route a node calls must be in the bypass list, and the proof is a POST
+   from the node's own machine, not from a logged-in browser.
