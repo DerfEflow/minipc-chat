@@ -78,14 +78,14 @@ the game, a new build is created (which invalidates prior evidence by design), Q
 returns to PLAYTEST_READY with the new build. Failed QA suites queue a `repair` task (up to 3 per build
 lineage) before the game blocks with the failing summary.
 
-D8. **Model ladder, free first where it is safe.** Design JSON: gx10/qwen3-coder-30b (free) first,
-then deepseek/deepseek-v4-pro, anthropic/claude-sonnet-5. Code generation and repairs (revised
-2026-09-04 on Fred's ruling "the coder is the grunt; the brain could do that job"): gx10/gpt-oss-120b
-(the GX10 brain, free, 131k window, measured 43 tok/s) first, then openai/gpt-5.6-terra,
-anthropic/claude-sonnet-5, deepseek/deepseek-v4-pro (the paid rungs in the order that produced files
-in the first production run). `GAME_FACTORY_FORGE_FREE_FIRST=1` additionally puts the 30B coder in
-front. Configurable via `GAME_FACTORY_FORGE_MODELS` and `GAME_FACTORY_DESIGN_MODELS` (comma-separated
-catalog ids). Every result carries `servedBy`.
+D8. **Model ladder, local first, no DeepSeek** (revised 2026-09-04 on two rulings from Fred: "the
+coder is the grunt; the brain could do that job" and "I don't want to use DeepSeek. I want to make
+the local models work"). Design JSON: gx10/qwen3-coder-30b, then gx10/gpt-oss-120b, then
+anthropic/claude-sonnet-5. Code generation and repairs: gx10/gpt-oss-120b (the GX10 brain, free,
+131k window, measured 43 tok/s), then gx10/qwen3-coder-30b, then openai/gpt-5.6-terra, then
+anthropic/claude-sonnet-5. One paid rung stays at the end of each ladder so a game never dies for
+lack of a model; `GAME_FACTORY_FORGE_MODELS` / `GAME_FACTORY_DESIGN_MODELS` (comma-separated catalog
+ids) override either ladder, so a fully local run is one variable away. Every result carries `servedBy`.
 Art: Foundry `generateImagesInternal` (paid -> safety rewrite -> free draft, already a ladder), and a
 deterministic kit-drawn PNG icon as the last rung so ASSET_GENERATION can never fail for lack of art.
 

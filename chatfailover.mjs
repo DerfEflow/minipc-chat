@@ -58,9 +58,11 @@ export const CHAT_SEAT_FALLBACKS = {
   // GX10 relay seats (lane/chat follow-up, 2026-09-03 production evidence: a busy GX10 produced no
   // first token for 150s while the client waited). The relay's own first-token watchdog now hands
   // off here the same way any cloud seat does when it goes quiet -- these targets are cloud models
-  // with comparable capability so a queued/unreachable box never strands the turn.
-  "gx10/gpt-oss-120b": "deepseek/deepseek-v4-pro",
-  "gx10/qwen3-coder-30b": "deepseek/deepseek-v4-pro",
+  // with comparable capability so a queued/unreachable box never strands the turn. 2026-09-04:
+  // DeepSeek is out by Fred's ruling ("I don't want to use DeepSeek"); the brain falls to Sonnet,
+  // the coder to the nearest tool-capable coder seat that actually produced files in production.
+  "gx10/gpt-oss-120b": "anthropic/claude-sonnet-5",
+  "gx10/qwen3-coder-30b": "openai/gpt-5.6-terra",
 };
 
 /*

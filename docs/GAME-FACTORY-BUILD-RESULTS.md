@@ -125,3 +125,11 @@ game landed in FAILED with an honest blocker. What the rounds showed, measured i
    `app.dominion.tools/hands/beat` to that Access app (snapshot under F:\Claude Sandbox\gf-rig-data\cf-snapshots).
    Rule for next time: every route a node calls must be in the bypass list, and the proof is a POST
    from the node's own machine, not from a logged-in browser.
+
+13. **DeepSeek out, local models first (Fred, 2026-09-04: "I don't want to use DeepSeek. I want to
+   make the local models work").** Design ladder: GX10 coder, GX10 brain, Sonnet. Code ladder: GX10
+   brain, GX10 coder, terra, Sonnet. The chat failover targets for the two GX10 seats no longer
+   point at DeepSeek (brain -> Sonnet, coder -> terra). Still naming DeepSeek elsewhere, for a
+   follow-up iteration: the general chat failover graph (kimi, qwen3-coder, minimax rungs), the
+   Simplify quick route, the video director's first rung, the Crucible "mechanical" assignment,
+   and the catalog seats themselves.
