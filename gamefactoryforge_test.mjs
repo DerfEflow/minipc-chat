@@ -414,4 +414,45 @@ await test("parser: prose around blocks, fenced code blocks, and a missing file 
   assert.deepEqual(parsedEmpty.missing, ["game/render.js"]);
 });
 
+await test("progress: a slow model call keeps the lease alive on a timer and health().current names the phase and model", async () => {
+  const { store, d } = freshStore();
+  try {
+    store.seedPortfolio({ uid: owner, email: "owner@example.com" });
+    const projectId = store.listProjects(owner).find((p) => p.slug === "vector-vault").id;
+    const taskHeartbeat = () => store.getProject(owner, projectId).tasks.find((t) => t.capability === "product_planning").heartbeatAt;
+    let forge = null;
+    const seen = {};
+    const chat = async (args) => {
+      // Mid-call: the store must see heartbeats WITHOUT the task code calling rc.heartbeat, and the
+      // worker's health must already say what it is doing and on which model.
+      seen.current = forge.health().current;
+      const before = taskHeartbeat();
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      seen.advanced = taskHeartbeat() > before;
+      seen.heartbeats = forge.health().current && forge.health().current.heartbeats;
+      return { ok: true, content: JSON.stringify(validDesign(portfolioGame("vector-vault"), 12)), servedBy: { model: args.model }, costUsd: 0.001 };
+    };
+    forge = createGameFactoryForge({
+      store, chat,
+      generateImages: async () => ({ error: "not used" }), readArtifact: async () => ({ error: "not used" }),
+      kit: makeFakeKit(), qaRunner: makeFakeQaRunner(() => ({})), dataDir: d,
+      models: { design: ["design-model"], code: ["model-a"] }, heartbeatMs: 100, leaseMs: 30000,
+    });
+    store.queueTask({ uid: owner, projectId, capability: "product_planning", payload: { kind: "design" } });
+    await forge.tick();
+    assert.ok(seen.current, "health().current is published while the model call is in flight");
+    assert.equal(seen.current.stage, "design");
+    assert.equal(seen.current.model, "design-model");
+    assert.equal(seen.current.slug, "vector-vault");
+    assert.equal(seen.current.phase, "asking design-model for the game design");
+    assert.ok(seen.current.startedAt > 0 && seen.current.phaseAt >= seen.current.startedAt);
+    assert.equal(seen.advanced, true, "the timer heartbeat must advance heartbeatAt during a 900ms model call at heartbeatMs=100 (timer floor 250ms)");
+    assert.ok(seen.heartbeats >= 2, `expected at least two timer pulses, saw ${seen.heartbeats}`);
+    assert.equal(forge.health().current, null, "current is cleared once the task ends");
+    assert.equal(forge.health().busy, false);
+    const task = store.getProject(owner, projectId).tasks.find((t) => t.capability === "product_planning");
+    assert.equal(task.status, "COMPLETED");
+  } finally { store.close(); rmSync(d, { recursive: true, force: true }); }
+});
+
 console.log(`\n${n} game factory forge tests passed`);

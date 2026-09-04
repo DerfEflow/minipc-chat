@@ -357,21 +357,53 @@ export function createGameFactoryForge({
    * pause, so it throws LeaseLostError instead of returning true, and processTask() below abandons
    * the task quietly rather than calling completeTask/failTask against a lease it does not hold.
    */
+  /*
+   * Progress visibility (Fable 2026-09-04, after the first production run): a model round can take
+   * many minutes, and until now the store saw no heartbeat between rounds, so the owner surface could
+   * not tell a working forge from a dead one, and a slow round could outlive the lease. The context
+   * now (a) pulses the store on a timer every heartbeatMs while the task runs, independent of the
+   * model call, and (b) publishes a plain-language `phase` into `current` (surfaced by health()) so
+   * the UI can say "asking claude-sonnet-5 to write the game (round 2 of 4), last heartbeat 12s ago".
+   * A timer pulse never throws into the task; it records lease loss, and the next checkpoint throws.
+   */
   function makeRunContext(task) {
     let lastAt = -Infinity;
     let stopRequested = false;
-    async function heartbeat(stage, round, model) {
-      current = { taskId: task.id, kind: (task.payload && task.payload.kind) || task.capability, stage, round, model: model || null };
-      if (stopRequested) return true;
+    let leaseLost = "";
+    const startedAt = Number(now()) || Date.now();
+    current = {
+      taskId: task.id, projectId: task.projectId, buildId: task.buildId || "", slug: "", name: "",
+      kind: (task.payload && task.payload.kind) || task.capability, capability: task.capability,
+      stage: "claimed", round: 0, model: null, phase: "claimed the task", phaseAt: startedAt,
+      startedAt, lastHeartbeatAt: 0, heartbeats: 0, attempt: task.attempt,
+    };
+    const mine = () => current && current.taskId === task.id;
+    function pulse() {
       const at = Number(now()) || Date.now();
-      if (at - lastAt < heartbeatMs) return stopRequested;
+      if (at - lastAt < heartbeatMs) return;
       lastAt = at;
       const r = store.heartbeatTask({ uid: task.uid, taskId: task.id, workerId: WORKER_ID, attempt: task.attempt, leaseMs });
-      if (r.status !== 200) throw new LeaseLostError((r.body && r.body.error) || "task lease was lost");
+      if (r.status !== 200) { leaseLost = (r.body && r.body.error) || "task lease was lost"; return; }
       if (r.body && r.body.stopRequested) stopRequested = true;
+      if (mine()) { current.lastHeartbeatAt = at; current.heartbeats++; }
+    }
+    const timer = setInterval(() => { try { pulse(); } catch (error) { leaseLost = leaseLost || safeErr(error) || "heartbeat failed"; } }, Math.max(250, heartbeatMs));
+    if (timer && typeof timer.unref === "function") timer.unref();
+    function describe(fields) { if (mine()) Object.assign(current, fields || {}); }
+    function phase(text) {
+      if (mine()) { current.phase = String(text || "").slice(0, 200); current.phaseAt = Number(now()) || Date.now(); }
+      if (leaseLost) throw new LeaseLostError(leaseLost);
+    }
+    async function heartbeat(stage, round, model) {
+      if (mine()) Object.assign(current, { stage, round, model: model || null });
+      if (leaseLost) throw new LeaseLostError(leaseLost);
+      if (stopRequested) return true;
+      pulse();
+      if (leaseLost) throw new LeaseLostError(leaseLost);
       return stopRequested;
     }
-    return { heartbeat };
+    function dispose() { clearInterval(timer); }
+    return { heartbeat, phase, describe, dispose };
   }
 
   function completeResult(task, result) {
@@ -422,6 +454,7 @@ export function createGameFactoryForge({
         { role: "system", content: buildDesignSystemPrompt() },
         { role: "user", content: buildDesignUserPrompt({ catalogGame, artifacts, levels }) },
       ];
+      rc.phase(`asking ${model} for the game design`);
       let resp = await chat({ model, messages, maxTokens: 6000, temperature: 0.4 });
       if (!resp || resp.ok === false || !resp.content) { lastFailure = `${model}: ${safeErr(resp && resp.error) || "no content"}`; continue; }
       cost.add(resp);
@@ -431,6 +464,7 @@ export function createGameFactoryForge({
         if (await rc.heartbeat("design", round, model)) return pauseResult(task, "design", round);
         round++;
         const fixMessages = [...messages, { role: "assistant", content: resp.content }, { role: "user", content: buildDesignFixPrompt(shapeErrors) }];
+        rc.phase(`repairing the design JSON with ${model}`);
         const fixResp = await chat({ model, messages: fixMessages, maxTokens: 6000, temperature: 0.2 });
         if (fixResp && fixResp.ok !== false && fixResp.content) {
           cost.add(fixResp);
@@ -462,6 +496,7 @@ export function createGameFactoryForge({
   async function runAssetsTask(task, project, rc) {
     const slug = project.slug;
     if (await rc.heartbeat("assets", 0, "generateImages")) return pauseResult(task, "assets", 0);
+    rc.phase("generating the icon and splash art");
     const catalogGame = portfolioGame(slug);
     const paletteHexes = ((catalogGame && catalogGame.visual && catalogGame.visual.palette) || []).map(([, hex]) => hex);
     const palette = paletteHexes.length ? paletteHexes : ["#111318", "#F5F7FF"];
@@ -686,6 +721,7 @@ export function createGameFactoryForge({
         // Four complete files run 6-12k output tokens; reasoning models also spend budget thinking. A
         // budget that cannot hold the answer surfaces as "no content" or a truncated last file, so the
         // ceiling is generous and a truncated answer is fed back as a missing-file round.
+        rc.phase(`asking ${model} to write the game (round ${round} of ${maxRounds} on this model)`);
         const resp = await chat({ model, messages, maxTokens: 32000, temperature: 0.3 });
         if (!resp || resp.ok === false || !resp.content) {
           lastFailureText = `${model}: ${safeErr(resp && resp.error) || "no content"}`;
@@ -713,10 +749,12 @@ export function createGameFactoryForge({
           mkdirSync(resultsDir, { recursive: true });
           const meta = buildMeta({ design, catalogGame, theme, buildId, versionName });
           const buildDoc = await kit.assembleBundle({ outDir: bundleDir, generated: parsed.files, meta, assets });
+          rc.phase(`running the ${MUST_PASS_LOCALLY.length} local QA suites on round ${totalRounds}`);
           const qa = await runner.run({ bundleDir, resultsDir });
           const suites = (qa && qa.results && qa.results.suites) || {};
           const failed = MUST_PASS_LOCALLY.filter((name) => !suites[name] || suites[name].status !== "PASSED");
           if (!failed.length) {
+            rc.phase("QA passed; assembling the final bundle");
             const finalDoc = await assembleFinal({ finalDir: buildsDir(buildId), generated: parsed.files, meta, assets, expectedSha: buildDoc.bundleSha256 });
             const servedBy = resp.servedBy || { model };
             persistSource(dir, buildId, parsed.files, { model, servedBy, at: Number(now()) || Date.now() });
@@ -752,11 +790,11 @@ export function createGameFactoryForge({
   // Dispatch loop
   // -----------------------------------------------------------------------------------------
   async function processTask(task) {
-    current = { taskId: task.id, kind: (task.payload && task.payload.kind) || task.capability, stage: "claimed", round: 0, model: null };
     const rc = makeRunContext(task);
     try {
       const project = store.getProject(task.uid, task.projectId, { eventLimit: 1 });
       if (!project) { failResult(task, "The project for this task no longer exists.", false); return; }
+      rc.describe({ slug: project.slug || "", name: project.name || "" });
       if (task.capability === "product_planning") await runDesignTask(task, project, rc);
       else if (task.capability === "visual_design") await runAssetsTask(task, project, rc);
       else if (task.capability === "gameplay_engineering") await runGameplayTask(task, project, rc);
@@ -772,6 +810,7 @@ export function createGameFactoryForge({
       try { store.failTask({ uid: task.uid, taskId: task.id, workerId: WORKER_ID, attempt: task.attempt, error: message, retryable: false }); stats.failed++; }
       catch (innerError) { log(`[game-factory-forge] failTask itself failed for task ${task.id}: ${safeErr(innerError)}`); }
     } finally {
+      rc.dispose();
       current = null;
     }
   }

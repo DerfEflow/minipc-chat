@@ -209,8 +209,15 @@ function projectCard(detail, options) {
     id: detail.id, name: detail.name, slug: detail.slug, order: detail.order,
     state: detail.state, operation: detail.operation, progress: durableProgress(detail),
     version: detail.version, priority: detail.priority, blocker: detail.blocker,
-    currentTask: running ? { id: running.id, title: running.title, capability: running.capability, status: running.status } : null,
-    nextTask: queued ? { id: queued.id, title: queued.title, capability: queued.capability, status: queued.status } : null,
+    currentTask: running ? {
+      id: running.id, title: running.title, capability: running.capability, status: running.status,
+      workerId: running.workerId || "", attempt: running.attempt, maxAttempts: running.maxAttempts,
+      startedAt: running.startedAt || 0, heartbeatAt: running.heartbeatAt || 0, leaseUntil: running.leaseUntil || 0,
+    } : null,
+    nextTask: queued ? {
+      id: queued.id, title: queued.title, capability: queued.capability, status: queued.status,
+      attempt: queued.attempt, maxAttempts: queued.maxAttempts, createdAt: queued.createdAt || 0,
+    } : null,
     approvalNeeded: gateStatus.ready ? gateStatus.gate : "",
     approvalBlocked: gateStatus.blocker,
     approvalSubject: gateStatus.subject,
@@ -450,6 +457,8 @@ export function createGameFactoryHttp({
       const details = store.listProjects(uid).map((project) => store.getProject(uid, project.id));
       const games = details.map((detail) => projectCard(detail, { builds, uid }));
       return json(res, 200, {
+        // The owner surface measures heartbeat and lease ages against THIS clock, never the phone's.
+        serverNow: Date.now(),
         games,
         summary: {
           total: games.length,
@@ -641,6 +650,7 @@ export function createGameFactoryHttp({
         if (!detail) return json(res, 404, { error: "No such game.", code: "not_found" });
         const gateStatus = ownerGateStatus(detail);
         return json(res, 200, {
+          serverNow: Date.now(),
           game: {
             ...detail,
             artifacts: artifactsForReview(detail, { configured: typeof readArtifactContent === "function", owner: !!T.isOwner }),

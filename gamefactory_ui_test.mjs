@@ -1,7 +1,7 @@
 /* SD Tech Mobile Game Factory owner surface contract. Run: node gamefactory_ui_test.mjs */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Script } from "node:vm";
+import { Script, createContext } from "node:vm";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const html = read("./public/index.html");
@@ -20,13 +20,13 @@ const includes = (source, value, label = value) => assert.ok(source.includes(val
 
 test("the classic owner surface parses and its versioned assets ship in the shell", () => {
   assert.doesNotThrow(() => new Script(js));
-  for (const asset of ["/dominion-game-factory.css?v=4", "/dominion-game-factory.js?v=4"]) {
+  for (const asset of ["/dominion-game-factory.css?v=5", "/dominion-game-factory.js?v=5"]) {
     includes(html, asset, `${asset} in index.html`);
     includes(sw, `"${asset}"`, `${asset} in the service-worker shell`);
   }
   includes(js, "window.DominionGameFactory", "stable surface global");
   includes(sw, '"/games"', "offline-capable deep route");
-  assert.match(sw, /dominion-ai-v187-game-factory/, "asset changes must advance the PWA cache");
+  assert.match(sw, /dominion-ai-v188-game-factory-progress/, "asset changes must advance the PWA cache");
 });
 
 test("owner navigation stays hidden until the server account capability arrives", () => {
@@ -132,7 +132,7 @@ test("the overlay isolates the shell, traps focus, and restores it on close", ()
   includes(js, 'event.target.closest?.("dialog")', "nested dialogs retain their own focus and Escape behavior");
   includes(js, "moveTabFocus(event)", "ARIA tab keyboard navigation");
   includes(js, "focus?.focus?.()", "return focus");
-  includes(html, "dominion-game-factory.css?v=4", "factory style link");
+  includes(html, "dominion-game-factory.css?v=5", "factory style link");
   const styles = [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="\/([^"?]+\.css)/g)].map((match) => match[1]);
   assert.equal(styles.at(-1), "dominion-mobile.css", "the established touch correction sheet must remain last");
 });
@@ -214,6 +214,90 @@ test("Run to playtest is a confirmed owner action and PLAYTEST_READY carries an 
 test("an autopilot badge appears on the detail header only when the server reports autopilot", () => {
   includes(js, "game.autopilot ?", "autopilot badge is conditional on server-reported state, never inferred client-side");
   includes(js, "dgf-autopilot", "autopilot badge carries its own scoped class");
+});
+
+test("the live activity strip exists, ticks on the server clock, and the gate points at the Artifacts tab", () => {
+  includes(js, "data-factory-activity", "activity strip marker");
+  includes(js, "serverNow", "server clock");
+  includes(js, "clockSkew = Number(nextBootstrap.serverNow) - Date.now()", "skew is taken from the bootstrap response");
+  includes(js, 'data-gf-age="', "age clocks re-tick without a re-render");
+  includes(js, "startClocks()", "clock ticker starts with polling");
+  includes(js, "stopClocks()", "clock ticker stops on close");
+  includes(js, 'data-tab="artifacts">Read the documents in the Artifacts tab.', "the planning gate names where its documents are");
+  includes(js, "${activityMarkup(game)}${operationNotice(game)}", "the strip renders above the notice in the decision row");
+  includes(js, 'event.type === "project.transitioned"', "lifecycle rail stamps the time each stage was reached");
+  includes(css, ".dgf-activity[data-tone=\"stalled\"]", "stalled tone is styled");
+  includes(css, "@media (prefers-reduced-motion:reduce)", "pulse animation respects reduced motion");
+  assert.doesNotMatch(js, /This checkpoint will not advance if its worker is unavailable/, "the ominous unexplained notice is gone");
+});
+
+// The stall verdict is a pure function; run the real surface script in a stub browser and prove it.
+function bootSurface() {
+  const noop = () => {};
+  const element = () => ({ setAttribute: noop, append: noop, remove: noop, focus: noop, classList: { add: noop, remove: noop }, style: {}, dataset: {}, addEventListener: noop, removeEventListener: noop });
+  const sandbox = {
+    console, setTimeout, clearTimeout, setInterval, clearInterval, URL, Number, Date, Math, JSON, Promise,
+    addEventListener: noop, removeEventListener: noop, dispatchEvent: noop,
+    location: { pathname: "/", assign: noop }, history: { pushState: noop, replaceState: noop, back: noop, state: {} },
+    navigator: { onLine: true }, fetch: () => Promise.reject(new Error("offline")),
+    MutationObserver: class { observe() {} disconnect() {} }, HTMLElement: class {},
+    document: {
+      readyState: "complete", visibilityState: "visible", addEventListener: noop, removeEventListener: noop,
+      getElementById: () => null, createElement: element, querySelector: () => null, querySelectorAll: () => [],
+      head: { append: noop }, body: { ...element(), children: [], contains: () => false },
+    },
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  const context = createContext(sandbox);
+  new Script(js, { filename: "dominion-game-factory.js" }).runInContext(context);
+  return sandbox.window.DominionGameFactory;
+}
+
+test("the stall verdict tells working from stalled from waiting, on the server clock", () => {
+  const surface = bootSurface();
+  assert.equal(typeof surface.activityVerdict, "function");
+  const now = 1_800_000_000_000;
+  const running = (heartbeatAgeMs, leaseLeftMs = 600_000) => ({
+    state: "IMPLEMENTATION", tasks: [{ id: "t1", title: "implement", status: "RUNNING", workerId: "game-factory:server-forge", attempt: 1, maxAttempts: 3, startedAt: now - 300_000, heartbeatAt: now - heartbeatAgeMs, leaseUntil: now + leaseLeftMs }],
+  });
+  const forgeBusy = { forge: { enabled: true, busy: true, current: { taskId: "t1", phase: "asking anthropic/claude-sonnet-5 to write the game (round 2 of 4 on this model)", model: "anthropic/claude-sonnet-5" } }, supervisor: { enabled: true, lastTickAt: now - 4000 } };
+
+  const working = surface.activityVerdict({ game: running(12_000), health: forgeBusy, now });
+  assert.equal(working.tone, "working");
+  assert.match(working.headline, /Implementation · Implement/);
+  assert.match(working.detail, /^Asking anthropic\/claude-sonnet-5 to write the game/);
+  assert.equal(working.model, "anthropic/claude-sonnet-5");
+
+  const silent = surface.activityVerdict({ game: running(10 * 60_000), health: forgeBusy, now });
+  assert.equal(silent.tone, "stalled");
+  assert.match(silent.detail, /No heartbeat for 10m 00s/);
+
+  const expired = surface.activityVerdict({ game: running(20_000, -30_000), health: forgeBusy, now });
+  assert.equal(expired.tone, "stalled");
+  assert.match(expired.detail, /lease ran out 30s ago/);
+
+  const queuedFresh = surface.activityVerdict({ game: { state: "IMPLEMENTATION", tasks: [{ id: "q", title: "implement", status: "QUEUED", createdAt: now - 20_000 }] }, health: { forge: { enabled: true, busy: false }, supervisor: { enabled: true, lastTickAt: now } }, now });
+  assert.equal(queuedFresh.tone, "waiting");
+  const queuedAbandoned = surface.activityVerdict({ game: { state: "IMPLEMENTATION", tasks: [{ id: "q", title: "implement", status: "QUEUED", createdAt: now - 5 * 60_000 }] }, health: { forge: { enabled: true, busy: false }, supervisor: { enabled: true, lastTickAt: now } }, now });
+  assert.equal(queuedAbandoned.tone, "stalled");
+  assert.match(queuedAbandoned.detail, /nobody has claimed it/);
+
+  const between = surface.activityVerdict({ game: { state: "ASSET_GENERATION", tasks: [], updatedAt: now - 3000 }, health: { supervisor: { enabled: true, lastTickAt: now - 8000 } }, now });
+  assert.equal(between.tone, "waiting");
+  assert.match(between.detail, /checked 8s ago/);
+  const deadSupervisor = surface.activityVerdict({ game: { state: "ASSET_GENERATION", tasks: [], updatedAt: now }, health: { supervisor: { enabled: true, lastTickAt: now - 10 * 60_000 } }, now });
+  assert.equal(deadSupervisor.tone, "stalled");
+  const noSupervisor = surface.activityVerdict({ game: { state: "ASSET_GENERATION", tasks: [] }, health: { supervisor: { enabled: false } }, now });
+  assert.equal(noSupervisor.tone, "stalled");
+  assert.match(noSupervisor.headline, /No supervisor/);
+
+  assert.equal(surface.activityVerdict({ game: { state: "SPECIFICATION", tasks: [], approvalNeeded: "SPECIFICATION" }, health: forgeBusy, now }), null, "an owner gate is not a stall");
+  assert.equal(surface.activityVerdict({ game: { state: "FAILED", tasks: [], blocker: "x" }, health: forgeBusy, now }), null, "a hold has its own banner");
+  assert.equal(surface.activityVerdict({ game: { state: "IDEA", tasks: [] }, health: forgeBusy, now }), null);
+  assert.equal(surface.ageText(59_000), "59s");
+  assert.equal(surface.ageText(61_000), "1m 01s");
+  assert.equal(surface.ageText(3_725_000), "1h 02m");
 });
 
 if (!process.exitCode) console.log(`\n${passed} Game Factory UI tests passed.`);

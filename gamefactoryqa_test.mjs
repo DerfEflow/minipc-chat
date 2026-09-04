@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { createServerQaRunner, emptyResults, QA_SUITE_NAMES } from "./gamefactoryqa.mjs";
 import { assembleBundle, fallbackIconPng, referenceGame, themeFromVisual } from "./gamefactorykit/kit.mjs";
 
@@ -106,6 +106,20 @@ try {
     assert.ok(outcome.durationMs >= 0);
     assert.equal(outcome.results.schema, "gf-qa/1");
     assert.equal(outcome.ok, true);
+  });
+
+  await test("the permission globs use the host's path separator (the first production run failed on Linux with a literal '\\*')", async () => {
+    const bundleDir = join(dir, "bundle-sep");
+    mkdirSync(join(bundleDir, "qa"), { recursive: true }); // no run.mjs: the child exits fast, we only need the spawn line
+    const resultsDir = join(dir, "results-sep");
+    const lines = [];
+    const runner = createServerQaRunner({ timeoutMs: 15000, log: (line) => lines.push(String(line)) });
+    await runner.run({ bundleDir, resultsDir });
+    const spawnLine = lines.find((line) => line.includes("spawning:"));
+    assert.ok(spawnLine, "the runner logs its spawn command");
+    assert.ok(spawnLine.includes(`--allow-fs-read=${join(bundleDir, "*")}`), spawnLine);
+    assert.ok(spawnLine.includes(`--allow-fs-write=${join(resultsDir, "*")}`), spawnLine);
+    if (sep === "/") assert.ok(!spawnLine.includes("\\*"), "a POSIX host must never see a backslash glob: " + spawnLine);
   });
 
   console.log(`\n${n} gamefactoryqa tests passed`);

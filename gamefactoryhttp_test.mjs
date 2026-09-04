@@ -710,6 +710,20 @@ try {
     rmSync(bundleDir, { recursive: true, force: true });
   });
 
+  await test("bootstrap and detail carry the server clock so the owner surface measures heartbeat ages against it", async () => {
+    const before = Date.now();
+    const boot = (await call(api, { path: "/api/game-factory/bootstrap", tenant: owner })).res.json();
+    assert.equal(typeof boot.serverNow, "number");
+    assert.ok(boot.serverNow >= before && boot.serverNow <= Date.now() + 1000, "serverNow is the server's wall clock in ms");
+    const card = boot.games.find((game) => game.id === projectId) || boot.games[0];
+    assert.ok("currentTask" in card && "nextTask" in card, "cards always carry the task slots, even when empty");
+    if (card.currentTask) for (const key of ["startedAt", "heartbeatAt", "leaseUntil", "workerId", "attempt", "maxAttempts"]) assert.ok(key in card.currentTask, `currentTask.${key}`);
+    if (card.nextTask) for (const key of ["createdAt", "attempt", "maxAttempts"]) assert.ok(key in card.nextTask, `nextTask.${key}`);
+    const detail = (await call(api, { path: `/api/game-factory/games/${encodeURIComponent(projectId)}`, tenant: owner })).res.json();
+    assert.equal(typeof detail.serverNow, "number");
+    assert.ok(Math.abs(detail.serverNow - Date.now()) < 5000);
+  });
+
   console.log(`\n${n} game factory HTTP tests passed`);
 } finally {
   store.close();

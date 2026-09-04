@@ -79,3 +79,30 @@ verified human-owner identity), PROD (measured against app.dominion.tools after 
   follow-up (TODO(fred) in the spec).
 - icon-192 and the splash fallback are kit-drawn (no bitmap resize primitive); provenance says so.
 - Playtest approval is never automatic; Run to playtest pre-approves only the two planning gates.
+
+## First production run (2026-09-04 01:16Z to 01:35Z) and the iteration it forced
+
+Fred approved Vector Vault's Specification and Visual System by hand at 01:16Z. The supervisor moved
+the game through Architecture (design on the free GX10 model), Asset Generation (icon and splash)
+and into Implementation in four minutes. The implement task then failed after six rounds and the
+game landed in FAILED with an honest blocker. What the rounds showed, measured in the container:
+
+- Round 1, deepseek/deepseek-v4-pro: `Insufficient Balance` (HTTP 402). The DeepSeek account has
+  no credit; the same 402 demotes the video director and the Simplify quick route hourly.
+- Round 2, anthropic/claude-sonnet-5: `Anthropic timed out.` after nine minutes with no content.
+- Rounds 3 to 6, openai/gpt-5.6-terra: four files each time, then every QA suite reported
+  `the harness did not report this suite (exited 1 without writing a results file)`.
+
+9. **The QA runner could not run on Linux.** `gamefactoryqa.mjs` built its permission globs as
+   `--allow-fs-read=<bundleDir>\*`, measured only on Windows (rule 8.4 broken by me). Linux reads
+   the backslash as part of the path, so the child could not read its own entry script. Proven in
+   the production container with a two-line probe: `\*` exits 1 and writes nothing, `/*` exits 0.
+   The runner now uses `path.join(dir, "*")`; `gamefactoryqa_test.mjs` asserts the spawn line.
+10. **The owner could not tell working from dead.** The forge heartbeated the store only between
+   model rounds, so a nine-minute round showed a nine-minute-old heartbeat and no words. The forge
+   now pulses the store on a timer every 30 s while a task runs (independent of the model call) and
+   publishes a plain-language phase (`asking <model> to write the game (round 2 of 4)`, `running the
+   9 local QA suites`) through its health. The API stamps `serverNow` on bootstrap and detail. The
+   owner surface shows a live activity strip (working / waiting / stalled, with started, heartbeat
+   and lease clocks ticking on the server clock), stamps the lifecycle rail with the time each
+   stage was reached, and the planning-gate banner now points at the Artifacts tab.

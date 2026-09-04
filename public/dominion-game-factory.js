@@ -47,6 +47,100 @@
   const esc = (value) => String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
   const human = (value) => String(value || "Unknown").toLowerCase().replaceAll("_", " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
   const clamp = (value, min, max) => Math.min(Math.max(Number(value) || 0, min), max);
+
+  // Progress visibility (2026-09-04). Every age below is measured against the SERVER clock: the
+  // bootstrap and detail responses carry serverNow, and clockSkew corrects this device's clock.
+  const WORKING_STATES = new Set(["ARCHITECTURE", "ASSET_GENERATION", "IMPLEMENTATION", "INTEGRATION", "AUTOMATED_TESTING", "REVISION"]);
+  const HEARTBEAT_STALL_MS = 150000;   // the forge pulses the store every 30s; five missed pulses is a stall
+  const CLAIM_STALL_MS = 90000;        // a queued task nobody claims for 90s means no worker is alive
+  const SUPERVISOR_STALL_MS = 90000;   // the supervisor passes every 10s
+  let clockSkew = 0;
+  let clockTimer = null;
+  const serverNow = () => Date.now() + clockSkew;
+  function ageText(ms) {
+    const s = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60), r = s % 60;
+    if (m < 60) return `${m}m ${String(r).padStart(2, "0")}s`;
+    return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+  }
+  const leaseText = (leaseUntil, now = serverNow()) => { const left = leaseUntil - now; return left > 0 ? `${ageText(left)} left` : `expired ${ageText(-left)} ago`; };
+
+  /*
+   * The stall verdict: a pure read of the durable record plus the worker health the bootstrap
+   * carries. Returns null when nothing is in flight to report on (an owner gate, a hold, IDEA,
+   * DEPLOYED); otherwise a tone of working / waiting / stalled with a plain sentence for each.
+   */
+  function activityVerdict({ game, health = {}, now = serverNow() } = {}) {
+    if (!game) return null;
+    const tasks = Array.isArray(game.tasks) ? game.tasks : [];
+    const running = tasks.find((task) => task.status === "RUNNING") || (game.currentTask?.status === "RUNNING" ? game.currentTask : null);
+    const queued = tasks.find((task) => task.status === "QUEUED") || (game.nextTask?.status === "QUEUED" ? game.nextTask : null);
+    const forge = health.forge || {}, supervisor = health.supervisor || {};
+    if (running) {
+      const phase = forge.current && forge.current.taskId === running.id ? forge.current : null;
+      const startedAt = Number(running.startedAt) || 0;
+      const heartbeatAt = Number(running.heartbeatAt) || startedAt;
+      const leaseUntil = Number(running.leaseUntil) || 0;
+      const hbAge = heartbeatAt ? now - heartbeatAt : 0;
+      const base = { kind: "running", task: running, startedAt, heartbeatAt, leaseUntil, phase: phase?.phase || "", model: phase?.model || "", worker: running.workerId || "" };
+      if (leaseUntil && now > leaseUntil) return { ...base, tone: "stalled", label: "Stalled", headline: `${human(running.title)} stopped reporting`, detail: `The worker's lease ran out ${ageText(now - leaseUntil)} ago with no heartbeat. The reconciler will requeue or fail this task on its next pass.` };
+      if (heartbeatAt && hbAge > HEARTBEAT_STALL_MS) return { ...base, tone: "stalled", label: "Stalled", headline: `${human(running.title)} stopped reporting`, detail: `No heartbeat for ${ageText(hbAge)}. The worker may have died; its lease ${leaseUntil ? leaseText(leaseUntil, now) : "has no expiry"}.` };
+      const phaseText = phase?.phase ? `${phase.phase.charAt(0).toUpperCase()}${phase.phase.slice(1)}.` : `${running.workerId || "A worker"} holds this task and is reporting on time.`;
+      return { ...base, tone: "working", label: "Working", headline: `${human(game.state)} · ${human(running.title)}`, detail: phaseText };
+    }
+    if (queued) {
+      const createdAt = Number(queued.createdAt) || 0;
+      const waited = createdAt ? now - createdAt : 0;
+      const base = { kind: "queued", task: queued, createdAt, startedAt: createdAt };
+      if (waited > CLAIM_STALL_MS && forge.busy !== true) return { ...base, tone: "stalled", label: "No worker", headline: `${human(queued.title)} is waiting for a worker`, detail: `Queued ${ageText(waited)} ago and nobody has claimed it. The forge is ${forge.enabled === true ? "idle but not claiming" : "not running on this runtime"}.` };
+      return { ...base, tone: "waiting", label: "Queued", headline: `${human(queued.title)} is queued`, detail: forge.busy === true && forge.current ? `The forge is finishing ${human(forge.current.kind || "another task")} for ${forge.current.name || forge.current.slug || "another game"} first.` : "Waiting for the next free worker to claim it." };
+    }
+    if (HOLD_STATES.has(game.state) || game.state === "DEPLOYED" || game.state === "IDEA" || game.approvalNeeded || game.approvalBlocked) return null;
+    if (WORKING_STATES.has(game.state) || game.state === "SPECIFICATION" || game.state === "PLAYTEST_READY") {
+      const tickAt = Number(supervisor.lastTickAt) || 0;
+      const tickAge = tickAt ? now - tickAt : 0;
+      const base = { kind: "scheduling", tickAt, startedAt: Number(game.updatedAt) || 0 };
+      if (supervisor.enabled !== true) return { ...base, tone: "stalled", label: "Stalled", headline: "No supervisor is running", detail: "Nothing schedules the next stage on this runtime. Enable the supervisor or advance the game by hand." };
+      if (!tickAt || tickAge > SUPERVISOR_STALL_MS) return { ...base, tone: "stalled", label: "Stalled", headline: "The supervisor stopped checking in", detail: `Its last pass was ${tickAt ? ageText(tickAge) + " ago" : "never"}. Nothing advances until it runs again.` };
+      return { ...base, tone: "waiting", label: "Scheduling", headline: `${human(game.state)} · between steps`, detail: `The supervisor checked ${ageText(tickAge)} ago and schedules the next task on its own.` };
+    }
+    return null;
+  }
+
+  function activityMarkup(game) {
+    const verdict = activityVerdict({ game, health: bootstrap?.health || {} });
+    if (!verdict) return "";
+    const now = serverNow();
+    const age = (at, label) => `<span>${label} <time data-gf-age="${Number(at) || 0}" data-gf-suffix=" ago">${esc(ageText(now - at))} ago</time></span>`;
+    const clocks = [];
+    if (verdict.kind === "running") {
+      if (verdict.startedAt) clocks.push(age(verdict.startedAt, "started"));
+      if (verdict.heartbeatAt) clocks.push(age(verdict.heartbeatAt, "last heartbeat"));
+      if (verdict.leaseUntil) clocks.push(`<span>lease <time data-gf-until="${verdict.leaseUntil}">${esc(leaseText(verdict.leaseUntil, now))}</time></span>`);
+      if (verdict.model) clocks.push(`<span>model ${esc(verdict.model)}</span>`);
+      if (Number(verdict.task?.attempt)) clocks.push(`<span>attempt ${Number(verdict.task.attempt)}${Number(verdict.task.maxAttempts) ? ` of ${Number(verdict.task.maxAttempts)}` : ""}</span>`);
+    } else if (verdict.kind === "queued" && verdict.createdAt) {
+      clocks.push(age(verdict.createdAt, "queued"));
+    } else if (verdict.kind === "scheduling" && verdict.tickAt) {
+      clocks.push(age(verdict.tickAt, "supervisor checked"));
+    }
+    const chipTone = verdict.tone === "working" ? "done" : verdict.tone === "stalled" ? "hold" : "";
+    return `<div class="dgf-activity" data-tone="${esc(verdict.tone)}" data-factory-activity role="status" aria-live="polite">
+      <i class="dgf-activity-dot" aria-hidden="true"></i>
+      <div class="dgf-activity-body"><b>${esc(verdict.headline)}</b><p>${esc(verdict.detail)}</p>${clocks.length ? `<div class="dgf-activity-clocks">${clocks.join("")}</div>` : ""}</div>
+      <span class="dgf-chip" data-tone="${chipTone}">${esc(verdict.label)}</span>
+    </div>`;
+  }
+
+  function tickClocks() {
+    if (!root) return;
+    const now = serverNow();
+    for (const node of $$("[data-gf-age]")) node.textContent = ageText(now - Number(node.dataset.gfAge)) + (node.dataset.gfSuffix || "");
+    for (const node of $$("[data-gf-until]")) node.textContent = leaseText(Number(node.dataset.gfUntil), now);
+  }
+  function startClocks() { clearInterval(clockTimer); clockTimer = setInterval(tickClocks, 1000); }
+  function stopClocks() { clearInterval(clockTimer); clockTimer = null; }
   const shortDate = (value) => {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? "Not recorded" : date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -271,11 +365,17 @@
     if (game.approvalNeeded) {
       const subject = game.approvalSubject?.hash ? ` Evidence ${esc(game.approvalSubject.hash.slice(0, 12))}…` : "";
       const playNote = game.state === "PLAYTEST_READY" ? `<p>Play the build, then approve it or request changes.</p>` : "";
-      return `<div class="dgf-alert"><b>Owner gate:</b> ${esc(human(game.approvalNeeded))} approval is required for ${esc(game.approvalSubject?.label || "the current evidence")}.${subject}</div>${playNote}`;
+      // The documents behind the two planning gates live in the Artifacts tab; say so where the
+      // decision is asked for, instead of leaving the owner to hunt for them.
+      const docs = ["SPECIFICATION", "VISUAL_SYSTEM"].includes(game.approvalNeeded)
+        ? ` <button class="dgf-inline-link" type="button" data-tab="artifacts">Read the documents in the Artifacts tab.</button>` : "";
+      return `<div class="dgf-alert"><b>Owner gate:</b> ${esc(human(game.approvalNeeded))} approval is required for ${esc(game.approvalSubject?.label || "the current evidence")}.${subject}${docs}</div>${playNote}`;
     }
     const ownerProgress = (game.allowedActions || []).some((action) => ["advance", "approve", "resume", "retry"].includes(action.id));
     if (!ownerProgress && !HOLD_STATES.has(game.state) && game.state !== "DEPLOYED") {
-      return `<div class="dgf-alert"><b>No owner decision is pending.</b> The supervising factory must validate the current evidence and schedule the next stage. This checkpoint will not advance if its worker is unavailable.</div>`;
+      // The activity strip above already says what is running and whether it is healthy.
+      if (activityVerdict({ game, health: bootstrap?.health || {} })) return "";
+      return `<div class="dgf-alert"><b>No owner decision is pending.</b> The supervisor schedules the next stage on its own; when work is in flight the activity strip above reports its heartbeat and flags a stall.</div>`;
     }
     return "";
   }
@@ -311,8 +411,16 @@
     const states = (config?.states || []).filter((state) => !HOLD_STATES.has(state) && state !== "REVISION");
     const current = (HOLD_STATES.has(game.state) || game.state === "REVISION") && game.resumeState ? game.resumeState : game.state;
     const index = states.indexOf(current);
+    // When each stage was reached, from the append-only event history, so the rail doubles as a timeline.
+    const reached = new Map();
+    for (const event of game.events || []) {
+      if (event.type === "project.transitioned" && event.payload?.to) reached.set(event.payload.to, Math.max(reached.get(event.payload.to) || 0, Number(event.createdAt) || 0));
+    }
+    const live = (game.tasks || []).some((task) => task.status === "RUNNING");
     return `<div class="dgf-milestones" aria-label="Lifecycle states">${states.map((state, i) => {
-      const marker = `<span class="dgf-milestone" data-state="${state === game.state || state === current ? "current" : i < index ? "passed" : "future"}">${esc(human(state))}</span>`;
+      const position = state === game.state || state === current ? "current" : i < index ? "passed" : "future";
+      const stamp = reached.get(state) ? `<small>${esc(shortDate(reached.get(state)))}</small>` : "";
+      const marker = `<span class="dgf-milestone" data-state="${position}"${position === "current" && live ? ' data-live="true"' : ""}>${esc(human(state))}${stamp}</span>`;
       return marker + (game.state === "REVISION" && state === current ? `<span class="dgf-milestone" data-state="current">Revision loop</span>` : "");
     }).join("")}</div>`;
   }
@@ -476,7 +584,7 @@
     node.innerHTML = `<header class="dgf-detail-head">
       <div class="dgf-title-row"><div><h2>${esc(game.name)}</h2><p>#${String(Number(game.order) || 0).padStart(2, "0")} · ${esc(game.slug)} · updated ${esc(shortDate(game.updatedAt))}</p></div>${game.autopilot ? `<span class="dgf-chip dgf-autopilot" data-tone="done">Autopilot</span>` : ""}<span class="dgf-chip" data-tone="${stateTone(game)}">${esc(human(game.operation || game.state))}</span></div>
       <div class="dgf-progress-row"><div class="dgf-progress" role="progressbar" aria-label="Lifecycle progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${clamp(game.progress, 0, 100)}"><i style="width:${clamp(game.progress, 0, 100)}%"></i></div><b>${clamp(game.progress, 0, 100)}%</b></div>
-      <div class="dgf-decision-row" data-playtest-ready="${game.state === "PLAYTEST_READY"}">${operationNotice(game)}${actionMarkup(game)}</div>
+      <div class="dgf-decision-row" data-playtest-ready="${game.state === "PLAYTEST_READY"}">${activityMarkup(game)}${operationNotice(game)}${actionMarkup(game)}</div>
     </header>${tabsMarkup()}<section class="dgf-tab-panel" id="dgf-tab-panel" role="tabpanel">${panelMarkup(game)}</section>`;
   }
 
@@ -502,6 +610,7 @@
     const result = await request(`/games/${encodeURIComponent(id)}`);
     if (!root || token !== loadToken || selectedId !== id) return;
     detail = result.game;
+    if (Number(result.serverNow)) clockSkew = Number(result.serverNow) - Date.now();
     lastEventId = Math.max(lastEventId, ...(detail.events || []).map((event) => Number(event.id) || 0));
     renderList();
     renderDetail();
@@ -518,6 +627,7 @@
       const [nextBootstrap, nextConfig] = await Promise.all([request("/bootstrap"), config ? Promise.resolve(config) : request("/config")]);
       if (!root || epoch !== openEpoch) return;
       bootstrap = nextBootstrap;
+      if (Number(nextBootstrap?.serverNow)) clockSkew = Number(nextBootstrap.serverNow) - Date.now();
       config = nextConfig;
       accessError = null;
       const available = bootstrap.games || [];
@@ -835,6 +945,7 @@
   function startPolling() {
     clearInterval(pollTimer);
     pollTimer = setInterval(() => { if (root && document.visibilityState === "visible") void refresh({ quiet: true }); }, 20000);
+    startClocks();
   }
 
   function open({ route = true } = {}) {
@@ -865,6 +976,7 @@
     loadToken++;
     clearTimeout(refreshTimer); refreshTimer = null;
     clearInterval(pollTimer); pollTimer = null;
+    stopClocks();
     stopEvents();
     previewDialog?.close();
     artifactDialog?.close();
@@ -898,6 +1010,8 @@
 
   window.DominionGameFactory = {
     init, open, close,
+    // Pure helpers exposed for the contract test: the stall verdict must be provable without a browser.
+    activityVerdict, ageText,
     getState: () => ({ open: !!root, selectedId, tab: currentTab, games: bootstrap?.games?.length || 0, live: !!eventSource }),
   };
 

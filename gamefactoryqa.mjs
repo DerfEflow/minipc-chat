@@ -88,10 +88,14 @@ export function createServerQaRunner({ nodePath = process.execPath, timeoutMs = 
     mkdirSync(resultsDir, { recursive: true });
     const outFile = join(resultsDir, "results.json");
     const runnerScript = join(bundleDir, "qa", "run.mjs");
+    // The permission globs take the HOST's separator. The first production run (2026-09-04, Linux
+    // container) proved a literal "\*" is read as part of the path there, so the harness could not
+    // even read its own entry script and every suite "exited 1 without writing a results file".
+    // Measured in that container: `\*` -> exit 1, `/*` -> exit 0. path.join picks the right one.
     const args = [
       "--permission",
-      `--allow-fs-read=${bundleDir}\\*`,
-      `--allow-fs-write=${resultsDir}\\*`,
+      `--allow-fs-read=${join(bundleDir, "*")}`,
+      `--allow-fs-write=${join(resultsDir, "*")}`,
       `--max-old-space-size=${maxOldSpaceMb}`,
       runnerScript,
       "--bundle", bundleDir,
